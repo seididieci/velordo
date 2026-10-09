@@ -1,0 +1,14 @@
+[package]
+name = "vfscli"
+version = "0.1.0"
+edition = "2021"
+
+# Client FS condiviso (S2.2): sessione ring + op cardo, estratto da `civis`
+# (stessa disciplina, zero cambi di comportamento). no_std + `alloc` (niente
+# `#[global_allocator]` qui: l'allocatore lo da' il consumatore). Backing
+# syscall astratto via `Sys` (civis e PAL std lo implementano). Crate fuori
+# dal workspace del kernel: build freestanding separata / vendored in std.
+[workspace]
+
+[dependencies]
+syscall-numbers = { path = "../../syscall-numbers" }

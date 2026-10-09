@@ -19,7 +19,7 @@
 
 use super::*;
 use super::fs::ring;
-use super::fs::session::{fs_light_gate, REQ_PHYS, RESP_PHYS};
+use super::fs::session::{fs_light_gate, ring_phys};
 use alloc::vec::Vec;
 
 /// Livelli di log (convenzione al bordo, mai kernel/wire numerato POSIX).
@@ -189,8 +189,7 @@ fn log_reg(chan: u64) -> Result<u64, Error> {
     // handshake FS). Senza, scriveremmo su VA non mappate (#PF) o in un
     // async-FS in volo (corruzione del ring condiviso).
     fs_light_gate()?;
-    let req_phys = REQ_PHYS.load(Ordering::Relaxed);
-    let resp_phys = RESP_PHYS.load(Ordering::Relaxed);
+    let (req_phys, resp_phys) = ring_phys();
     match ipc::send(chan, LOG_REG, req_phys, resp_phys) {
         Ok(rep) => {
             LOG_REGED.store(chan as i64, Ordering::Relaxed);

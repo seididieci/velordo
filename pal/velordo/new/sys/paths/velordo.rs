@@ -9,7 +9,8 @@ use crate::ffi::OsStr;
 use crate::io;
 use crate::os::velordo::ffi::OsStrExt;
 use crate::path::{Path, PathBuf};
-use crate::sys::pal::{syscall4, unsupported_err, SYS_CHDIR, SYS_GETCWD};
+use crate::sys::pal::velordo::numbers::{SYS_CHDIR, SYS_GETCWD};
+use crate::sys::pal::{syscall4, unsupported_err};
 
 pub fn getcwd() -> io::Result<PathBuf> {
     // CWD_MAX (256) + NUL: 512 per margine futuro, il kernel scrive ≤257.

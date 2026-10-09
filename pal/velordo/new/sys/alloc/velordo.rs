@@ -10,13 +10,12 @@ mod valloc;
 
 use crate::alloc::Layout;
 use crate::ptr;
+use crate::sys::pal::velordo::numbers::{PROT_READ, PROT_WRITE, SYS_MMAP, SYS_MUNMAP};
 use crate::sys::pal::syscall4;
 use valloc::{Allocator, Provider, State};
 
-// Numeri syscall (single source: syscall-numbers; duplicati come altrove).
-const SYS_MMAP: u64 = 39;
-const SYS_MUNMAP: u64 = 40;
-const PROT_RW: u64 = 0x3; // PROT_READ|PROT_WRITE (solo anonimo supportato)
+// Solo anonimo supportato (il kernel rifiuta altro): combinato dai generati.
+const PROT_RW: u64 = PROT_READ | PROT_WRITE;
 
 struct Velordo;
 

@@ -9,6 +9,7 @@ edition = "2024"
 [dependencies]
 syscall-numbers = { path = "../../syscall-numbers" }
 arcafs = { path = "../../arcafs" }
+vfscli = { path = "../vfscli" }
 
 [profile.dev]
 panic = "abort"

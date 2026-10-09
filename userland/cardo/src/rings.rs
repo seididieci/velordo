@@ -1,9 +1,8 @@
 use super::*;
 
-/// Request ring virtuale (coincide con USER_FS_BUFFER del kernel).
-pub const REQ_RING_VA: u64 = 0x0000_4000_0020_0000;
-/// Response ring virtuale (USER_FS_BUFFER + 0x1000).
-pub const RESP_RING_VA: u64 = 0x0000_4000_0021_0000;
+/// Request/response ring virtuali: via `civis` (single source S2.2 in
+/// `syscall-numbers`, mai i valori).
+pub use civis::{USER_FS_BUFFER as REQ_RING_VA, USER_RESP_RING as RESP_RING_VA};
 
 // ── Ring I/O (Fase 10.2) ─────────────────────────────────────────
 // `ring_positions`/`ring_available` da `civis` (import sopra, A1).

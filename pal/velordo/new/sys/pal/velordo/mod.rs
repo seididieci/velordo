@@ -8,16 +8,11 @@
 
 use core::arch::asm;
 
-// Numeri syscall (single source: syscall-numbers del repo; duplicati qui
-// perche' la PAL non puo' dipendere dai crate Velordo in questa fase).
-// `con` e' una maniglia console, non un fd POSIX (1/2 = coincidenza storica).
-const SYS_WRITE: u64 = 2;
-const CONSOLE_OUT: u64 = 1;
-pub(crate) const SYS_CHDIR: u64 = 59;
-pub(crate) const SYS_GETCWD: u64 = 60;
-const SYS_EXIT: u64 = 0;
-const SYS_GET_TICKS: u64 = 22;
-const SYS_SBRK: u64 = 25;
+pub(crate) mod numbers;
+
+// Numeri ABI generati da apply.py (S2.2, single source = syscall-numbers).
+// `con` e' una maniglia console, non un fd POSIX.
+use numbers::{CONSOLE_OUT, SYS_EXIT, SYS_GET_TICKS, SYS_SBRK, SYS_WRITE};
 
 /// Syscall raw a 4 argomenti (ABI Velordo: rax=num, rdi/rsi/rdx/r10=args).
 #[inline(always)]

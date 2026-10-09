@@ -56,8 +56,7 @@ pub fn fs_register_async(prefix: &[u8]) -> Result<i64, Error> {
 /// Fase 39: `Result` invece di req_id/-1.
 pub fn fs_buf_reg_async() -> Result<i64, Error> {
     session::fs_gate()?;
-    let req_phys = session::REQ_PHYS.load(Ordering::Relaxed);
-    let resp_phys = session::RESP_PHYS.load(Ordering::Relaxed);
+    let (req_phys, resp_phys) = session::ring_phys();
     if req_phys == 0 || resp_phys == 0 {
         return Err(Error::NotReady);
     }
@@ -67,11 +66,11 @@ pub fn fs_buf_reg_async() -> Result<i64, Error> {
     }
     match ipc::send_async(c as u64, FS_BUF_REG, req_phys, resp_phys) {
         Ok(req) => {
-            session::FS_PENDING.store(req, Ordering::Relaxed);
+            session::guard_take(req);
             Ok(req)
         }
         Err(_) => {
-            session::FS_CHAN.store(-1, Ordering::Relaxed);
+            session::chan_set(-1);
             Err(Error::RingFull)
         }
     }
@@ -101,7 +100,7 @@ pub fn fs_op_async(ipc_tag: u64, frame_tag: u32, w0: u64, w1: u64, payload: &[u8
     }
     match ipc::send_async(c as u64, ipc_tag, 0, 0) {
         Ok(req) => {
-            session::FS_PENDING.store(req, Ordering::Relaxed);
+            session::guard_take(req);
             Ok(req)
         }
         Err(_) => {
@@ -109,7 +108,7 @@ pub fn fs_op_async(ipc_tag: u64, frame_tag: u32, w0: u64, w1: u64, payload: &[u8
             // morto: peer riavviato e cache FS_CHAN stale): invalida la cache
             // cosi' il prossimo tentativo ri-risolve per nome. Come `fs_send`
             // fa sul path sincrono (Fase 14, init-restart).
-            session::FS_CHAN.store(-1, Ordering::Relaxed);
+            session::chan_set(-1);
             // Togli il frame dal request ring.
             ring::req_ring_rollback(20 + payload.len());
             Err(Error::RingFull)
@@ -130,7 +129,7 @@ pub fn fs_op_async(ipc_tag: u64, frame_tag: u32, w0: u64, w1: u64, payload: &[u8
 pub fn fs_collect(req: i64, dst: &mut [u8], cap: usize) -> Result<usize, Error> {
     // Invariante: collect segue una read_async riuscita, che ha risolto e
     // cachato FS_CHAN (>= 0) prima di registrare FS_PENDING.
-    let fchan = session::FS_CHAN.load(Ordering::Relaxed).max(0) as u64;
+    let fchan = session::chan_get().max(0) as u64;
     let msg = match ipc::wait_reply_chan(req, fchan) {
         Ok(m) => m,
         Err(ipc::WaitReplyError::ServerDied { pid, code }) => {
@@ -144,15 +143,15 @@ pub fn fs_collect(req: i64, dst: &mut [u8], cap: usize) -> Result<usize, Error> 
                 session::ring_reset(ring::REQ_RING_VA);
                 session::ring_reset(ring::RESP_RING_VA);
             }
-            session::FS_PENDING.store(-1, Ordering::Relaxed);
+            session::guard_clear();
             return Err(Error::ServerDied);
         }
         Err(e) => {
-            session::FS_PENDING.store(-1, Ordering::Relaxed);
+            session::guard_clear();
             return Err(Error::from(e));
         }
     };
-    session::FS_PENDING.store(-1, Ordering::Relaxed);
+    session::guard_clear();
     fs_collect_msg(&msg, dst, cap, true).map(|n| n as usize)
 }
 
@@ -165,7 +164,7 @@ pub fn fs_collect(req: i64, dst: &mut [u8], cap: usize) -> Result<usize, Error> 
 /// Per un driver-server (tty) che non puo' mai bloccarsi: serve le relay DEV
 /// nel mentre invece di attendere in `wait_reply` (ciclo cardo<->driver).
 pub fn fs_collect_msg(m: &IpcMsg, dst: &mut [u8], cap: usize, is_read: bool) -> Result<i64, Error> {
-    session::FS_PENDING.store(-1, Ordering::Relaxed);
+    session::guard_clear();
     if is_read {
         if m.w0 == ring::ERR {
             if ring::resp_ring_read().is_some() {
@@ -206,7 +205,7 @@ pub fn fs_collect_msg(m: &IpcMsg, dst: &mut [u8], cap: usize, is_read: bool) -> 
 /// server muore (EXIT_NOTIFY) prima di riaprire i peer: frame orfani
 /// disallineerebbero le op successive; la prossima op riscrive da zero.
 pub fn fs_abort_pending() {
-    session::FS_PENDING.store(-1, Ordering::Relaxed);
+    session::guard_clear();
     unsafe {
         session::ring_reset(ring::REQ_RING_VA);
         session::ring_reset(ring::RESP_RING_VA);

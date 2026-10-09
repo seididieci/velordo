@@ -179,7 +179,7 @@ impl<'a> FsRead<'a> {
         // Invariante di `fs_collect`: la read_async riuscita ha risolto e
         // cachato FS_CHAN prima di registrare FS_PENDING.
         let fchan =
-            crate::FS_CHAN.load(core::sync::atomic::Ordering::Relaxed).max(0) as u64;
+            crate::fs::session::chan_get().max(0) as u64;
         Ok(Self { inner: WaitReply::on_chan(req, fchan), dst, cap })
     }
 }
@@ -218,11 +218,9 @@ impl Future for FsRead<'_> {
                         code
                     );
                 }
-                unsafe {
-                    crate::ring_reset(crate::REQ_RING_VA);
-                    crate::ring_reset(crate::RESP_RING_VA);
-                }
-                crate::FS_PENDING.store(-1, core::sync::atomic::Ordering::Relaxed);
+                crate::fs::session::ring_reset(crate::fs::ring::REQ_RING_VA);
+                crate::fs::session::ring_reset(crate::fs::ring::RESP_RING_VA);
+                crate::fs::session::guard_clear();
                 Poll::Ready(-1)
             }
             Poll::Pending => Poll::Pending,

@@ -31,6 +31,9 @@ use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering
 pub use syscall_numbers::MAP_TEST_PHYS;
 /// Finestra staging DMA (Fase 38.1): `dma_alloc` mappa qui i frame contigui.
 pub use syscall_numbers::USER_DMA_VA;
+/// Finestre ring/relay (request/response/proprie/relay): single source in
+/// `syscall-numbers` (S2.2).
+pub use syscall_numbers::{USER_FS_BUFFER, USER_RESP_RING, CLI_REQ_VA, CLI_RESP_VA};
 /// Servizi di sistema raggiungibili per nome (ADR-0008).
 pub use syscall_numbers::Service;
 /// Tag della notifica kernel→parent della morte di un figlio (Fase 14).

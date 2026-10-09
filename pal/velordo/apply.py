@@ -12,6 +12,7 @@ Uso: apply.py <library-dir> <pal-new-dir>
 """
 
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -43,7 +44,9 @@ ARMS = [
     (
         "sys/pal/mod.rs",
         '    target_os = "uefi" => {\n        mod uefi;\n        pub use self::uefi::*;\n    }\n',
-        '    target_os = "velordo" => {\n        mod velordo;\n        pub use self::velordo::*;\n    }\n',
+        # pub(crate): altri moduli raggiungono `crate::sys::pal::velordo::numbers`
+        # (ABI generati, S2.2); il glob sotto riesporta solo le funzioni.
+        '    target_os = "velordo" => {\n        pub(crate) mod velordo;\n        pub use self::velordo::*;\n    }\n',
     ),
     (
         "sys/alloc/mod.rs",
@@ -134,11 +137,52 @@ ARMS = [
 ]
 
 
+def gen_numbers(repo_root: Path) -> str:
+    """Estrae TUTTI i `pub const NOME: int = expr` da syscall-numbers e li
+    emette come letterali (S2.2: single source vero, mai duplicati a mano).
+    Forme supportate: letterali dec/hex, `!0u64 - N`, aritmetica `*+-`,
+    `u64::MAX`. Qualunque altra forma = errore LOUD (mai valori skippati
+    in silenzio)."""
+    src = repo_root / "syscall-numbers" / "src" / "lib.rs"
+    assert src.exists(), f"syscall-numbers assente: {src}"
+    text = src.read_text()
+    rows = re.findall(r"^pub const (\w+): (\w+) = ([^;]+);", text, re.M)
+    assert len(rows) > 50, f"syscall-numbers illeggibile? ({len(rows)} const)"
+    out = [
+        "//! ABI numerica Velordo — GENERATO da apply.py (S2.2).",
+        "//! MAI modificare a mano: single source = syscall-numbers/src/lib.rs.",
+        "#![allow(dead_code)]",
+        "",
+    ]
+    seen = set()
+    for name, ty, rhs in rows:
+        assert name not in seen, f"const duplicata: {name}"
+        seen.add(name)
+        e = rhs.strip().replace("u64::MAX", str(2**64 - 1)).replace("!0u64", str(2**64 - 1))
+        assert re.fullmatch(r"[0-9xXa-fA-F _+*()\-]+", e), f"forma non supportata: {name} = {rhs}"
+        v = eval(e, {"__builtins__": {}}, {})
+        assert isinstance(v, int) and v >= 0, f"valore non intero: {name}"
+        out.append(f"pub const {name}: {ty} = {v};")
+    # Spot-check fail-loud sui critici (se mancano, la PAL non compila comunque,
+    # ma qui il messaggio dice DOVE guardare).
+    for must in ("SYS_WRITE", "SYS_MMAP", "SYS_RING_ALLOC", "USER_FS_BUFFER", "R_OPEN"):
+        assert must in seen, f"const critica assente: {must}"
+    return "\n".join(out) + "\n"
+
+
 def main() -> None:
     lib = Path(sys.argv[1])
     new = Path(sys.argv[2])
     std = lib / "std" / "src"
     assert (lib / "std" / "Cargo.toml").exists(), f"library-dir non valida: {lib}"
+    repo_root = (new / ".." / ".." / "..").resolve()
+
+    # Numeri ABI generati (prima di copiare: i file PAL li usano).
+    numbers = gen_numbers(repo_root)
+    np = std / "sys" / "pal" / "velordo" / "numbers.rs"
+    np.parent.mkdir(parents=True, exist_ok=True)
+    np.write_text(numbers)
+    print(f"[pal] gen numbers.rs ({len(numbers.splitlines())} righe da syscall-numbers)")
 
     for rel in NEW_FILES:
         src = new / rel

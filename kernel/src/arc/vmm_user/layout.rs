@@ -34,11 +34,9 @@ pub(super) const USER_OWNED: u64 = 0x200;
 pub(super) const USER_COW: u64 = 0x400;
 pub(super) const PAGE_SIZE: u64 = 0x1000;
 
-/// Indirizzo virtuale della finestra request ring del processo corrente.
-pub const USER_FS_BUFFER: u64 = USER_BASE + 0x200_000;
-
-/// Indirizzo virtuale della finestra response ring del processo corrente.
-pub const USER_RESP_RING: u64 = USER_BASE + 0x210_000;
+/// Finestre ring (request/response) e relay: single source in
+/// `syscall-numbers` (S2.2: prima letterali qui duplicati altrove).
+pub use syscall_numbers::{USER_FS_BUFFER, USER_RESP_RING};
 
 /// Top dello stack user (cresce verso il basso, qui sopra il codice).
 /// Esteso a 4 MiB per accommodare VGA, FS buffer, e stack.
