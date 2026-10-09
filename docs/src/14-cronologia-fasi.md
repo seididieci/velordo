@@ -2213,3 +2213,11 @@
           (il prologo spostava RSP: con argc=0 funzionava per caso).
           Kernel/shell/civis invariati (layout_argv, serialize, export
           esistevano e bastano). Gate invariato.
+          S2.1 allocatore segregated-fit (libs/valloc + tools/alloc-fuzz):
+          classi O(1) 8-4096, slab 64 KiB a classe pura, large mmap/munmap
+          diretti, spinlock dal giorno 1, stats; niente alberi (registro
+          binario + slab omogenee bastano). PAL via apply.py COPY_MAP +
+          os::velordo::alloc_stats. Harness: 81k alloc passeggiate
+          single+8-thread senza leak/corruzioni; ha beccato un nostro bug
+          di pattern nell'harness stesso. test-shell-std 10→13. Kernel
+          invariato (mmap anonimo bastava). Gate invariato.

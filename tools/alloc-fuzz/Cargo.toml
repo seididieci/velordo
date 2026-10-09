@@ -1,0 +1,14 @@
+[package]
+name = "alloc-fuzz"
+version = "0.1.0"
+edition = "2021"
+
+# Harness differenziale host per libs/valloc (S2.1): fuzza l'allocatore con
+# PRNG deterministico contro un modello (pattern scritti/verificati, overlap
+# check, leak check) + hammer multithread per il lock. Crate fuori dal
+# workspace del kernel. MAI nel gate on-target: si lancia a mano in S2.1+.
+[workspace]
+
+[dependencies]
+valloc = { path = "../../libs/valloc" }
+libc = "0.2"

@@ -11,6 +11,7 @@ Uso: apply.py <library-dir> <pal-new-dir>
   pal-new-dir = pal/velordo/new
 """
 
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -30,6 +31,13 @@ NEW_FILES = [
     "sys/paths/velordo.rs",
 ]
 
+# (sorgente-relativa-a-pal/, destinazione-in-std/src): copie vendored da
+# fuori pal/new (source unica nel repo, mai derive silenziose).
+COPY_MAP = [
+    # Relativi a pal/velordo/new (tre livelli sopra = root repo).
+    ("../../../libs/valloc/src/core.rs", "sys/alloc/valloc_core.rs"),
+]
+
 # (file-relativo-a-std/src, anchor, inserimento): anchor deve occorrere UNA volta.
 ARMS = [
     (
@@ -41,6 +49,12 @@ ARMS = [
         "sys/alloc/mod.rs",
         '    target_os = "xous" => {\n        mod xous;\n        use xous as imp;\n    }\n',
         '    target_os = "velordo" => {\n        mod velordo;\n        use velordo as imp;\n    }\n',
+    ),
+    (
+        "sys/alloc/mod.rs",
+        'pub use imp::{alloc, dealloc, realloc};',
+        'pub use imp::{alloc, dealloc, realloc, stats};',
+        "inplace",
     ),
     (
         "sys/random/mod.rs",
@@ -133,6 +147,14 @@ def main() -> None:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
         print(f"[pal] new {rel}")
+
+    for src_rel, dst_rel in COPY_MAP:
+        src = Path(os.path.normpath(new / src_rel))
+        dst = std / dst_rel
+        assert src.exists(), f"file condiviso mancante: {src}"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        print(f"[pal] copy {src_rel} -> {dst_rel}")
 
     # Secondo elenco no_threads in thread_local/guard (stesso set, altro punto).
     guard_anchor = None

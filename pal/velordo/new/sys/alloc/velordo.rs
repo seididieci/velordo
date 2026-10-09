@@ -1,52 +1,65 @@
-//! Allocatore globale Velordo (S1.3): bump-pointer sopra `sbrk`.
+//! Allocatore globale Velordo (S2.1): `valloc` segregated-fit.
 //!
-//! Mai free (leak intenzionale v1: il bump avanza solo; `dealloc` e' no-op).
-//! Allineamento onorato (il break e' page-aligned dal kernel: si allinea in
-//! avanti). Thread-safety: bump atomico + sbrk seriale — con thread multipli
-//! due alloc concorrenti non si sovrappongono MAI (ognuno riserva via sbrk
-//! prima di scrivere), ma lo spazio tra due bump puo' restare inutilizzato
-//! (buco benigno, mai unsound). Single-thread e' il caso testato in S1.3.
+//! Il core vive in `libs/valloc/src/core.rs` (copiato qui da `apply.py`
+//! come `valloc_core.rs`: source unica, niente derive silenziose). Questo
+//! file e' solo l'adattatore: `Provider` sopra `mmap`/`munmap` anonimi +
+//! le 4 funzioni dell'interfaccia `sys::alloc`.
 
-use crate::sys::pal::sbrk as pal_sbrk;
+#[path = "valloc_core.rs"]
+mod valloc;
+
 use crate::alloc::Layout;
-use crate::sync::atomic::{AtomicUsize, Ordering};
+use crate::ptr;
+use crate::sys::pal::syscall4;
+use valloc::{Allocator, Provider, State};
 
-/// Vecchi break noti (debug/misura, mai usati per decisioni).
-static BUMP_HIGH: AtomicUsize = AtomicUsize::new(0);
+// Numeri syscall (single source: syscall-numbers; duplicati come altrove).
+const SYS_MMAP: u64 = 39;
+const SYS_MUNMAP: u64 = 40;
+const PROT_RW: u64 = 0x3; // PROT_READ|PROT_WRITE (solo anonimo supportato)
 
-pub unsafe fn alloc(layout: Layout) -> *mut u8 {
-    let size = layout.size();
-    if size == 0 {
-        return crate::ptr::without_provenance_mut(layout.align());
+struct Velordo;
+
+impl Provider for Velordo {
+    unsafe fn map(len: usize) -> *mut u8 {
+        debug_assert!(len % 4096 == 0);
+        let r = unsafe { syscall4(SYS_MMAP, 0, len as u64, PROT_RW, 0) };
+        if r < 0 {
+            ptr::null_mut()
+        } else {
+            crate::ptr::with_exposed_provenance_mut(r as usize)
+        }
     }
-    let align = layout.align().max(1);
-    // Riserva: sbrk(size + align) copre il worst-case di allineamento.
-    let need = size.checked_add(align).unwrap_or(usize::MAX);
-    if need == usize::MAX {
-        return crate::ptr::null_mut();
+    unsafe fn unmap(ptr: *mut u8, len: usize) {
+        // Range sempre esatto e nostro (il core smappa solo cio' che ha
+        // mappato): errore ignorato (niente da corrompere, solo leak).
+        unsafe {
+            syscall4(SYS_MUNMAP, ptr.addr() as u64, len as u64, 0, 0);
+        }
     }
-    let old = pal_sbrk(need);
-    if old < 0 {
-        return crate::ptr::null_mut();
-    }
-    let base = old as usize;
-    let aligned = base.next_multiple_of(align);
-    BUMP_HIGH.store(aligned + size, Ordering::Relaxed);
-    crate::ptr::without_provenance_mut(aligned)
 }
 
-pub unsafe fn dealloc(_ptr: *mut u8, _layout: Layout) {
-    // Bump-only v1: no-op intenzionale (mai riuso, mai double-free).
+static STATE: State = State::new();
+static ALLOC: Allocator<Velordo> = Allocator::new(&STATE);
+
+/// Istantanea stats per tuning (usata da `std::os::velordo::alloc_stats`;
+/// riesportata da `sys::alloc` come le altre).
+pub fn stats() -> valloc::Stats {
+    ALLOC.stats()
+}
+
+pub unsafe fn alloc(layout: Layout) -> *mut u8 {
+    unsafe { ALLOC.alloc(layout) }
+}
+
+pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
+    unsafe { ALLOC.dealloc(ptr, layout) }
 }
 
 pub unsafe fn realloc(ptr: *mut u8, old_layout: Layout, new_size: usize) -> *mut u8 {
-    unsafe { super::realloc_fallback(ptr, old_layout, new_size) }
+    unsafe { ALLOC.realloc(ptr, old_layout, new_size) }
 }
 
 pub unsafe fn alloc_zeroed(layout: Layout) -> *mut u8 {
-    let ptr = unsafe { alloc(layout) };
-    if !ptr.is_null() {
-        unsafe { ptr.write_bytes(0, layout.size()) };
-    }
-    ptr
+    unsafe { ALLOC.alloc_zeroed(layout) }
 }

@@ -82,8 +82,9 @@ ls "$DEST" | head -14
 
 # 4. Hello std: println! + Vec + Mutex + HashMap + Instant (niente fs/net).
 cat > "$WORK/hello.rs" << 'EOF'
-//! S2.0: hello std per Velordo (S1.3 + argv/env/current_dir).
+//! S2.1: hello std per Velordo (S1.3 + argv/env + alloc stress).
 #![feature(restricted_std)]
+#![feature(velordo_std)]
 fn main() {
     println!("[stdhello] ciao da std su Velordo");
     let mut v = Vec::new();
@@ -120,6 +121,28 @@ fn main() {
         Ok(p) => println!("[stdhello] cwd={}", p.display()),
         Err(_) => println!("[stdhello] cwd ERR"),
     }
+    // S2.1: churn small + large 2 MiB + over-align + stats.
+    let t1 = std::time::Instant::now();
+    let mut held = Vec::new();
+    for i in 0..2000u32 {
+        let mut b = Vec::with_capacity((i % 256 + 1) as usize);
+        b.extend((0..b.capacity()).map(|j| (i ^ j as u32) as u8));
+        if i % 3 == 0 {
+            held.push(b);
+        }
+    }
+    let mut big = Vec::with_capacity(2_000_000);
+    big.resize(2_000_000, 0x5Au8);
+    assert!(big.iter().all(|&b| b == 0x5A));
+    drop(held);
+    drop(big);
+    println!("[stdhello] alloc churn ok in {}ms", t1.elapsed().as_millis());
+    let layout = std::alloc::Layout::from_size_align(100, 64).unwrap();
+    let p = unsafe { std::alloc::alloc(layout) };
+    println!("[stdhello] overalign ok={}", !p.is_null() && p as usize % 64 == 0);
+    unsafe { std::alloc::dealloc(p, layout) };
+    let (a, f, live, high) = std::os::velordo::alloc_stats();
+    println!("[stdhello] alloc stats a={} f={} live={} high={}", a, f, live, high);
     println!("[stdhello] DONE");
 }
 EOF

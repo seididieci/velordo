@@ -42,6 +42,9 @@ def main():
         c.check("stdhello env", b"[stdhello] env VELORDO_S2=s2ok" in out)
         c.check("stdhello set_var", b"[stdhello] set_var STD_SET=42" in out)
         c.check("stdhello cwd", b"[stdhello] cwd=/" in out)
+        c.check("stdhello churn", b"[stdhello] alloc churn ok in " in out)
+        c.check("stdhello overalign", b"[stdhello] overalign ok=true" in out)
+        c.check("stdhello stats", b"[stdhello] alloc stats a=" in out)
         c.check("stdhello DONE", b"[stdhello] DONE" in out)
         return 0 if c.ok else 1
     except RuntimeError as e:

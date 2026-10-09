@@ -196,6 +196,13 @@ Voci con scope e vittoria dichiarati (non date).
        argc>0). Kernel/shell invariati. test-shell-std.py 6→10
        (argv/env/set_var/cwd), fuori gate con SKIP. Prossimo: S2.1
        (mmap/munmap/mprotect + free).
+- [x] **S2.1 allocatore segregated-fit** (chiusa): `libs/valloc` (no_std,
+       Provider astratto) + `tools/alloc-fuzz` (differenziale host:
+       81k op single+8-thread, zero leak/corruzioni); classi O(1),
+       slab a classe pura con ritorno munmap, large diretti, spinlock,
+       stats; PAL via COPY_MAP + `alloc_stats`. Kernel invariato
+       (file-backed rinviato a S2.4). test-shell-std.py 10→13
+       (churn/overalign/stats). Prossimo: S2.2 (`std::fs`).
 - [x] **S-T thread kernel 1:1 + TLS + futex** (chiusa, ADR-0046): thread =
        PCB con gruppo (cr3/canali/fd/heap/VMA condivisi col leader, stack/
        TSS/FS/coda propri); pool 32→128 (bitmask u128, TSS pool, VMA 64);

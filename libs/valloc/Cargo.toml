@@ -1,0 +1,12 @@
+[package]
+name = "valloc"
+version = "0.1.0"
+edition = "2021"
+
+# Allocatore segregated-fit condiviso (S2.1): no_std, solo core. Il backing
+# (mmap-like) e' astratto via `Provider`: la PAL std lo implementa con le
+# syscall Velordo, l'harness host con libc. Crate fuori dal workspace del
+# kernel: build freestanding separata / host per i test. Niente override di
+# profile qui: la panic strategy la decide il consumatore (target freestanding
+# = abort via RUSTFLAGS/workspace; host test = unwind per i messaggi).
+[workspace]
