@@ -2237,3 +2237,10 @@
           test-shell-std 17→24 (sum=1000, condvar, once, tls main=7/child=0).
           Gate verde (flake v29/bind noti in 2 run su 3), shell 10/10.
           Kernel invariato (solo codegen dal flip).
+          S2.4c1 sys::pipe (chiuso): riuso `vfscli::pipe` sulla sessione
+          FSTATE condivisa (ring singleton); `Pipe` con superficie inherent
+          per `std::io::pipe` STABILE (Debug + read/write/vectored/to_end +
+          try_clone onesto-Err); arm DOPO il catch-all `_` non matcha mai
+          (fix inplace). Diritti Fase 45: pipe/grant negati agli ignoti
+          (0x19F) → `pal/build` in TEST_POLICY (test-tooling come la suite);
+          catena build-pal→tests→kernel (cardo embedded!)→seed. 25/25.

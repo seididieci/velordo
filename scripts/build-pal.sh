@@ -156,6 +156,15 @@ fn main() {
     println!("[stdhello] fs readdir n={}", std::fs::read_dir("/tmp/s2fs").unwrap().count());
     std::fs::remove_file("/tmp/s2fs/bye.txt").unwrap();
     println!("[stdhello] fs DONE");
+    // S2.4c1: pipe anonima STABILE (std::io::pipe sopra vfscli/Fase 42).
+    {
+        let (mut pr, mut pw) = std::io::pipe().unwrap();
+        std::io::Write::write_all(&mut pw, b"pipe-1234").unwrap();
+        drop(pw);
+        let mut got = Vec::new();
+        std::io::Read::read_to_end(&mut pr, &mut got).unwrap();
+        println!("[stdhello] pipe ok={}", got == b"pipe-1234");
+    }
     // S2.3: thread 1:1 + sync sopra futex (TLS a chiavi in PAL).
     std::thread::spawn(|| {}).join().unwrap();
     println!("[stdhello] t-empty-join ok");

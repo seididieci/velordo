@@ -442,6 +442,24 @@ impl File {
     }
 }
 
+/// Pipe anonime condivise con `sys::pipe` (S2.4c1): stessa sessione FSTATE
+/// (i ring sono singleton per processo). Wrapper sottili, mai duplicati.
+pub(crate) fn pipe_raw() -> io::Result<(i64, i64)> {
+    sync::pipe(&FSTATE).map_err(io_err)
+}
+pub(crate) fn pipe_read(fd: i64, buf: &mut [u8]) -> io::Result<usize> {
+    sync::read_fs(&FSTATE, fd, buf, buf.len()).map_err(io_err)
+}
+pub(crate) fn pipe_write(fd: i64, buf: &[u8]) -> io::Result<usize> {
+    sync::write_fs(&FSTATE, fd, buf, buf.len()).map_err(io_err)
+}
+pub(crate) fn pipe_close(fd: i64) {
+    let _ = sync::close(&FSTATE, fd);
+}
+pub(crate) fn pipe_grant(fd: i64) -> io::Result<u64> {
+    sync::dup_grant(&FSTATE, fd).map_err(io_err)
+}
+
 /// Stat senza seguire i link (R_STAT = lstat) → FileAttr.
 fn stat_raw(path: &Path) -> io::Result<FileAttr> {
     let s = path_str(path)?;

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Tabella policy per i binari test (Fase 45, sandbox build): testland/ + la
-# suite della personalita' POSIX in flavours/posix/tests (Fase 58.5).
+# suite della personalita' POSIX in flavours/posix/tests (Fase 58.5) + i
+# veicoli test della PAL in pal/build se presenti (S2.4: hello-std e figli
+# creano pipe/grant → servono i diritti ALL come ogni binario suite).
 #
 # Genera `build-meta/test_policy.rs` con `pub const TEST_POLICY: &[(u64,u32)]`
 # (hash FNV-1a -> mask ops, TUTTI ALL: la suite esercita ogni op). Incluso
@@ -22,7 +24,13 @@ cd "$(dirname "$0")/.."
 
 # Fase 58.5: test meccanismo in testland/build, test personalita' POSIX in
 # flavours/posix/tests/build. Entrambe le dir entrano nella tabella.
+# S2.4: veicoli test della PAL (hello-std.bin + figli) in pal/build —
+# OPZIONALE (il gate default gira senza PAL): entra solo se esiste con .bin.
 BUILD_DIRS=(testland/build flavours/posix/tests/build)
+if ls pal/build/*.bin >/dev/null 2>&1; then
+    BUILD_DIRS+=(pal/build)
+    echo "[gen-test-policy] + pal/build (veicoli PAL)"
+fi
 OUT_DIR="build-meta"
 OUT="$OUT_DIR/test_policy.rs"
 

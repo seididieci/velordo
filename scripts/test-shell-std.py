@@ -49,6 +49,7 @@ def main():
         c.check("stdhello fs len", b"[stdhello] fs len=13 is_file=true" in out)
         c.check("stdhello fs readdir", b"[stdhello] fs readdir n=1" in out)
         c.check("stdhello fs DONE", b"[stdhello] fs DONE" in out)
+        c.check("stdhello pipe", b"[stdhello] pipe ok=true" in out)
         c.check("stdhello t-empty-join", b"[stdhello] t-empty-join ok" in out)
         c.check("stdhello t-raw", b"[stdhello] t-raw=1" in out)
         c.check("stdhello threads sum", b"[stdhello] threads sum=1000" in out)

@@ -34,6 +34,7 @@ NEW_FILES = [
     "sys/fs/vfslib/mod.rs",
     "sys/sync/futex/velordo.rs",
     "sys/thread_local/key/velordo.rs",
+    "sys/pipe/velordo.rs",
 ]
 
 # (sorgente-relativa-a-pal/, destinazione-in-std/src): copie vendored da
@@ -128,6 +129,12 @@ ARMS = [
         '        target_os = "velordo" => {\n            mod racy;\n            mod velordo;\n            pub(super) use racy::LazyKey;\n            pub(crate) use velordo::{destroy_tls, register_slot, release_base};\n            pub(super) use velordo::{Key, get, set};\n            use velordo::{create, destroy};\n        }',
     ),
     (
+        "sys/pipe/mod.rs",
+        '    _ => {\n        mod unsupported;\n        pub use unsupported::{Pipe, pipe};\n    }',
+        '    target_os = "velordo" => {\n        mod velordo;\n        pub use velordo::{Pipe, pipe};\n    }\n    _ => {\n        mod unsupported;\n        pub use unsupported::{Pipe, pipe};\n    }',
+        "inplace",
+    ),
+    (
         "sys/thread/mod.rs",
         '    target_os = "uefi" => {\n        mod uefi;\n        pub use uefi::{available_parallelism, sleep};\n        #[expect(dead_code)]\n        mod unsupported;\n        pub use unsupported::{DEFAULT_MIN_STACK_SIZE, Thread, current_os_id, set_name, yield_now};\n    }\n',
         '    target_os = "velordo" => {\n        mod velordo;\n        pub use velordo::{DEFAULT_MIN_STACK_SIZE, Thread, available_parallelism, current_os_id, init_main_tls, set_name, sleep, yield_now};\n    }\n',
@@ -145,7 +152,7 @@ ARMS = [
     (
         "sys/fs/mod.rs",
         '    target_os = "hermit" => {\n        mod hermit;\n        use hermit as imp;\n    }\n',
-        '    target_os = "hermit" => {\n        mod hermit;\n        use hermit as imp;\n    }\n    target_os = "velordo" => {\n        mod velordo;\n        use velordo as imp;\n    }\n',
+        '    target_os = "hermit" => {\n        mod hermit;\n        use hermit as imp;\n    }\n    target_os = "velordo" => {\n        pub(crate) mod velordo;\n        use velordo as imp;\n    }\n',
     ),
     (
         "sys/thread_local/mod.rs",
