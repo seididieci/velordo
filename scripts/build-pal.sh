@@ -156,6 +156,65 @@ fn main() {
     println!("[stdhello] fs readdir n={}", std::fs::read_dir("/tmp/s2fs").unwrap().count());
     std::fs::remove_file("/tmp/s2fs/bye.txt").unwrap();
     println!("[stdhello] fs DONE");
+    // S2.3: thread 1:1 + sync sopra futex (TLS a chiavi in PAL).
+    std::thread::spawn(|| {}).join().unwrap();
+    println!("[stdhello] t-empty-join ok");
+    static RAW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    std::thread::spawn(|| {
+        RAW.store(1, std::sync::atomic::Ordering::SeqCst);
+    })
+    .join()
+    .unwrap();
+    println!("[stdhello] t-raw={}", RAW.load(std::sync::atomic::Ordering::SeqCst));
+    let counter = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+    let mut hs = vec![];
+    for _ in 0..4 {
+        let c = counter.clone();
+        hs.push(std::thread::spawn(move || {
+            for _ in 0..250 {
+                *c.lock().unwrap() += 1;
+            }
+        }));
+    }
+    for h in hs {
+        h.join().unwrap();
+    }
+    println!("[stdhello] threads sum={}", *counter.lock().unwrap());
+    let flag = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let f2 = flag.clone();
+    let w = std::thread::spawn(move || {
+        let (m, cv) = &*f2;
+        let mut g = m.lock().unwrap();
+        while !*g {
+            g = cv.wait(g).unwrap();
+        }
+    });
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    {
+        let (m, cv) = &*flag;
+        *m.lock().unwrap() = true;
+        cv.notify_one();
+    }
+    w.join().unwrap();
+    println!("[stdhello] condvar ok");
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    let mut n = 0;
+    for _ in 0..3 {
+        ONCE.call_once(|| n += 1);
+    }
+    println!("[stdhello] once n={}", n);
+    std::thread_local! {
+        static TLS_DEMO: std::cell::Cell<u32> = std::cell::Cell::new(0);
+    }
+    TLS_DEMO.set(7);
+    let jt = std::thread::spawn(|| TLS_DEMO.get());
+    let child_val = jt.join().unwrap();
+    println!(
+        "[stdhello] tls main={} child={}",
+        TLS_DEMO.get(),
+        child_val
+    );
+    println!("[stdhello] threads DONE");
     println!("[stdhello] DONE");
 }
 EOF

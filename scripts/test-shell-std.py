@@ -49,6 +49,13 @@ def main():
         c.check("stdhello fs len", b"[stdhello] fs len=13 is_file=true" in out)
         c.check("stdhello fs readdir", b"[stdhello] fs readdir n=1" in out)
         c.check("stdhello fs DONE", b"[stdhello] fs DONE" in out)
+        c.check("stdhello t-empty-join", b"[stdhello] t-empty-join ok" in out)
+        c.check("stdhello t-raw", b"[stdhello] t-raw=1" in out)
+        c.check("stdhello threads sum", b"[stdhello] threads sum=1000" in out)
+        c.check("stdhello condvar", b"[stdhello] condvar ok" in out)
+        c.check("stdhello once", b"[stdhello] once n=1" in out)
+        c.check("stdhello tls", b"[stdhello] tls main=7 child=0" in out)
+        c.check("stdhello threads DONE", b"[stdhello] threads DONE" in out)
         c.check("stdhello DONE", b"[stdhello] DONE" in out)
         return 0 if c.ok else 1
     except RuntimeError as e:

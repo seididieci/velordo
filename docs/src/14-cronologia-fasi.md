@@ -2227,3 +2227,13 @@
           test-shell-std 13→17 (roundtrip/len/readdir/fs-DONE su /tmp).
           set_readonly resta no-op (firma () imposta da std, precedente
           hermit; documentato). Kernel invariato. Gate invariato.
+          S2.3 thread+sync+TLS (chiusa): PAL sys/thread (TCB in cima allo
+          stack, trampolino naked + jmp, join su futex, Dekker al detach,
+          sleep/yield su deadline) + sys/sync/futex (Mutex/RwLock/Condvar/
+          Once/Parker gratis) + TLS a chiavi modello xous (tabella via RSP,
+          registro slot, dtor in destroy_tls dal trampolino) + target
+          singlethread=false. Bug: prologo non-naked (-64 RSP, #PF @ 0x0);
+          no_threads=CURRENT globale (abort 134 al 2o set_current).
+          test-shell-std 17→24 (sum=1000, condvar, once, tls main=7/child=0).
+          Gate verde (flake v29/bind noti in 2 run su 3), shell 10/10.
+          Kernel invariato (solo codegen dal flip).

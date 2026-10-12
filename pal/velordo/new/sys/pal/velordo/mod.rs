@@ -136,6 +136,9 @@ mod c_compat {
     }
 
     unsafe extern "C" fn __velordo_start(sp: u64) -> ! {
+        // S2.3: FS sul TCB del main thread prima di qualunque codice Rust
+        // (i thread spawnati lo ricevono dalla CREATE).
+        crate::sys::thread::init_main_tls();
         // Layout kernel (`layout_argv`): [argc][argv..][NULL][envp..][NULL].
         // Lo stack sotto `sp` e' libero (prologo/call sicuri, allineati).
         let (argc, argv): (isize, *const *const u8);

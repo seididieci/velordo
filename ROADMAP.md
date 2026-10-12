@@ -208,8 +208,15 @@ Voci con scope e vittoria dichiarati (non date).
        (sagoma hermit, provider raw, honest-Err); generatore numeri ABI
        in `apply.py` (zero duplicati) + VA in `syscall-numbers`;
        test-shell-std.py 13→17 (fs roundtrip/len/readdir su `/tmp`).
-       set_readonly no-op (firma () di std). Prossimo: S2.3
-       (thread PAL + `Command`).
+       set_readonly no-op (firma () di std).
+- [x] **S2.3 thread + sync + TLS** (chiusa): PAL `sys/thread` (TCB in cima
+       allo stack, entry naked + jmp, join su futex, Dekker al detach,
+       sleep/yield su deadline, parallelism=1) + `sys/sync/futex`
+       (Mutex/RwLock/Condvar/Once/Parker gratis) + TLS a chiavi modello
+       xous (tabella via RSP, registro 32 slot, dtor dal trampolino) +
+       target `singlethread=false`; `Command` slitta in S2.4 (vuole IPC).
+       test-shell-std.py 17→24 (sum=1000, condvar, once, tls main/child).
+       Prossimo: S2.4 (process/`Command` + leaf-arms).
 - [x] **S-T thread kernel 1:1 + TLS + futex** (chiusa, ADR-0046): thread =
        PCB con gruppo (cr3/canali/fd/heap/VMA condivisi col leader, stack/
        TSS/FS/coda propri); pool 32→128 (bitmask u128, TSS pool, VMA 64);

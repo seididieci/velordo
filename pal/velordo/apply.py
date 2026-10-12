@@ -32,6 +32,8 @@ NEW_FILES = [
     "sys/paths/velordo.rs",
     "sys/fs/velordo.rs",
     "sys/fs/vfslib/mod.rs",
+    "sys/sync/futex/velordo.rs",
+    "sys/thread_local/key/velordo.rs",
 ]
 
 # (sorgente-relativa-a-pal/, destinazione-in-std/src): copie vendored da
@@ -85,9 +87,50 @@ ARMS = [
         '    target_os = "velordo" => {\n        mod velordo;\n        use velordo as imp;\n    }\n',
     ),
     (
+        "sys/sync/futex/mod.rs",
+        '    target_os = "hermit" => {\n        mod hermit;\n        pub use hermit::*;\n    }\n',
+        '    target_os = "hermit" => {\n        mod hermit;\n        pub use hermit::*;\n    }\n    target_os = "velordo" => {\n        pub(crate) mod velordo;\n        pub use velordo::*;\n    }\n',
+    ),
+    (
+        "sys/sync/mutex/mod.rs",
+        '        target_os = "hermit",\n',
+        '        target_os = "hermit",\n        target_os = "velordo",\n',
+    ),
+    (
+        "sys/sync/condvar/mod.rs",
+        '        target_os = "hermit",\n',
+        '        target_os = "hermit",\n        target_os = "velordo",\n',
+    ),
+    (
+        "sys/sync/rwlock/mod.rs",
+        '        target_os = "hermit",\n',
+        '        target_os = "hermit",\n        target_os = "velordo",\n',
+    ),
+    (
+        "sys/sync/once/mod.rs",
+        '        target_os = "hermit",\n',
+        '        target_os = "hermit",\n        target_os = "velordo",\n',
+    ),
+    (
+        "sys/sync/thread_parking/mod.rs",
+        '        target_os = "hermit",\n',
+        '        target_os = "hermit",\n        target_os = "velordo",\n',
+    ),
+    (
+        "sys/sync/mod.rs",
+        'mod futex;',
+        'pub(crate) mod futex;',
+        "inplace",
+    ),
+    (
+        "sys/thread_local/mod.rs",
+        '        target_os = "motor" => {\n            mod racy;\n            #[cfg(test)]\n            mod tests;\n            pub(super) use moto_rt::tls::{Key, get, set};\n            use moto_rt::tls::{create, destroy};\n            pub(super) use racy::LazyKey;\n        }',
+        '        target_os = "velordo" => {\n            mod racy;\n            mod velordo;\n            pub(super) use racy::LazyKey;\n            pub(crate) use velordo::{destroy_tls, register_slot, release_base};\n            pub(super) use velordo::{Key, get, set};\n            use velordo::{create, destroy};\n        }',
+    ),
+    (
         "sys/thread/mod.rs",
         '    target_os = "uefi" => {\n        mod uefi;\n        pub use uefi::{available_parallelism, sleep};\n        #[expect(dead_code)]\n        mod unsupported;\n        pub use unsupported::{DEFAULT_MIN_STACK_SIZE, Thread, current_os_id, set_name, yield_now};\n    }\n',
-        '    target_os = "velordo" => {\n        mod velordo;\n        pub use velordo::sleep;\n        #[expect(dead_code)]\n        mod unsupported;\n        pub use unsupported::{DEFAULT_MIN_STACK_SIZE, Thread, available_parallelism, current_os_id, set_name, yield_now};\n    }\n',
+        '    target_os = "velordo" => {\n        mod velordo;\n        pub use velordo::{DEFAULT_MIN_STACK_SIZE, Thread, available_parallelism, current_os_id, init_main_tls, set_name, sleep, yield_now};\n    }\n',
     ),
     (
         "sys/exit.rs",
@@ -106,15 +149,9 @@ ARMS = [
     ),
     (
         "sys/thread_local/mod.rs",
-        '        target_os = "uefi",\n        target_os = "zkvm",\n        target_os = "trusty",\n        target_os = "vexos",\n    ) => {\n        mod no_threads;',
-        '        target_os = "uefi",\n        target_os = "velordo",\n        target_os = "zkvm",\n        target_os = "trusty",\n        target_os = "vexos",\n    ) => {\n        mod no_threads;',
-        "tls",
-    ),
-    (
-        "sys/thread_local/mod.rs",
-        '            all(target_family = "wasm", not(target_env = "p3")),\n            target_os = "uefi",\n            target_os = "zkvm",\n            target_os = "trusty",\n            target_os = "vexos",\n        ) => {\n            pub(crate) fn enable() {',
-        '            all(target_family = "wasm", not(target_env = "p3")),\n            target_os = "uefi",\n            target_os = "velordo",\n            target_os = "zkvm",\n            target_os = "trusty",\n            target_os = "vexos",\n        ) => {\n            pub(crate) fn enable() {',
-        "guard",
+        '        any(target_os = "hermit", target_os = "xous") => {',
+        '        any(target_os = "hermit", target_os = "velordo", target_os = "xous") => {',
+        "inplace",
     ),
     (
         "os/mod.rs",
