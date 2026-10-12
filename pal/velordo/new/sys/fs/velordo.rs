@@ -434,6 +434,13 @@ impl File {
         // DUP e' handoff single-use al figlio, non clone indipendente.
         Err(io::Error::new(ErrorKind::Unsupported, "try_clone senza DUP indipendente"))
     }
+    /// Trasferisce l'fd (per `Stdio::from(File)`: il figlio eredita l'fd
+    /// aperto; nessuna close qui, ownership al chiamante).
+    pub fn into_inner(self) -> i64 {
+        let fd = self.fd;
+        core::mem::forget(self);
+        fd
+    }
     pub fn set_permissions(&self, _perm: FilePermissions) -> io::Result<()> {
         Err(io::Error::new(ErrorKind::Unsupported, "chmod e' accept-only"))
     }
@@ -458,6 +465,13 @@ pub(crate) fn pipe_close(fd: i64) {
 }
 pub(crate) fn pipe_grant(fd: i64) -> io::Result<u64> {
     sync::dup_grant(&FSTATE, fd).map_err(io_err)
+}
+
+/// Avvelena l'FS nel figlio fork (S2.4c2): ring/canale del padre non
+/// riusabili (aliasing SPSC). Prima dell'exec il figlio tocca solo syscall
+/// raw (exec/print/exit); l'exec riparte da BSS pristine.
+pub(crate) fn poison_child_fstate() {
+    vfslib::session::post_spawn_copy_child(&FSTATE)
 }
 
 /// Stat senza seguire i link (R_STAT = lstat) → FileAttr.

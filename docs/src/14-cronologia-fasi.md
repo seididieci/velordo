@@ -2244,3 +2244,11 @@
           (fix inplace). Diritti Fase 45: pipe/grant negati agli ignoti
           (0x19F) → `pal/build` in TEST_POLICY (test-tooling come la suite);
           catena build-pal→tests→kernel (cardo embedded!)→seed. 25/25.
+          S2.4c2 sys::process (chiuso): fork+exec con argv/env, wait via
+          EXIT_NOTIFY (demux tabella), kill/try_wait, ExitStatus/ExitCode;
+          MakePipe/Fd rifiutati onesti (c3), getpid panic, niente PATH search.
+          runhello: status 0 + argv + fail 3 + env ereditato. LEZIONE: i FAIL
+          "hang al condvar" erano troncamento (run_out dorme T_RUN=0.4s fisso,
+          l'hello cresciuto dura ~350ms; kill precoce = seriale mozzato
+          indistinguibile): fix run_until su DONE. La strumentazione kernel
+          perturbava (testsarca 48/54) e inseguiva un fantasma. 28/28.

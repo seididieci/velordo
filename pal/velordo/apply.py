@@ -35,6 +35,7 @@ NEW_FILES = [
     "sys/sync/futex/velordo.rs",
     "sys/thread_local/key/velordo.rs",
     "sys/pipe/velordo.rs",
+    "sys/process/velordo.rs",
 ]
 
 # (sorgente-relativa-a-pal/, destinazione-in-std/src): copie vendored da
@@ -132,6 +133,12 @@ ARMS = [
         "sys/pipe/mod.rs",
         '    _ => {\n        mod unsupported;\n        pub use unsupported::{Pipe, pipe};\n    }',
         '    target_os = "velordo" => {\n        mod velordo;\n        pub use velordo::{Pipe, pipe};\n    }\n    _ => {\n        mod unsupported;\n        pub use unsupported::{Pipe, pipe};\n    }',
+        "inplace",
+    ),
+    (
+        "sys/process/mod.rs",
+        '    _ => {\n        mod unsupported;\n        use unsupported as imp;\n    }',
+        '    target_os = "velordo" => {\n        mod velordo;\n        use velordo as imp;\n    }\n    _ => {\n        mod unsupported;\n        use unsupported as imp;\n    }',
         "inplace",
     ),
     (

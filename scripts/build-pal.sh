@@ -165,6 +165,22 @@ fn main() {
         std::io::Read::read_to_end(&mut pr, &mut got).unwrap();
         println!("[stdhello] pipe ok={}", got == b"pipe-1234");
     }
+    // S2.4c2: Command su runhello (spawn+argv+exit-code, niente capture).
+    {
+        let st = std::process::Command::new("/fat/bin/runhello.bin")
+            .arg("foo")
+            .arg("bar")
+            .status()
+            .unwrap();
+        println!("[stdhello] cmd status ok={} code={:?}", st.success(), st.code());
+        let st2 = std::process::Command::new("/fat/bin/runhello.bin")
+            .arg("fail")
+            .status()
+            .unwrap();
+        println!("[stdhello] cmd fail code={:?}", st2.code());
+        let missing = std::process::Command::new("/bin/nope-missing.bin").status();
+        println!("[stdhello] cmd missing err={}", missing.is_err());
+    }
     // S2.3: thread 1:1 + sync sopra futex (TLS a chiavi in PAL).
     std::thread::spawn(|| {}).join().unwrap();
     println!("[stdhello] t-empty-join ok");

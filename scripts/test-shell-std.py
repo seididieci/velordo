@@ -29,7 +29,9 @@ def main():
     c = Checker()
     try:
         sh.boot()
-        out = sh.run_out("run /fat/test/stdhello.bin")
+        # S2.4: l'hello dura ~350ms (pipe+fork) contro T_RUN=0.4s: aspettare
+        # DONE esplicito, mai sleep fisso (il troncamento tagliava la coda).
+        out = sh.run_until("run /fat/test/stdhello.bin", b"[stdhello] DONE", timeout=60)
         c.check("stdhello println", b"[stdhello] ciao da std su Velordo" in out)
         c.check("stdhello vec", b"[stdhello] vec len=8 sum=140" in out)
         c.check("stdhello mutex", b"[stdhello] mutex=41" in out)
@@ -37,7 +39,7 @@ def main():
         c.check("stdhello instant", b"[stdhello] instant ok" in out)
         # S2.0: argv/env/cwd (export prima, run con argv dopo).
         sh.run_out("export VELORDO_S2=s2ok")
-        out = sh.run_out("run /fat/test/stdhello.bin foo bar")
+        out = sh.run_until("run /fat/test/stdhello.bin foo bar", b"[stdhello] DONE", timeout=60)
         c.check("stdhello argv", b"[stdhello] argv=foo,bar" in out)
         c.check("stdhello env", b"[stdhello] env VELORDO_S2=s2ok" in out)
         c.check("stdhello set_var", b"[stdhello] set_var STD_SET=42" in out)
@@ -50,6 +52,9 @@ def main():
         c.check("stdhello fs readdir", b"[stdhello] fs readdir n=1" in out)
         c.check("stdhello fs DONE", b"[stdhello] fs DONE" in out)
         c.check("stdhello pipe", b"[stdhello] pipe ok=true" in out)
+        c.check("stdhello cmd status", b"[stdhello] cmd status ok=true code=Some(0)" in out)
+        c.check("stdhello cmd fail", b"[stdhello] cmd fail code=Some(3)" in out)
+        c.check("stdhello cmd missing", b"[stdhello] cmd missing err=true" in out)
         c.check("stdhello t-empty-join", b"[stdhello] t-empty-join ok" in out)
         c.check("stdhello t-raw", b"[stdhello] t-raw=1" in out)
         c.check("stdhello threads sum", b"[stdhello] threads sum=1000" in out)
