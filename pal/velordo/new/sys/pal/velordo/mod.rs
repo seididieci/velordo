@@ -34,6 +34,32 @@ pub(crate) unsafe fn syscall4(n: u64, a: u64, b: u64, c: u64, d: u64) -> i64 {
     r
 }
 
+/// Syscall raw a 4 argomenti con 5 parole di ritorno (ADR-0008:
+/// channel/tag/w0/w1 oltre allo stato in rax). Usata dall'IPC bloccante
+/// del client FS.
+#[inline(always)]
+pub(crate) unsafe fn syscall4_out(n: u64, a: u64, b: u64, c: u64, d: u64) -> (i64, u64, u64, u64, u64) {
+    let rax: i64;
+    let rdi: u64;
+    let rsi: u64;
+    let rdx: u64;
+    let r10: u64;
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") n => rax,
+            inlateout("rdi") a => rdi,
+            inlateout("rsi") b => rsi,
+            inlateout("rdx") c => rdx,
+            inlateout("r10") d => r10,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    (rax, rdi, rsi, rdx, r10)
+}
+
 pub(crate) fn write_console(buf: &[u8]) -> usize {
     if buf.is_empty() {
         return 0;

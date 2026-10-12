@@ -203,6 +203,13 @@ Voci con scope e vittoria dichiarati (non date).
        stats; PAL via COPY_MAP + `alloc_stats`. Kernel invariato
        (file-backed rinviato a S2.4). test-shell-std.py 10→13
        (churn/overalign/stats). Prossimo: S2.2 (`std::fs`).
+- [x] **S2.2 `std::fs` sopra cardo** (chiusa): `libs/vfscli` condivisa
+       (estratto `civis`, commit checkpoint + gate) + PAL `sys/fs`
+       (sagoma hermit, provider raw, honest-Err); generatore numeri ABI
+       in `apply.py` (zero duplicati) + VA in `syscall-numbers`;
+       test-shell-std.py 13→17 (fs roundtrip/len/readdir su `/tmp`).
+       set_readonly no-op (firma () di std). Prossimo: S2.3
+       (thread PAL + `Command`).
 - [x] **S-T thread kernel 1:1 + TLS + futex** (chiusa, ADR-0046): thread =
        PCB con gruppo (cr3/canali/fd/heap/VMA condivisi col leader, stack/
        TSS/FS/coda propri); pool 32→128 (bitmask u128, TSS pool, VMA 64);

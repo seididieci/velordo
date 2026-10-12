@@ -360,8 +360,14 @@ pub fn ring_alloc_raw<S: Sys>() -> Option<(u64, u64)> {
 /// a un'epoca morta (server riavviato). Solo per `fs_rehandshake`.
 pub fn ring_reset(ring_va: u64) {
     unsafe {
-        core::ptr::write_volatile((ring_va + ring::RING_HEAD as u64) as *mut u32, 0);
-        core::ptr::write_volatile((ring_va + ring::RING_TAIL as u64) as *mut u32, 0);
+        core::ptr::write_volatile::<u32>(
+            core::ptr::with_exposed_provenance_mut((ring_va + ring::RING_HEAD as u64) as usize),
+            0,
+        );
+        core::ptr::write_volatile::<u32>(
+            core::ptr::with_exposed_provenance_mut((ring_va + ring::RING_TAIL as u64) as usize),
+            0,
+        );
     }
 }
 

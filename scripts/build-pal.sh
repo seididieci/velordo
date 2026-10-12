@@ -143,6 +143,19 @@ fn main() {
     unsafe { std::alloc::dealloc(p, layout) };
     let (a, f, live, high) = std::os::velordo::alloc_stats();
     println!("[stdhello] alloc stats a={} f={} live={} high={}", a, f, live, high);
+    // S2.2: fs sopra cardo (/tmp ramfs isolata; cleanup per rerun idempotenti).
+    std::fs::remove_file("/tmp/s2fs/hello.txt").ok();
+    std::fs::remove_file("/tmp/s2fs/bye.txt").ok();
+    std::fs::create_dir("/tmp/s2fs").ok();
+    std::fs::write("/tmp/s2fs/hello.txt", b"velordo-fs-42").unwrap();
+    let back = std::fs::read("/tmp/s2fs/hello.txt").unwrap();
+    println!("[stdhello] fs roundtrip ok={}", back == b"velordo-fs-42");
+    let md = std::fs::metadata("/tmp/s2fs/hello.txt").unwrap();
+    println!("[stdhello] fs len={} is_file={}", md.len(), md.is_file());
+    std::fs::rename("/tmp/s2fs/hello.txt", "/tmp/s2fs/bye.txt").unwrap();
+    println!("[stdhello] fs readdir n={}", std::fs::read_dir("/tmp/s2fs").unwrap().count());
+    std::fs::remove_file("/tmp/s2fs/bye.txt").unwrap();
+    println!("[stdhello] fs DONE");
     println!("[stdhello] DONE");
 }
 EOF

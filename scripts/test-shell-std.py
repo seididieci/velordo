@@ -45,6 +45,10 @@ def main():
         c.check("stdhello churn", b"[stdhello] alloc churn ok in " in out)
         c.check("stdhello overalign", b"[stdhello] overalign ok=true" in out)
         c.check("stdhello stats", b"[stdhello] alloc stats a=" in out)
+        c.check("stdhello fs roundtrip", b"[stdhello] fs roundtrip ok=true" in out)
+        c.check("stdhello fs len", b"[stdhello] fs len=13 is_file=true" in out)
+        c.check("stdhello fs readdir", b"[stdhello] fs readdir n=1" in out)
+        c.check("stdhello fs DONE", b"[stdhello] fs DONE" in out)
         c.check("stdhello DONE", b"[stdhello] DONE" in out)
         return 0 if c.ok else 1
     except RuntimeError as e:

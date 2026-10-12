@@ -30,6 +30,8 @@ NEW_FILES = [
     "sys/args/velordo.rs",
     "sys/env/velordo.rs",
     "sys/paths/velordo.rs",
+    "sys/fs/velordo.rs",
+    "sys/fs/vfslib/mod.rs",
 ]
 
 # (sorgente-relativa-a-pal/, destinazione-in-std/src): copie vendored da
@@ -37,6 +39,14 @@ NEW_FILES = [
 COPY_MAP = [
     # Relativi a pal/velordo/new (tre livelli sopra = root repo).
     ("../../../libs/valloc/src/core.rs", "sys/alloc/valloc_core.rs"),
+    # vfscli (S2.2): client FS condiviso; `abi.rs` e' GENERATO sotto (stessi
+    # nomi della controparte repo, letterali al posto dei re-export).
+    ("../../../libs/vfscli/src/base.rs", "sys/fs/vfslib/base.rs"),
+    ("../../../libs/vfscli/src/session.rs", "sys/fs/vfslib/session.rs"),
+    ("../../../libs/vfscli/src/ring.rs", "sys/fs/vfslib/ring.rs"),
+    ("../../../libs/vfscli/src/sync.rs", "sys/fs/vfslib/sync.rs"),
+    ("../../../libs/vfscli/src/cwd.rs", "sys/fs/vfslib/cwd.rs"),
+    ("../../../libs/vfscli/src/error.rs", "sys/fs/vfslib/error.rs"),
 ]
 
 # (file-relativo-a-std/src, anchor, inserimento): anchor deve occorrere UNA volta.
@@ -88,6 +98,11 @@ ARMS = [
         "sys/io/error/mod.rs",
         '    target_os = "xous" => {\n        mod xous;\n        pub use xous::*;\n    }\n',
         '    target_os = "velordo" => {\n        mod velordo;\n        pub use velordo::*;\n    }\n',
+    ),
+    (
+        "sys/fs/mod.rs",
+        '    target_os = "hermit" => {\n        mod hermit;\n        use hermit as imp;\n    }\n',
+        '    target_os = "hermit" => {\n        mod hermit;\n        use hermit as imp;\n    }\n    target_os = "velordo" => {\n        mod velordo;\n        use velordo as imp;\n    }\n',
     ),
     (
         "sys/thread_local/mod.rs",
@@ -155,7 +170,8 @@ def gen_numbers(repo_root: Path) -> str:
         "",
     ]
     seen = set()
-    for name, ty, rhs in rows:
+
+    def emit_const(name, ty, rhs):
         assert name not in seen, f"const duplicata: {name}"
         seen.add(name)
         e = rhs.strip().replace("u64::MAX", str(2**64 - 1)).replace("!0u64", str(2**64 - 1))
@@ -163,6 +179,18 @@ def gen_numbers(repo_root: Path) -> str:
         v = eval(e, {"__builtins__": {}}, {})
         assert isinstance(v, int) and v >= 0, f"valore non intero: {name}"
         out.append(f"pub const {name}: {ty} = {v};")
+
+    for name, ty, rhs in rows:
+        emit_const(name, ty, rhs)
+    # Enum fieldless con discriminanti esplicite (solo `Service`: serve
+    # l'id numerico per il lookup raw; qualunque altro enum = LOUD).
+    for m in re.finditer(r"pub enum (\w+) \{(.*?)\n\}", text, re.S):
+        ename, body = m.group(1), m.group(2)
+        assert ename == "Service", f"enum non gestito: {ename}"
+        for line in body.splitlines():
+            mm = re.match(r"\s*(\w+) = (\d+),?", line)
+            if mm:
+                emit_const(f"SERVICE_{mm.group(1).upper()}", "u64", mm.group(2))
     # Spot-check fail-loud sui critici (se mancano, la PAL non compila comunque,
     # ma qui il messaggio dice DOVE guardare).
     for must in ("SYS_WRITE", "SYS_MMAP", "SYS_RING_ALLOC", "USER_FS_BUFFER", "R_OPEN"):
@@ -177,12 +205,24 @@ def main() -> None:
     assert (lib / "std" / "Cargo.toml").exists(), f"library-dir non valida: {lib}"
     repo_root = (new / ".." / ".." / "..").resolve()
 
-    # Numeri ABI generati (prima di copiare: i file PAL li usano).
+    # Numeri ABI generati (prima di copiare: i file PAL li usano). La stessa
+    # estrazione alimenta `vfslib/abi.rs` (stessi nomi, per le copie vfscli).
     numbers = gen_numbers(repo_root)
     np = std / "sys" / "pal" / "velordo" / "numbers.rs"
     np.parent.mkdir(parents=True, exist_ok=True)
     np.write_text(numbers)
     print(f"[pal] gen numbers.rs ({len(numbers.splitlines())} righe da syscall-numbers)")
+    ab = std / "sys" / "fs" / "vfslib" / "abi.rs"
+    ab.parent.mkdir(parents=True, exist_ok=True)
+    ab.write_text(
+        "//! ABI per il client FS — GENERATO come numbers.rs (S2.2).\n"
+        "//! Stessi nomi di `libs/vfscli/src/abi.rs` (li' re-export).\n"
+        "#![allow(dead_code)]\n\n" + "\n".join(
+            l for l in numbers.splitlines()
+            if l.startswith("pub const ") and not l.startswith("pub const SYS_")
+        ) + "\n"
+    )
+    print("[pal] gen vfslib/abi.rs (senza SYS_*: il provider usa raw dedicati)")
 
     for rel in NEW_FILES:
         src = new / rel

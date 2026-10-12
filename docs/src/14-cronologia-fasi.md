@@ -2221,3 +2221,9 @@
           single+8-thread senza leak/corruzioni; ha beccato un nostro bug
           di pattern nell'harness stesso. test-shell-std 10→13. Kernel
           invariato (mmap anonimo bastava). Gate invariato.
+          S2.2 std::fs sopra cardo: libs/vfscli commit 1 (estrazione) +
+          PAL sys/fs (sagoma hermit, provider raw, honest-Err) commit 2;
+          generatore numeri ABI (niente duplicati) + VA in syscall-numbers;
+          test-shell-std 13→17 (roundtrip/len/readdir/fs-DONE su /tmp).
+          set_readonly resta no-op (firma () imposta da std, precedente
+          hermit; documentato). Kernel invariato. Gate invariato.

@@ -41,8 +41,8 @@ pub use super::abi::{ERR, ERR_NOHANDSHAKE};
 
 /// Legge head e tail dal ring a `ring_va`.
 pub unsafe fn ring_positions(ring_va: u64) -> (u32, u32) {
-    let head = unsafe { core::ptr::read_volatile((ring_va + RING_HEAD as u64) as *const u32) };
-    let tail = unsafe { core::ptr::read_volatile((ring_va + RING_TAIL as u64) as *const u32) };
+    let head = unsafe { core::ptr::read_volatile::<u32>(core::ptr::with_exposed_provenance((ring_va + RING_HEAD as u64) as usize)) };
+    let tail = unsafe { core::ptr::read_volatile::<u32>(core::ptr::with_exposed_provenance((ring_va + RING_TAIL as u64) as usize)) };
     (head, tail)
 }
 
@@ -60,7 +60,7 @@ pub fn ring_free_space(head: u32, tail: u32) -> usize {
 /// Scrive `data` nel ring a `ring_va` partendo dalla posizione `head`.
 /// Avanza head di `data.len()`. Non verifica lo spazio (chiamante deve farlo).
 pub unsafe fn ring_write_at(ring_va: u64, head: u32, data: &[u8]) {
-    let dst = ring_va as *mut u8;
+    let dst: *mut u8 = core::ptr::with_exposed_provenance_mut(ring_va as usize);
     for (i, byte) in data.iter().enumerate() {
         let pos = ((head as usize) + i) % RING_DATA_CAP;
         unsafe { core::ptr::write_volatile(dst.add(pos), *byte); }
@@ -69,7 +69,7 @@ pub unsafe fn ring_write_at(ring_va: u64, head: u32, data: &[u8]) {
 
 /// Legge `count` byte dal ring a `ring_va` partendo dalla posizione `tail`.
 pub unsafe fn ring_read_at(ring_va: u64, tail: u32, dst: &mut [u8], count: usize) {
-    let src = ring_va as *const u8;
+    let src: *const u8 = core::ptr::with_exposed_provenance(ring_va as usize);
     for i in 0..count.min(dst.len()) {
         let pos = ((tail as usize) + i) % RING_DATA_CAP;
         dst[i] = unsafe { core::ptr::read_volatile(src.add(pos)) };
@@ -91,7 +91,7 @@ pub unsafe fn resp_frame_write(resp_va: u64, data: &[u8]) {
         let mut hdr = [0u8; 16];
         hdr[0..8].copy_from_slice(&(data.len() as u64).to_le_bytes());
         hdr[8..16].copy_from_slice(&0u64.to_le_bytes());
-        let dst = resp_va as *mut u8;
+        let dst: *mut u8 = core::ptr::with_exposed_provenance_mut(resp_va as usize);
         for (i, byte) in hdr.iter().enumerate() {
             let p = ((head as usize) + i) % RING_DATA_CAP;
             core::ptr::write_volatile(dst.add(p), *byte);
@@ -101,7 +101,7 @@ pub unsafe fn resp_frame_write(resp_va: u64, data: &[u8]) {
             core::ptr::write_volatile(dst.add(p), *byte);
         }
         let new_head = ((head as usize) + frame_len) % RING_DATA_CAP;
-        core::ptr::write_volatile((resp_va + RING_HEAD as u64) as *mut u32, new_head as u32);
+        core::ptr::write_volatile(core::ptr::with_exposed_provenance_mut((resp_va + RING_HEAD as u64) as usize), new_head as u32);
     }
 }
 
@@ -110,9 +110,9 @@ pub unsafe fn resp_frame_write(resp_va: u64, data: &[u8]) {
 /// avanzata o il prossimo request dello stesso client verrebbe letto male.
 pub unsafe fn req_frame_consume(req_va: u64, count: usize) {
     unsafe {
-        let tail = core::ptr::read_volatile((req_va + RING_TAIL as u64) as *const u32);
+        let tail = core::ptr::read_volatile::<u32>(core::ptr::with_exposed_provenance((req_va + RING_TAIL as u64) as usize));
         let new_tail = ((tail as usize) + 20 + count) % RING_DATA_CAP;
-        core::ptr::write_volatile((req_va + RING_TAIL as u64) as *mut u32, new_tail as u32);
+        core::ptr::write_volatile(core::ptr::with_exposed_provenance_mut((req_va + RING_TAIL as u64) as usize), new_tail as u32);
     }
 }
 
@@ -121,14 +121,14 @@ pub unsafe fn req_frame_consume(req_va: u64, count: usize) {
 pub unsafe fn req_frame_read(req_va: u64, dst: &mut [u8], count: usize) -> usize {
     unsafe {
         let (_head, tail) = ring_positions(req_va);
-        let src = req_va as *const u8;
+        let src: *const u8 = core::ptr::with_exposed_provenance(req_va as usize);
         let n = count.min(dst.len());
         for i in 0..n {
             let p = ((tail as usize) + 20 + i) % RING_DATA_CAP;
             dst[i] = core::ptr::read_volatile(src.add(p));
         }
         let new_tail = ((tail as usize) + 20 + n) % RING_DATA_CAP;
-        core::ptr::write_volatile((req_va + RING_TAIL as u64) as *mut u32, new_tail as u32);
+        core::ptr::write_volatile(core::ptr::with_exposed_provenance_mut((req_va + RING_TAIL as u64) as usize), new_tail as u32);
         n
     }
 }
@@ -154,7 +154,7 @@ pub fn req_ring_write(tag: u32, w0: u64, w1: u64, payload: &[u8]) -> bool {
         }
         // Aggiorna head (wrappa entro [0, RING_DATA_CAP))
         let new_head = ((head as usize) + frame_len) % RING_DATA_CAP;
-        core::ptr::write_volatile((REQ_RING_VA + RING_HEAD as u64) as *mut u32, new_head as u32);
+        core::ptr::write_volatile(core::ptr::with_exposed_provenance_mut((REQ_RING_VA + RING_HEAD as u64) as usize), new_head as u32);
     }
     true
 }
@@ -190,7 +190,7 @@ pub fn resp_ring_read_payload(dst: &mut [u8], payload_len: usize) {
         // Avanza tail (wrappa entro [0, RING_DATA_CAP))
         let total = 16 + payload_len;
         let new_tail = ((tail as usize) + total) % RING_DATA_CAP;
-        core::ptr::write_volatile((RESP_RING_VA + RING_TAIL as u64) as *mut u32, new_tail as u32);
+        core::ptr::write_volatile(core::ptr::with_exposed_provenance_mut((RESP_RING_VA + RING_TAIL as u64) as usize), new_tail as u32);
     }
 }
 
@@ -199,7 +199,7 @@ pub fn resp_ring_consume(frame_len: usize) {
     unsafe {
         let (_, tail) = ring_positions(RESP_RING_VA);
         let new_tail = ((tail as usize) + frame_len) % RING_DATA_CAP;
-        core::ptr::write_volatile((RESP_RING_VA + RING_TAIL as u64) as *mut u32, new_tail as u32);
+        core::ptr::write_volatile(core::ptr::with_exposed_provenance_mut((RESP_RING_VA + RING_TAIL as u64) as usize), new_tail as u32);
     }
 }
 
@@ -211,6 +211,6 @@ pub fn req_ring_rollback(frame_len: usize) {
     unsafe {
         let (head, _tail) = ring_positions(REQ_RING_VA);
         let new_head = (head as usize + RING_DATA_CAP - frame_len) % RING_DATA_CAP;
-        core::ptr::write_volatile((REQ_RING_VA + RING_HEAD as u64) as *mut u32, new_head as u32);
+        core::ptr::write_volatile(core::ptr::with_exposed_provenance_mut((REQ_RING_VA + RING_HEAD as u64) as usize), new_head as u32);
     }
 }

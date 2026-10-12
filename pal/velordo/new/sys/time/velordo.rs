@@ -38,6 +38,12 @@ impl SystemTime {
 
     pub const MIN: SystemTime = SystemTime(Duration::ZERO);
 
+    /// Costruisce da epoch-secondi + nanosecondi (S2.2: serve a `FileAttr`
+    /// per l'mtime di cardo; `now()` resta unsupported senza servizio Time).
+    pub const fn new(secs: u64, nanos: u32) -> SystemTime {
+        SystemTime(Duration::new(secs, nanos))
+    }
+
     pub fn now() -> SystemTime {
         panic!("wall-clock non implementata su Velordo v1 (serve il servizio Time: S2)")
     }
