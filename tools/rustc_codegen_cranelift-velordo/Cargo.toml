@@ -1,0 +1,48 @@
+[package]
+name = "rustc_codegen_cranelift"
+version = "0.1.0"
+edition = "2024"
+
+# Vendor per Velordo (S2.5b) da compiler/rustc_codegen_cranelift al commit
+# pinnato (vedi git log di /home/work/work/rust-src): STESSI sorgenti,
+# Cargo diverso — rlib invece di dylib (link statico nello staticone) +
+# dipendenze rustc_* DICHIARATE (l'originale le prende dal prelude sysroot
+# via x.py: in cargo diretto servono path espliciti, una sola istanza).
+# Deviazioni documentate (niente altro toccato):
+# - tolto `extern crate rustc_driver;` (mai usato: zero occorrenze `rustc_driver::`).
+# - niente feature `jit` (serve libloading/dlopen: assente su Velordo).
+# Refresh: ricopiare src/ dal nuovo pin e ri-verificare le deviazioni.
+# Fuori dal workspace del kernel (come tools/arca).
+[workspace]
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# rustc_private (path nel checkout pinnato; versioni 0.0.0 coerenti).
+rustc_abi = { path = "../../../rust-src/compiler/rustc_abi" }
+rustc_ast = { path = "../../../rust-src/compiler/rustc_ast" }
+rustc_codegen_ssa = { path = "../../../rust-src/compiler/rustc_codegen_ssa" }
+rustc_const_eval = { path = "../../../rust-src/compiler/rustc_const_eval" }
+rustc_data_structures = { path = "../../../rust-src/compiler/rustc_data_structures" }
+rustc_errors = { path = "../../../rust-src/compiler/rustc_errors" }
+rustc_hir = { path = "../../../rust-src/compiler/rustc_hir" }
+rustc_index = { path = "../../../rust-src/compiler/rustc_index" }
+rustc_log = { path = "../../../rust-src/compiler/rustc_log" }
+rustc_middle = { path = "../../../rust-src/compiler/rustc_middle" }
+rustc_session = { path = "../../../rust-src/compiler/rustc_session" }
+rustc_span = { path = "../../../rust-src/compiler/rustc_span" }
+rustc_structures = { path = "../../../rust-src/compiler/rustc_structures" }
+rustc_symbol_mangling = { path = "../../../rust-src/compiler/rustc_symbol_mangling" }
+rustc_target = { path = "../../../rust-src/compiler/rustc_target" }
+# Terze parti (come l'originale, meno jit/libloading).
+cranelift-codegen = { version = "0.135.0", default-features = false, features = ["std", "timing", "unwind", "all-native-arch"] }
+cranelift-frontend = { version = "0.135.0" }
+cranelift-module = { version = "0.135.0" }
+cranelift-native = { version = "0.135.0" }
+cranelift-object = { version = "0.135.0", default-features = false }
+target-lexicon = "0.13"
+gimli = { version = "0.33", default-features = false, features = ["write"] }
+object = { version = "0.39.1", default-features = false, features = ["std", "read_core", "write", "archive", "coff", "elf", "macho", "pe"] }
+indexmap = "2.0.0"
+smallvec = "1.8.1"

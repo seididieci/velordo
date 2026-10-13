@@ -17,6 +17,10 @@ static mut HAS_FSGSBASE: bool = false;
 /// prima che qualunque thread user esista (l'MSR FS_BASE programmato dal
 /// kernel allo switch non dipende da questo bit; abilitarlo dopo non sposta
 /// le basi correnti, solo sblocca le istruzioni).
+/// S2.5b (FPU eager): accende anche OSFXSR+OSXMMEXCPT (CR4 bit 9+10, presenti
+/// su ogni x86_64: senza, le SSE faultano #UD) e inizializza l'area fxsave
+/// del contesto di boot (altrimenti il primo switch la salverebbe da zeri
+/// grezzi con FCW smascherato).
 pub fn init() {
     // Leaf 0: max basic leaf (niente structured-extended sotto il 7).
     let max_basic = unsafe { __cpuid(0) }.eax;
@@ -32,6 +36,13 @@ pub fn init() {
             cr4 |= 1 << 16; // CR4.FSGSBASE
             core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
         }
+    }
+    unsafe {
+        let mut cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nostack, preserves_flags));
+        cr4 |= (1 << 9) | (1 << 10); // CR4.OSFXSR + CR4.OSXMMEXCPT
+        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
+        crate::ordo::sched::ctx::init_boot_fpu();
     }
     unsafe {
         HAS_FSGSBASE = supported;

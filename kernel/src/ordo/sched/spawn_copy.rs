@@ -135,6 +135,7 @@ pub fn spawn_copy_current() -> Option<(usize, usize)> {
             r14: rd(SAVED_R14),
             r15: rd(SAVED_R15),
             rsp: rsp_child,
+            fpu: 0,
         }
     };
     // Record per-processo (infallibili da qui in poi: nessun unwind).

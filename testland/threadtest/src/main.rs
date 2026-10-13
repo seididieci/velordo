@@ -420,6 +420,93 @@ fn real_main(_sp: u64) -> ! {
     };
     c.ok("stress 32 thread somma", v11);
 
+    // 12. FPU eager (S2.5b): due thread tengono pattern XMM diversi per
+    // ~10 tick (switch reali in mezzo); se lo switch perdesse XMM/MXCSR
+    // vedremmo l'altro pattern o zeri. Richiede SSE (qemu64/host ok;
+    // senza = #UD loud, mai muto).
+    static X_A: AtomicU64 = AtomicU64::new(0);
+    static X_B: AtomicU64 = AtomicU64::new(0);
+    // Finestra load+spin+store TUTTA in asm (S2.5b): il compilatore non puo'
+    // spillare XMM0 in memoria (falso negativo) perche' non vede dentro.
+    // Lo spin (~30ms > quanto 20ms) forza switch in mezzo: se il kernel
+    // perdesse XMM si legge spazzatura (o #UD senza OSFXSR, mai muto).
+    // `movdqa` pretende operandi a 16 (altrimenti #GP nel TEST, non nel
+    // kernel: osservato). Pattern/buffer in STATICHE (allineamento garantito
+    // dal linker, mai dallo stack: i locali hanno tradito una volta).
+    #[repr(align(16))]
+    struct A16([u32; 4]);
+    static PAT_A: A16 = A16([0x0A0A0A0A; 4]);
+    static PAT_B: A16 = A16([0x0B0B0B0B; 4]);
+    static mut BACK_A: A16 = A16([0; 4]);
+    static mut BACK_B: A16 = A16([0; 4]);
+    macro_rules! xmm_window {
+        ($pat:expr, $back:expr, $rounds:expr) => {{
+            unsafe {
+                core::arch::asm!(
+                    "movdqa xmm0, [{p}]",
+                    "mov ecx, {n:e}",
+                    "2:",
+                    "pause",
+                    "dec ecx",
+                    "jnz 2b",
+                    "movdqa [{o}], xmm0",
+                    p = in(reg) $pat.0.as_ptr(),
+                    o = in(reg) core::ptr::addr_of_mut!($back.0) as usize,
+                    n = in(reg) $rounds as u32,
+                    out("ecx") _,
+                    out("xmm0") _,
+                    options(nostack),
+                );
+            }
+            $back.0 == $pat.0
+        }};
+    }
+    unsafe extern "C" fn txa_main() {
+        let mut ok = true;
+        let t0 = civis::get_ticks();
+        while civis::get_ticks() - t0 < 10 {
+            if !xmm_window!(PAT_A, BACK_A, 3_000_000) {
+                ok = false;
+                break;
+            }
+        }
+        X_A.store(if ok { 1 } else { 2 }, Ordering::SeqCst);
+        civis::thread_exit(0);
+    }
+    unsafe extern "C" fn txb_main() {
+        let mut ok = true;
+        let t0 = civis::get_ticks();
+        while civis::get_ticks() - t0 < 10 {
+            if !xmm_window!(PAT_B, BACK_B, 3_000_000) {
+                ok = false;
+                break;
+            }
+        }
+        X_B.store(if ok { 1 } else { 2 }, Ordering::SeqCst);
+        civis::thread_exit(0);
+    }
+    let v12 = {
+        let mut ok = true;
+        match (alloc_stack(), alloc_stack()) {
+            (Some(a), Some(b)) => {
+                if civis::thread_create(txa_main as *const () as usize, a, 0).is_err() {
+                    ok = false;
+                }
+                if civis::thread_create(txb_main as *const () as usize, b, 0).is_err() {
+                    ok = false;
+                }
+            }
+            _ => ok = false,
+        }
+        ok = ok
+            && poll_flag(&X_A, 1, 400)
+            && poll_flag(&X_B, 1, 400)
+            && X_A.load(Ordering::SeqCst) == 1
+            && X_B.load(Ordering::SeqCst) == 1;
+        ok
+    };
+    c.ok("xmm isolamento switch", v12);
+
     println!("[threadtest] PASS {}/{}", c.pass, c.total);
     let _ = civis::send(civis::CHANNEL_PARENT, civis::TEST_DONE, 0, 0);
     civis::exit(0);

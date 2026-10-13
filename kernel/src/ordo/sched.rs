@@ -13,7 +13,7 @@ mod tick;
 mod ipc;
 mod ps;
 mod lifecycle;
-mod ctx;
+pub(crate) mod ctx;
 mod spawn_copy;
 mod exec;
 
@@ -38,7 +38,7 @@ const QUANTUM_TICKS: u64 = 2;
 /// `layout.rs`, VMA, rings: gia' a 128). Dal Fase 14 (ADR-0010) i PID dei
 /// processi reclamati vengono RIUSATI: il limite e' di concorrenza, non piu'
 /// il numero totale di processi creati dal boot.
-const MAX_PIDS: usize = 128;
+pub(crate) const MAX_PIDS: usize = 128;
 
 /// Priorita' a 32 livelli (0 = idle, 31 = massima). Newtype struct con
 /// costanti alias (`Priority::High`/`Normal`/`Low`) per leggibilita'.

@@ -79,7 +79,12 @@ impl Scheduler {
     }
 
     /// Inserisce (o sovrascrive, se il PID era riusato) il processo.
-    pub(super) fn place_process(&mut self, id: usize, process: Process) {
+    /// S2.5b (FPU eager): assegna qui l'area fxsave del pool e la
+    /// inizializza a `fninit` pulito — UNICO punto di assegnazione (ogni
+    /// riuso pid riparte pulito; mai indirizzi stack-dipendenti).
+    pub(super) fn place_process(&mut self, id: usize, mut process: Process) {
+        process.saved.fpu = crate::ordo::context::fpu_slot(id);
+        unsafe { crate::ordo::context::fpu_init(process.saved.fpu as *mut [u128; 32]) };
         if id < self.processes.len() {
             self.processes[id] = process;
         } else {

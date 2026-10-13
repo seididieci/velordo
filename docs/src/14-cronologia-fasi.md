@@ -2272,3 +2272,10 @@
           (softfloat locked); 1 VCPU (parallelism=1 onesto); nomi arca lunghi
           ok; /tmp illimitato-to-OOM. ADR-0048 aggiornata (target singolo,
           staticone Cranelift, scala graduata).
+          S2.5b kernel FPU (chiusa, ADR-0049): fxsave/fxrstor eager a ogni
+          switch, pool statico per pid (64K .bss), OSFXSR/OSXMMEXCPT, fninit
+          a ogni placement/exec, fault #GP/#PF che stampano pre-lock.
+          Saga: offset asm 56 vs 64 (pad del struct, #GP) + aree stack con
+          allineamento layout-dipendente + print `%` bugiardo + deadlock
+          SCHED nel fault handler (diagnosi via monitor QEMU: RIP nel lock).
+          threadtest 11→12 (XMM, statiche allineate). Gate verde.

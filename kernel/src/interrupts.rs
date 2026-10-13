@@ -200,6 +200,15 @@ fn fault_kill(
     error_code: PageFaultErrorCode,
     stack_frame: &InterruptStackFrame,
 ) -> ! {
+    // S2.5b: report PRIMA di qualunque lock (come gpf_handler: un fault
+    // dentro una sezione critica SCHED non deve mai morire muto).
+    crate::serial_println!(
+        "[int ] #PF (kill) @ {:#x}, err={:?} rip={:#x} pid={} (pre-lock)",
+        fault_addr,
+        error_code,
+        stack_frame.instruction_pointer.as_u64(),
+        pid,
+    );
     let (pnb, pnl) = crate::ordo::sched::process_name(pid);
     let pname = core::str::from_utf8(&pnb[..pnl as usize]).unwrap_or("???");
     crate::serial_println!(
@@ -221,6 +230,14 @@ unsafe fn flush_page(addr: u64) {
 }
 
 extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_code: u64) {
+    // S2.5b: report PRIMA di qualunque lock (un fault dentro una sezione
+    // critica SCHED dead-lockherebbe il lock non-rientrante prima di parlare:
+    // osservato con fxsave disallineato in `new_context`, silenzio totale).
+    crate::serial_println!(
+        "[int ] #GP err={} @ {:#x} (pre-lock)",
+        error_code,
+        stack_frame.instruction_pointer.as_u64(),
+    );
     let pid = crate::syscall::current_id() as usize;
     let user = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
     let (pnb, pnl) = crate::ordo::sched::process_name(pid);

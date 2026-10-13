@@ -22,6 +22,12 @@ pub struct CpuContext {
     pub r15: u64,
     /// Puntatore alla zona sullo stack da cui riprendere.
     pub rsp: u64,
+    /// Indirizzo dell'area fxsave del thread (S2.5b, FPU eager): 512 B nel
+    /// pool statico indicizzato per pid (vedi `FPU_POOL` — allineamento
+    /// garantito dal linker, mai dallo stack: un disallineamento ha prodotto
+    /// #GP + deadlock SCHED nel fault handler, diagnosticato via monitor).
+    /// Assegnato in `place_process` (ogni riuso pid re-inizializza).
+    pub fpu: u64,
 }
 
 impl CpuContext {
@@ -33,7 +39,63 @@ impl CpuContext {
         r14: 0,
         r15: 0,
         rsp: 0,
+        fpu: 0,
     };
+}
+
+/// Offset dell'area FPU usato dall'assembly (S2.5b): se cambia, l'asm va
+/// aggiornato (fail a compile-time, mai #GP silenzioso a runtime).
+const _: () = assert!(core::mem::offset_of!(CpuContext, fpu) == 56);
+
+/// Pool aree fxsave, uno slot per pid (S2.5b): 128 × 512 B = 64 KiB di .bss.
+/// Statico = allineamento garantito dal linker (il bug Publications: aree su
+/// stack con allineamento dipendente dal layout del chiamante). Lo slot si
+/// RIUSA col pid: `place_process` re-inizializza sempre (mai registri stale).
+static mut FPU_POOL: [[u128; 32]; crate::ordo::sched::MAX_PIDS] =
+    [[0u128; 32]; crate::ordo::sched::MAX_PIDS];
+
+/// Indirizzo dell'area fxsave dello slot `pid` (S2.5b).
+pub(crate) fn fpu_slot(pid: usize) -> u64 {
+    unsafe { core::ptr::addr_of_mut!(FPU_POOL[pid]) as u64 }
+}
+
+/// Area scratch per `fpu_init` (S2.5b): i costruttori PCB girano in syscall
+/// (IF=0 via SFMASK) o a boot (sequenziale) — mai rientranza, niente lock.
+static mut FPU_SCRATCH: [u128; 32] = [0; 32];
+
+
+
+/// Inizializza un'area fxsave a stato pulito (S2.5b): `fninit` (MXCSR
+/// mascherato, tag vuoti) + `fxsave` per catturarlo. Chiamato a ogni
+/// creazione PCB (il fork COPIA invece l'area del padre).
+/// Preserva i registri FPU live del chiamante (una syscall `spawn` puo'
+/// arrivare con XMM vivi: `fninit` nudo li distruggerebbe e il mittente
+/// li ritroverebbe corrotti al prossimo switch).
+///
+/// # Safety
+/// `area` deve puntare a 512 B scrivibili e 16-allineati (il tipo
+/// `[u128; 32]` lo garantisce per costruzione).
+pub unsafe fn fpu_init(area: *mut [u128; 32]) {
+    // L'area arriva sempre dal pool statico (allineato dal linker): niente
+    // check a runtime nel percorso caldo (l'assert di offset resta a compile).
+    unsafe {
+        core::arch::asm!(
+            "fxsave [{}]",
+            in(reg) core::ptr::addr_of_mut!(FPU_SCRATCH) as *mut u8,
+            options(nostack, preserves_flags),
+        );
+        core::arch::asm!("fninit", options(nostack, preserves_flags));
+        core::arch::asm!(
+            "fxsave [{}]",
+            in(reg) area as *mut u8,
+            options(nostack, preserves_flags),
+        );
+        core::arch::asm!(
+            "fxrstor [{}]",
+            in(reg) core::ptr::addr_of_mut!(FPU_SCRATCH) as *mut u8,
+            options(nostack, preserves_flags),
+        );
+    }
 }
 
 /// Salva lo stato del processo corrente in `cur` e ripristina `next`.
@@ -48,7 +110,7 @@ impl CpuContext {
 #[unsafe(naked)]
 pub unsafe extern "C" fn switch_to(cur: *mut CpuContext, next: *const CpuContext) {
     naked_asm!(
-        // ABI: rdi = cur, rsi = next
+        // ABI: rdi = cur, rsi = next (rax libero: caller-saved).
         "mov [rdi + 0], rbx",
         "mov [rdi + 8], rbp",
         "mov [rdi + 16], r12",
@@ -56,6 +118,10 @@ pub unsafe extern "C" fn switch_to(cur: *mut CpuContext, next: *const CpuContext
         "mov [rdi + 32], r14",
         "mov [rdi + 40], r15",
         "mov [rdi + 48], rsp",
+        // S2.5b (FPU eager): salva x87/SSE/MXCSR del corrente. L'indirizzo
+        // e' nel contesto a +56 (pool statico per pid: sempre allineato).
+        "mov rax, [rdi + 56]",
+        "fxsave [rax]",
         // carica il nuovo contesto
         "mov rsp, [rsi + 48]",
         "mov rbx, [rsi + 0]",
@@ -64,6 +130,8 @@ pub unsafe extern "C" fn switch_to(cur: *mut CpuContext, next: *const CpuContext
         "mov r13, [rsi + 24]",
         "mov r14, [rsi + 32]",
         "mov r15, [rsi + 40]",
+        "mov rax, [rsi + 56]",
+        "fxrstor [rax]",
         "ret",
     );
 }
@@ -116,6 +184,8 @@ pub unsafe fn new_context(stack_top: u64, entry: u64) -> CpuContext {
         core::ptr::write(ret_addr as *mut u64, process_entry_trampoline as *const () as usize as u64);
     }
 
+    // S2.5b: fpu = 0 qui (indirizzo pool assegnato in `place_process`,
+    // che inizializza anche il contenuto: mai aree stack-dipendenti).
     CpuContext {
         rbx: 0,
         rbp: 0,
@@ -124,6 +194,7 @@ pub unsafe fn new_context(stack_top: u64, entry: u64) -> CpuContext {
         r14: 0,
         r15: 0,
         rsp: ret_addr,
+        fpu: 0,
     }
 }
 
@@ -172,6 +243,8 @@ pub unsafe fn new_context_user(
         core::ptr::write(ret_addr as *mut u64, process_entry_trampoline as *const () as usize as u64);
     }
 
+    // S2.5b: fpu = 0 qui (indirizzo pool assegnato in `place_process`,
+    // che inizializza anche il contenuto: mai aree stack-dipendenti).
     CpuContext {
         rbx: 0,
         rbp: 0,
@@ -180,5 +253,6 @@ pub unsafe fn new_context_user(
         r14: 0,
         r15: 0,
         rsp: ret_addr,
+        fpu: 0,
     }
 }

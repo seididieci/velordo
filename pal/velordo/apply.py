@@ -141,6 +141,13 @@ ARMS = [
         '    target_os = "velordo" => {\n        mod velordo;\n        use velordo as imp;\n    }\n    _ => {\n        mod unsupported;\n        use unsupported as imp;\n    }',
         "inplace",
     ),
+    # build.rs sta alla radice del crate std (non in src/): `..` consentito.
+    (
+        "../build.rs",
+        '        || target_os == "motor"\n',
+        '        || target_os == "motor"\n        || target_os == "velordo"\n',
+        "inplace",
+    ),
     (
         "sys/thread/mod.rs",
         '    target_os = "uefi" => {\n        mod uefi;\n        pub use uefi::{available_parallelism, sleep};\n        #[expect(dead_code)]\n        mod unsupported;\n        pub use unsupported::{DEFAULT_MIN_STACK_SIZE, Thread, current_os_id, set_name, yield_now};\n    }\n',

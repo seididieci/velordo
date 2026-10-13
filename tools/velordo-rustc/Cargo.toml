@@ -1,0 +1,32 @@
+[package]
+name = "velordo-rustc"
+version = "0.0.0"
+edition = "2024"
+
+# Fuori dal workspace del kernel (come tools/arca): toolchain e target propri.
+[workspace]
+
+# rustc nativo per Velordo (S2.5b): driver + backend Cranelift statici.
+# Sorgenti dal checkout pinnato (../.. = /home/work/work/rust-src):
+# stessa nightly dell'host (niente skew rmeta/rustc_private).
+[[bin]]
+name = "velordo-rustc"
+path = "src/main.rs"
+
+[dependencies]
+rustc_driver_impl = { path = "../../../rust-src/compiler/rustc_driver_impl" }
+rustc_interface = { path = "../../../rust-src/compiler/rustc_interface" }
+rustc_ast = { path = "../../../rust-src/compiler/rustc_ast" }
+rustc_middle = { path = "../../../rust-src/compiler/rustc_middle" }
+rustc_errors = { path = "../../../rust-src/compiler/rustc_errors" }
+rustc_codegen_cranelift = { path = "../rustc_codegen_cranelift-velordo" }
+
+[profile.release]
+opt-level = 2
+
+# memmap2 con backend Velordo (S2.5b): snapshot-Vec al posto dello stub
+# che non compila (arity skew) e fallirebbe a runtime (Err).
+[patch.crates-io]
+memmap2 = { path = "../vendor/memmap2-velordo" }
+target-lexicon = { path = "../vendor/target-lexicon-velordo" }
+ctrlc = { path = "../vendor/ctrlc-velordo" }

@@ -12,7 +12,21 @@ pub(super) static SCHED: Mutex<Option<Scheduler>> = Mutex::new(None);
 /// Contesto del "processo" di boot (main). Non e' un vero PCB: serve solo a
 /// salvare lo stato di main al primo switch, quando `current` e' ancora None.
 /// Main non viene mai rischedulato (resta in `hlt` nel suo loop).
-static mut BOOT_CONTEXT: CpuContext = CpuContext::ZERO;
+pub(crate) static mut BOOT_CONTEXT: CpuContext = CpuContext::ZERO;
+
+/// Inizializza l'area fxsave del contesto di boot (S2.5b, da `cpu::init`,
+/// prima di qualunque switch: single-threaded, niente lock). Usa lo slot 0
+/// del pool (condiviso con idle/pid 0 in sequenza: il boot termina prima che
+/// idle giri; entrambi re-inizializzati al proprio init).
+///
+/// # Safety
+/// Chiamare una sola volta a boot.
+pub(crate) unsafe fn init_boot_fpu() {
+    unsafe {
+        BOOT_CONTEXT.fpu = crate::ordo::context::fpu_slot(0);
+        crate::ordo::context::fpu_init(BOOT_CONTEXT.fpu as *mut [u128; 32]);
+    }
+}
 
 pub(super) fn switch_to(
     prev: Option<usize>,

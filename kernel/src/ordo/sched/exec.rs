@@ -209,10 +209,13 @@ pub fn exec_current(bytes: &[u8], args_block: Option<&[u8]>) -> Result<(), ()> {
 
     // 5. PCB: nuova identita' (text + hash), stessa persona (pid/parent/prio/
     // canali/req_next/CBS intatti — nessuno li tocca).
+    // S2.5b: FPU resettata (nuova immagine, come Unix: niente registri ereditati).
     {
         let p = &mut sched.processes[me];
         p.text_id = new_text;
         p.image_hash = hash;
+        // S2.5b: contenuto resettato (l'indirizzo pool resta: stesso pid).
+        unsafe { crate::ordo::context::fpu_init(p.saved.fpu as *mut [u128; 32]) };
     }
 
     // 6. TSS: bitmap I/O azzerata (idempotente). Nessuno puo' chiedere porte
