@@ -216,7 +216,14 @@ Voci con scope e vittoria dichiarati (non date).
        xous (tabella via RSP, registro 32 slot, dtor dal trampolino) +
        target `singlethread=false`; `Command` slitta in S2.4 (vuole IPC).
        test-shell-std.py 17→24 (sum=1000, condvar, once, tls main/child).
-       Prossimo: S2.4 (process/`Command` + leaf-arms).
+- [x] **S2.4 process/`Command` + pipe** (chiusa): `sys::pipe` (riuso
+       `vfscli`, `std::io::pipe` stabile; TEST_POLICY per i diritti
+       Fase 45) + `sys::process` (fork+exec, wait EXIT_NOTIFY, `output()`
+       con capture, stdin echo) + stdio fd-override (`VELORDO_FD*`) +
+       lock pipe globale. Lezioni: run_out vs run lunghi (run_until su
+       DONE); notify solo al leader (wait non-leader muto); no setenv nel
+       figlio (append env nel blocco). `net` resta stub (deciso).
+       test-shell-std.py 24→30. Prossimo: S2.5 (staticone + linker).
 - [x] **S-T thread kernel 1:1 + TLS + futex** (chiusa, ADR-0046): thread =
        PCB con gruppo (cr3/canali/fd/heap/VMA condivisi col leader, stack/
        TSS/FS/coda propri); pool 32→128 (bitmask u128, TSS pool, VMA 64);

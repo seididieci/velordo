@@ -2259,3 +2259,7 @@
           + WAIT SUL MAIN (code IPC per-TID: waiter non-leader mai svegliato).
           Vittoria: output() capture + stdin echo su se' stesso (code 7).
           test-shell-std 28→30. Gate+shell verdi.
+          S2.4c4 chiusura (nessun codice: leaf verificati): net/current_exe/
+          home_dir/getpid restano stub intenzionali e documentati; backtrace/
+          personality/fd generici. Gate 6/6 + shell 10/10 + test-shell-std
+          30/30 sul codice finale. ROADMAP+ADR-0048 aggiornati. Prossimo S2.5.

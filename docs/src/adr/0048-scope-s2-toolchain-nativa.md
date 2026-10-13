@@ -83,10 +83,9 @@ statico) sequenziato dopo la PAL.
 - **Patch toolchain**: `build.rs` allowlist + PAL, nel patch-set versionato
   con `apply.py` (fail-loud agli anchor).
 - **Ordine**: S2.0 argv/env → S2.1 `mmap/munmap/mprotect` + free → S2.2
-  `std::fs` → S2.3 thread + sync + TLS → S2.4 process/`Command` + leaf-arms
-  → S2.5 staticone + linker + `rustc` in QEMU. Sub-fasi con commit.
-  (`Command` slitta in S2.4: vuole IPC (spawn/wait) nella PAL, un chunk a
-  parte; S2.3 chiude thread 1:1 + sync futex + TLS a chiavi.)
+  `std::fs` → S2.3 thread + sync + TLS → S2.4 process/`Command` + pipe
+  (chiusa: `output()` con capture su se' stesso) → S2.5 staticone + linker
+  + `rustc` in QEMU. Sub-fasi con commit.
 
 ## Principio: niente POSIX dentro (solo personalita')
 
