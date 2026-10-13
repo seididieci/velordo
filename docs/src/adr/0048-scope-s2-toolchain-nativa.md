@@ -65,19 +65,32 @@ statico) sequenziato dopo la PAL.
 
 ## Decision
 
-- **Vittoria S2**: rustc nativo che ricompila un programma sostanzioso
-  (candidato: cardo o shell; fissare in S2.5).
-- **Due target**: user-minimal (attuale, softfloat senza SSE) + native-full
-  (SSE, ABI host, stack grandi) per rustc.
+- **Vittoria S2**: rustc nativo che ricompila la scala graduata fino a un
+  programma sostanzioso (S2.5: uptime → vela/runhello → shell → cardo;
+  cardo solo compile-proof: senza LTO fa 335K > `SPAWN_IMAGE_MAX` 256K).
+- **Target singolo** (S2.5 rivede i due target): softfloat ovunque (niente
+  FPU nel kernel: SSE si corrompe; FPU+tcc in S3) + `-C linker` override
+  solo nel guest (host invariato). Stack grandi via thread-runner 64M
+  (niente lavoro kernel: main stack resta 16K).
 - **Pipe**: riuso `civis::pipe()` (Fase 42); l'object code viaggia su file,
   in pipe solo diagnostica.
 - **Panic del rustc nativo**: `abort` (ICE = morte, niente libunwind).
 - **Linker nativo**: scritto nostro, scope "statico PIE x86_64, no LTO, no
-  debug", lld stock come oracolo differenziale. **Trigger di
-  rivalutazione**: se il subset esplode (eh_frame? TLS? split-debuginfo?)
-  si rivaluta il port di lld. Tradurre lld dal C++ scartato: il ritaglio
-  del subset costa comunque, piu' dipendenze LLVM-ADT, fork congelato e
-  Rust non idiomatico (vedi discussione).
+  debug", lld stock come oracolo differenziale. Layout built-in Velordo
+  (base `0x400000000000`, `_start`, come `hello.ld`; niente parser di
+  script); flag `gnu-lld` tollerati (`--gc-sections` ignorato: corretto ma
+  piu' grosso; `-l*`/`-T`/`-r` rifiutati loud). Kernel carica solo PT_LOAD
+  (RELRO ignorabile). **Trigger di rivalutazione**: se il subset esplode
+  (eh_frame? TLS? split-debuginfo?) si rivaluta il port di lld. Tradurre
+  lld dal C++ scartato: il ritaglio del subset costa comunque, piu'
+  dipendenze LLVM-ADT, fork congelato e Rust non idiomatico.
+- **Staticone via Cranelift** (S2.5a): niente LLVM (mesi di port C++ senza
+  libc), niente loader dinamico (libLLVM lega glibc). Bin crate con
+  `run_compiler` + `Callbacks::config` (`make_codegen_backend` statico;
+  API verificate al commit pinnato). Backend pinnato a rev ~2026-09-10
+  (1 giorno di drift dal nightly); `cranelift-native` senza libc su x86_64;
+  `object` senza feature mmap. `panic=abort`, `available_parallelism=1`
+  (1 VCPU, onesto).
 - **Famiglia**: niente `family = "unix"` (stile hermit); arm `velordo`
   per-crate; superficie unix-shaped nella PAL sopra meccanismi Velordo.
 - **Patch toolchain**: `build.rs` allowlist + PAL, nel patch-set versionato

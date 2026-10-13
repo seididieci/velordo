@@ -2263,3 +2263,12 @@
           home_dir/getpid restano stub intenzionali e documentati; backtrace/
           personality/fd generici. Gate 6/6 + shell 10/10 + test-shell-std
           30/30 sul codice finale. ROADMAP+ADR-0048 aggiornati. Prossimo S2.5.
+          S2.5a spike (chiusi): rete host ok (cargo funziona); clone rust al
+          commit pinnato; backend pin 5e12048 (1 giorno di drift);
+          integrazione statica verificata (run_compiler + make_codegen_backend
+          + Callbacks default); cranelift-native senza libc su x86_64, object
+          senza mmap; cardo-no-LTO 335K > 256K (cardo solo compile-proof);
+          hello.ld catturato per il builtin; loader solo-PT_LOAD; FPU assente
+          (softfloat locked); 1 VCPU (parallelism=1 onesto); nomi arca lunghi
+          ok; /tmp illimitato-to-OOM. ADR-0048 aggiornata (target singolo,
+          staticone Cranelift, scala graduata).
