@@ -99,6 +99,11 @@ impl Pipe {
         self.0
     }
 
+    /// Avvolge un fd esistente (estremita' parent in `spawn`, mai duplicata).
+    pub(crate) fn from_fd(fd: i64) -> Pipe {
+        Pipe(fd)
+    }
+
     /// Tappo per `unsupported.rs` (`From<ChildPipe> for Stdio`, S2.4c1):
     /// irraggiungibile finche' `spawn` e' stub (nessuna pipe reale arriva al
     /// backend process). RIMOSSO in c2 col modulo process reale (il `From`

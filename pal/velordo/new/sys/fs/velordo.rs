@@ -449,22 +449,41 @@ impl File {
     }
 }
 
+/// Lock globale pipe (S2.4c3): UNA op alla volta (i ring sono condivisi).
+/// Solo i wrapper pipe (drain concorrenti di `output()` + stdio redirect):
+/// le op File restano single-thread-assumed come da S2.2 (niente lock per
+/// non rischiare rientranze: il Mutex non e' rientrante). Head-of-line ok,
+/// mai deadlock: chi sblocca (il figlio) non usa il nostro lock.
+pub(crate) fn pipe_lock() -> crate::sync::MutexGuard<'static, ()> {
+    static PIPE_LOCK: crate::sync::Mutex<()> = crate::sync::Mutex::new(());
+    PIPE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Pipe anonime condivise con `sys::pipe` (S2.4c1): stessa sessione FSTATE
 /// (i ring sono singleton per processo). Wrapper sottili, mai duplicati.
 pub(crate) fn pipe_raw() -> io::Result<(i64, i64)> {
+    let _g = pipe_lock();
     sync::pipe(&FSTATE).map_err(io_err)
 }
 pub(crate) fn pipe_read(fd: i64, buf: &mut [u8]) -> io::Result<usize> {
+    let _g = pipe_lock();
     sync::read_fs(&FSTATE, fd, buf, buf.len()).map_err(io_err)
 }
 pub(crate) fn pipe_write(fd: i64, buf: &[u8]) -> io::Result<usize> {
+    let _g = pipe_lock();
     sync::write_fs(&FSTATE, fd, buf, buf.len()).map_err(io_err)
 }
 pub(crate) fn pipe_close(fd: i64) {
+    let _g = pipe_lock();
     let _ = sync::close(&FSTATE, fd);
 }
 pub(crate) fn pipe_grant(fd: i64) -> io::Result<u64> {
+    let _g = pipe_lock();
     sync::dup_grant(&FSTATE, fd).map_err(io_err)
+}
+pub(crate) fn pipe_cancel(nonce: u64) {
+    let _g = pipe_lock();
+    let _ = sync::dup_cancel(&FSTATE, nonce);
 }
 
 /// Avvelena l'FS nel figlio fork (S2.4c2): ring/canale del padre non
@@ -472,6 +491,19 @@ pub(crate) fn pipe_grant(fd: i64) -> io::Result<u64> {
 /// raw (exec/print/exit); l'exec riparte da BSS pristine.
 pub(crate) fn poison_child_fstate() {
     vfslib::session::post_spawn_copy_child(&FSTATE)
+}
+
+/// Re-inizializza l'FS nel figlio che DEVE usarlo pre-exec (S2.4c3: claim
+/// dei grant stdio): canale NUOVO + ring freschi (come i figli builtin
+/// della shell, Fase 42). False = cardo irraggiungibile (fail loud).
+pub(crate) fn child_reinit_fstate() -> bool {
+    vfslib::session::fs_child_reinit(&FSTATE)
+}
+
+/// Claim di un grant nello spazio fd del chiamante (S2.4c3, figlio pre-exec).
+pub(crate) fn claim_grant(nonce: u64) -> io::Result<i64> {
+    let _g = pipe_lock();
+    sync::dup_claim(&FSTATE, nonce).map_err(io_err)
 }
 
 /// Stat senza seguire i link (R_STAT = lstat) → FileAttr.

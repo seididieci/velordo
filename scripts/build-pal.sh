@@ -86,6 +86,18 @@ cat > "$WORK/hello.rs" << 'EOF'
 #![feature(restricted_std)]
 #![feature(velordo_std)]
 fn main() {
+    // S2.4c3: ramo figlio per i test capture (stesso binario, argv-gated:
+    // niente hash nuovi in TEST_POLICY). Legge stdin, scrive stdout/stderr,
+    // esce 7. Lo stdio arriva via VELORDO_FD (armato da _start).
+    if std::env::args().skip(1).any(|a| a == "--s24-child") {
+        let mut input = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut input).unwrap();
+        println!("child-out-1");
+        println!("child-out-2");
+        eprintln!("child-err-1");
+        println!("child-echo:{}", String::from_utf8_lossy(&input));
+        std::process::exit(7);
+    }
     println!("[stdhello] ciao da std su Velordo");
     let mut v = Vec::new();
     for i in 0..8u32 {
@@ -180,6 +192,49 @@ fn main() {
         println!("[stdhello] cmd fail code={:?}", st2.code());
         let missing = std::process::Command::new("/bin/nope-missing.bin").status();
         println!("[stdhello] cmd missing err={}", missing.is_err());
+    }
+    // S2.4c3: output() con capture (stesso binario come figlio).
+    {
+        let self_bin = std::env::args().next().unwrap();
+        let out = std::process::Command::new(&self_bin)
+            .arg("--s24-child")
+            .output()
+            .unwrap();
+        let so = String::from_utf8_lossy(&out.stdout);
+        let se = String::from_utf8_lossy(&out.stderr);
+        println!(
+            "[stdhello] cmd out code={:?} cout={} cerr={} echo={}",
+            out.status.code(),
+            so.contains("child-out-1") && so.contains("child-out-2"),
+            se.contains("child-err-1"),
+            so.contains("child-echo:")
+        );
+        // Stdin piped: il figlio rimanda indietro i byte.
+        let mut child = std::process::Command::new(&self_bin)
+            .arg("--s24-child")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(
+            child.stdin.as_mut().unwrap(),
+            b"in-abc",
+        )
+        .unwrap();
+        drop(child.stdin.take());
+        let mut so2 = Vec::new();
+        let mut se2 = Vec::new();
+        std::io::Read::read_to_end(child.stdout.as_mut().unwrap(), &mut so2).unwrap();
+        std::io::Read::read_to_end(child.stderr.as_mut().unwrap(), &mut se2).unwrap();
+        let st2 = child.wait().unwrap();
+        let so2s = String::from_utf8_lossy(&so2);
+        println!(
+            "[stdhello] cmd pipe code={:?} echo={} cerr={}",
+            st2.code(),
+            so2s.contains("child-echo:in-abc"),
+            String::from_utf8_lossy(&se2).contains("child-err-1")
+        );
     }
     // S2.3: thread 1:1 + sync sopra futex (TLS a chiavi in PAL).
     std::thread::spawn(|| {}).join().unwrap();

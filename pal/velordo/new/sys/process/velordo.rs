@@ -3,17 +3,21 @@
 //! Forma di `motor.rs` (spawn reale non-unix); storage `OsString` come
 //! `unsupported.rs` (i path sono byte, non UTF-8).
 //!
-//! Onesta' v1 (gap documentati, mai bugie):
+//! Onesta' (gap documentati, mai bugie):
 //! - niente ricerca PATH: `program` deve essere un file leggibile (la shell
 //!   risolve per conto suo); altrimenti `NotFound`.
-//! - `MakePipe` a spawn → `Err(Unsupported)` (pipe ai figli in c3).
-//! - `Null` su stdout/stderr perde su console (manca il routing fd: c3);
-//!   `Null` su stdin e' EOF onesto (default gia' EOF).
-//! - niente concorrenza FS durante fork+exec (ring condiviso senza lock;
-//!   il lock globale arriva in c3 coi drain thread).
+//! - `Null` su stdout/stderr perde su console (manca /dev/null: il routing
+//!   fd copre solo fd reali); `Null` su stdin e' EOF onesto.
+//! - concorrenza FS: i wrapper pipe serializzano (drain `output()` sicuri);
+//!   le op File restano single-thread-assumed (come da S2.2).
 //! - `getpid` = panic (il kernel non espone il proprio pid: come unsupported).
 //! - `Drop` di `Process` = detach (il figlio gira; notify stale filtrate
 //!   per canale, evict-oldest a tabella piena).
+//! - grant non reclamati a exec fallita restano server-side (bounded, come
+//!   la shell che cancella solo a morte osservata).
+//! - `wait`/`try_wait` SOLO dal leader (S2.4c3b): le code IPC sono per-TID e
+//!   la notify atterra sul leader; da un thread spawnato appende per sempre.
+//!   `output()` drena in thread ma aspetta sul main per questo.
 
 use crate::ffi::{OsStr, OsString};
 use crate::num::NonZeroI32;
@@ -251,34 +255,93 @@ impl Command {
     }
 
     pub fn spawn(&mut self, default: Stdio, needs_stdin: bool) -> io::Result<(Process, StdioPipes)> {
-        // Risoluzione stdio v1 (vedi onesta' in testa): MakePipe rifiutato
-        // onesto (c3); il resto non tocca fd (in c2 il figlio eredita la
-        // console: il routing fd arriva in c3).
-        let use_pipe = [&self.stdin, &self.stdout, &self.stderr]
-            .iter()
-            .any(|s| matches!(s, Some(Stdio::MakePipe) | Some(Stdio::Fd(_))));
-        if use_pipe {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "stdio piped/fd in S2.4c3",
-            ));
+        // Risoluzione stdio (S2.4c3): MakePipe crea pipe (estremita' parent
+        // qui, grant al figlio); Fd passa l'fd aperto; il resto non tocca fd.
+        // `default` copre i None (come Unix); stdin non richiesto = Null.
+        // stdin non richiesto = Null (default Unix); il resto come chiesto.
+        // stdin: parent scrive, figlio legge (fd0). stdout/stderr: parent
+        // legge, figlio scrive (fd1/fd2). Fd: grant diretto.
+        let cfg_stdin = if needs_stdin { self.stdin.as_ref().unwrap_or(&default) } else { self.stdin.as_ref().unwrap_or(&Stdio::Null) };
+        // (nonce, slot) per il figlio + fd figli da chiudere nel padre.
+        let mut grants: Vec<(u64, usize)> = Vec::new();
+        let mut child_fds: Vec<i64> = Vec::new();
+        let mut tmp_in: Option<ChildPipe> = None;
+        let mut tmp_out: Option<ChildPipe> = None;
+        let mut tmp_err: Option<ChildPipe> = None;
+        match cfg_stdin {
+            Stdio::MakePipe => {
+                let (a, b) = crate::sys::pipe::pipe()?;
+                let nonce = vfs::pipe_grant(a.fd())?;
+                child_fds.push(a.fd());
+                grants.push((nonce, 0));
+                tmp_in = Some(b);
+            }
+            Stdio::Fd(fd) => {
+                let nonce = vfs::pipe_grant(*fd)?;
+                grants.push((nonce, 0));
+            }
+            _ => {}
         }
-        let _ = (default, needs_stdin);
+        let cfg_out = self.stdout.as_ref().unwrap_or(&default);
+        match cfg_out {
+            Stdio::MakePipe => {
+                let (a, b) = crate::sys::pipe::pipe()?;
+                let nonce = vfs::pipe_grant(b.fd())?;
+                child_fds.push(b.fd());
+                grants.push((nonce, 1));
+                tmp_out = Some(a);
+            }
+            Stdio::Fd(fd) => {
+                let nonce = vfs::pipe_grant(*fd)?;
+                grants.push((nonce, 1));
+            }
+            _ => {}
+        }
+        let cfg_err = self.stderr.as_ref().unwrap_or(&default);
+        match cfg_err {
+            Stdio::MakePipe => {
+                let (a, b) = crate::sys::pipe::pipe()?;
+                let nonce = vfs::pipe_grant(b.fd())?;
+                child_fds.push(b.fd());
+                grants.push((nonce, 2));
+                tmp_err = Some(a);
+            }
+            Stdio::Fd(fd) => {
+                let nonce = vfs::pipe_grant(*fd)?;
+                grants.push((nonce, 2));
+            }
+            _ => {}
+        }
         // Immagine dal path (niente PATH search: la shell risolve).
+        // NOTA (S2.4c3b): l'argv+env NON si serializza qui — il figlio
+        // aggiunge `VELORDO_FD*` all'env DOPO il fork, quindi il blocco va
+        // costruito NEL figlio (l'env serializzato pre-fork le perderebbe).
         let img = crate::fs::read(Path::new(&self.program))?;
-        // Blocco argv+env `[argc:8][envc:8][payload NUL]` (stesse regole di
-        // `libr::serialize_argv_redir_env`, senza magic redirect in c2).
-        let args = build_argv(&self.args, &self.env)?;
+        let progn = self.args.clone();
+        let envsrc = self.env.clone();
         let cwd = self.cwd.clone();
         // Fork: padre riceve (pid, chan), figlio 0 (come `fork()` POSIX).
+        // Niente lock tenuto qui (i wrapper rilasciano subito; il figlio
+        // non blocca mai pre-exec): niente deadlock fork+lock.
         let (rax, rdi, _, _, _) = unsafe { syscall4_out(SYS_SPAWN_COPY, 0, 0, 0, 0) };
         if rax < 0 {
+            // Cleanup: chiudi fd figli + cancella i grant (best-effort).
+            for fd in child_fds {
+                vfs::pipe_close(fd);
+            }
+            for (nonce, _) in grants.iter() {
+                vfs::pipe_cancel(*nonce);
+            }
             return Err(io::Error::new(io::ErrorKind::Other, "spawn_copy fallita"));
         }
         if rax == 0 {
-            // Figlio: FS avvelenato (ring del padre non riusabili) — solo
-            // syscall raw fino all'exec (che riparte da BSS pristine).
+            // Figlio: FS avvelenato poi re-inizializzato (serve per i claim:
+            // come i figli builtin della shell, Fase 42). Solo syscall raw +
+            // FS reinit fino all'exec (che riparte da BSS pristine).
             vfs::poison_child_fstate();
+            if !vfs::child_reinit_fstate() {
+                child_fail(b"fs reinit nel figlio fallita\n");
+            }
             if let Some(dir) = cwd.as_ref() {
                 let b = dir.as_encoded_bytes();
                 let r = unsafe { syscall4(SYS_CHDIR, b.as_ptr().addr() as u64, b.len() as u64, 0, 0) };
@@ -286,15 +349,72 @@ impl Command {
                     child_fail(b"chdir nel figlio fallita\n");
                 }
             }
+            // Claim grant → fd. NIENTE setenv/HashMap qui (la growth su
+            // mappa COW-ereditata si pianta): gli fd viaggiano accodati al
+            // blocco argv+env (l'exec azzera la BSS ma l'env sopravvive e
+            // `_start` rilegge i VELORDO_FD* e arma gli slot).
+            let mut claimed: Vec<(usize, i64)> = Vec::new();
+            for (nonce, slot) in grants.iter() {
+                match vfs::claim_grant(*nonce) {
+                    Ok(fd) => claimed.push((*slot, fd)),
+                    Err(_) => child_fail(b"claim grant nel figlio fallito\n"),
+                }
+            }
+            let mut args = match build_argv(&progn, &envsrc) {
+                Ok(b) => b,
+                Err(_) => child_fail(b"argv troppo lunghi nel figlio\n"),
+            };
+            // envc sta a [8..16] LE: si accodano le voci e si aggiorna.
+            let mut envc = u64::from_le_bytes(args[8..16].try_into().unwrap_or([0; 8]));
+            for (slot, fd) in claimed.iter() {
+                let name: &[u8] = match slot {
+                    0 => b"VELORDO_FD0=",
+                    1 => b"VELORDO_FD1=",
+                    2 => b"VELORDO_FD2=",
+                    _ => child_fail(b"slot stdio invalido\n"),
+                };
+                // fd decimale a mano (niente format!: solo il Vec proprio).
+                let mut digits = [0u8; 20];
+                let mut n = *fd as u64;
+                let mut len = 0usize;
+                if n == 0 {
+                    digits[0] = b'0';
+                    len = 1;
+                } else {
+                    let mut rev = [0u8; 20];
+                    while n > 0 {
+                        rev[len] = b'0' + (n % 10) as u8;
+                        n /= 10;
+                        len += 1;
+                    }
+                    let mut i = 0;
+                    while i < len {
+                        digits[i] = rev[len - 1 - i];
+                        i += 1;
+                    }
+                }
+                if args.len() + name.len() + len + 1 > ARGS_MAX as usize {
+                    child_fail(b"env fd oltre ARGS_MAX\n");
+                }
+                args.extend_from_slice(name);
+                args.extend_from_slice(&digits[..len]);
+                args.push(0);
+                envc += 1;
+            }
+            args[8..16].copy_from_slice(&envc.to_le_bytes());
             let r = unsafe {
                 syscall4(SYS_EXEC, img.as_ptr().addr() as u64, img.len() as u64, args.as_ptr().addr() as u64, args.len() as u64)
             };
             let _ = r;
             child_fail(b"exec nel figlio fallita\n");
         }
+        // Padre: chiude le estremita' figlio (senza, niente EOF).
+        for fd in child_fds {
+            vfs::pipe_close(fd);
+        }
         Ok((
             Process { pid: rax as u32, chan: rdi },
-            StdioPipes { stdin: None, stdout: None, stderr: None },
+            StdioPipes { stdin: tmp_in, stdout: tmp_out, stderr: tmp_err },
         ))
     }
 }
@@ -308,6 +428,7 @@ fn build_argv(args: &[OsString], env: &CommandEnv) -> io::Result<alloc::vec::Vec
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "troppi argv"));
     }
     // Env: `capture()` fa gia' inherit-salvo-clear + overlay + remove.
+    // (sola lettura della mappa: niente growth, sicuro nel figlio).
     let merged = env.capture();
     let mut envc = 0usize;
     let mut env_len = 0usize;
@@ -362,19 +483,58 @@ fn child_fail(msg: &[u8]) -> ! {
     }
 }
 
-pub fn output(_cmd: &mut Command) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
-    // Capture in c3 (serve il routing fd + drain concorrente).
-    Err(io::Error::new(io::ErrorKind::Unsupported, "Command::output in S2.4c3"))
+pub fn output(cmd: &mut Command) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    // Come motor: pipe su stdout/stderr, stdin scartato (EOF al figlio),
+    // drain concorrente + wait in scope.
+    let (mut process, mut pipes) = cmd.spawn(Stdio::MakePipe, false)?;
+    drop(pipes.stdin.take());
+    // Drain in thread, WAIT SUL MAIN (leader): le code IPC sono per-TID e
+    // la EXIT_NOTIFY atterra sulla coda del leader (canale di nascita) — un
+    // waiter non-leader non la vedrebbe mai (diagnosi S2.4c3b: figlio
+    // morto+reaped con waiter muto). Stesso vincolo per `Child::wait`.
+    let out = pipes.stdout.take();
+    let err = pipes.stderr.take();
+    let (status, (stdout, r_out), (stderr, r_err)) = crate::thread::scope(|scope| {
+        let h_out = scope.spawn(move || {
+            let mut buf = Vec::new();
+            let r = match out {
+                Some(o) => o.read_to_end(&mut buf).map(|_| ()),
+                None => Ok(()),
+            };
+            (buf, r)
+        });
+        let h_err = scope.spawn(move || {
+            let mut buf = Vec::new();
+            let r = match err {
+                Some(e) => e.read_to_end(&mut buf).map(|_| ()),
+                None => Ok(()),
+            };
+            (buf, r)
+        });
+        let status = process.wait();
+        let o = h_out.join().expect("drain stdout fallito");
+        let e = h_err.join().expect("drain stderr fallito");
+        (status, o, e)
+    });
+    r_out?;
+    r_err?;
+    Ok((status?, stdout, stderr))
 }
 
 pub fn read_output(
-    _out: ChildPipe,
-    _stdout: &mut Vec<u8>,
-    _err: ChildPipe,
-    _stderr: &mut Vec<u8>,
+    out: ChildPipe,
+    stdout: &mut Vec<u8>,
+    err: ChildPipe,
+    stderr: &mut Vec<u8>,
 ) -> io::Result<()> {
-    // Drain concorrente in c3 (col lock FS globale).
-    Err(io::Error::new(io::ErrorKind::Unsupported, "read_output in S2.4c3"))
+    // Un thread per estremita' (drain concorrente: niente deadlock su pipe
+    // piena). Le read sono serializzate dal lock pipe globale.
+    crate::thread::scope(|scope| {
+        let t = scope.spawn(|| err.read_to_end(stderr));
+        let r = out.read_to_end(stdout);
+        let r2 = t.join().expect("drain stderr fallito");
+        r.map(|_| ()).and(r2.map(|_| ()))
+    })
 }
 
 impl fmt::Debug for Command {

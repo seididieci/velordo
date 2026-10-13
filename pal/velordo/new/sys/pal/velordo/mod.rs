@@ -105,10 +105,48 @@ pub unsafe fn init(argc: isize, argv: *const *const u8, _sigpipe: u8) {
     // envp segue argv[argc] == NULL (layout steso da `layout_argv`).
     let envp = argv.wrapping_add(argc.max(0) as usize + 1);
     crate::sys::env::init(envp as *const *const crate::ffi::c_char);
+    // S2.4c3: redirect stdio ereditato via exec (il figlio pre-exec scrive
+    // gli fd reclamati in `VELORDO_FD0/1/2`; l'exec azzera la BSS ma l'env
+    // sopravvive nel nuovo stack). Valori garbage = ignorati (console).
+    inherit_stdio_fds();
     // Niente SIGPIPE (niente segnali), niente sanitize fd (niente fd).
 }
 
 pub unsafe fn cleanup() {}
+
+/// Legge `VELORDO_FD0/1/2` dall'env e arma gli slot stdio (S2.4c3).
+fn inherit_stdio_fds() {
+    use crate::os::velordo::ffi::OsStrExt;
+    const NAMES: [&[u8]; 3] = [b"VELORDO_FD0", b"VELORDO_FD1", b"VELORDO_FD2"];
+    for (slot, name) in NAMES.iter().enumerate() {
+        let key = OsStrExt::from_bytes(name);
+        if let Some(val) = crate::sys::env::getenv(key) {
+            if let Some(fd) = parse_fd(val.as_bytes()) {
+                crate::sys::stdio::set_stdio_fd(slot, fd);
+            }
+        }
+    }
+}
+
+/// Decimale ASCII → i64 (negativi per -1/-2; garbage/overflow = None).
+fn parse_fd(b: &[u8]) -> Option<i64> {
+    if b.is_empty() || b.len() > 19 {
+        return None;
+    }
+    let (neg, digits) = match b[0] {
+        b'-' => (true, &b[1..]),
+        d if d.is_ascii_digit() => (false, &b[..]),
+        _ => return None,
+    };
+    if digits.is_empty() || !digits.iter().all(|d| d.is_ascii_digit()) {
+        return None;
+    }
+    let mut v: i64 = 0;
+    for d in digits {
+        v = v.checked_mul(10)?.checked_add((d - b'0') as i64)?;
+    }
+    Some(if neg { -v } else { v })
+}
 
 pub fn abort_internal() -> ! {
     exit_process(134);

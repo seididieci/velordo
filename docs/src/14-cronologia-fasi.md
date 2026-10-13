@@ -2252,3 +2252,10 @@
           l'hello cresciuto dura ~350ms; kill precoce = seriale mozzato
           indistinguibile): fix run_until su DONE. La strumentazione kernel
           perturbava (testsarca 48/54) e inseguiva un fantasma. 28/28.
+          S2.4c3 Command/output (chiuso): spawn con pipe+grant (MakePipe/Fd),
+          claim+env nel figlio SENZA setenv (growth HashMap COW si piantava:
+          append VELORDO_FD* nel blocco argv), _start arma gli slot,
+          stdio/Stderr split con override, lock pipe globale, drain in thread
+          + WAIT SUL MAIN (code IPC per-TID: waiter non-leader mai svegliato).
+          Vittoria: output() capture + stdin echo su se' stesso (code 7).
+          test-shell-std 28→30. Gate+shell verdi.

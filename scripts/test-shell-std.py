@@ -55,6 +55,8 @@ def main():
         c.check("stdhello cmd status", b"[stdhello] cmd status ok=true code=Some(0)" in out)
         c.check("stdhello cmd fail", b"[stdhello] cmd fail code=Some(3)" in out)
         c.check("stdhello cmd missing", b"[stdhello] cmd missing err=true" in out)
+        c.check("stdhello cmd out", b"[stdhello] cmd out code=Some(7) cout=true cerr=true echo=true" in out)
+        c.check("stdhello cmd pipe", b"[stdhello] cmd pipe code=Some(7) echo=true cerr=true" in out)
         c.check("stdhello t-empty-join", b"[stdhello] t-empty-join ok" in out)
         c.check("stdhello t-raw", b"[stdhello] t-raw=1" in out)
         c.check("stdhello threads sum", b"[stdhello] threads sum=1000" in out)
