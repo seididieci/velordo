@@ -223,10 +223,12 @@ pub const MAP_COW: u64 = 0x2;
 /// lo stack vive a `USER_STACK_TOP` (cresce verso il basso, 4 frame);
 /// la pagina a `USER_STACK_GUARD` (subito sotto) NON e' mai mappata:
 /// lo stack overflow fa #PF li' → kill (mai corruzione silenziosa).
-/// NB: `USER_BASE + 0x400_000` (0x0000_4000_0040_0000).
-pub const USER_STACK_TOP: u64 = 0x0000_4000_0040_0000;
+/// NB: `USER_BASE + 0x2000_0000` (0x0000_4000_2000_0000): spostato a +512M
+/// in S2.5c (la finestra immagine occupa [0, +256M), lo stack non deve
+/// starci dentro).
+pub const USER_STACK_TOP: u64 = 0x0000_4000_2000_0000;
 pub const USER_STACK_FRAMES: usize = 4;
-pub const USER_STACK_GUARD: u64 = 0x0000_4000_0040_0000 - 5 * 0x1000;
+pub const USER_STACK_GUARD: u64 = 0x0000_4000_2000_0000 - 5 * 0x1000;
 /// Codice di uscita con cui il kernel termina un processo user che provoca
 /// un fault di memoria non recuperabile (Fase 29: #PF di protezione, accesso
 /// a PROT_NONE, stack overflow nella guard). Il parent lo osserva via
@@ -241,24 +243,29 @@ pub const EXIT_SIGINT: i64 = 130;
 /// kernel+test): il loader ELF mappa i segmenti al `p_vaddr` di link e
 /// l'entry e' `e_entry`. Prima solo nel kernel (`layout.rs`).
 pub const USER_CODE: u64 = 0x0000_4000_0000_0000;
+/// Blocco VA alte per DMA/ring/relay (S2.5c): `USER_BASE + 1T
+/// (0x0000_4100_0000_0000)`, offsets intra-blocco invariati. Spostato da
+/// +32M perche' la finestra immagine occupa [USER_CODE, +256M) e lo heap
+/// (da +512M fino a +512G) attraverserebbe il vecchio blocco.
+const FS_BLOCK: u64 = 0x0000_4100_0000_0000;
 /// Finestra staging DMA del processo corrente (Fase 38.1, single source
 /// kernel+user come `USER_CODE`): `SYS_DMA_ALLOC` mappa qui i frame contigui
 /// (PRD + dati). Dopo CLI_RESP (`+0x230_000`) e DISK_RESP (`+0x250_000`):
 /// prima VA libera.
-pub const USER_DMA_VA: u64 = 0x0000_4000_0026_0000;
+pub const USER_DMA_VA: u64 = FS_BLOCK + 0x260_000;
 /// Finestre ring del processo corrente (single source S2.2: prima letterali
 /// duplicati in `layout.rs` del kernel, `civis/src/fs/ring.rs` e
 /// `cardo/src/rings.rs` con commenti "coincide con..."). `SYS_RING_ALLOC`
 /// mappa qui la coppia di pagine (request + response).
-pub const USER_FS_BUFFER: u64 = 0x0000_4000_0020_0000;
+pub const USER_FS_BUFFER: u64 = FS_BLOCK + 0x200_000;
 /// Finestra response ring (USER_FS_BUFFER + 0x1000).
-pub const USER_RESP_RING: u64 = 0x0000_4000_0021_0000;
+pub const USER_RESP_RING: u64 = FS_BLOCK + 0x210_000;
 /// Finestre relay cardo→driver (zero-copy DEV_*, Fase 10.2): cardo inietta
 /// qui via `map_in` i ring del client. Single source come sopra (prima solo
 /// in `civis/src/fs/ring.rs`, usate dai driver via `civis::`).
-pub const CLI_REQ_VA: u64 = 0x0000_4000_0022_0000;
+pub const CLI_REQ_VA: u64 = FS_BLOCK + 0x220_000;
 /// Finestra response per i relay cardo→driver (vedi sopra).
-pub const CLI_RESP_VA: u64 = 0x0000_4000_0023_0000;
+pub const CLI_RESP_VA: u64 = FS_BLOCK + 0x230_000;
 /// Flag `SpawnMeta.flags` (Fase 22, detach): il figlio non partecipa alla
 /// cascata di morte del parent — alla morte del parent viene ri-parentato a
 /// init invece di terminare. Deciso dallo spawner (il figlio non puo'

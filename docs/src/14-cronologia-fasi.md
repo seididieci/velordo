@@ -2279,3 +2279,18 @@
           allineamento layout-dipendente + print `%` bugiardo + deadlock
           SCHED nel fault handler (diagnosi via monitor QEMU: RIP nel lock).
           threadtest 11→12 (XMM, statiche allineate). Gate verde.
+          S2.5c layout+exec (chiusa): stack +512M (0x4000_2000_0000), blocco
+          FS +1T, MAX_PAGES 512→65536 (finestra 256M), check W+X a coppie
+          di segmenti (niente array 64K sullo stack kernel); exec streaming
+          (nuovo address space + load diretto dalla slice user come lo
+          spawn, switch mov-cr3 + teardown del vecchio; exec_clear_user
+          rimossa; solo gli args restano staged). Bug vero trovato per
+          bisezione (H1 verde da solo, H2 colpevole): il PCB non aggiornava
+          `cr3` — il reclaim faceva teardown dello spazio vecchio gia'
+          liberato (deref su frame libero / double fault non deterministici;
+          aggiornati anche i thread del gruppo, letti da ctx/spawn). fix +
+           gate 6/6 zero FAIL/PANIC/FAULT. Staticone cross: velordo-rustc
+          99 MB static-PIE (patch dll_path/no-dlopen, fork memmap2/
+          target-lexicon/ctrlc, getrandom RDRAND, dynamic-linking per il
+          probe cargo, cap-lints=allow), `--version` + hello ok su host.
+          Prossimo S2.5d: spawn streaming per i 99 MB + run in guest.

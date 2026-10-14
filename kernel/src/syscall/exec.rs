@@ -24,10 +24,11 @@ pub(super) fn sys_exec(img_ptr: u64, img_len: usize, args_ptr: u64, args_len: us
         crate::serial_println!("[syscall] exec: fuori dallo spazio user");
         return -1;
     }
-    // Copie in heap kernel PRIMA del teardown (sorgenti user spariscono con
-    // lo spazio che stiamo per smantellare — mai leggere user dopo).
+    // S2.5c (exec streaming): l'IMMAGINE resta slice user (niente staging in
+    // heap: `exec_current` la legge prima del teardown, come `spawn_image`).
+    // Solo gli ARGS si copiano (<= 8 KiB: il blocco sopravvive perche'
+    // `layout_argv` gira DOPO, a spazio nuovo attivo).
     let src = unsafe { core::slice::from_raw_parts(img_ptr as *const u8, img_len) };
-    let owned = src.to_vec();
     let args = if args_len == 0 {
         None
     } else {
@@ -35,7 +36,7 @@ pub(super) fn sys_exec(img_ptr: u64, img_len: usize, args_ptr: u64, args_len: us
             unsafe { core::slice::from_raw_parts(args_ptr as *const u8, args_len) };
         Some(asrc.to_vec())
     };
-    match crate::ordo::sched::exec_current(&owned, args.as_deref()) {
+    match crate::ordo::sched::exec_current(src, args.as_deref()) {
         Ok(()) => 0,
         Err(()) => -1,
     }

@@ -234,6 +234,14 @@ Voci con scope e vittoria dichiarati (non date).
        11/11 (create/stack/TLS/joins/timeout/wake/IPC/fd/stress-32).
        Vittoria conseguita: programmi multithread nativi + gate invariato.
        Prossimo: S1.
+- [ ] **S2.5 rustc nativo** (aperta, in corso): S2.5a spike+decisioni
+       (ADR-0048: staticone Cranelift, target singolo, scala graduata) e
+       S2.5b FPU eager (ADR-0049, threadtest 12/12) chiuse; S2.5c layout VA
+       (stack +512M, FS +1T, MAX_PAGES 64K, W+X a coppie) + exec streaming
+       (niente staging in heap; fix: PCB cr3 aggiornato, reclamo col vecchio
+       corrompeva l'allocator) chiusa, gate 6/6; staticone cross-compilato
+       (99 MB static-PIE, `--version`+hello ok). Prossimo: S2.5d (spawn
+       streaming per binari grandi + run in guest).
 
 ## Parcheggiate
 

@@ -3,8 +3,9 @@
 //!
 //! Stesso PID/parent/priorita'/canali (fd server-side, code IPC e registrazioni
 //! sopravvivono: sono indicizzati per canale, non per immagine); cade TUTTO
-//! l'address space e ne viene caricato uno nuovo dai byte del chiamante
-//! (copia owned in heap kernel: la sorgente user sparisce col teardown).
+//! l'address space e ne viene caricato uno nuovo leggendo DIRETTAMENTE dai
+//! byte user del chiamante (S2.5c, exec streaming: niente staging in heap,
+//! come `spawn_image` — lo spazio vecchio resta mappato finche' serve).
 //! Stack nuovo con argv stile Linux (37.1; argc=0 senza args); `image_hash`
 //! rimisurato (Strato 2: senza, `peer_info` mentirebbe e la regola same-image
 //! 36.5 sarebbe bypassabile); porte I/O azzerate (least privilege, come il
@@ -122,12 +123,15 @@ unsafe fn layout_argv(stack_top: u64, parsed: &ParsedArgs<'_>) -> u64 {
     }
 }
 
-/// Sostituisce l'immagine del processo corrente con `bytes` (copia owned del
-/// chiamante, gia' validata come range user) e gli argomenti `args_block`
-/// (`None` = nessun argv/env → argc=0; `Some` = blocco `[argc:8][envc:8]
-/// [payload]`, copiato in heap kernel come i byte). SCHED lock trattenuto per tutta
-/// l'operazione (come `spawn_copy_current`); IF=0 in syscall, niente preemption e
-/// niente blocking nel mezzo (mai context switch su spazio dimezzato).
+/// Sostituisce l'immagine del processo corrente con `bytes` (slice user del
+/// chiamante, range validato: IF=0 in syscall, niente preemption/munmap nel
+/// mezzo, come `spawn_image`) e gli argomenti `args_block` (`None` = nessun
+/// argv/env → argc=0; `Some` = blocco `[argc:8][envc:8][payload]` in heap
+/// kernel — piccolo, sopravvive al teardown per `layout_argv`). SCHED lock
+/// trattenuto per tutta l'operazione (come `spawn_copy_current`); niente
+/// blocking nel mezzo (mai context switch su spazio dimezzato).
+/// S2.5c: nuovo address space + load diretto (come `create_user`), poi switch
+/// CR3 + teardown del vecchio — mai staging dell'immagine in heap.
 pub fn exec_current(bytes: &[u8], args_block: Option<&[u8]>) -> Result<(), ()> {
     // 1. Validazione PRIMA di toccare qualunque stato (ELF malformato o args
     // malformati = -1, processo intatto, come `create_user` prima di allocare).
@@ -173,16 +177,14 @@ pub fn exec_current(bytes: &[u8], args_block: Option<&[u8]>) -> Result<(), ()> {
         }
     }
 
-    // 2. Svuota la meta' user TENENDO il PML4 (stesso CR3, meta' kernel
-    // intatta), poi TLB flush (entry vecchie stale sullo stesso CR3).
-    unsafe { crate::arc::vmm_user::exec_clear_user(cr3); }
-    unsafe {
-        let (frame, flags) = x86_64::registers::control::Cr3::read();
-        x86_64::registers::control::Cr3::write(frame, flags);
-    }
-    // 3. Reset bookkeeping: heap, VMA (+ref shm rilasciati), ring (i frame
-    // verranno riallocati al primo handshake lazy), staging DMA (38.1: la
-    // nuova immagine rialloca se serve), text image vecchia.
+    // 2. Nuovo address space + load DIRETTO dalla slice user (spazio vecchio
+    // ancora attivo e mappato: come `create_user`, niente staging in heap).
+    // Fallimento qui = processo intatto (il vecchio spazio non e' toccato).
+    let new_cr3 = crate::arc::vmm_user::new_address_space().ok_or(())?;
+    // 3. Reset bookkeeping PRIMA del load (i record descrivono il vecchio
+    // spazio; il nuovo parte vuoto): heap, VMA (+ref shm rilasciati), ring
+    // (i frame verranno riallocati al primo handshake lazy), staging DMA
+    // (38.1: la nuova immagine rialloca se serve), text image vecchia.
     crate::arc::vmm_user::set_heap_brk(me, 0);
     crate::arc::vmm_user::vma_clear(me);
     crate::arc::vmm_user::free_ring_pages(me);
@@ -191,12 +193,22 @@ pub fn exec_current(bytes: &[u8], args_block: Option<&[u8]>) -> Result<(), ()> {
         crate::text::release(old_text);
     }
 
-    // 4. Carica la nuova immagine + stack nuovo (stesso percorso dello spawn:
-    // condivisione text, W^X per-segmento, NX ovunque tranne il codice).
-    // `setup_user_stack` mappa e basta (le 3 parole argc=0 che scrive per lo
-    // spawn vengono sovrascritte qui sotto: il layout parte da USER_STACK_TOP).
-    let new_text = unsafe { crate::elf::load(cr3, bytes, &layout) };
-    let _ = unsafe { crate::arc::vmm_user::setup_user_stack(cr3) };
+    // 4. Carica la nuova immagine + stack nuovo nel NUOVO spazio (stesso
+    // percorso dello spawn: condivisione text, W^X per-segmento, NX ovunque
+    // tranne il codice). `setup_user_stack` mappa e basta (le 3 parole
+    // argc=0 che scrive per lo spawn vengono sovrascritte qui sotto: il
+    // layout parte da USER_STACK_TOP).
+    let new_text = unsafe { crate::elf::load(new_cr3, bytes, &layout) };
+    let _ = unsafe { crate::arc::vmm_user::setup_user_stack(new_cr3) };
+    // 4b. Switch al nuovo spazio + teardown del vecchio (S2.5c): da qui in
+    // poi gira sul nuovo CR3 (`mov cr3` flusha la TLB: niente stale, come lo
+    // switch in `ctx.rs`). PERCPU allineato (syscall future devono vedere
+    // il cr3 giusto).
+    unsafe {
+        core::arch::asm!("mov cr3, {}", in(reg) new_cr3, options(nostack, preserves_flags));
+    }
+    crate::syscall::set_current(me, top, new_cr3, me as u64);
+    unsafe { crate::arc::vmm_user::teardown_user_space(cr3, me) };
     let new_rsp = match &parsed {
         Some(p) => unsafe { layout_argv(crate::arc::vmm_user::USER_STACK_TOP, p) },
         None => unsafe {
@@ -207,10 +219,22 @@ pub fn exec_current(bytes: &[u8], args_block: Option<&[u8]>) -> Result<(), ()> {
         },
     };
 
-    // 5. PCB: nuova identita' (text + hash), stessa persona (pid/parent/prio/
-    // canali/req_next/CBS intatti — nessuno li tocca).
+    // 5. PCB: nuovo cr3 + nuova identita' (text + hash), stessa persona
+    // (pid/parent/prio/canali/req_next/CBS intatti — nessuno li tocca). Il
+    // cr3 VA aggiornato: il reclaim fa teardown dallo spazio registrato —
+    // col vecchio (gia' liberato qui) corromperebbe l'allocator e i processi
+    // che hanno riusato quei frame (deref su frame libero / double fault).
     // S2.5b: FPU resettata (nuova immagine, come Unix: niente registri ereditati).
     {
+        sched.processes[me].cr3 = new_cr3;
+        // Il cr3 e' condiviso col gruppo: i thread (vivi o in reclaim — il
+        // reclaim salta l'mm ma `ctx.rs`/`spawn` leggono il cr3 registrato)
+        // devono vedere quello nuovo, mai il vecchio liberato qui sopra.
+        for i in 0..sched.processes.len() {
+            if sched.processes[i].thread_group == Some(me) {
+                sched.processes[i].cr3 = new_cr3;
+            }
+        }
         let p = &mut sched.processes[me];
         p.text_id = new_text;
         p.image_hash = hash;

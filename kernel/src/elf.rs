@@ -26,8 +26,10 @@ const PT_LOAD: u32 = 1;
 pub(crate) const PAGE: u64 = 0x1000;
 /// Program header massimi accettati (i nostri binari ne hanno 4-7).
 const MAX_PHNUM: usize = 16;
-/// Pagine massime dell'immagine (2 MiB: regione [USER_CODE, USER_FS_BUFFER)).
-const MAX_PAGES: usize = 512;
+/// Pagine massime dell'immagine (256 MiB, S2.5c: era 2 MiB): la finestra
+/// e' [USER_CODE, USER_CODE+256M) — well dentro [USER_CODE, USER_FS_BUFFER)
+/// (+1T). Oltre = rifiuto in validazione (mai OOM a load).
+const MAX_PAGES: usize = 65536;
 
 /// Un segmento `PT_LOAD` validato.
 #[derive(Clone, Copy)]
@@ -149,28 +151,21 @@ pub fn validate(bytes: &[u8]) -> Option<Layout> {
     }
 
     // Rifiuto W+X: nessuna pagina puo' essere scrivibile ed eseguibile insieme
-    // (invariante di sicurezza; un ELF che lo chiede e' rifiutato).
-    let mut page_flags = [0u8; MAX_PAGES];
-    for s in &segments[..nseg] {
-        let mut bit = 0u8;
-        if s.flags & PF_W != 0 {
-            bit |= 1;
-        }
-        if s.flags & PF_X != 0 {
-            bit |= 2;
-        }
-        if bit == 0 {
-            continue;
-        }
-        let first = ((s.vaddr - base) / PAGE) as usize;
-        let last = ((s.vaddr + s.memsz - 1 - base) / PAGE) as usize;
-        for p in first..=last {
-            page_flags[p] |= bit;
-        }
-    }
-    for p in 0..npages {
-        if page_flags[p] == 3 {
-            return None; // pagina W+X
+    // (invariante di sicurezza; un ELF che lo chiede e' rifiutato). Check a
+    // coppie di segmenti (nseg <= 16, niente array per-pagina: con MAX_PAGES
+    // a 64K l'array sfonderebbe lo stack kernel).
+    for (i, a) in segments[..nseg].iter().enumerate() {
+        for b in &segments[..nseg][..i] {
+            let aw = a.flags & PF_W != 0;
+            let ax = a.flags & PF_X != 0;
+            let bw = b.flags & PF_W != 0;
+            let bx = b.flags & PF_X != 0;
+            if (aw && bx) || (ax && bw) {
+                let (lo, hi) = (a.vaddr.max(b.vaddr), (a.vaddr + a.memsz).min(b.vaddr + b.memsz));
+                if lo < hi {
+                    return None; // overlap W+X
+                }
+            }
         }
     }
 
@@ -242,8 +237,8 @@ unsafe fn map_private(cr3: u64, bytes: &[u8], l: &Layout, from: u64, to: u64) {
 /// condiviso (0 = nessuno), da rilasciare al teardown del processo.
 ///
 /// # Safety
-/// `cr3` deve essere un address space VUOTO: appena creato da
-/// `new_address_space` (spawn) o ripulito da `exec_clear_user` (exec, Fase 37);
+/// `cr3` deve essere un address space VUOTO appena creato da
+/// `new_address_space` (spawn ed exec, che poi passano a quello nuovo);
 /// `layout` deve venire da `validate` sullo stesso `bytes`.
 pub unsafe fn load(cr3: u64, bytes: &[u8], layout: &Layout) -> u32 {
     let mut text_id = 0u32;
