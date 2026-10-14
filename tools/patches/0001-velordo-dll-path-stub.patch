@@ -1,0 +1,18 @@
+diff --git a/compiler/rustc_session/src/filesearch.rs b/compiler/rustc_session/src/filesearch.rs
+index 10c62d932ba..c67a297e4a1 100644
+--- a/compiler/rustc_session/src/filesearch.rs
++++ b/compiler/rustc_session/src/filesearch.rs
+@@ -262,6 +262,13 @@ pub unsafe fn dll_path(_function: *mut std::ffi::c_void) -> Result<PathBuf, Stri
+     Err("dll_path is not supported on WASI".to_string())
+ }
+ 
++#[cfg(target_os = "velordo")]
++pub unsafe fn dll_path(_function: *mut std::ffi::c_void) -> Result<PathBuf, String> {
++    // S2.5b (patch Velordo): niente dladdr senza libc; il sysroot e' sempre
++    // esplicito (--sysroot del driver), quindi irraggiungibile in pratica.
++    Err("dll_path is not supported on Velordo".to_string())
++}
++
+ fn current_dll_path() -> Result<PathBuf, String> {
+     use std::sync::OnceLock;
+ 

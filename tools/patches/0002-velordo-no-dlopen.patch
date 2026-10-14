@@ -1,0 +1,64 @@
+diff --git a/compiler/rustc_metadata/src/host_dylib.rs b/compiler/rustc_metadata/src/host_dylib.rs
+index 8f446d26512..fe170213d61 100644
+--- a/compiler/rustc_metadata/src/host_dylib.rs
++++ b/compiler/rustc_metadata/src/host_dylib.rs
+@@ -13,6 +13,7 @@ fn format_dlopen_err(e: &(dyn std::error::Error + 'static)) -> String {
+     e.sources().map(|e| format!(": {e}")).collect()
+ }
+ 
++#[cfg(not(target_os = "velordo"))]
+ fn attempt_load_dylib(path: &Path) -> Result<libloading::Library, libloading::Error> {
+     #[cfg(target_os = "aix")]
+     if let Some(ext) = path.extension()
+@@ -40,6 +41,7 @@ fn attempt_load_dylib(path: &Path) -> Result<libloading::Library, libloading::Er
+ // proc-macro DLL with `Error::LoadLibraryExW`. It is suspected that something in the
+ // system still holds a lock on the file, so we retry a few times before calling it
+ // an error.
++#[cfg(not(target_os = "velordo"))]
+ fn load_dylib(path: &Path, max_attempts: usize) -> Result<libloading::Library, String> {
+     assert!(max_attempts > 0);
+ 
+@@ -103,6 +105,7 @@ fn from(err: DylibError) -> CrateError {
+     }
+ }
+ 
++#[cfg(not(target_os = "velordo"))]
+ pub unsafe fn load_symbol_from_dylib<T: Copy>(
+     path: &Path,
+     sym_name: &str,
+@@ -123,6 +126,7 @@ pub unsafe fn load_symbol_from_dylib<T: Copy>(
+     Ok(*sym)
+ }
+ 
++#[cfg(not(target_os = "velordo"))]
+ pub(crate) fn dlsym_proc_macros(
+     path: &Path,
+     stable_crate_id: StableCrateId,
+@@ -145,3 +149,27 @@ pub(crate) fn dlsym_proc_macros(
+         }
+     }
+ }
++
++// S2.5b (patch Velordo): niente dlopen (loader solo-statico) — backend e
++// proc-macro dinamici non caricabili (il backend e' linkato statico; le
++// victory crate non usano proc-macro). Errori onesti se mai raggiunti.
++#[cfg(target_os = "velordo")]
++fn no_dylib(path: &Path) -> DylibError {
++    DylibError::DlOpen(path.display().to_string(), "dynamic loading unsupported on Velordo".to_string())
++}
++
++#[cfg(target_os = "velordo")]
++pub unsafe fn load_symbol_from_dylib<T: Copy>(
++    path: &Path,
++    _sym_name: &str,
++) -> Result<T, DylibError> {
++    Err(no_dylib(path))
++}
++
++#[cfg(target_os = "velordo")]
++pub(crate) fn dlsym_proc_macros(
++    path: &Path,
++    _stable_crate_id: StableCrateId,
++) -> Result<&'static [ProcMacroClient], DylibError> {
++    Err(no_dylib(path))
++}

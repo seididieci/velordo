@@ -22,6 +22,11 @@ export RUSTC_INSTALL_BINDIR="bin"
 
 # Lockfile: tools/velordo-rustc/Cargo.lock (copiato da rust-src al setup:
 # niente skew unicode-ident/properties; committed come ogni bin crate).
+# Patch compiler (dll_path & co.): applicate se l'albero e' pulito,
+# altrimenti si assume gia' applicato (fail-loud di apply-compiler.sh).
+if [ -z "$(git -C "$ROOT/../rust-src" status --short -- compiler/)" ]; then
+    "$ROOT/scripts/apply-compiler.sh" "$ROOT/../rust-src"
+fi
 # CWD fuori dal repo (vedi sopra): cargo non deve vedere .cargo/config.toml.
 cd /tmp
 
@@ -32,7 +37,9 @@ if [ "$MODE" = "host" ]; then
 elif [ "$MODE" = "velordo" ]; then
     export CFG_COMPILER_HOST_TRIPLE="x86_64-unknown-velordo"
     # getrandom su RDRAND (niente backend OS: S2.5b).
-    export RUSTFLAGS='--cfg getrandom_backend="rdrand"'
+    # cap-lints allow come x.py (il target softfloat nega future-incompat
+    # su `target_feature(sse2)` usato con dispatch runtime: sicuro con FPU).
+    export RUSTFLAGS='--cap-lints=allow --cfg getrandom_backend="rdrand"'
     cargo build -Zjson-target-spec --release --manifest-path "$MANIFEST" \
         --target "$ROOT/targets/x86_64-unknown-velordo.json" --target-dir /tmp/vrustc-velordo
 else

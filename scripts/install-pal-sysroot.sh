@@ -11,6 +11,8 @@ if [ ! -d "$SRC" ]; then
     exit 1
 fi
 DST="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-velordo"
+# Pulisci prima: i fingerprint cambiano col target JSON (stale = E0461).
+rm -rf "$DST"
 mkdir -p "$DST"
 cp -r "$SRC"/. "$DST"/
 echo "[install-pal-sysroot] $(ls "$DST/lib" | wc -l) file in $DST"

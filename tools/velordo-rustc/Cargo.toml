@@ -30,3 +30,16 @@ opt-level = 2
 memmap2 = { path = "../vendor/memmap2-velordo" }
 target-lexicon = { path = "../vendor/target-lexicon-velordo" }
 ctrlc = { path = "../vendor/ctrlc-velordo" }
+
+# SIMD portabile forzato (S2.5b): il backend softfloat di LLVM non digerisce
+# i rami dispatch di sha1/sha2 (ICE "split"), e senza FPU-save il dispatch
+# runtime sarebbe comunque insicuro. `force-soft` = solo software, sempre.
+[dependencies.sha1]
+version = "0.10.6"
+default-features = false
+features = ["std", "force-soft"]
+
+[dependencies.sha2]
+version = "0.10.9"
+default-features = false
+features = ["std", "force-soft"]
