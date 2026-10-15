@@ -214,12 +214,13 @@ def gen_numbers(repo_root: Path) -> str:
     """Estrae TUTTI i `pub const NOME: int = expr` da syscall-numbers e li
     emette come letterali (S2.2: single source vero, mai duplicati a mano).
     Forme supportate: letterali dec/hex, `!0u64 - N`, aritmetica `*+-`,
-    `u64::MAX`. Qualunque altra forma = errore LOUD (mai valori skippati
-    in silenzio)."""
+    `u64::MAX`, riferimenti ad altre costanti (pub o private, es. S2.5d
+    `FS_BLOCK + off` — risolti in ordine di file). Qualunque altra forma =
+    errore LOUD (mai valori skippati in silenzio)."""
     src = repo_root / "syscall-numbers" / "src" / "lib.rs"
     assert src.exists(), f"syscall-numbers assente: {src}"
     text = src.read_text()
-    rows = re.findall(r"^pub const (\w+): (\w+) = ([^;]+);", text, re.M)
+    rows = re.findall(r"^(pub )?const (\w+): (\w+) = ([^;]+);", text, re.M)
     assert len(rows) > 50, f"syscall-numbers illeggibile? ({len(rows)} const)"
     out = [
         "//! ABI numerica Velordo — GENERATO da apply.py (S2.2).",
@@ -228,18 +229,24 @@ def gen_numbers(repo_root: Path) -> str:
         "",
     ]
     seen = set()
+    env = {}
 
-    def emit_const(name, ty, rhs):
+    def emit_const(pub, name, ty, rhs):
         assert name not in seen, f"const duplicata: {name}"
         seen.add(name)
         e = rhs.strip().replace("u64::MAX", str(2**64 - 1)).replace("!0u64", str(2**64 - 1))
-        assert re.fullmatch(r"[0-9xXa-fA-F _+*()\-]+", e), f"forma non supportata: {name} = {rhs}"
-        v = eval(e, {"__builtins__": {}}, {})
+        assert re.fullmatch(r"[\w\s_+*()\-]+", e), f"forma non supportata: {name} = {rhs}"
+        try:
+            v = eval(e, {"__builtins__": {}}, dict(env))
+        except NameError as ex:
+            raise AssertionError(f"riferimento non risolto: {name} = {rhs} ({ex})")
         assert isinstance(v, int) and v >= 0, f"valore non intero: {name}"
-        out.append(f"pub const {name}: {ty} = {v};")
+        env[name] = v
+        if pub:
+            out.append(f"pub const {name}: {ty} = {v};")
 
-    for name, ty, rhs in rows:
-        emit_const(name, ty, rhs)
+    for pub, name, ty, rhs in rows:
+        emit_const(pub, name, ty, rhs)
     # Enum fieldless con discriminanti esplicite (solo `Service`: serve
     # l'id numerico per il lookup raw; qualunque altro enum = LOUD).
     for m in re.finditer(r"pub enum (\w+) \{(.*?)\n\}", text, re.S):
@@ -248,7 +255,7 @@ def gen_numbers(repo_root: Path) -> str:
         for line in body.splitlines():
             mm = re.match(r"\s*(\w+) = (\d+),?", line)
             if mm:
-                emit_const(f"SERVICE_{mm.group(1).upper()}", "u64", mm.group(2))
+                emit_const("pub", f"SERVICE_{mm.group(1).upper()}", "u64", mm.group(2))
     # Spot-check fail-loud sui critici (se mancano, la PAL non compila comunque,
     # ma qui il messaggio dice DOVE guardare).
     for must in ("SYS_WRITE", "SYS_MMAP", "SYS_RING_ALLOC", "USER_FS_BUFFER", "R_OPEN"):

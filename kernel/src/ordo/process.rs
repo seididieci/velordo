@@ -147,6 +147,11 @@ pub struct Process {
     /// via flag `SPAWN_FLAG_DETACH` (il figlio non puo' auto-staccarsi);
     /// irrevocabile. Inerte per i figli di init (init non muore mai).
     pub detached: bool,
+    /// Frame dello stack user (`USER_STACK_FRAMES`, o `BIGSTACK_FRAMES` col
+    /// flag S2.5d). Ereditato dal fork, preservato dall'exec (che rimappa lo
+    /// stack nuovo con la stessa profondita'). Inerte per i thread (stack
+    /// proprio, mai rimappato qui).
+    pub stack_frames: u32,
     /// Indirizzo base (basso) dello stack kernel, per un futuro rilascio.
     pub stack_base: u64,
     /// CR3 (page table) del processo. Per i processi kernel e' la CR3 di base.
@@ -307,6 +312,7 @@ impl Process {
             suspended: false,
             parent,
             detached: false,
+            stack_frames: crate::arc::vmm_user::USER_STACK_FRAMES as u32,
             stack_base,
             cr3: crate::arc::vmm_user::kernel_cr3(),
             kernel_stack_top: stack_top,
@@ -356,6 +362,8 @@ impl Process {
         parent_chan: Option<usize>,
         io_ranges: &[(u16, u16)],
         detached: bool,
+        stack_frames: u32,
+        args: Option<&crate::arc::vmm_user::ParsedArgs<'_>>,
     ) -> Option<Process> {
         // Validazione PRIMA di allocare (ELF malformato = nessun leak).
         let layout = crate::elf::validate(elf)?;
@@ -376,7 +384,8 @@ impl Process {
         // Carica i segmenti ELF + stack user. La pagina FS per-processo viene
         // allocata/mappata lazy al primo uso (syscall 26).
         let text_id = unsafe { crate::elf::load(cr3, elf, &layout) };
-        let user_stack_top = unsafe { crate::arc::vmm_user::setup_user_stack(cr3) };
+        let user_stack_top =
+            unsafe { crate::arc::vmm_user::setup_user_stack(cr3, stack_frames as usize, args) };
 
         // Frame CPU ring 3 sul kernel stack (entry dall'ELF).
         let entry = crate::elf::entry(&layout);
@@ -395,6 +404,7 @@ impl Process {
             suspended: false,
             parent,
             detached,
+            stack_frames,
             stack_base,
             cr3,
             kernel_stack_top: stack_top,
@@ -453,6 +463,7 @@ impl Process {
         tss_sel: SegmentSelector,
         text_id: u32,
         image_hash: u64,
+        stack_frames: u32,
     ) -> Process {
         Process {
             name,
@@ -463,6 +474,7 @@ impl Process {
             suspended: false,
             parent: Some(parent_pid),
             detached: false,
+            stack_frames,
             stack_base,
             cr3: child_cr3,
             kernel_stack_top,
@@ -544,6 +556,7 @@ impl Process {
             suspended: false,
             parent: None,
             detached: false,
+            stack_frames: crate::arc::vmm_user::USER_STACK_FRAMES as u32,
             stack_base,
             cr3: leader_cr3,
             kernel_stack_top: stack_top,

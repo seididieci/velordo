@@ -201,11 +201,15 @@ pub const DMA_PAGES_MAX: usize = 4;
 /// Il kernel tratta le stringhe come byte opachi (mai ispezione `=`: la
 /// convenzione `NAME=val` vive in `civis`/shell, il kernel resta neutro).
 pub const ARGS_MAX: u64 = 8 * 1024;
-/// Immagine massima spawabile/eseguibile (Fase 21: 64 frame = 256 KiB; i binari
-/// sono < 70 KiB — un singolo spawn non puo' svuotare il pool frame). Single
-/// source kernel (`sys_spawn_image`, stesso bound per `exec` in Fase 37) +
-/// user (`civis` pre-valida prima della syscall per errori precisi).
-pub const SPAWN_IMAGE_MAX: usize = 256 * 1024;
+/// Immagine massima spawabile/eseguibile (S2.5d: 128 MiB; prima 256 KiB
+/// Fase 21 — bastava finche' i binari erano < 70 KiB, ma lo staticone rustc
+/// e' ~99 MB). Lo spawn/exec streama dai byte del chiamante (niente staging),
+/// quindi il bound protegge solo il pool frame: oltre la RAM disponibile il
+/// load va in OOM loud (`expect`, mai corruzione) — binari grandi richiedono
+/// `RUN_MEM` adeguata (>= 1G per lo staticone). Single source kernel
+/// (`sys_spawn_image`, stesso bound per `exec` in Fase 37) + user (`civis`
+/// pre-valida prima della syscall per errori precisi).
+pub const SPAWN_IMAGE_MAX: usize = 128 * 1024 * 1024;
 /// Protezioni `mmap`/`mprotect` (29: NONE/R/RW con enforcement; W solo e
 /// PROT_EXEC rifiutati — eseguibile solo il codice di spawn).
 pub const PROT_NONE: u64 = 0x0;
@@ -271,6 +275,17 @@ pub const CLI_RESP_VA: u64 = FS_BLOCK + 0x230_000;
 /// init invece di terminare. Deciso dallo spawner (il figlio non puo'
 /// auto-staccarsi); irrevocabile. Bit riservati: devono essere 0 (rifiuto).
 pub const SPAWN_FLAG_DETACH: u8 = 0x01;
+/// Flag `SpawnMeta.flags` (S2.5d, bigstack): il figlio nasce con uno stack
+/// user da `BIGSTACK_FRAMES` invece di `USER_STACK_FRAMES` (per programmi che
+/// vogliono MB di stack, es. lo staticone rustc: 16 KiB non bastano). La
+/// guard resta la prima pagina sotto lo stack (dinamica, mai mappata);
+/// l'heap parte comunque da `USER_STACK_TOP` (lo stack cresce verso il basso).
+/// Ereditato dal fork (stesso `stack_frames` nel PCB), preservato dall'exec.
+pub const SPAWN_FLAG_BIGSTACK: u8 = 0x02;
+/// Frame dello stack bigstack (8 MiB): allocazione contigua a spawn (con
+/// 1G di RAM non frammenta; su 256M lo staticone non gira comunque per
+/// l'immagine). OOM a spawn = `None` loud (mai corruzione).
+pub const BIGSTACK_FRAMES: usize = 2048;
 /// Bound di scansione per `ps` (Fase 19.1): i PID vivono in 0..PS_SCAN_MAX.
 /// Deve restare uguale al `MAX_PIDS` del kernel (32, Fase 14).
 pub const PS_SCAN_MAX: u32 = 32;

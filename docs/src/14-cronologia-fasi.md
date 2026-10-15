@@ -2293,4 +2293,23 @@
           99 MB static-PIE (patch dll_path/no-dlopen, fork memmap2/
           target-lexicon/ctrlc, getrandom RDRAND, dynamic-linking per il
           probe cargo, cap-lints=allow), `--version` + hello ok su host.
-          Prossimo S2.5d: spawn streaming per i 99 MB + run in guest.
+          S2.5d spawn streaming (chiusa): SPAWN_IMAGE_MAX 256K→128M,
+          BIGSTACK 8M via flag; payload su FAT (ArcaFS quadratica oltre
+          16M), s25fuse carica+spawna; run.sh cpu+qemu64/fsgsbase/rdrand,
+          cmdline s25=1; fix `is_user_range` al leader (VMA/heap del gruppo;
+          sbrk gia' cosi'), `panic_output`→Stderr (rtabort silenti),
+          RDRAND→xorshift fallback, anti-skew sysroot, image-base USER_CODE.
+          Caccia al `table[1]=3` (child abort 134 "already set" senza
+          println nostri): escluse bisezione VMA/heap, frame-aliasing
+          (census kernel: 0 dup su 35K pagine), wild-write; causa vera:
+          `&Stdout::write` fa lock → `current_id()` → ID auto-assegnato (3)
+          diverso dall'handle (2) → `set_current` fallisce (stesso messaggio
+          per entrambi i rami). Lezione: mai stdio con lock prima di
+          `init.init()` (commento nel trampolino). Kernel/valloc esonerati.
+          S2.5e spawn argv (chiusa): `SpawnMeta` 56B + blocco packed come
+          exec, `ParsedArgs/parse/layout` in `vmm_user::args` (dual-base:
+          exec via VA, spawn via direct map), `pack_args`+`argv()` in civis;
+          `--version` in guest (`rustc 1.100.0-nightly`, exit 0, reclaim
+          pulito), gate 6/6 zero FAIL/PANIC/FAULT. Blocker noto: sysroot
+          (`dll_path` non supportato; serve `--sysroot`/mini-sysroot).
+          Prossimo S2.5f: mini-sysroot + prima compilazione in guest.

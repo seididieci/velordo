@@ -385,7 +385,12 @@ pub fn is_user_range(addr: u64, len: usize) -> bool {
     let (start, end) = (addr, addr.checked_add(len as u64));
     match end {
         Some(end) => {
-            let pid = crate::syscall::current_id() as usize;
+            // S-T: VMA e heap sono indicizzati al leader del gruppo (mm
+            // condiviso) — col tid del chiamante i thread non troverebbero
+            // mai i propri range (heap_brk=base + VMA vuote = ogni syscall
+            // con buffer rifiutata; osservato: thread rayon dello staticone
+            // con stack mmap, write sempre -1 e abort 134).
+            let pid = crate::syscall::current_mm();
             let brk = heap_brk(pid);
             // Heap committato oppure UNA vma viva (i buffer syscall possono
             // stare in memoria mappata: la validazione resta centrale qui).

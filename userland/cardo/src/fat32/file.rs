@@ -6,7 +6,7 @@ impl<B: BlockSource> Fat32<B> {
     /// 24.1 — legge SOLO i settori coperti da [offset, offset+to_read): il
     /// walk dei cluster saltati costa solo FAT (memo), mai dati. Prima si
     /// leggeva ogni cluster intero (spc settori) anche per 25 byte.
-    pub fn read_file(&self, info: &FileInfo, offset: usize, count: usize, out: &mut [u8]) -> usize {
+    pub fn read_file(&mut self, info: &FileInfo, offset: usize, count: usize, out: &mut [u8]) -> usize {
         let csize = self.cluster_bytes();
         let size = info.size as usize;
         if offset >= size {
@@ -16,14 +16,27 @@ impl<B: BlockSource> Fat32<B> {
         let spc = self.spc as usize;
         let first_ci = offset / csize;
         let last_ci = (offset + to_read - 1) / csize;
-        // Walk FAT-only fino al primo cluster utile (memo: niente disco).
-        let mut cluster = info.first_cluster;
-        for _ in 0..first_ci {
-            match self.next_cluster(cluster) {
-                Some(next) => cluster = next,
+        // S2.5d: cluster di partenza dal memo (O(1)); senza, ogni slice
+        // ricamminerebbe da 0 (O(n^2) sul file). Build pigra con cap
+        // anti-loop (mai oltre size+1: ciclo o size bugiarda = corrotta).
+        let mut cluster = match self.chain_memo.get(&info.first_cluster) {
+            Some(chain) => match chain.get(first_ci) {
+                Some(&c) => c,
                 None => return 0, // catena piu' corta di size: corrotta
+            },
+            None => {
+                let chain = match self.build_chain(info.first_cluster, size, csize) {
+                    Some(ch) => ch,
+                    None => return 0,
+                };
+                let c = match chain.get(first_ci) {
+                    Some(&c) => c,
+                    None => return 0,
+                };
+                self.chain_memo.insert(info.first_cluster, chain);
+                c
             }
-        }
+        };
         let mut done = 0usize;
         // 24.2 — un solo run per cluster a chunk da ≤8 settori in buffer
         // stack (niente Vec temporanei: vedi read_dir). `spc` resta qualunque
@@ -67,6 +80,32 @@ impl<B: BlockSource> Fat32<B> {
             }
         }
         done
+    }
+
+    /// Costruisce la cluster-chain completa da `first` (S2.5d, per il memo
+    /// di `read_file`). Cap a size+1 (mai oltre: ciclo o size bugiarda =
+    /// `None`, come la catena corta). `first < 2` = cluster riservati.
+    fn build_chain(&self, first: u32, size: usize, csize: usize) -> Option<alloc::vec::Vec<u32>> {
+        if first < 2 || size == 0 {
+            return None;
+        }
+        let max = size.div_ceil(csize) + 1;
+        let mut chain = alloc::vec::Vec::new();
+        let mut c = first;
+        loop {
+            chain.push(c);
+            if chain.len() > max {
+                return None;
+            }
+            match self.next_cluster(c) {
+                Some(n) => c = n,
+                None => break,
+            }
+        }
+        if chain.is_empty() {
+            return None;
+        }
+        Some(chain)
     }
     /// Scrive fino a `data.len()` byte del file a partire da `offset`
     /// (Fase 20.2: SOLO overwrite entro `size`, mai crescita — oltre EOF si
@@ -356,7 +395,10 @@ impl<B: BlockSource> Fat32<B> {
     /// aggiorna la dir-entry. Ritorna i byte scritti; la size cresce solo di
     /// quanto e' atterrato davvero (mai oltre). Fallimento allocazione →
     /// degrado a overwrite entro size (come 20.2).
-    pub fn write_grow(&self, info: &FileInfo, offset: usize, data: &[u8]) -> usize {
+    pub fn write_grow(&mut self, info: &FileInfo, offset: usize, data: &[u8]) -> usize {
+        // S2.5d: qualunque scrittura invalida il memo (overwrite non cambia
+        // la catena ma append/alloc si': drop incondizionato, rebuild pigro).
+        self.chain_memo.remove(&info.first_cluster);
         let size = info.size as usize;
         if data.is_empty() || info.is_dir {
             return 0;

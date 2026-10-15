@@ -120,6 +120,9 @@ extern "C" fn trampoline_entry() -> ! {
 }
 
 extern "C" fn trampoline_real(tcb: *mut Tcb) -> ! {
+    // S2.5d: MAI println (o altro stdio con lock) prima di `init.init()`:
+    // `&Stdout::write` fa lock → `current_id()` → assegna un ID diverso da
+    // quello dell'handle e `set_current` fallisce (rtabort "already set").
     let init = unsafe { Box::from_raw((*tcb).init as *mut ThreadInit) };
     unsafe {
         (*tcb).init = ptr::null_mut();

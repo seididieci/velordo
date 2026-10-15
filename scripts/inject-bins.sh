@@ -50,6 +50,15 @@ mcopy -i "$IMG" flavours/posix/tests/build/userposixtests.bin ::/test/posixtst.b
 if [ -f pal/build/hello-std.bin ]; then
     mcopy -i "$IMG" pal/build/hello-std.bin ::/test/stdhello.bin || exit 1
 fi
+# Staticone rustc (S2.5d): solo nei run dedicati (RUN_S25=1) e solo se
+# costruito (build-velordo-rustc.sh velordo + copia in build-meta/). Nome
+# 8.3, dir propria. Niente fail-loud: il gate non lo usa (testfat conta le
+# entry di /fat: /tool in piu' romperebbe il Test 1 — il gate resta
+# byte-identico al pristino). fat.img da 257 MB lo contiene con margine.
+if [ "${RUN_S25:-0}" = "1" ] && [ -f build-meta/rustc-velordo.bin ]; then
+    mmd -i "$IMG" ::/tool || exit 1
+    mcopy -i "$IMG" build-meta/rustc-velordo.bin ::/tool/rustc.bin || exit 1
+fi
 # Script shell per `source` (velocizzazione test: 1 riga digitata invece di N
 # comandi via sendkey) + pilota del builtin permanente. Nomi 8.3 come i .bin
 # (il FAT non ha LFN: oltre 8+3 mcopy fallisce loud, mai nomi troncati in

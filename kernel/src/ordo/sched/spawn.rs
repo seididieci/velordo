@@ -131,13 +131,18 @@ pub unsafe fn create_user(
     parent_chan: Option<usize>,
     io_ranges: &[(u16, u16)],
     detached: bool,
+    stack_frames: u32,
+    args: Option<&crate::arc::vmm_user::ParsedArgs<'_>>,
 ) -> Option<usize> {
     let mut guard = SCHED.lock();
     let sched = guard.as_mut().expect("scheduler non inizializzato");
 
     let id = sched.alloc_pid()?;
     let process = match unsafe {
-        Process::create_user(name, priority, elf, parent, parent_chan, io_ranges, detached)
+        Process::create_user(
+            name, priority, elf, parent, parent_chan, io_ranges, detached, stack_frames,
+            args,
+        )
     } {
         Some(p) => p,
         None => {

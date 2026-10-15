@@ -10,6 +10,7 @@
 //! `docs/04-memory.md`.
 
 mod layout;
+mod args;
 mod heap_brk;
 mod vma;
 mod shm;
@@ -24,6 +25,7 @@ pub use layout::USER_DMA_VA;
 // Compat: erano `pub` prima dello split (nessun uso interno attuale).
 #[allow(unused_imports)]
 pub use layout::{USER_STACK_TOP, USER_STACK_FRAMES, USER_STACK_GUARD};
+pub(crate) use args::{ParsedArgs, parse_args, layout_argv};
 pub use heap_brk::{heap_brk, set_heap_brk};
 pub use vma::{vma_lookup, vma_map, vma_unmap, vma_protect, vma_clone, is_user_range};
 pub(crate) use vma::vma_clear;

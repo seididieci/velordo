@@ -47,7 +47,17 @@ fn spawn_user(
     io_ranges: &[(u16, u16)],
 ) -> Option<usize> {
     let id = unsafe {
-        crate::ordo::sched::create_user(name, priority, elf, parent, parent_chan, io_ranges, false)
+        crate::ordo::sched::create_user(
+            name,
+            priority,
+            elf,
+            parent,
+            parent_chan,
+            io_ranges,
+            false,
+            crate::arc::vmm_user::USER_STACK_FRAMES as u32,
+            None,
+        )
     }?;
     crate::serial_println!(
         "[user] binary '{}': elf {} byte, entry={:#x}",
@@ -75,6 +85,8 @@ pub fn spawn_image(
     parent_chan: Option<usize>,
     io_ranges: &[(u16, u16)],
     detached: bool,
+    stack_frames: u32,
+    args: Option<&crate::arc::vmm_user::ParsedArgs<'_>>,
 ) -> Option<usize> {
     if len == 0 {
         return None;
@@ -83,7 +95,10 @@ pub fn spawn_image(
     // validata come range user da `sys_spawn_image`.
     let elf = unsafe { core::slice::from_raw_parts(src, len) };
     let id = unsafe {
-        crate::ordo::sched::create_user("image", priority, elf, parent, parent_chan, io_ranges, detached)
+        crate::ordo::sched::create_user(
+            "image", priority, elf, parent, parent_chan, io_ranges, detached, stack_frames,
+            args,
+        )
     }?;
     crate::ordo::sched::set_owned_name(id, owned);
     Some(id)

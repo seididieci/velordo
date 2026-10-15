@@ -46,6 +46,7 @@ impl<B: BlockSource> Fat32<B> {
             root_cluster: root,
             vol_serial,
             vol_label,
+            chain_memo: alloc::collections::BTreeMap::new(),
         })
     }
 

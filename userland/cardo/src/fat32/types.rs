@@ -94,6 +94,12 @@ pub struct Fat32<B: BlockSource> {
     // 25: la cache settoriale write-through vive in `block`, unico
     // proprietario dei blocchi — un secondo strato cacherebbe gli stessi 512 B
     // due volte. Ogni `read_sector` attraversa IPC+PIO o la cache del driver).
+    /// Memo delle cluster-chain per first_cluster (S2.5d): `read_file`
+    /// camminerebbe da 0 a ogni slice (O(n) a read, O(n^2) sul file — un
+    /// file da 99 MB non finirebbe mai). Build pigra al primo read, drop su
+    /// `write_grow` (l'unica mutazione possibile: mkdir/remove fuori scope).
+    /// Chiave = first_cluster (stabile a mount vivo: niente defrag online).
+    pub(crate) chain_memo: alloc::collections::BTreeMap<u32, alloc::vec::Vec<u32>>,
 }
 
 pub(crate) const ATTR_DIR: u8 = 0x10;

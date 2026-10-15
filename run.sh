@@ -92,20 +92,30 @@ fi
 # esiste o il parametro e' assente → kernel panic loud.
 if [ -f userland/disk/arca.img ]; then
     APPEND="root=UUID=4152434100000001"
+    # S2.5d: run dedicato allo staticone (volume + RAM grandi via env).
+    if [ "${RUN_S25:-0}" = "1" ]; then
+        APPEND="$APPEND s25=1"
+    fi
 else
     APPEND=""
 fi
 # shellcheck disable=SC2086
 # S-T (T2): FSGSBASE per la TLS user (rdfsbase/wrfsbase da ring 3). Solo
 # questo flag oltre qemu64: niente altro cambia per gli altri test.
+# S2.5d: +rdrand,+rdseed per il backend getrandom RDRAND dello staticone
+# (no-op se qemu64 li ha gia'; il boot fallisce loud se invalidi).
 # S1.2: RAM parametrica (default 256M: gate veloce; multi-GB per S1.3).
+# S2.5d: `-append` con token multipli (root=UUID + s25=1) — il vecchio
+# `$(echo "-append $APPEND")` splittava e QEMU leggeva `s25=1` come drive.
+if [ -n "$APPEND" ]; then
+    set -- "$@" -append "$APPEND"
+fi
 exec qemu-system-x86_64 \
     -m ${RUN_MEM:-256M} \
-    -cpu qemu64,+fsgsbase \
+    -cpu qemu64,+fsgsbase,+rdrand,+rdseed \
     -display "$DISPLAY" \
     -serial stdio \
     -no-reboot \
     -kernel "$KERNEL" \
     $DRIVES \
-    $( [ -n "$APPEND" ] && echo "-append $APPEND" ) \
     "$@"

@@ -185,8 +185,9 @@ pub fn is_ebadf(_err: &io::Error) -> bool {
     true
 }
 
-pub fn panic_output() -> Option<Vec<u8>> {
-    // Panic su seriale via Stderr diretto (vedi rt::panic_output): qui
-    // niente (il writer lo prende rt da Stderr::new). None = default.
-    None
+pub fn panic_output() -> Option<impl crate::io::Write> {
+    // S2.5d: rtabort! scriveva nel vuoto (None = aborti runtime silenti,
+    // codice 134 senza messaggio — undebuggabili). Stderr diretto: niente
+    // lock, niente alloc, solo raw write sullo slot 2 (console).
+    Some(Stderr::new())
 }

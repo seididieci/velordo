@@ -48,7 +48,7 @@ pub fn spawn_copy_current() -> Option<(usize, usize)> {
     // GRUPPO: parent = leader, mai un tid riusabile come orfano).
     let p_mm = sched.processes[parent_pid].thread_group.unwrap_or(parent_pid);
     let p_parent = p_mm;
-    let (p_cr3, p_top, p_prio, p_req, p_text, p_hash, p_name, p_owned, p_nlen, p_brk) = {
+    let (p_cr3, p_top, p_prio, p_req, p_text, p_hash, p_name, p_owned, p_nlen, p_brk, p_frames) = {
         let p = &sched.processes[parent_pid];
         (
             p.cr3,
@@ -61,6 +61,9 @@ pub fn spawn_copy_current() -> Option<(usize, usize)> {
             p.name_owned,
             p.name_len,
             crate::arc::vmm_user::heap_brk(p_mm),
+            // Stack del GRUPPO (il chiamante puo' essere un thread: i thread
+            // non hanno stack proprio registrato — S2.5d eredita dal leader).
+            sched.processes[p_mm].stack_frames,
         )
     };
     // Solo processi user duplicabili (cr3 propria, mai quella kernel).
@@ -148,7 +151,7 @@ pub fn spawn_copy_current() -> Option<(usize, usize)> {
     let child = unsafe {
         Process::create_spawn_copy(
             p_name, p_owned, p_nlen, p_prio, p_req, p_parent, child_cr3,
-            stack_base, stack_top, saved, tss_slot, tss_sel, p_text, p_hash,
+            stack_base, stack_top, saved, tss_slot, tss_sel, p_text, p_hash, p_frames,
         )
     };
     sched.place_process(child_pid, child);

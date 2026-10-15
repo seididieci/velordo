@@ -232,7 +232,7 @@ fn spawn_object(bucket: &[u8], key: &[u8]) -> Option<alloc::vec::Vec<u8>> {
 
 /// Spawna un binario da un vettore di byte (Fase 55, N0).
 fn spawn_image_from_vec(img: &[u8], meta: &SvcMeta) -> Option<i64> {
-    if img.len() > 262144 {
+    if img.len() > civis::syscall_numbers::SPAWN_IMAGE_MAX {
         println!(" -> FAILED (image too large, {}B)", img.len());
         return None;
     }
@@ -283,6 +283,24 @@ fn spawn_entry(meta: &SvcMeta) -> Option<i64> {
         None => spawn_child(meta.bin),
         Some(_) => spawn_file(meta),
     }
+}
+
+/// Cerca il token `s25=1` nella cmdline di boot (S2.5d: run dedicato allo
+/// staticone, `RUN_S25=1` in run.sh). Match a token intero (delimitato da
+/// spazi/nul/inizio/fine): niente falsi positivi dentro altre parole.
+fn cmdline_has_s25() -> bool {
+    let cmd = civis::boot_cmdline();
+    let mut i = 0usize;
+    while i + 5 <= cmd.len() {
+        if &cmd[i..i + 5] == b"s25=1"
+            && (i == 0 || cmd[i - 1] == b' ' || cmd[i - 1] == 0)
+            && (i + 5 == cmd.len() || cmd[i + 5] == b' ' || cmd[i + 5] == 0)
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Spawna un binario di test da disco (Fase 21: `/test/*.bin`) e aspetta che
@@ -565,6 +583,10 @@ const TESTS: SvcMeta = SvcMeta { bin: b"usertests", path: Some("/fat/test/tests.
 // Thread 1:1 (S-T, ADR-0046): dopo usertests (nessuna dipendenza dai diritti),
 // prima della shell interattiva.
 const TEST_THREADS: SvcMeta = SvcMeta { bin: b"userthreadtest", path: Some("/fat/test/thread.bin"), obj: Some((b"tst", b"test/thread.bin")), prio: 16, io: &[] };
+// Fuse staticone (S2.5d): ricompone i chunk rustc e lo spawna bigstack.
+// Solo obj (niente FAT: i chunk vivono solo su arca grande), solo se la
+// cmdline contiene `s25=1` (run dedicato, mai nel gate).
+const TEST_S25: SvcMeta = SvcMeta { bin: b"s25fuse", path: None, obj: Some((b"tst", b"tool/s25fuse.bin")), prio: 16, io: &[] };
 #[cfg(feature = "bench")]
 const TEST_BENCH: SvcMeta = SvcMeta { bin: b"userbench", path: Some("/fat/test/bench.bin"), obj: Some((b"tst", b"test/bench.bin")), prio: 16, io: &[] };
 
@@ -723,6 +745,14 @@ fn real_main(_sp: u64) -> ! {
     {
         println!("[init] avvio bench");
         run_test(&TEST_BENCH, &mut supervised);
+    }
+
+    // Staticone rustc (S2.5d): solo se la cmdline contiene `s25=1` (run.sh
+    // con RUN_S25=1: volume + RAM grandi). Dopo suite/bench, prima della
+    // shell (che resta usabile dopo). Mai nel gate.
+    if cmdline_has_s25() {
+        println!("[init] avvio s25fuse (staticone rustc)");
+        run_test(&TEST_S25, &mut supervised);
     }
 
     if boot_svc(&SVC_SHELL, false).is_none() {

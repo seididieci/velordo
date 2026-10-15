@@ -240,8 +240,15 @@ Voci con scope e vittoria dichiarati (non date).
        (stack +512M, FS +1T, MAX_PAGES 64K, W+X a coppie) + exec streaming
        (niente staging in heap; fix: PCB cr3 aggiornato, reclamo col vecchio
        corrompeva l'allocator) chiusa, gate 6/6; staticone cross-compilato
-       (99 MB static-PIE, `--version`+hello ok). Prossimo: S2.5d (spawn
-       streaming per binari grandi + run in guest).
+       (99 MB static-PIE, `--version`+hello ok). S2.5d spawn streaming
+       (SPAWN_IMAGE_MAX 128 MiB, BIGSTACK 8 MiB) + run in guest chiusa:
+       staticone gira (Usage + driver thread, exit puliti), sysroot da
+       risolvere; fix `is_user_range` al leader, `panic_output` visibile,
+       RDRAND-fallback; mistero `table[1]=3` risolto (lock stdio →
+       `current_id()` pre-init: mai println prima di `init.init()`).
+       S2.5e spawn argv (`SpawnMeta` 56 B, layout dual-base via direct map)
+       + `--version` in guest (`rustc 1.100.0-nightly`, exit 0) chiusa,
+       gate 6/6. Prossimo: S2.5f (mini-sysroot + prima compilazione).
 
 ## Parcheggiate
 

@@ -509,7 +509,9 @@ pub fn read_leaf(cr3: u64, vaddr: u64) -> Option<(u64, u64)> {
 }
 
 /// Alloca e mappa lo stack user a `USER_STACK_TOP` (Fase 31: separato dal
-/// caricamento del codice, che ora e' `elf::load`). Ritorna il RSP iniziale.
+/// caricamento del codice, che ora e' `elf::load`). `frames` = profondita'
+/// (`USER_STACK_FRAMES` di default, `BIGSTACK_FRAMES` col flag S2.5d).
+/// Ritorna il RSP iniziale.
 ///
 /// Convenzione argv (37.1): OGNI processo nasce con argc valido in cima —
 /// spawn scrive argc=0 + argv NULL + envp NULL (exec stende il layout completo
@@ -523,16 +525,26 @@ pub fn read_leaf(cr3: u64, vaddr: u64) -> Option<(u64, u64)> {
 ///
 /// # Safety
 /// `cr3` e' un address space creato da `new_address_space`.
-pub unsafe fn setup_user_stack(cr3: u64) -> u64 {
-    let stack_base = USER_STACK_TOP - (USER_STACK_FRAMES as u64 * PAGE_SIZE);
-    let stack_phys = crate::arc::phys_mem::alloc_contiguous(USER_STACK_FRAMES)
+pub unsafe fn setup_user_stack(
+    cr3: u64,
+    frames: usize,
+    args: Option<&super::args::ParsedArgs<'_>>,
+) -> u64 {
+    let stack_base = USER_STACK_TOP - (frames as u64 * PAGE_SIZE);
+    let stack_phys = crate::arc::phys_mem::alloc_contiguous(frames)
         .expect("oom per lo stack user");
-    unsafe { map_user_region_owned(cr3, stack_base, stack_phys, USER_STACK_FRAMES); }
-    let top = crate::addr::phys_to_virt(stack_phys) + (USER_STACK_FRAMES as u64 * PAGE_SIZE);
+    unsafe { map_user_region_owned(cr3, stack_base, stack_phys, frames); }
+    let top = crate::addr::phys_to_virt(stack_phys) + (frames as u64 * PAGE_SIZE);
     unsafe {
         core::ptr::write((top - 8) as *mut u64, 0); // argc = 0
         core::ptr::write((top - 16) as *mut u64, 0); // argv NULL
         core::ptr::write((top - 24) as *mut u64, 0); // envp NULL
     }
-    USER_STACK_TOP - 24
+    match args {
+        // S2.5e: layout argv via direct map (CR3 del chiamante attivo:
+        // scrivere VA user del figlio toccherebbe il chiamante). Le 3 parole
+        // qui sopra vengono sovrascritte (come in exec).
+        Some(p) => unsafe { super::args::layout_argv(top, USER_STACK_TOP, p) },
+        None => USER_STACK_TOP - 24,
+    }
 }

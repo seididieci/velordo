@@ -104,7 +104,7 @@ La numerazione e' definita nel dispatch di `syscall_handler` in `kernel/src/sysc
 | 35 | `kill(pid, code)` | termina un processo user (exit/kill kernel-side) → 0 o -1 (Fase 14, ADR-0010) |
 | 36 | `service_pid(service)` | pid dell'owner del servizio o -1 (supervisione/diagnostica, Fase 14) |
 | 37 | `ps_info(pid)` | snapshot `ps`: 0 + nome in rdi+rsi, packed stato/prio/parent/ipc in rdx, tick in r10; -1 se slot vuoto (Fase 19.1; stato 2=Stopped dalla 44a) |
-| 38 | `spawn_image(img, len, meta, metalen)` | come `spawn` ma il binario e' in memoria del chiamante (servizi da disco, Fase 21); `meta` = `SpawnMeta` 40 B (nome/prio/porte, porte solo init); ritorna il canale di nascita o -1 |
+| 38 | `spawn_image(img, len, meta, metalen)` | come `spawn` ma il binario e' in memoria del chiamante (servizi da disco, Fase 21); `meta` = `SpawnMeta` 56 B (nome/prio/porte, porte solo init; S2.5e: `args_ptr`/`args_len` = blocco packed `[argc:8][envc:8][stringhe NUL]`, stesso formato di exec, zero = argc=0, layout via direct map); ritorna il canale di nascita o -1 |
 | 39 | `mmap(hint, len, prot, flags)` | mappa anonima privata nel basso canonico (Fase 28/29): VA subito, frame zero al primo fault; `hint` 0 = scelta kernel, `MMAP_FIXED` = piazza o fallisci; `prot` = `PROT_NONE`/`PROT_READ`/`PROT_READ\|PROT_WRITE` (W solo ed EXEC rifiutati); ritorna la base o -1 |
 | 40 | `munmap(addr, len)` | smappa VMA intere (Fase 28, niente split: parziali = -1 senza stato) → 0 o -1 |
 | 41 | `mprotect(addr, len, prot)` | cambia le protezioni di VMA intere (Fase 29): RO↔RW flippa il bit W, `PROT_NONE` fa cadere le pagine (riuso a zeri); stesse regole di `munmap`; ritorna 0 o -1 |

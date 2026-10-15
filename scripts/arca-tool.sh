@@ -93,6 +93,15 @@ if [ -f "$ROOT/pal/build/hello-std.bin" ]; then
     SEED_NS+=( "ns:test/stdhello.bin=$ROOT/pal/build/hello-std.bin" )
     echo "[arca] + stdhello (PAL)"
 fi
+# Fuse s25 (S2.5d): il binario che carica lo staticone da FAT. Solo chiave
+# obj `tst` (+ ns per ispezione): init lo carica per object_id come le altre
+# suite. (Il payload viaggia su FAT per linearita': obj_get su ArcaFS
+# materializza l'oggetto intero per slice — quadratico oltre i 16 MiB.)
+if [ -f "$ROOT/testland/build/users25fuse.bin" ]; then
+    SEED_NS+=( "ns:tool/s25fuse.bin=$ROOT/testland/build/users25fuse.bin" )
+    SEED_NS+=( "tst:tool/s25fuse.bin=$ROOT/testland/build/users25fuse.bin" )
+    echo "[arca] + s25fuse"
+fi
 # Script shell /test/sh (stessi di inject-bins.sh: *.txt + *.sh).
 for s in scripts/sh/*.txt scripts/sh/*.sh; do
     if [ ! -f "$ROOT/$s" ]; then

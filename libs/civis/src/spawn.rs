@@ -14,10 +14,12 @@ pub fn spawn(name: &[u8]) -> Result<i64, Error> {
     Ok(pid)
 }
 
-/// Metadati di `spawn_image` (Fase 21, servizi da disco): layout `repr(C)` da
-/// 40 B, identico allo `SpawnMeta` kernel (validato per size). Nome NUL-padded
+/// Metadati di `spawn_image` (Fase 21, servizi da disco; S2.5e: 56 B con
+/// argv): layout `repr(C)`, identico allo `SpawnMeta` kernel (validato per
+/// size). Nome NUL-padded
 /// (non vuoto, stampabile); `prio` 1..31; fino a 4 range I/O (start <= end);
-/// `flags` (Fase 22: solo `SPAWN_FLAG_DETACH`, resto riservato = 0).
+/// `flags` (Fase 22: `SPAWN_FLAG_DETACH`; S2.5d: `SPAWN_FLAG_BIGSTACK` via
+/// `.bigstack()`; resto riservato = 0).
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct SpawnMeta {
@@ -27,6 +29,10 @@ pub struct SpawnMeta {
     pub flags: u8,
     pub _pad: [u8; 5],
     pub io_ranges: [(u16, u16); 4],
+    /// S2.5e: blocco packed `[argc:8][envc:8][stringhe NUL]` (come exec);
+    /// zero = nessun argv → argc=0.
+    pub args_ptr: u64,
+    pub args_len: u64,
 }
 
 impl SpawnMeta {
@@ -44,6 +50,8 @@ impl SpawnMeta {
             flags: 0,
             _pad: [0u8; 5],
             io_ranges: [(0, 0); 4],
+            args_ptr: 0,
+            args_len: 0,
         };
         let bytes = name.as_bytes();
         let n = bytes.len().min(16);
@@ -59,6 +67,50 @@ impl SpawnMeta {
         self.flags |= SPAWN_FLAG_DETACH;
         self
     }
+
+    /// Stack largo per il figlio (S2.5d, `BIGSTACK_FRAMES`): per programmi
+    /// che vogliono MB di stack (lo staticone rustc). Scelta dello spawner
+    /// (builder, come `detached`), irrevocabile.
+    pub fn bigstack(mut self) -> Self {
+        self.flags |= SPAWN_FLAG_BIGSTACK;
+        self
+    }
+
+    /// Argv/env packed per il figlio (S2.5e, builder come gli altri flag):
+    /// `block` = `[argc:8][envc:8][stringhe NUL-terminate]` (stesso formato
+    /// di exec; vedi `pack_args` per costruirlo). Il blocco deve restare vivo
+    /// per tutta la `spawn_image` (il kernel lo copia dentro la syscall).
+    pub fn argv(mut self, block: &[u8]) -> Self {
+        self.args_ptr = block.as_ptr() as u64;
+        self.args_len = block.len() as u64;
+        self
+    }
+}
+
+/// Costruisce il blocco packed `[argc:8][envc:8][stringhe NUL]` per
+/// `SpawnMeta::argv` da fette di argomenti e ambiente (byte opachi, niente
+/// `NAME=val` imposto: la convenzione vive qui, mai nel kernel — ADR-0025).
+/// `None` se il totale supera `ARGS_MAX`.
+pub fn pack_args(argv: &[&[u8]], env: &[&[u8]]) -> Option<alloc::vec::Vec<u8>> {
+    let mut out = alloc::vec::Vec::new();
+    let argc = argv.len() as u64;
+    let envc = env.len() as u64;
+    if argc > 1024 || envc > 1024 {
+        return None;
+    }
+    out.extend_from_slice(&argc.to_le_bytes());
+    out.extend_from_slice(&envc.to_le_bytes());
+    for s in argv.iter().chain(env.iter()) {
+        if s.contains(&0) {
+            return None; // NUL interni proibiti (C-string)
+        }
+        out.extend_from_slice(s);
+        out.push(0);
+    }
+    if out.len() as u64 > ARGS_MAX + 16 {
+        return None;
+    }
+    Some(out)
 }
 
 /// `spawn_image(img, meta)`: come `spawn` ma il binario e' letto dalla memoria

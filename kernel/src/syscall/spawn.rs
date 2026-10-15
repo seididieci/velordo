@@ -33,10 +33,12 @@ pub(super) fn sys_spawn(name_ptr: u64, name_len: usize) -> i64 {
     }
 }
 
-/// Layout di `SpawnMeta` (Fase 21, 40 B, `repr(C)` anche in civis): nome NUL-
-/// padded (non vuoto), priorita', porte I/O + flags (Fase 22: solo DETACH).
-/// Il kernel valida tutto (init e' trusted ma il formato deve essere
-/// fail-loud, mai UB).
+/// Layout di `SpawnMeta` (Fase 21, 40 B, `repr(C)` anche in civis; S2.5e: 56 B
+/// con `args_ptr`/`args_len`): nome NUL-padded (non vuoto), priorita', porte
+/// I/O + flags (Fase 22: solo DETACH). `args_*` = blocco packed
+/// `[argc:8][envc:8][stringhe NUL]` (stesso formato di exec, 37.1.2; zero =
+/// nessun argv → argc=0). Il kernel valida tutto (init e' trusted ma il
+/// formato deve essere fail-loud, mai UB).
 #[repr(C)]
 struct SpawnMeta {
     name: [u8; 16],
@@ -45,11 +47,14 @@ struct SpawnMeta {
     flags: u8,
     _pad: [u8; 5],
     io_ranges: [(u16, u16); 4],
+    args_ptr: u64,
+    args_len: u64,
 }
 
 /// Immagine massima spawabile (Fase 39: single source in `syscall-numbers`,
-/// condivisa con `civis` che pre-valida): un singolo spawn non puo' svuotare
-/// il pool frame. Stesso bound per `exec` (Fase 37, stessa ragione).
+/// condivisa con `civis` che pre-valida; S2.5d: 128 MiB per lo staticone —
+/// lo spawn streama, il bound protegge il pool frame e i binari grandi
+/// vogliono `RUN_MEM` adeguata). Stesso bound per `exec` (Fase 37).
 pub(crate) use syscall_numbers::SPAWN_IMAGE_MAX;
 
 /// spawn_image(img_ptr, img_len, meta_ptr, meta_len): come `spawn` ma il
@@ -83,12 +88,52 @@ pub(super) fn sys_spawn_image(img_ptr: u64, img_len: usize, meta_ptr: u64, meta_
     if meta.name.iter().any(|&b| b != 0 && (b < 0x20 || b > 0x7e)) {
         return -1; // nome stampabile (ps/log), niente control byte
     }
-    // Flags (Fase 22): solo DETACH ammesso; i bit riservati devono essere 0
-    // (forward-compat: nuovi flag futuri restano rifiutati, mai ignorati).
-    if meta.flags & !syscall_numbers::SPAWN_FLAG_DETACH != 0 {
+    // Flags (Fase 22 + S2.5d): DETACH e BIGSTACK ammessi; i bit riservati
+    // devono essere 0 (forward-compat: nuovi flag futuri restano rifiutati,
+    // mai ignorati).
+    if meta.flags
+        & !(syscall_numbers::SPAWN_FLAG_DETACH | syscall_numbers::SPAWN_FLAG_BIGSTACK)
+        != 0
+    {
         return -1;
     }
     let detached = meta.flags & syscall_numbers::SPAWN_FLAG_DETACH != 0;
+    let stack_frames = if meta.flags & syscall_numbers::SPAWN_FLAG_BIGSTACK != 0 {
+        syscall_numbers::BIGSTACK_FRAMES as u32
+    } else {
+        crate::arc::vmm_user::USER_STACK_FRAMES as u32
+    };
+    // Argv packed (S2.5e, stesso formato di exec): copiato in heap kernel
+    // (stabile: niente TOCTOU) e validato PRIMA di creare nulla. Zero = argc=0.
+    let args_block: Option<alloc::vec::Vec<u8>> = if meta.args_len == 0 {
+        if meta.args_ptr != 0 {
+            return -1;
+        }
+        None
+    } else {
+        if meta.args_ptr == 0
+            || meta.args_len > syscall_numbers::ARGS_MAX + 16
+            || !crate::arc::vmm_user::is_user_range(meta.args_ptr, meta.args_len as usize)
+        {
+            crate::serial_println!("[syscall] spawn_image: args fuori range");
+            return -1;
+        }
+        let src =
+            unsafe { core::slice::from_raw_parts(meta.args_ptr as *const u8, meta.args_len as usize) };
+        let mut staged = alloc::vec::Vec::with_capacity(meta.args_len as usize);
+        staged.extend_from_slice(src);
+        Some(staged)
+    };
+    let parsed = match &args_block {
+        Some(b) => match crate::arc::vmm_user::parse_args(b) {
+            Some(p) => Some(p),
+            None => {
+                crate::serial_println!("[syscall] spawn_image: args malformati");
+                return -1;
+            }
+        },
+        None => None,
+    };
     // Porte I/O: solo init (pid 1). Gli altri processi girano senza porte
     // (solo init/disk/fs sono embedded, Fase 21: gli altri partono da disco
     // con le porte del manifest): chiederle = -1.
@@ -107,7 +152,8 @@ pub(super) fn sys_spawn_image(img_ptr: u64, img_len: usize, meta_ptr: u64, meta_
     }
     // S-T (T5): parent = leader del gruppo (vedi sys_spawn).
     let parent = crate::ordo::sched::group_leader(current_id() as usize);
-    let name_len = meta.name.iter().position(|&b| b == 0).unwrap_or(16);    match crate::user_binary::spawn_image(
+    let name_len = meta.name.iter().position(|&b| b == 0).unwrap_or(16);
+    match crate::user_binary::spawn_image(
         &meta.name[..name_len],
         prio,
         img_ptr as *const u8,
@@ -116,6 +162,8 @@ pub(super) fn sys_spawn_image(img_ptr: u64, img_len: usize, meta_ptr: u64, meta_
         None,
         &meta.io_ranges[..meta.io_count as usize],
         detached,
+        stack_frames,
+        parsed.as_ref(),
     ) {
         Some(pid) => {
             let disp = core::str::from_utf8(&meta.name[..name_len]).unwrap_or("?");

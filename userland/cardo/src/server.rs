@@ -44,8 +44,9 @@ const SYS_SEED: &[(&str, &[u8], &[u8])] = &[
     ("/fat/test/bench.bin", b"tst", b"test/bench.bin"),
 ];
 
-/// Bound seed: nessun servizio supera 256 KiB (stesso tetto di
-/// `spawn_image_from_vec` in init: cio' che non si puo' spawnare non si seeda).
+/// Bound seed: i servizi da FAT non superano 256 KiB (S2.5d: disaccoppiato
+/// da `SPAWN_IMAGE_MAX` — i binari grandi arrivano via seed host su arca,
+/// mai da FAT; cio' che passa da qui resta piccolo per scelta).
 const SYS_SEED_MAX: usize = 262144;
 
 /// Legge un file via mount interni (stesso resolve dei client, niente IPC).

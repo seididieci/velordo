@@ -47,6 +47,9 @@ build_one testland/bench testland/bench/src/bench.ld userbench.bin userbench
 # policy (gen-test-policy.sh lo salta per nome) per provare il default
 # restrittivo fail-closed sugli hash fuori manifest.
 build_one testland/foreign testland/foreign/src/foreign.ld userforeign.bin userforeign
+# Fuse staticone (S2.5d): ricompone i chunk rustc e lo spawna bigstack.
+# Mai nel gate (run dedicato RUN_S25=1).
+build_one testland/s25fuse testland/s25fuse/src/s25fuse.ld users25fuse.bin users25fuse
 
 # Suite test della personalita' POSIX (Fase 58.5, ADR-0041): binario in
 # flavours/posix/tests, output in flavours/posix/tests/build (BUILD override;
