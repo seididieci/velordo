@@ -255,8 +255,9 @@ impl ArcaFs {
         Ok(n)
     }
 
-    /// Scrittura con motore esplicito (`put_chunk(0)` = fresco: gli overlap
-    /// parziali passano da read-modify-write, l'append va diretto in coda).
+    /// Scrittura con motore esplicito (W1: UN solo `put_chunk` per op —
+    /// il patch e' interno al motore, mai merge in RAM qui; la size viene
+    /// da `stat`, mai rilettura integrale del blob).
     #[inline(never)]
     pub fn ns_write(
         &mut self,
@@ -269,23 +270,24 @@ impl ArcaFs {
         if buf.is_empty() {
             return Ok(0);
         }
-        let cur = crate::btree_drv::ns_get(eng, h.as_str().as_bytes()).ok_or(crate::ERR_NOTFOUND)?;
-        let at = if append { cur.len() } else { off };
-        if at == 0 && buf.len() >= cur.len() {
-            crate::btree_drv::ns_put(eng, h.as_str().as_bytes(), 0, buf)?;
-            return Ok(buf.len());
-        }
-        if at >= cur.len() {
+        let (size, _) =
+            crate::btree_drv::ns_stat(eng, h.as_str().as_bytes()).ok_or(crate::ERR_NOTFOUND)?;
+        let size = size as usize;
+        let at = if append { size } else { off };
+        if at != 0 || buf.len() >= size {
+            // Append / oltre-EOF / overlap interno / rewrite totale: un solo
+            // put (0 con buf coprente = versione fresca senza base; >0 =
+            // patch interna al motore).
             crate::btree_drv::ns_put(eng, h.as_str().as_bytes(), at, buf)?;
-            return Ok(buf.len());
+        } else {
+            // Prefix-overwrite parziale (at == 0, buf piu' corto del file):
+            // put_chunk(0) da solo troncherebbe — merge esplicito, unico caso
+            // che rilegge il blob.
+            let mut merged =
+                crate::btree_drv::ns_get(eng, h.as_str().as_bytes()).ok_or(crate::ERR_NOTFOUND)?;
+            merged[..buf.len()].copy_from_slice(buf);
+            crate::btree_drv::ns_put(eng, h.as_str().as_bytes(), 0, &merged)?;
         }
-        let mut merged = cur;
-        let end = at.checked_add(buf.len()).ok_or(crate::ERR_INVALID)?;
-        if merged.len() < end {
-            merged.resize(end, 0);
-        }
-        merged[at..end].copy_from_slice(buf);
-        crate::btree_drv::ns_put(eng, h.as_str().as_bytes(), 0, &merged)?;
         Ok(buf.len())
     }
 

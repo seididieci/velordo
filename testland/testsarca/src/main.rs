@@ -51,6 +51,8 @@
 //!  57. range read 100 KiB sequenziale a slice 4 KiB (S2.5f/F0: fixture
 //! `test/r57.bin` seedata da host, pattern posizionale + bound 300 tick —
 //! il materializza-e-slice era quadratico per slice).
+//!  58. prefix-overwrite parziale (W1: merge esplicito in `ns_write`,
+//! senza il quale `put_chunk(0)` troncherebbe la coda).
 //! Con `ARCA_IMG=1` (gate) i drive ci sono sempre; senza, solo 1-3 e 7-13
 //! adattivi e il resto saltato — n/n adattivo, mai FAIL per drive assente.
 
@@ -1130,6 +1132,32 @@ fn real_main(_sp: u64) -> ! {
             good && pos == BIG && dt >= 0 && dt < 300
         };
         c.ok("range 100KiB sequenziale", v57);
+        // 58. prefix-overwrite parziale (W1: write a offset 0 piu' corto
+        // del file — senza merge esplicito in ns_write, put_chunk(0)
+        // troncherebbe la coda).
+        let v58 = {
+            const SZ: usize = 8192;
+            const PRE: usize = 100;
+            let full: alloc::vec::Vec<u8> = (0..SZ).map(|i| (i % 251) as u8).collect();
+            let pre: alloc::vec::Vec<u8> =
+                (0..PRE).map(|i| (0xA5u8).wrapping_add(i as u8)).collect();
+            let mut good = civis::mkdir("/arca/r58").is_ok()
+                && wr_all("/arca/r58/f", civis::OPEN_CREATE, &full)
+                && wr_all("/arca/r58/f", civis::OPEN_CREATE, &pre);
+            match rd_all("/arca/r58/f") {
+                Some(v) => {
+                    good = good
+                        && v.len() == SZ
+                        && v[..PRE] == pre[..]
+                        && v[PRE..].iter().enumerate().all(|(i, b)| *b == ((PRE + i) % 251) as u8);
+                }
+                None => good = false,
+            }
+            let _ = civis::remove("/arca/r58/f");
+            let _ = civis::remove("/arca/r58");
+            good
+        };
+        c.ok("prefix-overwrite parziale", v58);
         // Cleanup best-effort (il volume resta pulito per i run dopo).
         let _ = civis::remove("/arca/keep/v");
         let _ = civis::remove("/arca/keep");

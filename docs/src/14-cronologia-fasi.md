@@ -2323,4 +2323,18 @@
           da host in UN put, il guest li legge; test57 testsarca ridisegnato
           su fixture seedata (100 KiB, 57/57). Host test sbloccati (un
           `Vec::new()` senza annotazione non compilava piu'). Gate 6/6.
-          Prossimo S2.5f/F1: staticone su ArcaFS.
+          S2.5w/W1 L0-lite (chiusa): strumentazione host (`CountStore` sopra
+          `MemStore`: baseline 128 append da 4 KiB = 68K op blocco, ~136 per
+          write); `ns_write` a UN `put_chunk` (size da `stat`, mai rilettura
+          integrale; in guest dimezza quasi le letture per append) e
+          `ov_write` con link all'indietro (ogni blocco scritto UNA volta:
+          wr == alloc nei numeri; invariante "scritto = immutabile" per la
+          cache W3). Dopo: 50K op (-26%), bound regressione in test (host
+          17/17). Correzioni di rotta: quota-skip inutile (`quota_check`
+          salta gia' il walk senza quota — le quote test sono su `q5*`, mai
+          `ns`); bug vero trovato rileggendo (prefix-overwrite a offset 0
+          con buf corto troncherebbe via `put_chunk(0)` = versione fresca):
+          merge esplicito solo in quel caso + test58 dedicato (58/58).
+          Flake: `log seal + delete` FAIL 1/3 run (re-run verde; timing,
+          segnato). Gate 6/6.
+          Prossimo S2.5w/W2: extent dinamici.

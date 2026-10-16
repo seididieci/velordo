@@ -7,7 +7,7 @@
 # shell) e rimanda a run.sh. Righe attese + zero FAIL/PANIC/FAULT:
 #   [testfs] PASS 5/5
 #   [testfat] PASS 7/7
-#   [testsarca] PASS 57/57
+#   [testsarca] PASS 58/58
 #   [posixtests] PASS 4/4
 #   [usertests] PASS 58/58
 #   [threadtest] PASS 12/12

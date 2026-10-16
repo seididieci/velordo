@@ -395,38 +395,35 @@ fn ov_write<S: BlockStore>(
     if data.is_empty() {
         return None;
     }
-    let mut head = 0u64;
-    let mut prev = 0u64;
-    let mut rest = data;
-    let size = data.len() as u64;
-    while !rest.is_empty() {
-        let take = rest.len().min(OV_CHUNK);
+    // Prealloca tutti i blocchi, poi scrivi dal FONDO col `next` gia' noto:
+    // ogni nodo e' scritto UNA volta sola (niente patch read-modify-write).
+    // INVARIANTE (W1, fonda la cache W3): un nodo scritto non viene mai piu'
+    // mutato — solo radici/xhdr/freelist/superblock mutano in place.
+    // Fallimento a meta': nodi orfani per la GC (come prima, mai rollback).
+    let n = data.len().div_ceil(OV_CHUNK);
+    let mut blks = Vec::with_capacity(n);
+    for _ in 0..n {
         let blk = store.alloc()?;
         if blk == 0 {
             return None;
         }
-        // Buffer heap (regola §18: 3.5K stack qui + catena write sotto).
-        let mut payload = format::boxed_node();
-        payload[..8].copy_from_slice(&0u64.to_le_bytes()); // next, patchato sotto
-        payload[8..8 + take].copy_from_slice(&rest[..take]);
-        if !store.write_node(blk, ARCA_NODE_TYPE_RAW, gen, &payload) {
+        blks.push(blk);
+    }
+    let size = data.len() as u64;
+    // Buffer heap riusato (regola §18, mai 3.5K stack).
+    let mut payload = format::boxed_node();
+    for (i, blk) in blks.iter().enumerate().rev() {
+        let base = i * OV_CHUNK;
+        let take = (data.len() - base).min(OV_CHUNK);
+        let next = if i + 1 < n { blks[i + 1] } else { 0 };
+        payload[..8].copy_from_slice(&next.to_le_bytes());
+        payload[8..8 + take].copy_from_slice(&data[base..base + take]);
+        payload[8 + take..].fill(0); // coda zero come i buffer freschi di prima
+        if !store.write_node(*blk, ARCA_NODE_TYPE_RAW, gen, &payload) {
             return None;
         }
-        if prev != 0 {
-            // Patch next del precedente: rileggi, aggiorna, riscrivi.
-            let mut pb = format::boxed_node();
-            store.read_node(prev, &mut pb)?;
-            pb[..8].copy_from_slice(&blk.to_le_bytes());
-            if !store.write_node(prev, ARCA_NODE_TYPE_RAW, gen, &pb) {
-                return None;
-            }
-        } else {
-            head = blk;
-        }
-        prev = blk;
-        rest = &rest[take..];
     }
-    Some((head, size))
+    Some((blks[0], size))
 }
 
 fn ov_read<S: BlockStore>(store: &S, head: u64, size: usize) -> Option<Vec<u8>> {
@@ -2328,6 +2325,95 @@ mod tests {
         let (len, part) = t.get_range(b"r", b"seq", 65536, 4096).unwrap();
         assert_eq!(len, expect.len());
         assert_eq!(part.as_slice(), &expect[65536..65536 + part.len()]);
+    }
+
+    /// Decoratore di conteggio op blocco (W1 strumentazione): misura il costo
+    /// algoritmico dei write senza rumore guest (in guest ogni op = IPC+PIO).
+    /// I bound sotto sono tarati sui numeri post-fix (guardia regressione);
+    /// i numeri assoluti si leggono con `-- --nocapture`.
+    struct CountStore<S> {
+        inner: S,
+        rd: core::cell::Cell<usize>,
+        wr: core::cell::Cell<usize>,
+        al: core::cell::Cell<usize>,
+        fr: core::cell::Cell<usize>,
+    }
+
+    impl<S> CountStore<S> {
+        fn new(inner: S) -> Self {
+            Self {
+                inner,
+                rd: core::cell::Cell::new(0),
+                wr: core::cell::Cell::new(0),
+                al: core::cell::Cell::new(0),
+                fr: core::cell::Cell::new(0),
+            }
+        }
+        fn counts(&self) -> (usize, usize, usize, usize) {
+            (self.rd.get(), self.wr.get(), self.al.get(), self.fr.get())
+        }
+    }
+
+    impl<S: BlockStore> BlockStore for CountStore<S> {
+        fn read_node(&self, blk: u64, out: &mut [u8; ARCA_NODE_PAYLOAD_LEN]) -> Option<(u8, u64)> {
+            self.rd.set(self.rd.get() + 1);
+            self.inner.read_node(blk, out)
+        }
+        fn write_node(
+            &mut self,
+            blk: u64,
+            ty: u8,
+            gen: u64,
+            payload: &[u8; ARCA_NODE_PAYLOAD_LEN],
+        ) -> bool {
+            self.wr.set(self.wr.get() + 1);
+            self.inner.write_node(blk, ty, gen, payload)
+        }
+        fn alloc(&mut self) -> Option<u64> {
+            self.al.set(self.al.get() + 1);
+            self.inner.alloc()
+        }
+        fn free(&mut self, blk: u64) -> bool {
+            self.fr.set(self.fr.get() + 1);
+            self.inner.free(blk)
+        }
+    }
+
+    #[test]
+    fn write_append_opcount() {
+        // 128 append sequenziali da 4 KiB (512 KiB finali): il pattern che
+        // in guest era quadratico (test57 originale inchiodato a 64 KiB).
+        let mut t = BTree::new(CountStore::new(MemStore::new()), 1).expect("new");
+        let mut off = 0usize;
+        for k in 0..128usize {
+            let chunk: Vec<u8> = (0..4096).map(|i| ((k * 4096 + i) % 251) as u8).collect();
+            assert_eq!(t.put_chunk(b"w", b"seq", off, &chunk, k as u64, 8), Some(4096));
+            off += 4096;
+        }
+        assert_eq!(t.get(b"w", b"seq").map(|v| v.len()), Some(128 * 4096));
+        let (rd, wr, al, fr) = t.store.counts();
+        println!("[opcount] append128x4K rd={rd} wr={wr} alloc={al} free={fr}");
+        // Bound post-W1 (+~25% sui misurati 20869/9963/9963/8432): ogni
+        // blocco allocato e' scritto una sola volta (wr == alloc); un
+        // rewrite-e-patch reintrodotto farebbe saltare wr oltre alloc.
+        assert!(rd <= 26000 && wr <= 12500 && al <= 12500 && fr <= 10600);
+        assert_eq!(wr, al);
+    }
+
+    #[test]
+    fn write_rewrite_opcount() {
+        // 10 rewrite totali da 64 KiB (esercita trim oltre retain=8).
+        let mut t = BTree::new(CountStore::new(MemStore::new()), 1).expect("new");
+        let big: Vec<u8> = (0..65536).map(|i| (i % 251) as u8).collect();
+        for k in 0..10u64 {
+            assert_eq!(t.put_chunk(b"w", b"big", 0, &big, k, 8), Some(65536));
+        }
+        assert_eq!(t.get(b"w", b"big").map(|v| v.len()), Some(65536));
+        let (rd, wr, al, fr) = t.store.counts();
+        println!("[opcount] rewrite10x64K rd={rd} wr={wr} alloc={al} free={fr}");
+        // Bound post-W1 (+~25% sui misurati 367/215/215/38).
+        assert!(rd <= 460 && wr <= 270 && al <= 270 && fr <= 50);
+        assert_eq!(wr, al);
     }
 
     #[test]

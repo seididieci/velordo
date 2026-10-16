@@ -248,10 +248,41 @@ Voci con scope e vittoria dichiarati (non date).
        `current_id()` pre-init: mai println prima di `init.init()`).
        S2.5e spawn argv (`SpawnMeta` 56 B, layout dual-base via direct map)
        + `--version` in guest (`rustc 1.100.0-nightly`, exit 0) chiusa,
-       gate 6/6 (57/57 testsarca con range test). S2.5f/F0 range read
+        gate 6/6 (58/58 testsarca con range + prefix-overwrite test).
+        S2.5f/F0 range read
        ArcaFS chiusa (cursore LRU, invalidazione su mutazione; append
        guest-side O(n^2) documentato: file grandi solo da seed host).
-       Prossimo: S2.5f/F1 (staticone su ArcaFS) + F2 (mini-sysroot).
+        Prossimo: S2.5w (W1–W5, voce sotto) poi S2.5f/F1 (staticone su
+        ArcaFS) + F2 (mini-sysroot).
+- [ ] **S2.5w scrittura ArcaFS** (extent variabili + cache cardo + epoche
+      minime; prima di S2.5f/F1: il write path O(n^2) non regge sysroot e
+      output rustc in guest): W1 L0-lite + invariante immutabilita' CHIUSA
+      (stat-vs-get in `ns_write` con merge esplicito nel prefix-overwrite,
+      `ov_write` con link all'indietro; baseline op-count host 68K→50K op
+      (-26%), bound regressione in test; quota-skip non serve: `quota_check`
+      salta gia' il walk a bucket senza quota; test58 prefix-overwrite,
+      gate 6/6); W2 extent
+      dinamici senza tabella (extent = run contiguo dall'allocatore con
+      affinita' ultimo-run + contiguita' best-effort, tetto 256 blocchi;
+      codec EXTENT 12 entry inline + spill su nodo MAP, kind PACKED riservato
+      loud + ADR formato; write tocca solo gli extent coperti, condivisione
+      tra versioni, free-via-liveness-al-trim su ≤8 mappe; read duale
+      OV/extent, prima write migra; `ARCA_VERSION` 1→2 senza retrocompat;
+      istogramma extent in `ARCA_DEBUG` + distribuzione seed sysroot in
+      testsarca); W3 cache in cardo (wrapper `BlockStore` LRU a fasce R0
+      metadati taggati dal motore / R1 MFU a 2 bit / R2, sizing da
+      `SYS_MEMINFO`, readahead da pattern ftable + manopola tipo disco,
+      serve-from-cache no-copy nel response ring, hook `pin()` riservato);
+      W4 epoche minime (commit batching su soglia dirty 256K + close di fd
+      dirty + shutdown, SYNC esplicita fd/volume, semantica crash
+      documentata, test kill-mid-epoch con recovery via GC); W5 packing
+      sub-blocco stesso-bucket (banda (512,3560], 1 oggetto = 1 slice,
+      bump-alloc, free via sweep GC/trim; oltre il blocco → extent, solo
+      verso l'alto; misura spazio sysroot). Follow-up espliciti non
+      promessi: clustering chiavi, shrinker kernel→cardo, defrag, hint
+      allocsize-style, ZIL/log-tree (solo se fsync di S2.5 lo chiede).
+      Vittoria: gate 6/6 a ogni sottofase + append 2MB lineare (bound
+      test57 stretto) + N file piccoli in M<N blocchi dati.
 
 ## Parcheggiate
 
