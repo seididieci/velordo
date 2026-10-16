@@ -2364,4 +2364,19 @@
           IPC/driver sotto carico sostenuto, mai esercitato prima dei 64K;
           engine escluso: op tutte I/O-bound o RAM-bounded + recovery pulita
           nei fail veloci). Gate 6/6 (59/59 + host 24/24).
-          Prossimo S2.5w/W3: cache in cardo.
+          S2.5w/W3 cache write-through (chiusa, ADR-0051): un livello nel
+          `VolumeStore` (classi dal tipo nodo, mai tagging dal motore),
+          MFU 2-bit + aging + LRU a contatore, cap da `SYS_MEMINFO`,
+          evict-on-free, hit/reads in XSTATS. Misure: hit 99.8%
+          (34324/34385), test59 1100→~850 tick. Niente readahead: col
+          sincrono non riduce ne' totale letture ne' numero op (stesso lavoro,
+          solo anticipato) — si rivede con async/epoche. Caccia grossa:
+          cardo fault 139 deterministico a ogni boot (guard page stack,
+          `#PF write` a 16K+8): catena real_main/handle_get_hash/
+          hash_of_provider (4.8K+4.5K+4.8K misurati con `-Z emit-stack-sizes`;
+          hash_of_provider senza `#[inline(never)]`) — buffer 4K in heap
+          + firewall (handle_read resta stack per disegno: churn heap
+          documentato). Lezione: ogni crescita di cardo va misurata contro
+          i 16 KiB (LTO sposta i margini in silenzio). Gate 6/6 (i 139 di
+          `utcli` sono fault-injection attesi).
+          Prossimo S2.5w/W4: epoche minime.

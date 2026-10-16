@@ -735,16 +735,22 @@ pub fn handle_disk_info(
 /// Legge tutto il file via trait `read` a chunk 4K e ne calcola BLAKE2s-256
 /// (Fase 54, opzione A compute-on-query: nessuno stato, nessuno store).
 /// `open`+`read`+`close` (close no-op) sul provider risolto; EOF = fine.
+/// Buffer in heap (W3: 4K stack qui + 4K nel chiamante + dispatch sfondavano
+/// i 16 KiB — firewall + niente array KiB per-valore, regola §18).
+#[inline(never)]
 fn hash_of_provider(
     d: &mut dyn crate::provider::LocalFsDyn,
     rel: &str,
 ) -> Result<[u8; 32], u64> {
     let h = d.open_dyn(rel, 0)?;
     let mut hasher = blake2s::Hasher::new();
-    let mut buf = [0u8; 4096];
+    // `new_zeroed` azzera in heap (mai `[0u8; 4096]` letterale: 4K transienti
+    // sullo stack prima del move — vedi `format::boxed_node`).
+    let mut buf: alloc::boxed::Box<[u8; 4096]> =
+        unsafe { alloc::boxed::Box::new_zeroed().assume_init() };
     let mut off = 0usize;
     loop {
-        let n = d.read_dyn(h, off, &mut buf)?;
+        let n = d.read_dyn(h, off, &mut buf[..])?;
         if n == 0 {
             break;
         }
@@ -799,12 +805,14 @@ pub fn handle_get_hash(
         Some(mount_legacy::FsKind::Fat) | Some(mount_legacy::FsKind::Local) => Err(ERR),
         Some(mount_legacy::FsKind::Ram) => {
             // ramfs radice: hash via trait `LocalFs` diretta (open+read loop).
+            // Buffer in heap come sopra (stessa catena: dispatch → qui).
             let h = LocalFs::open(fs, path, 0)?;
             let mut hasher = blake2s::Hasher::new();
-            let mut buf = [0u8; 4096];
+            let mut buf: alloc::boxed::Box<[u8; 4096]> =
+                unsafe { alloc::boxed::Box::new_zeroed().assume_init() };
             let mut off = 0usize;
             loop {
-                let n = LocalFs::read(fs, h, off, &mut buf)?;
+                let n = LocalFs::read(fs, h, off, &mut buf[..])?;
                 if n == 0 {
                     break;
                 }

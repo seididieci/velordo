@@ -1234,11 +1234,11 @@ fn real_main(_sp: u64) -> ! {
             good && pos == TOTAL && dt >= 0 && dt < 3000
         };
         c.ok("append 512KiB sequenziale", v59);
-        // Istogramma layout valori (W2 tuning): informativo, mai FAIL.
+        // Istogramma layout + cache (W2/W3 tuning): informativo, mai FAIL.
         match civis::arca_extent_stats() {
-            Ok((ne, en, mx, ov, ii)) => println!(
-                "[testsarca] xstats: extent={} entries={} max={} legacy_ov={} inline={}",
-                ne, en, mx, ov, ii
+            Ok((ne, en, mx, ov, ii, hits, reads)) => println!(
+                "[testsarca] xstats: extent={} entries={} max={} legacy_ov={} inline={} hits={} reads={}",
+                ne, en, mx, ov, ii, hits, reads
             ),
             Err(_) => println!("[testsarca] xstats: N/D"),
         }

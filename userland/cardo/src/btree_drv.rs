@@ -17,8 +17,8 @@
 use super::*;
 use arcafs::btree::{BlockStore, BTree, TREE_PRIMARY, TREE_REFCOUNT, TREE_SECONDARY};
 use arcafs::format::{
-    self, ARCA_NODE_PAYLOAD_LEN, ARCA_NODE_TYPE_INTERNAL, ARCA_NODE_TYPE_LEAF,
-    ARCA_XH_DIRTY,
+    self, ARCA_NODE_PAYLOAD_LEN, ARCA_NODE_TYPE_DATA, ARCA_NODE_TYPE_INTERNAL,
+    ARCA_NODE_TYPE_LEAF, ARCA_NODE_TYPE_MAP, ARCA_NODE_TYPE_RAW, ARCA_XH_DIRTY,
 };
 use alloc::boxed::Box;
 
@@ -29,12 +29,141 @@ pub const SECONDARY_ROOT: u64 = 2;
 /// Versioni trattenute per oggetto (56.1: 8; A3 con la quota vera rivaluta).
 const RETAIN: usize = 8;
 
-/// Adattatore volume → `BlockStore`: possiede `ArcaVolume` (un solo handle).
-/// I/O diretto senza cache (56.2b: correttezza prima; la cache write-through
-/// LRU da 256 nodi arriva col tuning coi numeri, non a stima — a scala gate
-/// ogni op tocca pochi nodi e il costo e' solo latenza, mai correttezza).
+/// Adattatore volume → `BlockStore`: possiede `ArcaVolume` (un solo handle)
+/// + cache nodi write-through (W3, sotto: tuning coi numeri arrivato).
+// ── Cache nodi write-through (W3, ADR-0051) ─────────────────────────────
+// Un solo livello, qui (mai nel motore: niente double buffering). Chiave =
+// numero blocco; classi inferite dal tipo nodo (LEAF/INTERNAL/MAP = metadati
+// R0, RAW/DATA = dati R2); frequenza MFU a 2 bit con aging; LRU a contatore
+// (niente clock). Write-through (mai dirty): l'evict e' un drop — reclaim
+// banale, niente flush (il write-back ordinato e' lavoro delle epoche W4).
+// Coerenza: i blocchi scritti non mutano mai (invariante W1; solo radici/
+// xhdr/freelist mutano, via API settori che bypassa la cache); `free`
+// sfratta (i numeri riciclati non devono mai servire stale).
+
+/// Classe retain (il tipo decide la fascia, la frequenza promuove a caldo;
+/// classe 2 PIN riservata al futuro hook `pin()`: mai sfrattata).
+const CACHE_META: u8 = 0; // R0: nodi indice/mappe, sfrattati per ultimi
+const CACHE_DATA: u8 = 1; // R2: dati, vittime prime
+
+/// Fascia dal tipo nodo (politica, mai semantica: i futuri restano cold).
+fn node_class(ty: u8) -> u8 {
+    match ty {
+        ARCA_NODE_TYPE_LEAF | ARCA_NODE_TYPE_INTERNAL | ARCA_NODE_TYPE_MAP => CACHE_META,
+        ARCA_NODE_TYPE_RAW | ARCA_NODE_TYPE_DATA => CACHE_DATA, // legacy/scaffold + extent
+        _ => CACHE_DATA, // tipi futuri: cold di default
+    }
+}
+
+struct CacheEntry {
+    ty: u8,
+    generation: u64,
+    payload: Box<[u8; ARCA_NODE_PAYLOAD_LEN]>,
+    class: u8,
+    freq: u8, // 0..3 saturante
+    last: u64, // LRU logico
+}
+
+struct NodeCache {
+    map: BTreeMap<u64, CacheEntry>,
+    cap: usize,
+    clock: u64,
+    hits: u64,
+    reads: u64,
+}
+
+impl NodeCache {
+    /// Cap da `SYS_MEMINFO` (1/8 della libera in blocchi, [256..16384]):
+    /// cresce da sola fino al tetto via LRU, mai oltre.
+    fn new() -> Self {
+        let (free, _, _) = civis::meminfo();
+        let blocks = free.saturating_mul(4096) / 8 / arcafs::format::ARCA_BLOCK_SIZE as u64;
+        Self { map: BTreeMap::new(), cap: (blocks as usize).clamp(256, 16384), clock: 0, hits: 0, reads: 0 }
+    }
+
+    fn get(&mut self, blk: u64, out: &mut [u8; ARCA_NODE_PAYLOAD_LEN]) -> Option<(u8, u64)> {
+        self.reads += 1;
+        self.clock += 1;
+        let clock = self.clock;
+        match self.map.get_mut(&blk) {
+            Some(e) => {
+                self.hits += 1;
+                e.freq = (e.freq + 1).min(3);
+                e.last = clock;
+                out.copy_from_slice(&e.payload[..]);
+                Some((e.ty, e.generation))
+            }
+            None => None,
+        }
+    }
+
+    /// Write-through: aggiorna/inserisce (mai dirty). Sfratta prima se pieno.
+    fn put(&mut self, blk: u64, ty: u8, generation: u64, payload: &[u8; ARCA_NODE_PAYLOAD_LEN]) {
+        self.clock += 1;
+        let clock = self.clock;
+        match self.map.get_mut(&blk) {
+            Some(e) => {
+                e.ty = ty;
+                e.generation = generation;
+                e.payload.copy_from_slice(payload);
+                e.class = node_class(ty);
+                e.freq = (e.freq + 1).min(3);
+                e.last = clock;
+            }
+            None => {
+                if self.map.len() >= self.cap {
+                    self.evict_one();
+                }
+                let mut p = format::boxed_node();
+                p.copy_from_slice(payload);
+                self.map.insert(
+                    blk,
+                    CacheEntry { ty, generation, payload: p, class: node_class(ty), freq: 1, last: clock },
+                );
+            }
+        }
+    }
+
+    /// Vittima: classe max prima (DATA fuori, META resta), poi freq min,
+    /// poi meno recente. Aging: dimezza freq a ogni scansione.
+    fn evict_one(&mut self) {
+        for e in self.map.values_mut() {
+            e.freq /= 2;
+        }
+        let mut victim: Option<u64> = None;
+        let mut b_class = 0u8;
+        let mut b_freq = 0u8;
+        let mut b_last = u64::MAX;
+        let mut first = true;
+        for (blk, e) in self.map.iter() {
+            let worse = first
+                || e.class > b_class
+                || (e.class == b_class && (e.freq < b_freq || (e.freq == b_freq && e.last < b_last)));
+            if worse {
+                victim = Some(*blk);
+                b_class = e.class;
+                b_freq = e.freq;
+                b_last = e.last;
+                first = false;
+            }
+        }
+        if let Some(b) = victim {
+            self.map.remove(&b);
+        }
+    }
+
+    fn evict(&mut self, blk: u64) {
+        self.map.remove(&blk);
+    }
+}
+
+/// Adattatore volume → `BlockStore`: possiede `ArcaVolume` (un solo handle,
+/// freelist/xh mai divergenti) + cache nodi (sopra). Ogni accesso nodo
+/// passa dalla cache (coerente per costruzione: write-through + sfratto
+/// alla free); settori/xhdr/superblock la bypassano (sempre freschi).
 pub struct VolumeStore {
     vol: crate::volume::ArcaVolume,
+    cache: core::cell::RefCell<NodeCache>,
 }
 
 /// Motore disco: B+tree sopra `VolumeStore` (tutto owned, niente lifetime).
@@ -42,7 +171,14 @@ pub type DiskEngine = BTree<VolumeStore>;
 
 impl VolumeStore {
     pub fn new(vol: crate::volume::ArcaVolume) -> Self {
-        Self { vol }
+        Self { vol, cache: core::cell::RefCell::new(NodeCache::new()) }
+    }
+
+    /// (hit, letture) cache nodi per XSTATS (W3 tuning).
+    #[inline(never)]
+    pub fn cache_stats(&self) -> (u64, u64) {
+        let c = self.cache.borrow();
+        (c.hits, c.reads)
     }
 
     /// Volume per le op RAW di scaffold e il commit (stesso handle del
@@ -73,7 +209,12 @@ impl BlockStore for VolumeStore {
         blk: u64,
         out: &mut [u8; ARCA_NODE_PAYLOAD_LEN],
     ) -> Option<(u8, u64)> {
-        self.vol.read_node(blk, out)
+        if let Some(v) = self.cache.borrow_mut().get(blk, out) {
+            return Some(v);
+        }
+        let r = self.vol.read_node(blk, out)?;
+        self.cache.borrow_mut().put(blk, r.0, r.1, out);
+        Some(r)
     }
 
     #[inline(never)]
@@ -84,7 +225,12 @@ impl BlockStore for VolumeStore {
         generation: u64,
         payload: &[u8; ARCA_NODE_PAYLOAD_LEN],
     ) -> bool {
-        self.vol.write_node(blk, ty, generation, payload)
+        // Write-through: prima il disco (a errore niente cache), poi la entry.
+        if !self.vol.write_node(blk, ty, generation, payload) {
+            return false;
+        }
+        self.cache.borrow_mut().put(blk, ty, generation, payload);
+        true
     }
 
     #[inline(never)]
@@ -94,6 +240,8 @@ impl BlockStore for VolumeStore {
 
     #[inline(never)]
     fn free(&mut self, blk: u64) -> bool {
+        // Sfratto prima: il numero riciclato non deve mai servire stale.
+        self.cache.borrow_mut().evict(blk);
         self.vol.free(blk)
     }
 
@@ -612,11 +760,13 @@ pub fn ns_get_range(
         .map(|(len, v)| (len as u64, v))
 }
 
-/// XSTATS (W2): istogramma layout valori del motore
-/// (n_extent, entries, max_entry, n_legacy_ov, n_inline). Solo motore disco.
+/// XSTATS (W2 istogramma + W3 cache): (n_extent, entries, max_entry,
+/// n_legacy_ov, n_inline, cache_hit, cache_reads). Solo motore disco.
 #[inline(never)]
-pub fn disk_xstats(eng: &DiskEngine) -> Option<(u64, u64, u64, u64, u64)> {
-    eng.extent_stats()
+pub fn disk_xstats(eng: &DiskEngine) -> Option<(u64, u64, u64, u64, u64, u64, u64)> {
+    let (ne, en, mx, ov, ii) = eng.extent_stats()?;
+    let (hits, reads) = eng.store.cache_stats();
+    Some((ne, en, mx, ov, ii, hits, reads))
 }
 
 /// STAT namespace: (size head, mtime head). Assente = `None`.

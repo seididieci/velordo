@@ -422,27 +422,22 @@ pub fn arca_quota_get(bucket: &[u8]) -> Result<(u64, u64), Error> {
     }
 }
 
-/// Istogramma layout valori ArcaFS (W2 debug/tuning): (oggetti extent,
-/// entry totali, max entry singolo, legacy OV, inline).
-pub fn arca_extent_stats() -> Result<(u64, u64, u64, u64, u64), Error> {
+/// Istogramma layout valori ArcaFS + cache (W2/W3 debug/tuning):
+/// (oggetti extent, entry totali, max entry singolo, legacy OV, inline,
+/// cache hit, cache reads).
+pub fn arca_extent_stats() -> Result<(u64, u64, u64, u64, u64, u64, u64), Error> {
     let (ne, en, _) = arca_request(ARCA_SUB_XSTATS, &[])?;
     match fs_reply_check(ne).and(fs_reply_check(en)) {
         Ok(_) => {
-            let mut f = [0u8; 24];
-            resp_ring_read_payload(&mut f, 24);
-            let mut mx = [0u8; 8];
-            let mut ov = [0u8; 8];
-            let mut ii = [0u8; 8];
-            mx.copy_from_slice(&f[..8]);
-            ov.copy_from_slice(&f[8..16]);
-            ii.copy_from_slice(&f[16..24]);
-            Ok((
-                ne,
-                en,
-                u64::from_le_bytes(mx),
-                u64::from_le_bytes(ov),
-                u64::from_le_bytes(ii),
-            ))
+            let mut f = [0u8; 40];
+            resp_ring_read_payload(&mut f, 40);
+            let mut u = [0u8; 8];
+            let mut vals = [0u64; 5];
+            for (i, v) in vals.iter_mut().enumerate() {
+                u.copy_from_slice(&f[i * 8..(i + 1) * 8]);
+                *v = u64::from_le_bytes(u);
+            }
+            Ok((ne, en, vals[0], vals[1], vals[2], vals[3], vals[4]))
         }
         Err(e) => {
             resp_ring_consume(16);

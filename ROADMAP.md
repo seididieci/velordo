@@ -271,11 +271,12 @@ Voci con scope e vittoria dichiarati (non date).
       tick; retry throttled ring cardo→block contro backpressure burst;
       bug trovati: riuso nodi MAP in avanti insano, double-free su drop
       multipli, seqs_of cieca ai buchi pinnati, fresh-truncate perso nel
-      ramo Ext, stima quota; gate 6/6); W3 cache in cardo (wrapper `BlockStore` LRU a fasce R0
-      metadati taggati dal motore / R1 MFU a 2 bit / R2, sizing da
-      `SYS_MEMINFO`, readahead da pattern ftable + manopola tipo disco,
-      serve-from-cache no-copy nel response ring, hook `pin()` riservato);
-      W4 epoche minime (commit batching su soglia dirty 256K + close di fd
+      ramo Ext, stima quota; gate 6/6); W3 cache in cardo CHIUSA (ADR-0051:
+      write-through a un livello nel `VolumeStore`, classi dal tipo nodo,
+      MFU 2-bit + LRU, cap da `SYS_MEMINFO`, evict-on-free, hit/reads in
+      XSTATS: hit 99.8% in gate, test59 1100→~850 tick; niente readahead
+      sincrono (beneficio zero); stack hash in heap + firewall dopo caccia
+      con `-Z emit-stack-sizes`; gate 6/6); W4 epoche minime (commit batching su soglia dirty 256K + close di fd
       dirty + shutdown, SYNC esplicita fd/volume, semantica crash
       documentata, test kill-mid-epoch con recovery via GC); W5 packing
       sub-blocco stesso-bucket (banda (512,3560], 1 oggetto = 1 slice,
