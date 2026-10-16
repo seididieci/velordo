@@ -248,7 +248,10 @@ Voci con scope e vittoria dichiarati (non date).
        `current_id()` pre-init: mai println prima di `init.init()`).
        S2.5e spawn argv (`SpawnMeta` 56 B, layout dual-base via direct map)
        + `--version` in guest (`rustc 1.100.0-nightly`, exit 0) chiusa,
-       gate 6/6. Prossimo: S2.5f (mini-sysroot + prima compilazione).
+       gate 6/6 (57/57 testsarca con range test). S2.5f/F0 range read
+       ArcaFS chiusa (cursore LRU, invalidazione su mutazione; append
+       guest-side O(n^2) documentato: file grandi solo da seed host).
+       Prossimo: S2.5f/F1 (staticone su ArcaFS) + F2 (mini-sysroot).
 
 ## Parcheggiate
 

@@ -239,17 +239,19 @@ impl ArcaFs {
     #[inline(never)]
     pub fn ns_read(
         &mut self,
-        eng: &DiskEngine,
+        eng: &mut DiskEngine,
         h: ArcaHandle,
         off: usize,
         buf: &mut [u8],
     ) -> Result<usize, u64> {
-        let data = crate::btree_drv::ns_get(eng, h.as_str().as_bytes()).ok_or(crate::ERR_NOTFOUND)?;
-        if off >= data.len() {
+        // S2.5f/F0: range (mai blob intero per slice).
+        let (len, data) = crate::btree_drv::ns_get_range(eng, h.as_str().as_bytes(), off, buf.len())
+            .ok_or(crate::ERR_NOTFOUND)?;
+        if off >= len as usize {
             return Ok(0);
         }
-        let n = (data.len() - off).min(buf.len());
-        buf[..n].copy_from_slice(&data[off..off + n]);
+        let n = data.len().min(buf.len());
+        buf[..n].copy_from_slice(&data[..n]);
         Ok(n)
     }
 

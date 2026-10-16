@@ -144,7 +144,7 @@ velordo/
 
 ## Stato corrente
 
-Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 56/56` + `[posixtests] PASS 4/4` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12` + shell (10/10 fasi via `test-shell-all.sh`), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`).
+Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 57/57` + `[posixtests] PASS 4/4` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12` + shell (10/10 fasi via `test-shell-all.sh`), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`).
 
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-55, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
@@ -346,7 +346,7 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 # Suite di regressione (boot): 6 righe PASS attese e ZERO FAIL/PANIC
 #   [testfs] PASS 5/5
 #   [testfat] PASS 7/7
-#   [testsarca] PASS 56/56
+#   [testsarca] PASS 57/57
 #   [posixtests] PASS 4/4
 #   [usertests] PASS 58/58
 #   [threadtest] PASS 12/12

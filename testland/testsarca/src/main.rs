@@ -48,6 +48,9 @@
 //!  48. OPEN_TRUNC + OPEN_APPEND (56.3)
 //!  49. delete file: dir resta (RAM), rmdir ok, stat sparita (56.3)
 //!  50. bounce cardo + remount: file intatti, vuote perse (56.3)
+//!  57. range read 100 KiB sequenziale a slice 4 KiB (S2.5f/F0: fixture
+//! `test/r57.bin` seedata da host, pattern posizionale + bound 300 tick —
+//! il materializza-e-slice era quadratico per slice).
 //! Con `ARCA_IMG=1` (gate) i drive ci sono sempre; senza, solo 1-3 e 7-13
 //! adattivi e il resto saltato — n/n adattivo, mai FAIL per drive assente.
 
@@ -1080,6 +1083,53 @@ fn real_main(_sp: u64) -> ! {
         let _ = civis::remove("/arca/s56/dang");
         let _ = civis::remove("/arca/s56/real.txt");
         let _ = civis::remove("/arca/s56");
+        // 57. range read sequenziale (S2.5f/F0): fixture `test/r57.bin`
+        // (100 KiB seedati da host in UN put — gli append guest-side sono
+        // O(n^2) per design di `put_chunk`, mai usati per file grandi),
+        // riletta a slice 4 KiB con pattern posizionale + bound temporale
+        // (il materializza-e-slice qui era quadratico per slice: con la
+        // regressione le read supererebbero il bound di ordini).
+        let v57 = {
+            const BIG: usize = 100 * 1024;
+            const SL: usize = 4096;
+            let mut good = true;
+            let mut pos = 0usize;
+            let mut dt = -1i64;
+            match civis::open("/arca/test/r57.bin", 0) {
+                Ok(fd) => {
+                    let mut rbuf = [0u8; SL];
+                    let t0 = civis::get_ticks();
+                    loop {
+                        match civis::read_fs(fd, &mut rbuf, SL) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                for i in 0..n {
+                                    if rbuf[i] != ((pos + i) % 251) as u8 {
+                                        good = false;
+                                        break;
+                                    }
+                                }
+                                pos += n;
+                                if !good {
+                                    break;
+                                }
+                            }
+                            Err(_) => {
+                                good = false;
+                                break;
+                            }
+                        }
+                    }
+                    dt = civis::get_ticks() - t0;
+                    let _ = civis::close(fd);
+                }
+                Err(_) => good = false,
+            }
+            // Bound largo (300 tick = 3 s per 100 KiB; il quadratico
+            // impiegherebbe ordini di piu').
+            good && pos == BIG && dt >= 0 && dt < 300
+        };
+        c.ok("range 100KiB sequenziale", v57);
         // Cleanup best-effort (il volume resta pulito per i run dopo).
         let _ = civis::remove("/arca/keep/v");
         let _ = civis::remove("/arca/keep");

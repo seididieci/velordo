@@ -508,6 +508,16 @@ pub struct BTree<S: BlockStore> {
     pub quotas: BTreeMap<Vec<u8>, u64>,
     /// Indice inverso id → seckey (F2: id mai riusati). Persistito dal driver.
     pub by_id: BTreeMap<u64, Vec<u8>>,
+    /// Cursori range-read sequenziali (S2.5f/F0): (uuid, blk, off) — `blk`
+    /// e' il nodo che contiene l'offset `off` (resume esatto ammesso a
+    /// `off == prev_end`, avanza di un nodo). LRU a 8 vie, eviction
+    /// round-robin: i read sequenziali riprendono dal cursore (O(1) nodi per
+    /// slice invece di O(n)), i salti ripartono dalla head. Mai correttezza,
+    /// solo skip di nodi: i dati vengono sempre riletti dai blocchi, e ogni
+    /// mutazione (`put_chunk`/`delete`) azzera tutto (catene vecchie
+    /// liberabili/riusabili: un cursore stale leggerebbe dati altrui).
+    pub range_cur: [(u64, u64, usize); 8],
+    pub range_rr: usize,
 }
 
 impl<S: BlockStore> BTree<S> {
@@ -523,6 +533,7 @@ impl<S: BlockStore> BTree<S> {
             store, gen, root_primary: rp, root_secondary: rs, root_refcount: rr,
             meta_root: 0, next_id: 1, next_snap: 1, snaps: BTreeMap::new(),
             quotas: BTreeMap::new(), by_id: BTreeMap::new(),
+            range_cur: [(0, 0, 0); 8], range_rr: 0,
         };
         me.fmt_empty(rp, TREE_PRIMARY)?;
         me.fmt_empty(rs, TREE_SECONDARY)?;
@@ -549,6 +560,7 @@ impl<S: BlockStore> BTree<S> {
             store, gen, root_primary, root_secondary, root_refcount,
             meta_root: 0, next_id: 1, next_snap: 1, snaps: BTreeMap::new(),
             quotas: BTreeMap::new(), by_id: BTreeMap::new(),
+            range_cur: [(0, 0, 0); 8], range_rr: 0,
         })
     }
 
@@ -1554,6 +1566,9 @@ impl<S: BlockStore> BTree<S> {
         now: u64,
         retain: usize,
     ) -> Option<usize> {
+        // Qualunque scrittura invalida i cursori range (nuova versione: la
+        // catena head cambia e i nodi vecchi sono liberabili — vedi campo).
+        self.range_clear();
         let sk = seckey_encode(bucket, key)?;
         let n = data.len();
         // Base: clone della head se patch, altrimenti da zero.
@@ -1659,6 +1674,171 @@ impl<S: BlockStore> BTree<S> {
         self.value_read(&head)
     }
 
+    /// Range read con cursore (S2.5f/F0): `(len_totale, dati[offset..offset+take])`
+    /// con `take = min(count, len-offset)` (vuoto oltre EOF, mai errore).
+    /// Assente/malformato = `None` (stessa disciplina di `get`). Memoria
+    /// O(take), nodi O(take) sul sequenziale (cursore), O(offset) sui salti.
+    /// `&mut` per il cursore (RAM-only: perso al restart, mai persistito).
+    #[inline(never)]
+    pub fn get_range(
+        &mut self,
+        bucket: &[u8],
+        key: &[u8],
+        offset: usize,
+        count: usize,
+    ) -> Option<(usize, Vec<u8>)> {
+        let sk = seckey_encode(bucket, key)?;
+        let (_, leaf, i, found) = self.btree_lookup(self.root_secondary, TREE_SECONDARY, &sk)?;
+        if !found {
+            return None;
+        }
+        let (sec, _) = sec_rec_parse(&leaf.vals[i])?;
+        self.head_range(sec.uuid, sec.head_seq, offset, count)
+    }
+
+    /// Range read per object_id (stessa disciplina di `get_range`).
+    #[inline(never)]
+    pub fn get_id_range(
+        &mut self,
+        id: u64,
+        offset: usize,
+        count: usize,
+    ) -> Option<(usize, Vec<u8>)> {
+        let sk = self.by_id.get(&id)?.clone();
+        let (_, leaf, i, found) = self.btree_lookup(self.root_secondary, TREE_SECONDARY, &sk)?;
+        if !found {
+            return None;
+        }
+        let (sec, _) = sec_rec_parse(&leaf.vals[i])?;
+        if sec.uuid != id {
+            return None; // indice inverso stale: mai dati altrui
+        }
+        self.head_range(sec.uuid, sec.head_seq, offset, count)
+    }
+
+    /// Nucleo range su head nota: inline = slice diretto; overflow = walk
+    /// con cursore (vedi campo `range_cur` per il contratto di sicurezza).
+    #[inline(never)]
+    fn head_range(
+        &mut self,
+        uuid: u64,
+        head_seq: u64,
+        offset: usize,
+        count: usize,
+    ) -> Option<(usize, Vec<u8>)> {
+        let head = self.head_rec(uuid, head_seq)?;
+        let size: usize = match &head.data_ov {
+            Some((_, s)) => (*s).try_into().ok()?,
+            None => head.data_inline.len(),
+        };
+        if offset >= size {
+            return Some((size, Vec::new()));
+        }
+        let take = (size - offset).min(count);
+        if head.data_ov.is_none() {
+            return Some((size, head.data_inline[offset..offset + take].to_vec()));
+        }
+        let (mut cur, _) = head.data_ov?;
+        // Partenza: cursore (nodo che contiene `offset`, o resume esatto a
+        // fine nodo) oppure head con skip intero.
+        let mut skip = offset;
+        let mut hit = false;
+        for &(u, blk, off) in self.range_cur.iter() {
+            if u == uuid && blk != 0 && off <= offset && offset <= off + OV_CHUNK {
+                cur = blk;
+                skip = offset - off;
+                hit = true;
+                break;
+            }
+        }
+        if !hit {
+            // Nessun hit: avanza dalla head a nodi interi.
+            let mut guard = size / 8 + 16;
+            let mut payload = format::boxed_node();
+            while skip >= OV_CHUNK {
+                if guard == 0 {
+                    return None;
+                }
+                guard -= 1;
+                let (ty, _) = self.store.read_node(cur, &mut payload)?;
+                if ty != ARCA_NODE_TYPE_RAW {
+                    return None;
+                }
+                cur = rd64(&payload[..], 0)?;
+                skip -= OV_CHUNK;
+            }
+        }
+        // Raccolta (al massimo `take` byte): `skip` e' intra-nodo qui.
+        if skip > OV_CHUNK {
+            return None;
+        }
+        let mut out = Vec::with_capacity(take);
+        let mut left = take;
+        let mut node_off = offset - skip;
+        let mut guard = size / 8 + 16;
+        let mut payload = format::boxed_node();
+        while left > 0 {
+            if guard == 0 {
+                return None;
+            }
+            guard -= 1;
+            let (ty, _) = self.store.read_node(cur, &mut payload)?;
+            if ty != ARCA_NODE_TYPE_RAW {
+                return None;
+            }
+            let next = rd64(&payload[..], 0)?;
+            if skip == OV_CHUNK {
+                // Resume esatto a fine nodo: avanza senza leggere.
+                skip = 0;
+                node_off += OV_CHUNK;
+                cur = next;
+                if cur == 0 {
+                    return None;
+                }
+                continue;
+            }
+            let n = left.min(OV_CHUNK - skip);
+            out.extend_from_slice(payload.get(8 + skip..8 + skip + n)?);
+            left -= n;
+            if left > 0 {
+                skip = 0;
+                node_off += OV_CHUNK;
+                cur = next;
+                if cur == 0 {
+                    return None;
+                }
+            } else {
+                // Cursore sul nodo dell'ultimo byte (stesso uuid: riuso,
+                // altrimenti eviction round-robin).
+                let mut done = false;
+                for c in self.range_cur.iter_mut() {
+                    if c.0 == uuid {
+                        *c = (uuid, cur, node_off);
+                        done = true;
+                        break;
+                    }
+                }
+                if !done {
+                    let i = self.range_rr % 8;
+                    self.range_rr = self.range_rr.wrapping_add(1);
+                    self.range_cur[i] = (uuid, cur, node_off);
+                }
+            }
+        }
+        if out.len() != take {
+            return None;
+        }
+        Some((size, out))
+    }
+
+    /// Azzera i cursori range (ogni mutazione: la catena head cambia e i nodi
+    /// vecchi sono liberabili/riusabili — un cursore stale leggerebbe dati
+    /// altrui; il costo e' un head-walk al prossimo salto).
+    #[inline(never)]
+    fn range_clear(&mut self) {
+        self.range_cur = [(0, 0, 0); 8];
+    }
+
     /// Stat per (bucket,key): (id, size head, versioni contate, mtime head).
     #[inline(never)]
     pub fn stat(&self, bucket: &[u8], key: &[u8]) -> Option<(u64, u64, u64, u64)> {
@@ -1706,6 +1886,8 @@ impl<S: BlockStore> BTree<S> {
     /// dopo: documentato, non nascosto).
     #[inline(never)]
     pub fn delete(&mut self, bucket: &[u8], key: &[u8]) -> Option<bool> {
+        // Come `put_chunk`: la cancellazione libera catene (vedi campo).
+        self.range_clear();
         let sk = seckey_encode(bucket, key)?;
         let (sec, head_seq) = match self.btree_lookup(self.root_secondary, TREE_SECONDARY, &sk) {
             Some((_, leaf, i, true)) => {
@@ -1874,6 +2056,9 @@ impl<S: BlockStore> BTree<S> {
         now: u64,
         retain: usize,
     ) -> Option<u64> {
+        // Come `put_chunk`: scrive una nuova head (vedi sotto) — i cursori
+        // range della vecchia catena non sono piu' validi.
+        self.range_clear();
         let snap = self.snaps.get(&snap_id)?;
         if snap.bucket != bucket {
             return None;
@@ -2046,7 +2231,7 @@ mod tests {
         got.sort();
         assert_eq!(got, alloc::vec![b"bin/ls".to_vec(), b"bin/sh".to_vec()]);
         assert_eq!(t.scan_prefix(b"ns", b"").unwrap().len(), 3);
-        assert_eq!(t.scan_prefix(b"ns", b"nope").unwrap(), alloc::vec::Vec::new());
+        assert_eq!(t.scan_prefix(b"ns", b"nope").unwrap(), alloc::vec::Vec::<alloc::vec::Vec<u8>>::new());
         assert_eq!(t.scan_prefix(b"other", b"bin/").unwrap(), alloc::vec![b"bin/sh".to_vec()]);
         t.delete(b"ns", b"bin/ls").unwrap();
         assert_eq!(t.scan_prefix(b"ns", b"bin/").unwrap(), alloc::vec![b"bin/sh".to_vec()]);
@@ -2077,6 +2262,72 @@ mod tests {
         assert_eq!(t.get(b"v", b"k"), Some(b"hELLo".to_vec()));
         let (_, _, nv, _) = t.stat(b"v", b"k").unwrap();
         assert_eq!(nv, 2);
+    }
+
+    #[test]
+    fn range_sequenziale_e_rewrite() {
+        let mut t = engine();
+        // Blob multi-nodo (3+ chunk da 3552): pattern posizionale.
+        let n = super::OV_CHUNK * 2 + 1000;
+        let big: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+        t.put_chunk(b"r", b"big", 0, &big, 1, 8).unwrap();
+        assert_eq!(t.get(b"r", b"big").as_deref(), Some(big.as_slice()));
+        // Slice sequenziali da 4 KiB (come s25fuse): identiche al full.
+        let mut off = 0usize;
+        while off < n {
+            let (len, part) = t.get_range(b"r", b"big", off, 4096).expect("range");
+            assert_eq!(len, n);
+            assert_eq!(part.as_slice(), &big[off..off + part.len()]);
+            if part.is_empty() {
+                break;
+            }
+            off += part.len();
+        }
+        assert_eq!(off, n);
+        // Salti: inizio/metà/fine-nodo/EOF/oltre.
+        for o in [0, 1, super::OV_CHUNK - 1, super::OV_CHUNK, super::OV_CHUNK + 1, n - 7, n - 1, n, n + 5] {
+            let (len, part) = t.get_range(b"r", b"big", o, 4096).expect("range");
+            assert_eq!(len, n);
+            let want = if o >= n { &big[n..n] } else { &big[o..(o + 4096).min(n)] };
+            assert_eq!(part.as_slice(), want, "off={}", o);
+        }
+        // count 0 e assente.
+        assert_eq!(t.get_range(b"r", b"big", 10, 0), Some((n, Vec::new())));
+        assert_eq!(t.get_range(b"r", b"nope", 0, 4096), None);
+        // Via id: stesso contenuto.
+        let (id, _, _, _) = t.stat(b"r", b"big").unwrap();
+        let (len, part) = t.get_id_range(id, 100, 5000).expect("id range");
+        assert_eq!((len, part.as_slice()), (n, &big[100..5100]));
+        assert_eq!(t.get_id_range(id + 1000000, 0, 10), None);
+        // Rewrite totale dopo letture (cursore popolato): MAI dati vecchi.
+        let big2: Vec<u8> = (0..n).map(|i| (255 - (i % 251)) as u8).collect();
+        t.put_chunk(b"r", b"big", 0, &big2, 2, 8).unwrap();
+        let (len2, part2) = t.get_range(b"r", b"big", 0, 4096).expect("range v2");
+        assert_eq!((len2, part2.as_slice()), (n, &big2[..4096]));
+        let (_, part2b) = t.get_range(b"r", b"big", n - 7, 4096).expect("range v2b");
+        assert_eq!(part2b.as_slice(), &big2[n - 7..]);
+        // Inline piccolo: slice diretto.
+        t.put_chunk(b"r", b"tiny", 0, b"abcdef", 3, 8).unwrap();
+        assert_eq!(
+            t.get_range(b"r", b"tiny", 2, 10),
+            Some((6, b"cdef".to_vec()))
+        );
+    }
+
+    #[test]
+    fn range_append_sequenziali() {
+        let mut t = engine();
+        let mut expect = Vec::new();
+        for k in 0..20usize {
+            let chunk: Vec<u8> = (0..4096).map(|i| ((k * 4096 + i) % 251) as u8).collect();
+            let r = t.put_chunk(b"r", b"seq", k * 4096, &chunk, k as u64, 8);
+            assert!(r.is_some(), "put fallita a {}", k * 4096);
+            expect.extend_from_slice(&chunk);
+        }
+        assert_eq!(t.get(b"r", b"seq").as_deref(), Some(expect.as_slice()));
+        let (len, part) = t.get_range(b"r", b"seq", 65536, 4096).unwrap();
+        assert_eq!(len, expect.len());
+        assert_eq!(part.as_slice(), &expect[65536..65536 + part.len()]);
     }
 
     #[test]

@@ -459,15 +459,12 @@ pub fn disk_get(
     if bounds_invalid(bucket, key) {
         return Err(ERR_INVALID);
     }
-    match eng.get(bucket, key) {
-        Some(blob) => {
-            let len = blob.len();
-            if offset >= len {
-                rings::resp_ring_write(len as u64, 0, &[]);
-                return Ok(len as u64);
-            }
-            let take = (len - offset).min(count);
-            rings::resp_ring_write(len as u64, 0, &blob[offset..offset + take]);
+    // S2.5f/F0: range read con cursore (mai il blob intero: su oggetti da
+    // decine di MB il materializza-e-slice era quadratico per slice).
+    // Stesso contratto di prima: w0 = len totale, payload = slice.
+    match eng.get_range(bucket, key, offset, count) {
+        Some((len, data)) => {
+            rings::resp_ring_write(len as u64, 0, &data);
             Ok(len as u64)
         }
         None => Err(ERR_NOTFOUND),
@@ -483,15 +480,10 @@ pub fn disk_get_id(
     count: usize,
 ) -> Result<u64, u64> {
     let id = arcafs::wire::parse_u64(payload).ok_or(ERR_INVALID)?;
-    match eng.get_id(id) {
-        Some(blob) => {
-            let len = blob.len();
-            if offset >= len {
-                rings::resp_ring_write(len as u64, 0, &[]);
-                return Ok(len as u64);
-            }
-            let take = (len - offset).min(count);
-            rings::resp_ring_write(len as u64, 0, &blob[offset..offset + take]);
+    // S2.5f/F0: vedi disk_get (range, mai blob intero).
+    match eng.get_id_range(id, offset, count) {
+        Some((len, data)) => {
+            rings::resp_ring_write(len as u64, 0, &data);
             Ok(len as u64)
         }
         None => Err(ERR_NOTFOUND),
@@ -598,6 +590,22 @@ pub fn ns_get(eng: &DiskEngine, key: &[u8]) -> Option<alloc::vec::Vec<u8>> {
         return None;
     }
     eng.get(NS_BUCKET, key)
+}
+
+/// Range read namespace (S2.5f/F0): `(len_totale, slice)` — il path read dei
+/// file (ns_read) non materializza piu' l'intero oggetto per slice.
+#[inline(never)]
+pub fn ns_get_range(
+    eng: &mut DiskEngine,
+    key: &[u8],
+    off: usize,
+    count: usize,
+) -> Option<(u64, alloc::vec::Vec<u8>)> {
+    if key.len() > civis::OBJ_KEY_MAX {
+        return None;
+    }
+    eng.get_range(NS_BUCKET, key, off, count)
+        .map(|(len, v)| (len as u64, v))
 }
 
 /// STAT namespace: (size head, mtime head). Assente = `None`.

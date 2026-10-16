@@ -114,5 +114,13 @@ done
 # Fixture ex-ramfs (cardo/src/server.rs populate): hello.txt + test.txt.
 seed_bin userland/disk/hello.txt hello.txt
 seed_bin userland/disk/test.txt test.txt
+# Fixture range S2.5f/F0 (100 KiB pattern, test57 testsarca): generata qui
+# in UN put (mai in repo; gli append guest-side sono O(n^2) per design di
+# `put_chunk` — i file grandi si seedano da host, il guest li legge).
+mkdir -p "$ROOT/testland/build"
+R57_BIN="$ROOT/testland/build/r57.bin"
+python3 -c "import sys; sys.stdout.buffer.write(bytes((i % 251) for i in range(102400)))" > "$R57_BIN"
+SEED_NS+=( "ns:test/r57.bin=$R57_BIN" )
+echo "[arca] + r57 (range fixture)"
 $TOOL_BIN seed "$OUT" "${SEED_NS[@]}"
 echo "[arca] seed completato su $OUT"

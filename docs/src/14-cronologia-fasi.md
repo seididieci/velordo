@@ -2312,4 +2312,15 @@
           `--version` in guest (`rustc 1.100.0-nightly`, exit 0, reclaim
           pulito), gate 6/6 zero FAIL/PANIC/FAULT. Blocker noto: sysroot
           (`dll_path` non supportato; serve `--sysroot`/mini-sysroot).
-          Prossimo S2.5f: mini-sysroot + prima compilazione in guest.
+          S2.5f/F0 range read ArcaFS (chiusa): `disk_get`/`ns_read`
+          materializzavano il blob intero per slice (quadratico) — ora
+          `get_range`/`get_id_range` con cursore LRU a 8 vie (O(1) nodi per
+          slice sequenziale; skip dalla head sui salti) + invalidazione a
+          ogni mutazione (`put_chunk`/`delete`/`snap_rollback`: catene vecchie
+          liberabili, mai dati altrui). Scoperta: `put_chunk` e'
+          read-modify-write dell'intero blob → append guest-side O(n^2)
+          (2 MiB = ~1 GB traffico + fail oltre 64K): i file grandi si seedano
+          da host in UN put, il guest li legge; test57 testsarca ridisegnato
+          su fixture seedata (100 KiB, 57/57). Host test sbloccati (un
+          `Vec::new()` senza annotazione non compilava piu'). Gate 6/6.
+          Prossimo S2.5f/F1: staticone su ArcaFS.
