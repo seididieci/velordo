@@ -12,7 +12,10 @@ use syscall_numbers::image_hash;
 
 /// Magic superblock + versione formato.
 pub const ARCA_MAGIC: &[u8; 4] = b"ACFS";
-pub const ARCA_VERSION: u32 = 1;
+/// Versione formato (W2 extent: 2; la 1 aveva solo catene OV. Niente
+/// retrocompat: le immagini si rigenerano (tool host e guest condividono
+/// questo crate), un mount v1 fallisce loud in `superblock_verify`).
+pub const ARCA_VERSION: u32 = 2;
 /// Block size negoziato (fisso v1) = 1 chunk DISK_* esatto.
 pub const ARCA_BLOCK_SIZE: u32 = 3584;
 /// Superblock: 128 B a LBA0 (+ shadow LBA1); checksum FNV-1a di [0..120].
@@ -57,6 +60,17 @@ pub const ARCA_NMAGIC: &[u8; 4] = b"ANOD";
 pub const ARCA_NODE_TYPE_RAW: u8 = 0;
 pub const ARCA_NODE_TYPE_LEAF: u8 = 1;
 pub const ARCA_NODE_TYPE_INTERNAL: u8 = 2;
+/// Mappa extent (W2): `[prev:8][n:2 LE][entries: n x (blk:8, nb:4)]`
+/// (295 entry/nodo). Catena ALL'INDIETRO (ogni nodo punta al piu' vecchio):
+/// le versioni riusano i nodi invariati e riscrivono solo dalla prima
+/// entry cambiata in poi — i `prev` riusati restano sempre validi (mai
+/// patch in place, invariante W1). Punta solo blocchi DATA.
+pub const ARCA_NODE_TYPE_MAP: u8 = 3;
+/// Blocco dati extent (W2): 3560 B di dati puri, niente header interno
+/// (a differenza di RAW che riserva `[next:8]`). Immutabile dopo la
+/// scrittura (invariante W1 per la cache: solo radici/xhdr/freelist
+/// mutano in place).
+pub const ARCA_NODE_TYPE_DATA: u8 = 4;
 /// Offset del puntatore meta-root nel superblock (56.2c): coda di
 /// `mountpoint[64]`, 8 B a [108..116]. Il mountpoint effettivo e' clippato a
 /// 56 B (`superblock_build`): oltre, la meta si ignora loud al load (mai

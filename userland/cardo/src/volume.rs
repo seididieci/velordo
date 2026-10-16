@@ -294,6 +294,34 @@ impl ArcaVolume {
         Some(n)
     }
 
+    /// Alloca fino a `max` blocchi preferendo la continuazione di `hint`
+    /// (affinita' ultimo-run W2: gli extent del file restano compatti).
+    /// Tenta `hint+1, hint+2, ...` via `alloc_specific`, al primo buco passa
+    /// ad `alloc` normale per il resto. Mai blocco 0; vuoto a disco pieno.
+    /// I run risultanti possono essere corti (il motore raggruppa comunque
+    /// i consecutivi: la dinamica vera emerge qui, niente tabella).
+    pub fn alloc_run(&mut self, hint: u64, max: usize) -> Vec<u64> {
+        let mut out = Vec::with_capacity(max.min(512));
+        if hint != 0 {
+            let mut n = hint.checked_add(1).unwrap_or(0);
+            while out.len() < max && n != 0 {
+                if self.alloc_specific(n) {
+                    out.push(n);
+                    n = n.checked_add(1).unwrap_or(0);
+                } else {
+                    break;
+                }
+            }
+        }
+        while out.len() < max {
+            match self.alloc() {
+                Some(b) if b != 0 => out.push(b),
+                _ => break,
+            }
+        }
+        out
+    }
+
     /// Alloca uno SPECIFICO blocco (56.2b: secondary root fissa al blocco 2).
     /// Lo sgancia dalla freelist se presente, altrimenti lo prende solo se e'
     /// la cima (`high_water`, caso volume fresco). Blocco 0, live o oltre la

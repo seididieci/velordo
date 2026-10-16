@@ -96,6 +96,10 @@ impl BlockStore for VolumeStore {
     fn free(&mut self, blk: u64) -> bool {
         self.vol.free(blk)
     }
+
+    fn alloc_run(&mut self, hint: u64, max: usize) -> alloc::vec::Vec<u64> {
+        self.vol.alloc_run(hint, max)
+    }
 }
 
 /// Lega il motore al volume (consuma `vol` dallo scaffold RAW — lazy: DOPO
@@ -606,6 +610,13 @@ pub fn ns_get_range(
     }
     eng.get_range(NS_BUCKET, key, off, count)
         .map(|(len, v)| (len as u64, v))
+}
+
+/// XSTATS (W2): istogramma layout valori del motore
+/// (n_extent, entries, max_entry, n_legacy_ov, n_inline). Solo motore disco.
+#[inline(never)]
+pub fn disk_xstats(eng: &DiskEngine) -> Option<(u64, u64, u64, u64, u64)> {
+    eng.extent_stats()
 }
 
 /// STAT namespace: (size head, mtime head). Assente = `None`.

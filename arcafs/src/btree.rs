@@ -19,8 +19,8 @@
 //! linkati (nodi RAW `[next:8][chunk:3552]`). Mai tabelle fisse.
 
 use super::format::{
-    self, ARCA_NODE_PAYLOAD_LEN, ARCA_NODE_TYPE_INTERNAL, ARCA_NODE_TYPE_LEAF,
-    ARCA_NODE_TYPE_RAW,
+    self, ARCA_NODE_PAYLOAD_LEN, ARCA_NODE_TYPE_DATA, ARCA_NODE_TYPE_INTERNAL,
+    ARCA_NODE_TYPE_LEAF, ARCA_NODE_TYPE_MAP, ARCA_NODE_TYPE_RAW,
 };
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -55,6 +55,21 @@ pub trait BlockStore {
     ) -> bool;
     fn alloc(&mut self) -> Option<u64>;
     fn free(&mut self, blk: u64) -> bool;
+    /// Alloca fino a `max` blocchi preferendo la continuazione di `hint`
+    /// (affinita' ultimo-run W2: il chiamante raggruppa i consecutivi in
+    /// extent). Vuoto a disco pieno. Default: allocazioni singole (test);
+    /// il volume vero concatena via `alloc_specific`.
+    fn alloc_run(&mut self, hint: u64, max: usize) -> Vec<u64> {
+        let _ = hint;
+        let mut out = Vec::new();
+        for _ in 0..max {
+            match self.alloc() {
+                Some(b) if b != 0 => out.push(b),
+                _ => break,
+            }
+        }
+        out
+    }
 }
 
 // ── Codec primitivo (LE esplicito, mai panico su dati disco) ─────────────
@@ -68,6 +83,13 @@ fn rd64(b: &[u8], o: usize) -> Option<u64> {
     Some(u64::from_le_bytes([
         s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
     ]))
+}
+fn rd32(b: &[u8], o: usize) -> Option<u32> {
+    let s = b.get(o..o + 4)?;
+    Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+}
+fn wr32(out: &mut Vec<u8>, v: u32) {
+    out.extend_from_slice(&v.to_le_bytes());
 }
 fn wr16(out: &mut Vec<u8>, v: u16) {
     out.extend_from_slice(&v.to_le_bytes());
@@ -120,16 +142,56 @@ fn node_set_nrec(p: &mut [u8; ARCA_NODE_PAYLOAD_LEN], n: usize) -> Option<()> {
     Some(())
 }
 
+/// Costanti layout extent (W2, ADR-0050): entry `(blk:8, nb:4)` da 12 B,
+/// nb = lunghezza in blocchi (offset logici impliciti cumulativi; EOF da
+/// `size`). Run = cio' che l'allocatore consegna (dinamica vera, niente
+/// tabella), mai oltre `EXT_RUN_MAX`.
+pub const EXT_INLINE_MAX: usize = 12;
+/// Entry per nodo MAP: `(3560-10)/12 = 295` (layout `[next:8][n:2][entries]`).
+pub const EXT_MAP_CAP: usize = 295;
+/// Tetto lunghezza run in blocchi (~900 KiB: una mappa da 220 entry copre
+/// ~200 MB; oltre si spezza in piu' entry).
+pub const EXT_RUN_MAX: u32 = 256;
+/// Tetto blocchi per oggetto nei walk (~29 MB: gli oggetti veri sono
+/// ≤16 MiB ⇒ ≤4714 blocchi; oltre = struttura corrotta, rifiuto loud
+/// anti-OOM invece di Vec giganti).
+pub const EXT_BLOCKS_MAX: usize = 8192;
+
 /// Record primary encodato:
-/// `[id:8][seq:8][mtime:8][kind:1]` + inline `[dlen:2][data]` | overflow `[ov:8][size:8]`.
+/// `[id:8][seq:8][mtime:8][kind:1]` + inline `[dlen:2][data]` | overflow
+/// `[ov:8][size:8]` (legacy: solo lettura/migrazione, mai scritto nuovo) |
+/// extent `[size:8][n_ext:4][n_in:1][entries: n_in x (blk:8, nb:4)]`
+/// `[map_head:8 se n_ext > n_in]` | packed (kind 3: riservato, rifiuto loud).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PrimRec {
     pub id: u64,
     pub seq: u64,
     pub mtime: u64,
     /// A versione pinnata? No: pin vive nel refcount; qui solo dati.
-    pub data_ov: Option<(u64, u64)>, // (ov_head, size) se overflow
-    pub data_inline: Vec<u8>,        // vuoto se overflow
+    pub data: DataRef,
+}
+
+/// Riferimento dati di una versione (una sola variante viva per record).
+#[derive(Clone, Debug, PartialEq)]
+pub enum DataRef {
+    /// ≤512 B nel record (nessun blocco dati).
+    Inline(Vec<u8>),
+    /// Catena OV legacy (pre-W2): lettura e migrazione sole, mai nuove
+    /// catene, condivisione vietata (ogni catena ha un solo proprietario:
+    /// `walk_ov` resta severo sui blocchi rivisitati).
+    Ov(u64, u64), // (ov_head, size)
+    /// Mappa extent (tutte le nuove scritture): entry condivisibili tra
+    /// versioni (free via liveness al trim, mai eager).
+    Ext(ExtHead),
+}
+
+/// Testa mappa extent (vedi costanti sopra per il formato).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtHead {
+    pub size: u64,
+    pub inline: Vec<(u64, u32)>, // ≤ EXT_INLINE_MAX
+    pub map_head: u64,           // 0 = nessuna (n_ext == inline.len())
+    pub n_ext: u32,              // entry totali (inline + mappate)
 }
 
 fn prim_rec_encode(r: &PrimRec) -> Vec<u8> {
@@ -137,16 +199,29 @@ fn prim_rec_encode(r: &PrimRec) -> Vec<u8> {
     wr64(&mut v, r.id);
     wr64(&mut v, r.seq);
     wr64(&mut v, r.mtime);
-    match r.data_ov {
-        Some((ov, size)) => {
-            v.push(1);
-            wr64(&mut v, ov);
-            wr64(&mut v, size);
-        }
-        None => {
+    match &r.data {
+        DataRef::Inline(d) => {
             v.push(0);
-            wr16(&mut v, r.data_inline.len() as u16);
-            v.extend_from_slice(&r.data_inline);
+            wr16(&mut v, d.len() as u16);
+            v.extend_from_slice(d);
+        }
+        DataRef::Ov(ov, size) => {
+            v.push(1);
+            wr64(&mut v, *ov);
+            wr64(&mut v, *size);
+        }
+        DataRef::Ext(h) => {
+            v.push(2);
+            wr64(&mut v, h.size);
+            wr32(&mut v, h.n_ext);
+            v.push(h.inline.len() as u8);
+            for (blk, nb) in h.inline.iter() {
+                wr64(&mut v, *blk);
+                wr32(&mut v, *nb);
+            }
+            if h.n_ext as usize > h.inline.len() {
+                wr64(&mut v, h.map_head);
+            }
         }
     }
     v
@@ -161,18 +236,53 @@ fn prim_rec_parse(b: &[u8]) -> Option<(PrimRec, usize)> {
         let dlen = rd16(b, 25)? as usize;
         let data = b.get(27..27 + dlen)?.to_vec();
         Some((
-            PrimRec { id, seq, mtime, data_ov: None, data_inline: data },
+            PrimRec { id, seq, mtime, data: DataRef::Inline(data) },
             27 + dlen,
         ))
     } else if kind == 1 {
         let ov = rd64(b, 25)?;
         let size = rd64(b, 33)?;
         Some((
-            PrimRec { id, seq, mtime, data_ov: Some((ov, size)), data_inline: Vec::new() },
+            PrimRec { id, seq, mtime, data: DataRef::Ov(ov, size) },
             41,
         ))
+    } else if kind == 2 {
+        let size = rd64(b, 25)?;
+        let n_ext = rd32(b, 33)?;
+        let n_in = *b.get(37)? as usize;
+        if n_in > EXT_INLINE_MAX {
+            return None;
+        }
+        let mut off = 38;
+        let mut inline = Vec::new();
+        for _ in 0..n_in {
+            let blk = rd64(b, off)?;
+            let nb = rd32(b, off + 8)?;
+            off += 12;
+            if blk == 0 || nb == 0 {
+                return None;
+            }
+            inline.push((blk, nb));
+        }
+        let map_head = if n_ext as usize > n_in {
+            let mh = rd64(b, off)?;
+            off += 8;
+            if mh == 0 {
+                return None;
+            }
+            mh
+        } else {
+            if n_ext as usize != n_in {
+                return None; // entry dichiarate ma non presenti
+            }
+            0
+        };
+        Some((
+            PrimRec { id, seq, mtime, data: DataRef::Ext(ExtHead { size, inline, map_head, n_ext }) },
+            off,
+        ))
     } else {
-        None
+        None // kind 3 PACKED riservato + futuri: rifiuto loud
     }
 }
 
@@ -468,6 +578,41 @@ fn ov_free<S: BlockStore>(store: &mut S, head: u64) {
         store.free(cur);
         cur = next;
     }
+}
+
+/// Byte logici di un record (qualunque variante: inline, legacy, extent).
+fn value_size(r: &PrimRec) -> u64 {
+    match &r.data {
+        DataRef::Inline(d) => d.len() as u64,
+        DataRef::Ov(_, size) => *size,
+        DataRef::Ext(h) => h.size,
+    }
+}
+
+/// Raggruppa blocchi allocati in entry `(blk, nb)`: run consecutivi
+/// spezzati a `EXT_RUN_MAX`. La dinamica vera W2: la taglia emerge da cio'
+/// che l'allocatore consegna (affinita' ultimo-run), niente tabella.
+/// `None` a blocco 0 (mai valido, bug chiamante).
+fn group_runs(blks: &[u64]) -> Option<Vec<(u64, u32)>> {
+    let mut out = Vec::new();
+    let mut it = blks.iter().peekable();
+    while let Some(&start) = it.next() {
+        if start == 0 {
+            return None;
+        }
+        let mut nb: u32 = 1;
+        while nb < EXT_RUN_MAX {
+            match it.peek() {
+                Some(&&b) if Some(b) == start.checked_add(nb as u64) => {
+                    nb += 1;
+                    it.next();
+                }
+                _ => break,
+            }
+        }
+        out.push((start, nb));
+    }
+    Some(out)
 }
 
 // ── Snapshot (tabella in RAM nel motore; persistita dal driver al commit) ─
@@ -835,12 +980,21 @@ impl<S: BlockStore> BTree<S> {
     /// sovrastima conservativa, il check e' pre-put e rifiuta presto).
     pub const QUOTA_SLACK_BLOCKS: u64 = 8;
 
-    /// Blocchi dati di un blob di `nbytes` (0 se inline).
+    /// Blocchi dati di un blob di `nbytes` (0 se inline): blocchi DATA +
+    /// nodi MAP solo oltre l'inline (12 entry: sotto stanno nel record).
+    /// Stima per eccesso (run da 1 blocco): parita' col conto storico
+    /// (3000 B = 1 + 0 + slack 8 = 9, cfr. test quota 51/52).
     pub fn quota_blocks_for(nbytes: usize) -> u64 {
         if nbytes <= INLINE_MAX {
             return 0;
         }
-        ((nbytes - 1) / OV_CHUNK + 1) as u64
+        let data = nbytes.div_ceil(ARCA_NODE_PAYLOAD_LEN) as u64;
+        let map = if data > EXT_INLINE_MAX as u64 {
+            (data - EXT_INLINE_MAX as u64).div_ceil(EXT_MAP_CAP as u64)
+        } else {
+            0
+        };
+        data + map
     }
 
     /// Blocchi dati distinti trattenuti dal bucket. `None` a walk illeggibile
@@ -851,11 +1005,9 @@ impl<S: BlockStore> BTree<S> {
         // Nomi live: tutte le versioni in storia (pinnate incluse).
         let keys = self.keys_of_bucket(bucket, self.root_secondary);
         for (_, sec) in keys.iter() {
-            for seq in self.seqs_of(sec.uuid, sec.head_seq) {
+            for seq in self.seqs_of(sec.uuid, sec.head_seq)? {
                 let rec = self.head_rec(sec.uuid, seq)?;
-                if let Some((ov, _)) = rec.data_ov {
-                    self.quota_walk_ov(ov, &mut blocks)?;
-                }
+                self.value_blocks(&rec, &mut blocks)?;
             }
         }
         // Pinnati delle snapshot del bucket ANCHE a nome cancellato (il
@@ -867,9 +1019,7 @@ impl<S: BlockStore> BTree<S> {
             }
             for (_, uuid, seq) in snap.entries.iter() {
                 let rec = self.head_rec(*uuid, *seq)?;
-                if let Some((ov, _)) = rec.data_ov {
-                    self.quota_walk_ov(ov, &mut blocks)?;
-                }
+                self.value_blocks(&rec, &mut blocks)?;
             }
         }
         blocks.sort_unstable();
@@ -929,10 +1079,7 @@ impl<S: BlockStore> BTree<S> {
         let sk = seckey_encode(bucket, key)?;
         let (_, uuid_pin, seq_pin) = snap.entries.iter().find(|(k, _, _)| *k == sk)?;
         let rec = self.head_rec(*uuid_pin, *seq_pin)?;
-        Some(match rec.data_ov {
-            Some((_, size)) => size as usize,
-            None => rec.data_inline.len(),
-        })
+        Some(value_size(&rec) as usize)
     }
 
     /// Somma delle dimensioni pinnate (solo record): budget del clone sul
@@ -943,11 +1090,7 @@ impl<S: BlockStore> BTree<S> {
         let mut total = 0usize;
         for (_, uuid_pin, seq_pin) in snap.entries.iter() {
             let rec = self.head_rec(*uuid_pin, *seq_pin)?;
-            let s = match rec.data_ov {
-                Some((_, size)) => size as usize,
-                None => rec.data_inline.len(),
-            };
-            total = total.checked_add(s)?;
+            total = total.checked_add(value_size(&rec) as usize)?;
         }
         Some(total)
     }
@@ -968,9 +1111,11 @@ impl<S: BlockStore> BTree<S> {
     }
 
     // ── Reachability per orphan-GC (56.2c) ──────────────────────────────
-    // Blocchi raggiungibili = nodi dei 3 alberi + catene overflow dei valori
-    // primary. I pin snapshot non sganciano mai i record dal primary: la walk
-    // li trova comunque (la tabella serve a rollback/clone, non alla GC).
+    // Blocchi raggiungibili = nodi dei 3 alberi + dati dei valori primary
+    // (catene legacy + entry/nodi MAP extent, W2: condivisi tra versioni,
+    // dedup finale). I pin snapshot non sganciano mai i record dal primary:
+    // la walk li trova comunque (la tabella serve a rollback/clone, non
+    // alla GC).
 
     /// Tutti i blocchi raggiungibili dalle radici (ordinati, dedupati).
     /// Walk iterativa con guardia visited (puntatori corrotti: mai loop).
@@ -1010,9 +1155,10 @@ impl<S: BlockStore> BTree<S> {
             let leaf = leaf_parse(&p[..], TREE_PRIMARY)?;
             for v in leaf.vals.iter() {
                 let (rec, _) = prim_rec_parse(v)?;
-                if let Some((ov, _)) = rec.data_ov {
-                    self.walk_ov(ov, &mut out)?;
-                }
+                // Condivisione extent tra versioni: il dedup finale conta
+                // una volta sola (mai corruzione: le catene legacy restano
+                // a proprietario unico e `walk_ov` resta severo).
+                self.value_blocks(&rec, &mut out)?;
             }
         }
         out.sort_unstable();
@@ -1473,36 +1619,348 @@ impl<S: BlockStore> BTree<S> {
         }
     }
 
-    // ── Valori primary (inline / overflow) ───────────────────────────────
+    // ── Valori primary (inline / extent; overflow solo legacy) ──────────
+    // W2 (ADR-0050): ogni nuova scrittura produce extent; le catene OV
+    // restano leggibili (oggetti mai riscritti) e migrano al primo write.
+    // Condivisione: entry e nodi MAP condivisi tra versioni; free solo via
+    // liveness in trim/delete (mai eager).
 
-    /// Scrive un valore primary: `(PrimRec senza id/seq/mtime, overflow_allocati)`.
+    /// Scrive un valore primary da byte completi (nuovi oggetti, rollback,
+    /// clone, migrazioni): inline se piccolo, altrimenti extent freschi.
     #[inline(never)]
-    fn value_write(&mut self, data: &[u8]) -> Option<(Option<(u64, u64)>, Vec<u8>)> {
+    fn value_write(&mut self, data: &[u8]) -> Option<DataRef> {
         if data.len() <= INLINE_MAX {
-            return Some((None, data.to_vec()));
+            return Some(DataRef::Inline(data.to_vec()));
         }
-        let (ov, size) = ov_write(&mut self.store, self.gen, data)?;
-        Some((Some((ov, size)), Vec::new()))
+        let h = self.ext_write_all(data)?;
+        Some(DataRef::Ext(h))
     }
 
-    /// Legge un valore primary (inline od overflow).
+    /// Legge un valore primary (inline, overflow legacy od extent).
     #[inline(never)]
     fn value_read(&self, r: &PrimRec) -> Option<Vec<u8>> {
-        match r.data_ov {
-            Some((ov, size)) => {
-                let sz: usize = size.try_into().ok()?;
-                ov_read(&self.store, ov, sz)
+        match &r.data {
+            DataRef::Inline(d) => Some(d.clone()),
+            DataRef::Ov(ov, size) => {
+                let sz: usize = (*size).try_into().ok()?;
+                ov_read(&self.store, *ov, sz)
             }
-            None => Some(r.data_inline.clone()),
+            DataRef::Ext(h) => {
+                let size: usize = h.size.try_into().ok()?;
+                let (entries, _) = self.ext_entries(h)?;
+                let mut out = Vec::with_capacity(size.min(1 << 20));
+                self.ext_read_span(&entries, 0, size, &mut out)?;
+                if out.len() != size {
+                    return None;
+                }
+                Some(out)
+            }
         }
     }
 
-    /// Libera i blocchi overflow di un valore (il record lo cancella il chiamante).
+    /// Scrive byte interi come extent freschi (run dall'allocatore con hint
+    /// 0, raggruppati per consecutivita'): testa pronta. Fallisce intero a
+    /// disco pieno (orfani alla GC, come `ov_write`).
     #[inline(never)]
-    fn value_free(&mut self, r: &PrimRec) {
-        if let Some((ov, _)) = r.data_ov {
-            ov_free(&mut self.store, ov);
+    fn ext_write_all(&mut self, data: &[u8]) -> Option<ExtHead> {
+        let size = data.len() as u64;
+        let need = data.len().div_ceil(ARCA_NODE_PAYLOAD_LEN);
+        let blks = self.store.alloc_run(0, need);
+        if blks.len() < need {
+            return None;
         }
+        let entries = group_runs(&blks)?;
+        self.ext_store_data(&entries, data)?;
+        self.ext_build(size, entries)
+    }
+
+    /// Scrive `data` sui blocchi delle entry (span esatti del chiamante:
+    /// capacita' oltre i dati solo nell'ultimo blocco, coda azzerata per
+    /// igiene; buchi interni = bug chiamante, `None` loud).
+    #[inline(never)]
+    fn ext_store_data(&mut self, entries: &[(u64, u32)], data: &[u8]) -> Option<()> {
+        let mut payload = format::boxed_node();
+        let mut done = 0usize;
+        let mut bi = 0usize;
+        let total: usize = entries.iter().map(|(_, nb)| *nb as usize).sum();
+        for (blk, nb) in entries.iter() {
+            for b in 0..*nb {
+                let bblk = blk.checked_add(b as u64)?;
+                if bblk == 0 || done > data.len() {
+                    return None;
+                }
+                let take = (data.len() - done).min(ARCA_NODE_PAYLOAD_LEN);
+                bi += 1;
+                if take < ARCA_NODE_PAYLOAD_LEN && bi != total {
+                    return None;
+                }
+                payload[..take].copy_from_slice(&data[done..done + take]);
+                payload[take..].fill(0);
+                if !self.store.write_node(bblk, ARCA_NODE_TYPE_DATA, self.gen, &payload) {
+                    return None;
+                }
+                done += take;
+            }
+        }
+        if done != data.len() {
+            return None;
+        }
+        Some(())
+    }
+
+    /// Carica entry + numeri dei nodi MAP di una testa: `(entries, map_nodes)`
+    /// con entrambi in ordine vecchio→nuovo. Bound anti-OOM (oggetti ≤16
+    /// MiB ⇒ pochi blocchi): oltre rifiuto loud. None a struttura
+    /// illeggibile (mai parziali: o tutto o niente).
+    #[inline(never)]
+    fn ext_entries(&self, h: &ExtHead) -> Option<(Vec<(u64, u32)>, Vec<u64>)> {
+        // Walk dalla head (nodo piu' nuovo) a ritroso, poi riordina.
+        let mut segs: Vec<(u64, Vec<(u64, u32)>)> = Vec::new();
+        let mut cur = h.map_head;
+        // Bound: mai piu' nodi delle entry dichiarate (catena corrotta).
+        let mut guard = (h.n_ext as usize).max(8) + 8;
+        let mut payload = format::boxed_node();
+        while cur != 0 {
+            if guard == 0 {
+                return None;
+            }
+            guard -= 1;
+            let (ty, _) = self.store.read_node(cur, &mut payload)?;
+            if ty != ARCA_NODE_TYPE_MAP {
+                return None;
+            }
+            let n = rd16(&payload[..], 8)? as usize;
+            if n == 0 || n > EXT_MAP_CAP {
+                return None;
+            }
+            let mut seg = Vec::with_capacity(n);
+            let mut off = 10;
+            for _ in 0..n {
+                let blk = rd64(&payload[..], off)?;
+                let nb = rd32(&payload[..], off + 8)?;
+                off += 12;
+                if blk == 0 || nb == 0 {
+                    return None;
+                }
+                seg.push((blk, nb));
+            }
+            segs.push((cur, seg));
+            cur = rd64(&payload[..], 0)?;
+        }
+        segs.reverse();
+        let mut out = Vec::new();
+        out.extend_from_slice(&h.inline);
+        let mut nodes = Vec::new();
+        for (blk, seg) in segs {
+            nodes.push(blk);
+            out.extend_from_slice(&seg);
+        }
+        if out.len() != h.n_ext as usize {
+            return None;
+        }
+        let tblks: u64 = out.iter().map(|(_, nb)| *nb as u64).sum();
+        if tblks > EXT_BLOCKS_MAX as u64 {
+            return None;
+        }
+        Some((out, nodes))
+    }
+
+    /// Scrive un nodo MAP singolo (chunk non vuoto entro capacita', `prev`
+    /// = nodo piu' vecchio o 0).
+    #[inline(never)]
+    fn ext_write_map_node(&mut self, blk: u64, prev: u64, chunk: &[(u64, u32)]) -> Option<()> {
+        if blk == 0 || chunk.is_empty() || chunk.len() > EXT_MAP_CAP {
+            return None;
+        }
+        let mut payload = format::boxed_node();
+        payload[..8].copy_from_slice(&prev.to_le_bytes());
+        payload[8..10].copy_from_slice(&(chunk.len() as u16).to_le_bytes());
+        let mut off = 10;
+        for (b, nb) in chunk.iter() {
+            payload[off..off + 8].copy_from_slice(&b.to_le_bytes());
+            payload[off + 8..off + 12].copy_from_slice(&nb.to_le_bytes());
+            off += 12;
+        }
+        payload[off..].fill(0);
+        if !self.store.write_node(blk, ARCA_NODE_TYPE_MAP, self.gen, &payload) {
+            return None;
+        }
+        Some(())
+    }
+
+    /// Scrive entry eccedenti l'inline in catena MAP fresca (prev noti,
+    /// un write per nodo). Ritorna la head = nodo piu' nuovo (0 se vuote).
+    #[inline(never)]
+    fn ext_write_map(&mut self, entries: &[(u64, u32)]) -> Option<u64> {
+        if entries.is_empty() {
+            return Some(0);
+        }
+        let n_nodes = entries.len().div_ceil(EXT_MAP_CAP);
+        let mut heads = Vec::with_capacity(n_nodes);
+        for _ in 0..n_nodes {
+            let blk = self.store.alloc()?;
+            if blk == 0 {
+                return None;
+            }
+            heads.push(blk);
+        }
+        for (i, head) in heads.iter().enumerate() {
+            let lo = i * EXT_MAP_CAP;
+            let hi = (lo + EXT_MAP_CAP).min(entries.len());
+            let prev = if i > 0 { heads[i - 1] } else { 0 };
+            self.ext_write_map_node(*head, prev, &entries[lo..hi])?;
+        }
+        Some(*heads.last().unwrap())
+    }
+
+    /// Costruisce ExtHead da entry complete (prime 12 inline, resto in MAP).
+    #[inline(never)]
+    fn ext_build(&mut self, size: u64, entries: Vec<(u64, u32)>) -> Option<ExtHead> {
+        if entries.len() > u32::MAX as usize {
+            return None;
+        }
+        let n_ext = entries.len() as u32;
+        let n_in = entries.len().min(EXT_INLINE_MAX);
+        let inline = entries[..n_in].to_vec();
+        let map_head = if entries.len() > n_in {
+            self.ext_write_map(&entries[n_in..])?
+        } else {
+            0
+        };
+        Some(ExtHead { size, inline, map_head, n_ext })
+    }
+
+    /// Legge [off..off+take) logici (take gia' clampato a EOF): attraversa
+    /// solo i blocchi coperti, O(blocchi toccati), accesso casuale senza
+    /// cursore. Oltre la copertura (sparse da zero-extend) restituisce zeri.
+    /// Mai parziali: o `take` byte esatti o `None`.
+    #[inline(never)]
+    fn ext_read_span(
+        &self,
+        entries: &[(u64, u32)],
+        off: usize,
+        take: usize,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if take == 0 {
+            return Some(());
+        }
+        let end = off.checked_add(take)?;
+        let mut payload = format::boxed_node();
+        let mut e_off = 0usize;
+        let mut produced = 0usize;
+        for (blk, nb) in entries.iter() {
+            let e_len = (*nb as usize).checked_mul(ARCA_NODE_PAYLOAD_LEN)?;
+            let e_end = e_off.checked_add(e_len)?;
+            if e_end > off && e_off < end {
+                let lo = off.max(e_off);
+                let hi = end.min(e_end);
+                let b_lo = (lo - e_off) / ARCA_NODE_PAYLOAD_LEN;
+                let b_hi = (hi - e_off + ARCA_NODE_PAYLOAD_LEN - 1) / ARCA_NODE_PAYLOAD_LEN;
+                for b in b_lo..b_hi {
+                    let bblk = blk.checked_add(b as u64)?;
+                    let (ty, _) = self.store.read_node(bblk, &mut payload)?;
+                    if ty != ARCA_NODE_TYPE_DATA {
+                        return None;
+                    }
+                    let bs = e_off + b * ARCA_NODE_PAYLOAD_LEN;
+                    let s = lo.max(bs);
+                    let e = hi.min(bs + ARCA_NODE_PAYLOAD_LEN);
+                    out.extend_from_slice(payload.get(s - bs..e - bs)?);
+                    produced += e - s;
+                }
+            }
+            e_off = e_end;
+            if e_off >= end {
+                break;
+            }
+        }
+        // Coda oltre copertura = zeri (sparse); buchi interni mai (entry
+        // contigue per costruzione del write).
+        if produced > take {
+            return None;
+        }
+        while produced < take {
+            out.push(0);
+            produced += 1;
+        }
+        Some(())
+    }
+
+    /// Blocchi di un record (catena legacy / entry+MAP, mai inline).
+    #[inline(never)]
+    fn value_blocks(&self, r: &PrimRec, out: &mut Vec<u64>) -> Option<()> {
+        match &r.data {
+            DataRef::Inline(_) => Some(()),
+            DataRef::Ov(ov, _) => self.walk_ov(*ov, out),
+            DataRef::Ext(h) => {
+                let (entries, nodes) = self.ext_entries(h)?;
+                out.extend(nodes);
+                for (blk, nb) in entries {
+                    for b in 0..nb {
+                        out.push(blk.checked_add(b as u64)?);
+                    }
+                }
+                Some(())
+            }
+        }
+    }
+
+    /// Blocchi vivi delle versioni di `id` ESCLUSE `drop` (liveness W2):
+    /// la storia lineare meno le droppate (le pinnate restano sempre nel
+    /// primary: mai rimosse da trim/delete) — ordinati, dedupati. Il
+    /// chiamante libera i blocchi della droppata non presenti qui.
+    #[inline(never)]
+    fn live_blocks_except(&self, id: u64, head_seq: u64, drop: &[u64]) -> Option<Vec<u64>> {
+        let mut out = Vec::new();
+        for seq in self.seqs_of(id, head_seq)? {
+            if drop.contains(&seq) {
+                continue;
+            }
+            let rec = self.head_rec(id, seq)?;
+            self.value_blocks(&rec, &mut out)?;
+        }
+        out.sort_unstable();
+        out.dedup();
+        Some(out)
+    }
+
+    /// Droppa versioni in batch (trim/delete): rimuove i record, poi libera
+    /// UNA volta sola i blocchi non vivi (le droppate condividono blocchi
+    /// tra loro: liberarli per-versione darebbe double-free loud). `live`
+    /// ordinato (binary search). Free fallito = corruzione, `None` loud;
+    /// a meta' i record sono gia' via (orfani alla GC, mai dati altrui).
+    #[inline(never)]
+    fn free_dropped_versions(&mut self, id: u64, drops: &[u64], live: &[u64]) -> Option<()> {
+        let mut recs = Vec::new();
+        for seq in drops {
+            let pk = prim_key(id, *seq);
+            let val = match self.btree_lookup(self.root_primary, TREE_PRIMARY, &pk) {
+                Some((_, leaf, i, true)) => prim_rec_parse(&leaf.vals[i]).map(|(r, _)| r),
+                _ => None,
+            };
+            let (nr, removed) = self.btree_remove(self.root_primary, TREE_PRIMARY, &pk)?;
+            self.root_primary = nr;
+            if removed {
+                if let Some(rec) = val {
+                    recs.push(rec);
+                }
+                // Pulisci il refcount (era 0: rimuovi il record).
+                let _ = self.ref_dec_free(id, *seq);
+            }
+        }
+        let mut to_free = Vec::new();
+        for rec in recs.iter() {
+            self.value_blocks(rec, &mut to_free)?;
+        }
+        to_free.sort_unstable();
+        to_free.dedup();
+        for b in to_free {
+            if live.binary_search(&b).is_err() && !self.store.free(b) {
+                return None;
+            }
+        }
+        Some(())
     }
 
     /// Head di un oggetto: record al seq noto (i seq live sono densi
@@ -1521,12 +1979,17 @@ impl<S: BlockStore> BTree<S> {
         prim_rec_parse(&leaf.vals[i]).map(|(r, _)| r)
     }
 
-    /// Tutte le seq presenti per `id` (per trim/delete): vettore ordinato.
+    /// Tutte le seq presenti per `id` (per trim/delete/stat/quota/liveness):
+    /// vettore ordinato. I seq nascono densi ma i trim creano BUCHI (le
+    /// pinnate restano mentre le versioni sopra cadono): la sola discesa
+    /// densa si fermerebbe al primo gap rendendo le pinnate invisibili —
+    /// i loro blocchi verrebbero liberati sotto i piedi (dangling con la
+    /// condivisione W2; leak silenzioso prima). Suffisso denso + stragglers
+    /// pinnati dal refcount: esatto in entrambi i casi.
     #[inline(never)]
-    fn seqs_of(&self, id: u64, head_seq: u64) -> Vec<u64> {
+    fn seqs_of(&self, id: u64, head_seq: u64) -> Option<Vec<u64>> {
         let mut out = Vec::new();
-        // Dalla head a ritroso finche' i record esistono (catena senza buchi:
-        // i seq sono densi per costruzione di `put_chunk`).
+        // Suffisso denso dalla head (caso comune: niente buchi in cima).
         let mut s = head_seq;
         loop {
             let pk = prim_key(id, s);
@@ -1544,14 +2007,72 @@ impl<S: BlockStore> BTree<S> {
                 break; // guardia: mai loop infinito su store corrotto
             }
         }
-        out.reverse();
-        out
+        // Stragglers pinnati sotto la frontiera (refcount > 0).
+        for seq in self.pinned_seqs(id)? {
+            if !out.contains(&seq) {
+                out.push(seq);
+            }
+        }
+        out.sort_unstable();
+        Some(out)
+    }
+
+    /// Seq pinnate di `id` (refcount > 0): walk delle foglie refcount
+    /// (albero piccolo e raro: solo snapshot). `None` a walk illeggibile
+    /// (fail closed: mai enumeration parziali spacciate per esatte).
+    #[inline(never)]
+    fn pinned_seqs(&self, id: u64) -> Option<Vec<u64>> {
+        let mut out = Vec::new();
+        let mut seen: Vec<u64> = Vec::new();
+        let mut stack = alloc::vec![self.root_refcount];
+        let mut guard = 1usize << 20;
+        while let Some(blk) = stack.pop() {
+            if guard == 0 {
+                return None;
+            }
+            guard -= 1;
+            if blk == 0 || seen.contains(&blk) {
+                continue;
+            }
+            seen.push(blk);
+            let (ty, tag, _, p) = self.node_read(blk)?;
+            if tag != TREE_REFCOUNT {
+                return None;
+            }
+            if ty == ARCA_NODE_TYPE_INTERNAL {
+                let it = internal_parse(&p[..], TREE_REFCOUNT)?;
+                stack.extend(it.children.iter().copied());
+            } else if ty == ARCA_NODE_TYPE_LEAF {
+                let leaf = leaf_parse(&p[..], TREE_REFCOUNT)?;
+                for (k, v) in leaf.keys.iter().zip(leaf.vals.iter()) {
+                    if k.len() != 16 {
+                        continue; // chiave malformata: salta (difensiva)
+                    }
+                    let mut ib = [0u8; 8];
+                    ib.copy_from_slice(&k[..8]);
+                    if u64::from_le_bytes(ib) != id {
+                        continue;
+                    }
+                    let (rec, _) = ref_rec_parse(v)?;
+                    if rec.count > 0 {
+                        let mut sb = [0u8; 8];
+                        sb.copy_from_slice(&k[8..16]);
+                        out.push(u64::from_le_bytes(sb));
+                    }
+                }
+            } else {
+                return None;
+            }
+        }
+        Some(out)
     }
 
     // ── API oggetto (stessa semantica 56.1, backend blocchi) ─────────────
 
     /// PUT chunk a `offset` (0 = nuova versione da zero, >0 = patch della
     /// head): crea SEMPRE una versione nuova. Ritorna i byte accettati.
+    /// W2: tocca solo gli extent coperti (condivisione + niente free eager);
+    /// inline e catene legacy migrano ai layout nuovi al primo write.
     /// `now` = wall-clock dal chiamante (cardo `wall::wall_secs`).
     #[inline(never)]
     pub fn put_chunk(
@@ -1564,44 +2085,84 @@ impl<S: BlockStore> BTree<S> {
         retain: usize,
     ) -> Option<usize> {
         // Qualunque scrittura invalida i cursori range (nuova versione: la
-        // catena head cambia e i nodi vecchi sono liberabili — vedi campo).
+        // mappa head cambia e i blocchi vecchi sono liberabili — vedi campo).
         self.range_clear();
         let sk = seckey_encode(bucket, key)?;
         let n = data.len();
-        // Base: clone della head se patch, altrimenti da zero.
-        let (uuid, base, head_seq) = match self.btree_lookup(self.root_secondary, TREE_SECONDARY, &sk) {
+        let end = offset.checked_add(n)?;
+        if end > (1 << 24) {
+            return None; // bound anti-OOM: 16 MiB per oggetto in 56.2b
+        }
+        let (uuid, head_seq, head) = match self.btree_lookup(self.root_secondary, TREE_SECONDARY, &sk) {
             Some((_, leaf, i, true)) => {
                 let (sec, _) = sec_rec_parse(&leaf.vals[i])?;
                 let head = self.head_rec(sec.uuid, sec.head_seq)?;
-                let blob = self.value_read(&head)?;
-                (sec.uuid, if offset == 0 { Vec::new() } else { blob }, sec.head_seq)
+                (sec.uuid, sec.head_seq, Some(head))
             }
             _ => {
                 let id = self.next_id;
                 self.next_id += 1;
                 self.by_id.insert(id, sk.clone());
-                (id, Vec::new(), 0)
+                (id, 0, None)
             }
         };
-        let mut next = base;
-        let end = offset.checked_add(n)?;
-        if next.len() < end {
-            if end > (1 << 24) {
-                return None; // bound anti-OOM: 16 MiB per oggetto in 56.2b
-            }
-            next.resize(end, 0);
-        }
-        next.get_mut(offset..end)?.copy_from_slice(data);
         let seq = head_seq + 1;
-        let (data_ov, data_inline) = self.value_write(&next)?;
-        let rec = PrimRec { id: uuid, seq, mtime: now, data_ov, data_inline };
+        // Nuovo riferimento dati + size (fresh a offset 0, patch sopra).
+        let (data, new_size) = match head {
+            None => {
+                let r = self.value_write(data)?;
+                (r, n as u64)
+            }
+            Some(h) => match h.data {
+                DataRef::Inline(cur) => {
+                    let mut next = if offset == 0 { Vec::new() } else { cur };
+                    if next.len() < end {
+                        next.resize(end, 0);
+                    }
+                    next.get_mut(offset..end)?.copy_from_slice(data);
+                    let size = next.len() as u64;
+                    let r = self.value_write(&next)?;
+                    (r, size)
+                }
+                DataRef::Ov(ov, size) => {
+                    if offset == 0 {
+                        // Fresh: la base si scarta (niente lettura).
+                        let r = self.value_write(data)?;
+                        (r, n as u64)
+                    } else {
+                        // MIGRAZIONE one-time: materializza, patch, extent.
+                        let sz: usize = size.try_into().ok()?;
+                        let mut base = ov_read(&self.store, ov, sz)?;
+                        if base.len() < end {
+                            base.resize(end, 0);
+                        }
+                        base.get_mut(offset..end)?.copy_from_slice(data);
+                        let size = base.len() as u64;
+                        let r = self.value_write(&base)?;
+                        (r, size)
+                    }
+                }
+                DataRef::Ext(eh) => {
+                    if offset == 0 {
+                        // Fresh: la mappa vecchia si scarta intera (truncate
+                        // incluso) — parita' con Inline/Ov, mai patch.
+                        let r = self.value_write(data)?;
+                        (r, n as u64)
+                    } else {
+                        let (nh, size) = self.ext_put_span(&eh, offset, data, end)?;
+                        (DataRef::Ext(nh), size)
+                    }
+                }
+            },
+        };
+        let rec = PrimRec { id: uuid, seq, mtime: now, data };
         let pk = prim_key(uuid, seq);
         let nr = self.btree_insert(self.root_primary, TREE_PRIMARY, pk.to_vec(), prim_rec_encode(&rec))?;
         self.root_primary = nr;
         // Upsert secondary (uuid stabile, head avanzata).
         let sec = SecRec {
             bucket: bucket.to_vec(), key: key.to_vec(), uuid,
-            size: next.len() as u64, mtime: now, head_seq: seq,
+            size: new_size, mtime: now, head_seq: seq,
         };
         let nr2 = self.btree_insert(self.root_secondary, TREE_SECONDARY, sk, sec_rec_encode(&sec)?)?;
         self.root_secondary = nr2;
@@ -1609,35 +2170,145 @@ impl<S: BlockStore> BTree<S> {
         Some(n)
     }
 
+    /// Patch/incolla a granularita' blocco (W2, il COW chiesto): espande la
+    /// mappa in lista blocchi, sostituisce solo l'intervallo coperto da
+    /// [offset, end) con blocchi freschi (i vecchi restano condivisi con le
+    /// altre versioni, niente free eager), ricompatta in entry e riusa i
+    /// nodi MAP invariati per numero. Solo i blocchi toccati si leggono
+    /// (bordi parziali) e scrivono; l'append riempie il blocco di coda ed
+    /// estende — O(1) per op, totale lineare. Ritorna (nuova testa, size).
+    #[inline(never)]
+    fn ext_put_span(
+        &mut self,
+        h: &ExtHead,
+        offset: usize,
+        data: &[u8],
+        end: usize,
+    ) -> Option<(ExtHead, u64)> {
+        let old_size = h.size as usize;
+        let new_size = old_size.max(end) as u64;
+        let (entries, map_nodes) = self.ext_entries(h)?;
+        // Lista blocchi piatta (bound EXT_BLOCKS_MAX: heap contenuta).
+        let mut blocks = Vec::new();
+        for (blk, nb) in entries.iter() {
+            for b in 0..*nb {
+                blocks.push(blk.checked_add(b as u64)?);
+            }
+        }
+        let total = blocks.len();
+        // Intervallo blocchi da sostituire (bordi parziali inclusi); oltre
+        // copertura (append/extend) nessun blocco vecchio.
+        let first = (offset / ARCA_NODE_PAYLOAD_LEN).min(total);
+        let mut last = (end + ARCA_NODE_PAYLOAD_LEN - 1) / ARCA_NODE_PAYLOAD_LEN;
+        if last > total {
+            last = total;
+        }
+        // Span byte da assemblare: vecchi preservati + patch + zeri.
+        let s_lo = first * ARCA_NODE_PAYLOAD_LEN;
+        let s_hi = (last * ARCA_NODE_PAYLOAD_LEN).max(end);
+        let mut span = Vec::new();
+        span.resize(s_hi - s_lo, 0);
+        let old_part = s_hi.min(old_size).saturating_sub(s_lo);
+        if old_part > 0 {
+            let mut tmp = Vec::new();
+            self.ext_read_span(&entries, s_lo, old_part, &mut tmp)?;
+            span[..old_part].copy_from_slice(&tmp);
+        }
+        span[offset - s_lo..offset - s_lo + data.len()].copy_from_slice(data);
+        // Blocchi freschi (affinita': continua il run fisico precedente —
+        // l'extent nuovo estende quello vecchio quando il disco lo permette).
+        let need = span.len().div_ceil(ARCA_NODE_PAYLOAD_LEN);
+        let mut fresh = Vec::with_capacity(need);
+        let mut hint = if first > 0 { blocks[first - 1] } else { 0 };
+        while fresh.len() < need {
+            let got = self.store.alloc_run(hint, need - fresh.len());
+            if got.is_empty() {
+                return None;
+            }
+            hint = *got.last().unwrap();
+            fresh.extend_from_slice(&got);
+        }
+        // Scrivi solo i freschi (i condivisi restano intatti).
+        let span_entries = group_runs(&fresh)?;
+        self.ext_store_data(&span_entries, &span)?;
+        // Ricompatta tutto e riusa i nodi MAP invariati per numero.
+        let mut new_blocks = Vec::with_capacity(total + fresh.len());
+        new_blocks.extend_from_slice(&blocks[..first]);
+        new_blocks.extend_from_slice(&fresh);
+        new_blocks.extend_from_slice(&blocks[last..]);
+        let new_entries = group_runs(&new_blocks)?;
+        let n_in = new_entries.len().min(EXT_INLINE_MAX);
+        // Nodi MAP: riusa il prefisso invariato per numero, riscrivi dalla
+        // prima entry cambiata in poi. Corretto con catena all'indietro: i
+        // `prev` riusati puntano a nodi riusati (mai patch in place); il
+        // primo riscritto punta all'ultimo riusato (o 0).
+        let old_mapped: &[(u64, u32)] = entries.get(h.inline.len()..).unwrap_or(&[]);
+        let new_mapped = &new_entries[n_in..];
+        let mut first_diff: Option<usize> = None;
+        for (i, chunk) in new_mapped.chunks(EXT_MAP_CAP).enumerate() {
+            let lo = i * EXT_MAP_CAP;
+            if old_mapped.get(lo..lo + chunk.len()) != Some(chunk) {
+                first_diff = Some(i);
+                break;
+            }
+        }
+        let mut node_blks = Vec::new();
+        for (i, chunk) in new_mapped.chunks(EXT_MAP_CAP).enumerate() {
+            let lo = i * EXT_MAP_CAP;
+            let same = old_mapped.get(lo..lo + chunk.len()) == Some(chunk);
+            let reuse = same && first_diff.map_or(true, |c| i < c) && i < map_nodes.len();
+            if reuse {
+                node_blks.push(map_nodes[i]);
+            } else {
+                let b = self.store.alloc()?;
+                if b == 0 {
+                    return None;
+                }
+                node_blks.push(b);
+            }
+        }
+        for (i, chunk) in new_mapped.chunks(EXT_MAP_CAP).enumerate() {
+            let reused = first_diff.map_or(true, |c| i < c) && i < map_nodes.len();
+            if !reused {
+                let lo = i * EXT_MAP_CAP;
+                let hi = (lo + EXT_MAP_CAP).min(new_mapped.len());
+                let prev = if i > 0 { node_blks[i - 1] } else { 0 };
+                self.ext_write_map_node(node_blks[i], prev, &new_mapped[lo..hi])?;
+            }
+        }
+        let map_head = node_blks.last().copied().unwrap_or(0);
+        if new_entries.len() > u32::MAX as usize {
+            return None;
+        }
+        let head = ExtHead {
+            size: new_size,
+            inline: new_entries[..n_in].to_vec(),
+            map_head,
+            n_ext: new_entries.len() as u32,
+        };
+        Some((head, new_size))
+    }
+
     /// Trim retention: oltre `retain` versioni, le piu' vecchie non pinnate
     /// (refcount 0) vengono cancellate e liberate; quelle pinnate restano.
+    /// W2: i blocchi condivisi con le versioni vive/pinnate restano
+    /// (liveness sul set escluso, mai free eager).
     #[inline(never)]
     fn trim_retain(&mut self, id: u64, head_seq: u64, retain: usize) -> Option<()> {
-        let seqs = self.seqs_of(id, head_seq);
+        let seqs = self.seqs_of(id, head_seq)?;
         if seqs.len() <= retain {
             return Some(());
         }
         let drop_n = seqs.len() - retain;
+        let mut drops = Vec::new();
         for seq in seqs.iter().take(drop_n) {
-            if self.ref_get(id, *seq) > 0 {
-                continue; // pinnata da snapshot: resta
-            }
-            // Leggi il valore per liberare l'overflow, poi cancella.
-            let pk = prim_key(id, *seq);
-            let val = match self.btree_lookup(self.root_primary, TREE_PRIMARY, &pk) {
-                Some((_, leaf, i, true)) => prim_rec_parse(&leaf.vals[i]).map(|(r, _)| r),
-                _ => None,
-            };
-            let (nr, removed) = self.btree_remove(self.root_primary, TREE_PRIMARY, &pk)?;
-            self.root_primary = nr;
-            if removed {
-                if let Some(rec) = val {
-                    self.value_free(&rec);
-                }
-                // Pulisci il refcount (era 0: rimuovi il record).
-                let _ = self.ref_dec_free(id, *seq);
+            if self.ref_get(id, *seq) == 0 {
+                drops.push(*seq);
             }
         }
+        // Vivi = tutto il resto (storia + pinnate, mai rimosse dal primary).
+        let live = self.live_blocks_except(id, head_seq, &drops)?;
+        self.free_dropped_versions(id, &drops, &live)?;
         Some(())
     }
 
@@ -1713,8 +2384,9 @@ impl<S: BlockStore> BTree<S> {
         self.head_range(sec.uuid, sec.head_seq, offset, count)
     }
 
-    /// Nucleo range su head nota: inline = slice diretto; overflow = walk
-    /// con cursore (vedi campo `range_cur` per il contratto di sicurezza).
+    /// Nucleo range su head nota: inline = slice diretto; overflow legacy =
+    /// walk con cursore (vedi campo `range_cur` per il contratto); extent =
+    /// lettura indicizzata O(blocchi toccati), accesso casuale senza cursore.
     #[inline(never)]
     fn head_range(
         &mut self,
@@ -1724,18 +2396,52 @@ impl<S: BlockStore> BTree<S> {
         count: usize,
     ) -> Option<(usize, Vec<u8>)> {
         let head = self.head_rec(uuid, head_seq)?;
-        let size: usize = match &head.data_ov {
-            Some((_, s)) => (*s).try_into().ok()?,
-            None => head.data_inline.len(),
-        };
+        match head.data {
+            DataRef::Inline(d) => {
+                let size = d.len();
+                if offset >= size {
+                    return Some((size, Vec::new()));
+                }
+                let take = (size - offset).min(count);
+                Some((size, d[offset..offset + take].to_vec()))
+            }
+            DataRef::Ext(h) => {
+                let size: usize = h.size.try_into().ok()?;
+                if offset >= size {
+                    return Some((size, Vec::new()));
+                }
+                let take = (size - offset).min(count);
+                let (entries, _) = self.ext_entries(&h)?;
+                let mut out = Vec::with_capacity(take);
+                self.ext_read_span(&entries, offset, take, &mut out)?;
+                if out.len() != take {
+                    return None;
+                }
+                Some((size, out))
+            }
+            DataRef::Ov(ov, size) => {
+                let size: usize = size.try_into().ok()?;
+                self.head_range_legacy(uuid, ov, size, offset, count)
+            }
+        }
+    }
+
+    /// Range su catena OV legacy (F0: walk con cursore; solo oggetti mai
+    /// riscritti dopo W2 — il primo write migra a extent).
+    #[inline(never)]
+    fn head_range_legacy(
+        &mut self,
+        uuid: u64,
+        ov: u64,
+        size: usize,
+        offset: usize,
+        count: usize,
+    ) -> Option<(usize, Vec<u8>)> {
         if offset >= size {
             return Some((size, Vec::new()));
         }
         let take = (size - offset).min(count);
-        if head.data_ov.is_none() {
-            return Some((size, head.data_inline[offset..offset + take].to_vec()));
-        }
-        let (mut cur, _) = head.data_ov?;
+        let mut cur = ov;
         // Partenza: cursore (nodo che contiene `offset`, o resume esatto a
         // fine nodo) oppure head con skip intero.
         let mut skip = offset;
@@ -1846,12 +2552,43 @@ impl<S: BlockStore> BTree<S> {
         }
         let (sec, _) = sec_rec_parse(&leaf.vals[i])?;
         let head = self.head_rec(sec.uuid, sec.head_seq)?;
-        let nv = self.seqs_of(sec.uuid, sec.head_seq).len() as u64;
-        let size = match head.data_ov {
-            Some((_, s)) => s,
-            None => head.data_inline.len() as u64,
-        };
-        Some((sec.uuid, size, nv, head.mtime))
+        let nv = self.seqs_of(sec.uuid, sec.head_seq)?.len() as u64;
+        Some((sec.uuid, value_size(&head), nv, head.mtime))
+    }
+
+    /// Istogramma layout valori (W2 debug/tuning): (oggetti extent, entry
+    /// totali, max entry singolo, oggetti legacy OV, oggetti inline). Solo
+    /// diagnostica (costo O(oggetti) lookup: niente walk totali). Tollerante
+    /// agli indici stale (rename non aggiorna `by_id`, pre-esistente: qui si
+    /// salta, mai loud su una statistica).
+    #[inline(never)]
+    pub fn extent_stats(&self) -> Option<(u64, u64, u64, u64, u64)> {
+        let mut n_ext = 0u64;
+        let mut entries = 0u64;
+        let mut max_e = 0u64;
+        let mut n_ov = 0u64;
+        let mut n_in = 0u64;
+        for (id, sk) in self.by_id.iter() {
+            let (_, leaf, i, found) = self.btree_lookup(self.root_secondary, TREE_SECONDARY, sk)?;
+            if !found {
+                continue;
+            }
+            let (sec, _) = sec_rec_parse(&leaf.vals[i])?;
+            if sec.uuid != *id {
+                continue; // indice stale: mai dati altrui nemmeno in stats
+            }
+            let head = self.head_rec(sec.uuid, sec.head_seq)?;
+            match &head.data {
+                DataRef::Ext(h) => {
+                    n_ext += 1;
+                    entries += h.n_ext as u64;
+                    max_e = max_e.max(h.n_ext as u64);
+                }
+                DataRef::Ov(..) => n_ov += 1,
+                DataRef::Inline(_) => n_in += 1,
+            }
+        }
+        Some((n_ext, entries, max_e, n_ov, n_in))
     }
 
     /// Stat per object_id: (size head, versioni contate, mtime head).
@@ -1868,12 +2605,8 @@ impl<S: BlockStore> BTree<S> {
             return None;
         }
         let head = self.head_rec(id, sec.head_seq)?;
-        let nv = self.seqs_of(id, sec.head_seq).len() as u64;
-        let size = match head.data_ov {
-            Some((_, s)) => s,
-            None => head.data_inline.len() as u64,
-        };
-        Some((size, nv, head.mtime))
+        let nv = self.seqs_of(id, sec.head_seq)?.len() as u64;
+        Some((value_size(&head), nv, head.mtime))
     }
 
     /// Cancella nome + catena viva (gli snapshot pinnati restano validi:
@@ -1899,23 +2632,17 @@ impl<S: BlockStore> BTree<S> {
             return Some(false);
         }
         self.by_id.remove(&sec);
-        // Catena viva: cancella le versioni non pinnate, sgancia le pinnate.
-        for seq in self.seqs_of(sec, head_seq) {
-            if self.ref_get(sec, seq) > 0 {
-                continue; // pinnata: il blocco resta per lo snapshot
+        // Versioni vive: cancella le non pinnate (i blocchi condivisi con
+        // le pinnate restano via liveness), sgancia le pinnate.
+        let seqs = self.seqs_of(sec, head_seq)?;
+        let mut drops = Vec::new();
+        for seq in seqs {
+            if self.ref_get(sec, seq) == 0 {
+                drops.push(seq);
             }
-            let pk = prim_key(sec, seq);
-            let val = match self.btree_lookup(self.root_primary, TREE_PRIMARY, &pk) {
-                Some((_, leaf, i, true)) => prim_rec_parse(&leaf.vals[i]).map(|(r, _)| r),
-                _ => None,
-            };
-            let (nrp, _) = self.btree_remove(self.root_primary, TREE_PRIMARY, &pk)?;
-            self.root_primary = nrp;
-            if let Some(rec) = val {
-                self.value_free(&rec);
-            }
-            let _ = self.ref_dec_free(sec, seq);
         }
+        let live = self.live_blocks_except(sec, head_seq, &drops)?;
+        self.free_dropped_versions(sec, &drops, &live)?;
         Some(true)
     }
 
@@ -2079,19 +2806,20 @@ impl<S: BlockStore> BTree<S> {
             }
         };
         let seq = head_seq + 1;
-        let (data_ov, data_inline) = self.value_write(&data)?;
-        let rec = PrimRec { id: uuid, seq, mtime: now, data_ov, data_inline };
+        let size = data.len() as u64;
+        let data = self.value_write(&data)?;
+        let rec = PrimRec { id: uuid, seq, mtime: now, data };
         let pk = prim_key(uuid, seq);
         let nr = self.btree_insert(self.root_primary, TREE_PRIMARY, pk.to_vec(), prim_rec_encode(&rec))?;
         self.root_primary = nr;
         let sec = SecRec {
             bucket: bucket.to_vec(), key: key.to_vec(), uuid,
-            size: data.len() as u64, mtime: now, head_seq: seq,
+            size, mtime: now, head_seq: seq,
         };
         let nr2 = self.btree_insert(self.root_secondary, TREE_SECONDARY, sk, sec_rec_encode(&sec)?)?;
         self.root_secondary = nr2;
         self.trim_retain(uuid, seq, retain)?;
-        Some(data.len() as u64)
+        Some(size)
     }
 
     /// Clone di bucket: ogni entry dello snapshot diventa oggetto NUOVO
@@ -2122,14 +2850,15 @@ impl<S: BlockStore> BTree<S> {
                 }
             };
             let seq = head_seq + 1;
-            let (data_ov, data_inline) = self.value_write(&data)?;
-            let rec = PrimRec { id: uuid, seq, mtime: now, data_ov, data_inline };
+            let size = data.len() as u64;
+            let data = self.value_write(&data)?;
+            let rec = PrimRec { id: uuid, seq, mtime: now, data };
             let pk = prim_key(uuid, seq);
             let nr = self.btree_insert(self.root_primary, TREE_PRIMARY, pk.to_vec(), prim_rec_encode(&rec))?;
             self.root_primary = nr;
             let sec = SecRec {
                 bucket: dst.to_vec(), key: key.to_vec(), uuid,
-                size: data.len() as u64, mtime: now, head_seq: seq,
+                size, mtime: now, head_seq: seq,
             };
             let nr2 = self.btree_insert(self.root_secondary, TREE_SECONDARY, sk_dst, sec_rec_encode(&sec)?)?;
             self.root_secondary = nr2;
@@ -2381,22 +3110,41 @@ mod tests {
 
     #[test]
     fn write_append_opcount() {
-        // 128 append sequenziali da 4 KiB (512 KiB finali): il pattern che
-        // in guest era quadratico (test57 originale inchiodato a 64 KiB).
+        // 512 append sequenziali da 4 KiB (2 MiB finali, il target S2.5w):
+        // con gli extent ogni op tocca O(1) blocchi — la seconda meta' deve
+        // costare come la prima (un O(n^2) darebbe ~3x). Il test57 originale
+        // in guest si inchiodava a 64 KiB su questo stesso pattern.
         let mut t = BTree::new(CountStore::new(MemStore::new()), 1).expect("new");
         let mut off = 0usize;
-        for k in 0..128usize {
+        for k in 0..256usize {
             let chunk: Vec<u8> = (0..4096).map(|i| ((k * 4096 + i) % 251) as u8).collect();
-            assert_eq!(t.put_chunk(b"w", b"seq", off, &chunk, k as u64, 8), Some(4096));
+            assert_eq!(t.put_chunk(b"w", b"seq", off, &chunk, k as u64, 8), Some(4096), "put {}", k);
             off += 4096;
         }
-        assert_eq!(t.get(b"w", b"seq").map(|v| v.len()), Some(128 * 4096));
+        let (rd1, wr1, al1, fr1) = t.store.counts();
+        for k in 256..512usize {
+            let chunk: Vec<u8> = (0..4096).map(|i| ((k * 4096 + i) % 251) as u8).collect();
+            assert_eq!(t.put_chunk(b"w", b"seq", off, &chunk, k as u64, 8), Some(4096), "put {}", k);
+            off += 4096;
+        }
         let (rd, wr, al, fr) = t.store.counts();
-        println!("[opcount] append128x4K rd={rd} wr={wr} alloc={al} free={fr}");
-        // Bound post-W1 (+~25% sui misurati 20869/9963/9963/8432): ogni
-        // blocco allocato e' scritto una sola volta (wr == alloc); un
-        // rewrite-e-patch reintrodotto farebbe saltare wr oltre alloc.
-        assert!(rd <= 26000 && wr <= 12500 && al <= 12500 && fr <= 10600);
+        assert_eq!(t.get(b"w", b"seq").map(|v| v.len()), Some(512 * 4096));
+        // Contenuto posizionale intatto dopo trim aggressivo (retain=8 su
+        // 512 versioni: condivisione + liveness esercitati davvero).
+        let blob = t.get(b"w", b"seq").unwrap();
+        assert!(blob.iter().enumerate().all(|(i, b)| *b == (i % 251) as u8));
+        println!("[opcount] append512x4K rd={rd} wr={wr} alloc={al} free={fr} (meta1 rd={rd1} wr={wr1} al={al1} fr={fr1})");
+        // Linearita' (bound larghi 2x: il quadratico darebbe ~3x; misurati
+        // ~1.2x letture, ~1.0x scritture).
+        assert!(rd - rd1 <= 2 * rd1.max(1));
+        assert!(wr - wr1 <= 2 * wr1.max(1));
+        assert!(al - al1 <= 2 * al1.max(1));
+        assert!(fr - fr1 <= 2 * fr1.max(1));
+        // Bound assoluti post-W2 (+~30% sui misurati
+        // 28651/3133/3133/996): 2 MiB in ~33K op (il W1-quadratico ne
+        // vorrebbe ~800K).
+        assert!(rd <= 37500 && wr <= 4100 && al <= 4100 && fr <= 1300);
+        // Ogni blocco allocato e' scritto una sola volta (invariante W1).
         assert_eq!(wr, al);
     }
 
@@ -2414,6 +3162,396 @@ mod tests {
         // Bound post-W1 (+~25% sui misurati 367/215/215/38).
         assert!(rd <= 460 && wr <= 270 && al <= 270 && fr <= 50);
         assert_eq!(wr, al);
+    }
+
+    #[test]
+    fn extent_midpatch_trim_condivisione() {
+        // 20 patch centrali non sovrapposte + trim (retain=8 su 21 versioni):
+        // i blocchi sostituiti muoiono solo a versioni droppate, i condivisi
+        // sopravvivono — contenuto sempre esatto.
+        let mut t = engine();
+        let base: Vec<u8> = (0..30000).map(|i| (i % 251) as u8).collect();
+        t.put_chunk(b"e", b"mid", 0, &base, 1, 8).unwrap();
+        // Patch a offset >0 (offset 0 = versione fresca da zero per contratto,
+        // mai patch: il merge e' a carico del chiamante come `ns_write`).
+        for k in 0..20usize {
+            let off = 1400 + k * 1300;
+            let p: Vec<u8> = (0..1024).map(|i| (0xC0 + ((k + i) % 16)) as u8).collect();
+            assert_eq!(t.put_chunk(b"e", b"mid", off, &p, 10 + k as u64, 8), Some(1024));
+        }
+        let (_, _, nv, _) = t.stat(b"e", b"mid").unwrap();
+        assert_eq!(nv, 8);
+        let got = t.get(b"e", b"mid").unwrap();
+        assert_eq!(got.len(), 30000);
+        for k in 0..20usize {
+            let off = 1400 + k * 1300;
+            for i in 0..1024 {
+                assert_eq!(got[off + i], (0xC0 + ((k + i) % 16)) as u8, "k={k} i={i}");
+            }
+        }
+        for (i, b) in got.iter().enumerate() {
+            let patched = i >= 1400 && (i - 1400) % 1300 < 1024 && (i - 1400) / 1300 < 20;
+            if !patched {
+                assert_eq!(*b, (i % 251) as u8, "buco a {i}");
+            }
+        }
+        // Niente leak grossolani: 30K dati + mappe + btree in <500 blocchi.
+        assert!(t.store.live_count() < 500, "live={}", t.store.live_count());
+    }
+
+    #[test]
+    fn extent_snapshot_pin_delete_rollback() {
+        // Pin + overwrite totale + delete + rollback: i blocchi del pinnato
+        // non si liberano mai sotto i piedi.
+        let mut t = engine();
+        let base: Vec<u8> = (0..20000).map(|i| (i % 251) as u8).collect();
+        t.put_chunk(b"s", b"pin", 0, &base, 1, 8).unwrap();
+        let sid = t.snap_create(b"s", 2).expect("snap");
+        let over: Vec<u8> = (0..20000).map(|i| (0xFF - (i % 200)) as u8).collect();
+        t.put_chunk(b"s", b"pin", 0, &over, 3, 8).unwrap();
+        assert_eq!(t.get(b"s", b"pin").unwrap(), over);
+        // Delete sgancia ma il pin tiene i blocchi: rollback li ritrova.
+        assert!(t.delete(b"s", b"pin").unwrap());
+        assert_eq!(t.get(b"s", b"pin"), None);
+        t.snap_rollback(b"s", b"pin", sid, 4, 8).unwrap();
+        assert_eq!(t.get(b"s", b"pin").unwrap(), base);
+        assert!(t.snap_delete(sid));
+        // Dopo il delete tutto torna liberabile: rewrite + trim aggressivo.
+        for k in 0..10u64 {
+            t.put_chunk(b"s", b"pin", 0, &over, 10 + k, 1).unwrap();
+        }
+        assert_eq!(t.get(b"s", b"pin").unwrap(), over);
+    }
+
+    #[test]
+    fn extent_migra_legacy_al_write() {
+        // Catena OV forgiata a mano (i write nuovi non ne producono piu'):
+        // lettura duale ok, primo write migra a Ext con patch applicata.
+        let mut t = engine();
+        let old: Vec<u8> = (0..9000).map(|i| (i % 251) as u8).collect();
+        let (ov, size) = ov_write(&mut t.store, 1, &old).expect("ov");
+        let sk = seckey_encode(b"g", b"leg").unwrap();
+        t.next_id = 78;
+        t.by_id.insert(77, sk.clone());
+        let pk = prim_key(77, 1);
+        let rec = PrimRec { id: 77, seq: 1, mtime: 1, data: DataRef::Ov(ov, size) };
+        let rp = t.root_primary;
+        let nr = t.btree_insert(rp, TREE_PRIMARY, pk.to_vec(), prim_rec_encode(&rec)).unwrap();
+        t.root_primary = nr;
+        let sec = SecRec {
+            bucket: b"g".to_vec(), key: b"leg".to_vec(), uuid: 77,
+            size, mtime: 1, head_seq: 1,
+        };
+        let rs = t.root_secondary;
+        let nr2 = t.btree_insert(rs, TREE_SECONDARY, sk, sec_rec_encode(&sec).unwrap()).unwrap();
+        t.root_secondary = nr2;
+        assert_eq!(t.get(b"g", b"leg").as_deref(), Some(old.as_slice()));
+        t.put_chunk(b"g", b"leg", 100, &[0xAA; 50], 2, 8).unwrap();
+        let got = t.get(b"g", b"leg").unwrap();
+        assert_eq!(got.len(), 9000);
+        assert_eq!(&got[..100], &old[..100]);
+        assert!(got[100..150].iter().all(|b| *b == 0xAA));
+        assert_eq!(&got[150..], &old[150..]);
+        // Migrata davvero: head Ext, niente piu' catene.
+        let head = t.head_rec(77, 2).unwrap();
+        assert!(matches!(head.data, DataRef::Ext(_)));
+        // 9 rewrite freschi: trim droppa la v1 legacy (walk_ov + free
+        // esercitati) senza perdere la head.
+        for k in 0..9u64 {
+            t.put_chunk(b"g", b"leg", 0, &old, 10 + k, 8).unwrap();
+        }
+        assert_eq!(t.get(b"g", b"leg").as_deref(), Some(old.as_slice()));
+    }
+
+    #[test]
+    fn extent_map_spill_confini() {
+        // Append frammentanti (40x4K con trim/riuso freelist): decine di
+        // entry → 12 inline + nodi MAP; patch a cavallo + range oltre
+        // confine + confini inline/extent e blocco.
+        let mut t = engine();
+        let mut off = 0usize;
+        for k in 0..40usize {
+            let chunk: Vec<u8> = (0..4096).map(|i| ((k * 4096 + i) % 251) as u8).collect();
+            t.put_chunk(b"m", b"big", off, &chunk, k as u64, 8).unwrap();
+            off += 4096;
+        }
+        let (id, _, _, _) = t.stat(b"m", b"big").unwrap();
+        let head = t.head_rec(id, 40).unwrap();
+        match &head.data {
+            DataRef::Ext(h) => {
+                assert!(h.n_ext as usize > EXT_INLINE_MAX, "n_ext={}", h.n_ext);
+                assert_eq!(h.inline.len(), EXT_INLINE_MAX);
+                assert_ne!(h.map_head, 0);
+            }
+            other => panic!("atteso Ext, trovato {other:?}"),
+        }
+        let got = t.get(b"m", b"big").unwrap();
+        assert_eq!(got.len(), 40 * 4096);
+        assert!(got.iter().enumerate().all(|(i, b)| *b == (i % 251) as u8));
+        // Patch a cavallo di piu' entry + range oltre confine mappa.
+        let poff = 30000;
+        t.put_chunk(b"m", b"big", poff, &[0xBB; 8000], 41, 8).unwrap();
+        let got2 = t.get(b"m", b"big").unwrap();
+        assert_eq!(got2.len(), 40 * 4096);
+        assert!(got2[poff..poff + 8000].iter().all(|b| *b == 0xBB));
+        assert_eq!(&got2[..poff], &got[..poff]);
+        assert_eq!(&got2[poff + 8000..], &got[poff + 8000..]);
+        let (len, part) = t.get_range(b"m", b"big", poff - 100, 9000).unwrap();
+        assert_eq!(len, 40 * 4096);
+        assert_eq!(part.as_slice(), &got2[poff - 100..poff - 100 + 9000]);
+        // File fresco su disco vuoto = 1 sola entry (l'affinita' funziona:
+        // high_water++ consegna run contigui; sullo store frammentato sopra
+        // i run si spezzano ed e' corretto cosi').
+        let mut t2 = engine();
+        let big2: Vec<u8> = (0..102400).map(|i| (i % 251) as u8).collect();
+        t2.put_chunk(b"m", b"fresh", 0, &big2, 1, 8).unwrap();
+        match &t2.head_rec(1, 1).unwrap().data {
+            DataRef::Ext(h) => assert_eq!((h.n_ext, h.map_head), (1, 0)),
+            other => panic!("atteso Ext singolo, trovato {other:?}"),
+        }
+        assert_eq!(t2.get(b"m", b"fresh").as_deref(), Some(big2.as_slice()));
+        // Confini: 512 inline, 513 extent, shrink a inline, blocchi esatti.
+        t.put_chunk(b"m", b"t512", 0, &[7u8; 512], 43, 8).unwrap();
+        assert!(matches!(t.head_rec(2, 1).unwrap().data, DataRef::Inline(_)));
+        t.put_chunk(b"m", b"t512", 512, &[9u8; 1], 44, 8).unwrap();
+        let tiny = t.get(b"m", b"t512").unwrap();
+        assert_eq!(tiny.len(), 513);
+        assert!(tiny[..512].iter().all(|b| *b == 7) && tiny[512] == 9);
+        assert!(matches!(t.head_rec(2, 2).unwrap().data, DataRef::Ext(_)));
+        t.put_chunk(b"m", b"t512", 0, &[7u8; 512], 45, 8).unwrap();
+        assert!(matches!(t.head_rec(2, 3).unwrap().data, DataRef::Inline(_)));
+        for (key, n) in [(b"b9".as_slice(), 3559usize), (b"b0".as_slice(), 3560usize), (b"b1".as_slice(), 3561usize)] {
+            let v: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+            t.put_chunk(b"m", key, 0, &v, 46, 8).unwrap();
+            assert_eq!(t.get(b"m", key).as_deref(), Some(v.as_slice()));
+        }
+    }
+
+    /// Store fedele ad `ArcaVolume` (W2 diagnosis): freelist LIFO +
+    /// high_water + live-set + alloc_specific + stale-read (un blocco
+    /// liberato rilegge i dati VECCHI, come sul disco — MemStore invece
+    /// ritorna None e nasconde gli use-after-free).
+    struct FakeVol {
+        blocks: Vec<Option<([u8; ARCA_NODE_PAYLOAD_LEN], u8, u64)>>,
+        free_list: Vec<u64>,
+        high_water: u64,
+        live: alloc::collections::BTreeSet<u64>,
+    }
+
+    impl FakeVol {
+        fn new() -> Self {
+            Self { blocks: alloc::vec![None], free_list: Vec::new(), high_water: 1, live: alloc::collections::BTreeSet::new() }
+        }
+        fn is_live(&self, b: u64) -> bool {
+            self.live.contains(&b)
+        }
+        fn alloc_specific(&mut self, n: u64) -> bool {
+            if n == 0 || !self.live.insert(n) {
+                return false;
+            }
+            if let Some(pos) = self.free_list.iter().position(|x| *x == n) {
+                self.free_list.remove(pos);
+                return true;
+            }
+            if n == self.high_water {
+                self.high_water += 1;
+                while self.blocks.len() <= n as usize {
+                    self.blocks.push(None);
+                }
+                return true;
+            }
+            self.live.remove(&n);
+            false
+        }
+    }
+
+    impl BlockStore for FakeVol {
+        fn read_node(&self, blk: u64, out: &mut [u8; ARCA_NODE_PAYLOAD_LEN]) -> Option<(u8, u64)> {
+            let (p, ty, gen) = self.blocks.get(blk as usize)?.as_ref()?;
+            out.copy_from_slice(p);
+            Some((*ty, *gen))
+        }
+        fn write_node(&mut self, blk: u64, ty: u8, gen: u64, payload: &[u8; ARCA_NODE_PAYLOAD_LEN]) -> bool {
+            if blk == 0 || !self.live.contains(&blk) {
+                return false; // come ArcaVolume: mai scrivere non-live
+            }
+            while self.blocks.len() <= blk as usize {
+                self.blocks.push(None);
+            }
+            self.blocks[blk as usize] = Some((*payload, ty, gen));
+            true
+        }
+        fn alloc(&mut self) -> Option<u64> {
+            let b = match self.free_list.pop() {
+                Some(b) => b,
+                None => {
+                    let b = self.high_water;
+                    self.high_water += 1;
+                    b
+                }
+            };
+            if b == 0 || !self.live.insert(b) {
+                return None;
+            }
+            while self.blocks.len() <= b as usize {
+                self.blocks.push(None);
+            }
+            Some(b)
+        }
+        fn free(&mut self, blk: u64) -> bool {
+            if blk == 0 || !self.live.remove(&blk) {
+                return false; // double-free: loud come ArcaVolume
+            }
+            self.free_list.push(blk); // contenuto vecchio resta (stale-read)
+            true
+        }
+        fn alloc_run(&mut self, hint: u64, max: usize) -> Vec<u64> {
+            // Replica esatta di ArcaVolume::alloc_run (stessa semantica).
+            let mut out = Vec::new();
+            if hint != 0 {
+                let mut n = hint.checked_add(1).unwrap_or(0);
+                while out.len() < max && n != 0 {
+                    if self.alloc_specific(n) {
+                        out.push(n);
+                        n = n.checked_add(1).unwrap_or(0);
+                    } else {
+                        break;
+                    }
+                }
+            }
+            while out.len() < max {
+                match self.alloc() {
+                    Some(b) if b != 0 => out.push(b),
+                    _ => break,
+                }
+            }
+            out
+        }
+    }
+
+    #[test]
+    fn volume_faithful_churn() {
+        // Stesso workload del gate (append/patch/delete/ricrea, churn
+        // freelist con riuso LIFO): ogni blocco referenziato deve essere
+        // live (niente dangling) e ogni contenuto esatto — lo stale-read
+        // del fake rende visibile qualunque use-after-free.
+        let mut t = BTree::new(FakeVol::new(), 1).expect("new");
+        let check_live = |t: &BTree<FakeVol>| {
+            let reach = t.reachable_blocks().expect("reachable");
+            for b in reach {
+                assert!(t.store.is_live(b), "dangling {b}");
+            }
+        };
+        let mut expect: Vec<u8> = Vec::new();
+        for k in 0..60usize {
+            let chunk: Vec<u8> = (0..4096).map(|i| ((k * 4096 + i) % 251) as u8).collect();
+            t.put_chunk(b"v", b"f", k * 4096, &chunk, k as u64, 4).unwrap();
+            expect.extend_from_slice(&chunk);
+            assert_eq!(t.get(b"v", b"f").as_deref(), Some(expect.as_slice()), "k={k}");
+            check_live(&t);
+        }
+        // Patch centrali + delete/ricrea (churn gestorben).
+        for k in 0..10usize {
+            let off = 5000 + k * 20000;
+            t.put_chunk(b"v", b"f", off, &[0xDD; 2000], 100 + k as u64, 4).unwrap();
+            for i in 0..2000 {
+                expect[off + i] = 0xDD;
+            }
+            assert_eq!(t.get(b"v", b"f").as_deref(), Some(expect.as_slice()), "p{k}");
+            check_live(&t);
+        }
+        assert!(t.delete(b"v", b"f").unwrap());
+        assert_eq!(t.get(b"v", b"f"), None);
+        // Ricrea sulla freelist sporca (riuso LIFO di blocchi liberati).
+        let over: Vec<u8> = (0..70000).map(|i| (0x11 + (i % 33)) as u8).collect();
+        t.put_chunk(b"v", b"g", 0, &over, 200, 4).unwrap();
+        assert_eq!(t.get(b"v", b"g").as_deref(), Some(over.as_slice()));
+        check_live(&t);
+    }
+
+    #[test]
+    fn volume_faithful_gate_scale() {
+        // Maturita' da gate: 10 file x 30 round di append interlacciati +
+        // snapshot/rollback/delete/ricrea/quota/meta — contenuto esatto e
+        // niente dangling a ogni round.
+        let mut t = BTree::new(FakeVol::new(), 1).expect("new");
+        let mut expect: Vec<Vec<u8>> = Vec::new();
+        for _ in 0..10 {
+            expect.push(Vec::new());
+        }
+        let check_all = |t: &BTree<FakeVol>, expect: &Vec<Vec<u8>>| {
+            for (f, exp) in expect.iter().enumerate() {
+                let mut key = b"file".to_vec();
+                key.push(b'0' + f as u8);
+                if exp.is_empty() {
+                    assert_eq!(t.get(b"gate", &key), None, "f={f}");
+                    continue;
+                }
+                assert_eq!(t.get(b"gate", &key).as_deref(), Some(exp.as_slice()), "f={f}");
+            }
+            let reach = t.reachable_blocks().expect("reachable");
+            for b in reach {
+                assert!(t.store.is_live(b), "dangling {b}");
+            }
+        };
+        let mut snap: Option<u64> = None;
+        for round in 0..30usize {
+            for f in 0..10usize {
+                let mut key = b"file".to_vec();
+                key.push(b'0' + f as u8);
+                let off = expect[f].len();
+                let chunk: Vec<u8> = (0..4096).map(|i| ((off + i) % 251) as u8).collect();
+                t.put_chunk(b"gate", &key, off, &chunk, (round * 10 + f) as u64, 4).unwrap();
+                expect[f].extend_from_slice(&chunk);
+            }
+            if round == 10 {
+                snap = Some(t.snap_create(b"gate", 1000).expect("snap"));
+                t.quota_set(b"gq", 100000).expect("quota");
+                t.put_chunk(b"gq", b"q", 0, &[1u8; 3000], 1001, 8).unwrap();
+            }
+            if round == 20 {
+                // Rollback di un file + delete/ricrea di un altro.
+                let sid = snap.expect("snap");
+                t.snap_rollback(b"gate", b"file3", sid, 2000, 8).expect("rb");
+                expect[3] = t.get(b"gate", b"file3").expect("re-read").clone();
+                assert!(t.delete(b"gate", b"file5").expect("del"));
+                expect[5] = Vec::new();
+                t.put_chunk(b"gate", b"file5", 0, &[0xEE; 5000], 2001, 4).unwrap();
+                expect[5] = alloc::vec![0xEE; 5000];
+            }
+            check_all(&t, &expect);
+        }
+        // Snapshot finale: entry consistenti.
+        let _ = snap;
+        let (ne, en, mx, ov, ii) = t.extent_stats().expect("xstats");
+        assert!(ne > 0 && en > 0, "ne={ne} en={en} mx={mx} ov={ov} in={ii}");
+    }
+
+    #[test]
+    fn primrec_ext_codec_e_packed_rifiutato() {
+        // Roundtrip Ext (anche vuota) + kind 3 PACKED e futuri rifiutati loud.
+        let h = ExtHead {
+            size: 9000,
+            inline: alloc::vec![(11u64, 3u32), (20u64, 1u32)],
+            map_head: 33,
+            n_ext: 5,
+        };
+        let r = PrimRec { id: 7, seq: 9, mtime: 42, data: DataRef::Ext(h) };
+        let enc = prim_rec_encode(&r);
+        let (dec, len) = prim_rec_parse(&enc).expect("parse");
+        assert_eq!(dec, r);
+        assert_eq!(len, enc.len());
+        let e0 = PrimRec {
+            id: 1, seq: 1, mtime: 0,
+            data: DataRef::Ext(ExtHead { size: 0, inline: alloc::vec![], map_head: 0, n_ext: 0 }),
+        };
+        let enc0 = prim_rec_encode(&e0);
+        assert_eq!(prim_rec_parse(&enc0).map(|(r, _)| r), Some(e0));
+        let mut bad = enc.clone();
+        bad[24] = 3; // PACKED riservato
+        assert!(prim_rec_parse(&bad).is_none());
+        bad[24] = 9; // futuro
+        assert!(prim_rec_parse(&bad).is_none());
     }
 
     #[test]

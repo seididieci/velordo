@@ -44,6 +44,19 @@ const DISK_MAX_NAME: usize = 16;
 use civis::{ERR, RING_DATA_CAP, RING_HEAD, RING_TAIL};
 /// Bound attesa block a boot/restart (~5 s, come `wait_ready` di init).
 const HELLO_BOUND_TICKS: i64 = 500;
+/// Bound drenaggio ring cardo→block per op (~1 s): oltre = guasto vero,
+/// fail loud (mai wedge del FS). Sotto: backpressure normale sotto burst
+/// (a velocita' W2 il block non drena sempre in tempo: senza retry
+/// l'op falliva transitoria — write Err osservato 1/128 append).
+const DISK_RING_BOUND_TICKS: i64 = 100;
+
+    /// Throttle breve: un quanto di spin (il peer drena in us-ms; il bound
+    /// lo conta il chiamante in tick).
+    fn ring_wait() {
+        for _ in 0..10_000 {
+            core::hint::spin_loop();
+        }
+    }
 /// 24.2 — settori max per IPC DISK (bound del ring: 8 + 7*512 = 3592 nella
 /// request, 16 + 7*512 = 3600 nella response, entrambi < 4087).
 const DISK_MAX_SECTORS: usize = 7;
@@ -226,13 +239,18 @@ impl IpcDisk {
 
     /// Un tentativo di lettura multi (nessun retry qui: lo fa il chiamante).
     /// 24.2 — frame di richiesta `[count:8]` (1..=7), risposta con `n*512`
-    /// byte: 1 IPC invece di n.
+    /// byte: 1 IPC invece di n. Ring pieno = backpressure (retry throttled
+    /// fino al bound, poi loud); reply ERR = fallimento vero.
     fn try_read_multi(&self, chan: u64, lba: u64, n: usize, out: &mut [u8]) -> bool {
         if n == 0 || n > DISK_MAX_SECTORS || out.len() < n * 512 {
             return false;
         }
-        if !unsafe { Self::req_write_count(n) } {
-            return false;
+        let t0 = civis::get_ticks();
+        while !unsafe { Self::req_write_count(n) } {
+            if civis::get_ticks() - t0 > DISK_RING_BOUND_TICKS {
+                return false;
+            }
+            ring_wait();
         }
         match civis::send(chan, DISK_READ, self.handle as u64, lba) {
             Ok(rep) => {
@@ -302,12 +320,17 @@ impl IpcDisk {
         }
     }
 
-    /// Un tentativo di scrittura multi (24.2, nessun retry qui: lo fa il
-    /// chiamante). Reply senza frame: w0 = 0 ok, ERR fallito (canale intatto:
-    /// niente retry). Send fallita = driver morto: invalida.
+    /// Scrittura multi (24.2, retry throttled qui): ring pieno = backpressure
+    /// (il peer su canale vivo drena sempre: riprova fino al bound, poi
+    /// loud). Reply ERR = fallimento vero (niente retry). Send fallita =
+    /// driver morto: invalida.
     fn try_write_multi(&self, chan: u64, lba: u64, n: usize, data: &[u8]) -> bool {
-        if !unsafe { Self::req_write_sectors(n, data) } {
-            return false;
+        let t0 = civis::get_ticks();
+        while !unsafe { Self::req_write_sectors(n, data) } {
+            if civis::get_ticks() - t0 > DISK_RING_BOUND_TICKS {
+                return false;
+            }
+            ring_wait();
         }
         match civis::send(chan, DISK_WRITE, self.handle as u64, lba) {
             Ok(rep) => rep.w0 != ERR,

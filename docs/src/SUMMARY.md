@@ -77,3 +77,4 @@
 - [ADR-0047: PAL std Velordo — hello std nativo (S1.3)](./adr/0047-pal-std-velordo.md)
 - [ADR-0048: Scope S2 — toolchain Rust nativa](./adr/0048-scope-s2-toolchain-nativa.md)
 - [ADR-0049: FPU per thread, eager](./adr/0049-fpu-eager-per-thread.md)
+- [ADR-0050: Layout extent ArcaFS (scrittura O(toccati))](./adr/0050-arca-extent-dinamici.md)

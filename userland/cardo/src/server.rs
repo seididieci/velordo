@@ -979,6 +979,25 @@ fn real_main(_sp: u64) -> ! {
                         }
                         _ => Err(ERR),
                     }
+                } else if payload.first() == Some(&civis::ARCA_SUB_XSTATS) {
+                    // XSTATS (W2): reply a due registri (n_extent, entries) +
+                    // frame `[max:8][n_legacy_ov:8][n_inline:8]`. Solo motore.
+                    let out = match disk.as_mut() {
+                        Some(d) => btree_drv::disk_xstats(d).ok_or(ERR),
+                        None => Err(ERR),
+                    };
+                    match out {
+                        Ok((ne, en, mx, ov, ii)) => {
+                            let mut f = [0u8; 24];
+                            f[..8].copy_from_slice(&mx.to_le_bytes());
+                            f[8..16].copy_from_slice(&ov.to_le_bytes());
+                            f[16..24].copy_from_slice(&ii.to_le_bytes());
+                            rings::resp_ring_write(ne, en, &f);
+                            let _ = civis::reply(0, ne, en);
+                            continue;
+                        }
+                        Err(e) => Err(e),
+                    }
                 } else {
                     // Sub-op nel payload (`arcafs::proto::ARCA_SUB_*`): scalari
                     // per via generica; READ/STAT scrivono frame dedicato qui

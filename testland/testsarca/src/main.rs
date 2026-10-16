@@ -53,6 +53,8 @@
 //! il materializza-e-slice era quadratico per slice).
 //!  58. prefix-overwrite parziale (W1: merge esplicito in `ns_write`,
 //! senza il quale `put_chunk(0)` troncherebbe la coda).
+//!  59. append 512 KiB sequenziali con bound (W2: O(1) per op con extent)
+//! + riga xstats informativa (distribuzione layout valori).
 //! Con `ARCA_IMG=1` (gate) i drive ci sono sempre; senza, solo 1-3 e 7-13
 //! adattivi e il resto saltato — n/n adattivo, mai FAIL per drive assente.
 
@@ -1158,6 +1160,88 @@ fn real_main(_sp: u64) -> ! {
             good
         };
         c.ok("prefix-overwrite parziale", v58);
+        // 59. append sequenziali 512 KiB (W2: con gli extent ogni op tocca
+        // O(1) blocchi — bound temporale che il layout quadratico non puo'
+        // tenere: 512 append da 4K con rewrite integrale = ~1 GB di I/O).
+        let v59 = {
+            const TOTAL: usize = 512 * 1024;
+            const SL: usize = 4096;
+            let mut good = true;
+            let mut pos = 0usize;
+            let mut dt = -1i64;
+            if civis::mkdir("/arca/r59").is_ok() {
+                match civis::open("/arca/r59/f", civis::OPEN_CREATE) {
+                    Ok(fd) => {
+                        let mut wbuf = [0u8; SL];
+                        let t0 = civis::get_ticks();
+                        while good && pos < TOTAL {
+                            for i in 0..SL {
+                                wbuf[i] = ((pos + i) % 251) as u8;
+                            }
+                            match civis::write_fs(fd, &wbuf, SL) {
+                                Ok(n) if n == SL => pos += SL,
+                                other => {
+                                    println!("[testsarca] append512 wfail pos={} r={:?}", pos, other);
+                                    good = false;
+                                }
+                            }
+                        }
+                        dt = civis::get_ticks() - t0;
+                        let _ = civis::close(fd);
+                        if good {
+                            match civis::open("/arca/r59/f", 0) {
+                                Ok(fd) => {
+                                    let mut rbuf = [0u8; SL];
+                                    let mut rpos = 0usize;
+                                    loop {
+                                        match civis::read_fs(fd, &mut rbuf, SL) {
+                                            Ok(0) => break,
+                                            Ok(n) => {
+                                                for i in 0..n {
+                                                    if rbuf[i] != ((rpos + i) % 251) as u8 {
+                                                        good = false;
+                                                        break;
+                                                    }
+                                                }
+                                                rpos += n;
+                                                if !good {
+                                                    break;
+                                                }
+                                            }
+                                            Err(_) => {
+                                                good = false;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    let _ = civis::close(fd);
+                                    good = good && rpos == TOTAL;
+                                }
+                                Err(_) => good = false,
+                            }
+                        }
+                    }
+                    Err(_) => good = false,
+                }
+                let _ = civis::remove("/arca/r59/f");
+                let _ = civis::remove("/arca/r59");
+            } else {
+                good = false;
+            }
+            println!("[testsarca] append512: pos={} dt={}", pos, dt);
+            // 512 append da 4K in ~1100 tick misurati (il layout quadratico
+            // non finiva 2 MiB e si inchiodava a 64 KiB): bound ~3x.
+            good && pos == TOTAL && dt >= 0 && dt < 3000
+        };
+        c.ok("append 512KiB sequenziale", v59);
+        // Istogramma layout valori (W2 tuning): informativo, mai FAIL.
+        match civis::arca_extent_stats() {
+            Ok((ne, en, mx, ov, ii)) => println!(
+                "[testsarca] xstats: extent={} entries={} max={} legacy_ov={} inline={}",
+                ne, en, mx, ov, ii
+            ),
+            Err(_) => println!("[testsarca] xstats: N/D"),
+        }
         // Cleanup best-effort (il volume resta pulito per i run dopo).
         let _ = civis::remove("/arca/keep/v");
         let _ = civis::remove("/arca/keep");

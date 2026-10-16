@@ -56,3 +56,7 @@ pub const ARCA_SUB_USEDISK: u8 = 7;
 /// Solo motore disco (pre-bind = ERR): il backend RAM resta senza quota.
 pub const ARCA_SUB_QUOTA_SET: u8 = 8;
 pub const ARCA_SUB_QUOTA_GET: u8 = 9;
+/// XSTATS (W2): payload `[10]` (vuoto oltre il sub) → reply registri
+/// (n_extent, entries_totali) + frame `[max_entry:8][n_legacy_ov:8]`
+/// `[n_inline:8]`. Solo diagnostica/tuning (costo O(oggetti)).
+pub const ARCA_SUB_XSTATS: u8 = 10;

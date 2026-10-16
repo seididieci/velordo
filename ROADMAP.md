@@ -248,8 +248,8 @@ Voci con scope e vittoria dichiarati (non date).
        `current_id()` pre-init: mai println prima di `init.init()`).
        S2.5e spawn argv (`SpawnMeta` 56 B, layout dual-base via direct map)
        + `--version` in guest (`rustc 1.100.0-nightly`, exit 0) chiusa,
-        gate 6/6 (58/58 testsarca con range + prefix-overwrite test).
-        S2.5f/F0 range read
+        gate 6/6 (59/59 testsarca con range + prefix-overwrite + append
+        test). S2.5f/F0 range read
        ArcaFS chiusa (cursore LRU, invalidazione su mutazione; append
        guest-side O(n^2) documentato: file grandi solo da seed host).
         Prossimo: S2.5w (W1–W5, voce sotto) poi S2.5f/F1 (staticone su
@@ -261,15 +261,17 @@ Voci con scope e vittoria dichiarati (non date).
       `ov_write` con link all'indietro; baseline op-count host 68K→50K op
       (-26%), bound regressione in test; quota-skip non serve: `quota_check`
       salta gia' il walk a bucket senza quota; test58 prefix-overwrite,
-      gate 6/6); W2 extent
-      dinamici senza tabella (extent = run contiguo dall'allocatore con
-      affinita' ultimo-run + contiguita' best-effort, tetto 256 blocchi;
-      codec EXTENT 12 entry inline + spill su nodo MAP, kind PACKED riservato
-      loud + ADR formato; write tocca solo gli extent coperti, condivisione
-      tra versioni, free-via-liveness-al-trim su ≤8 mappe; read duale
-      OV/extent, prima write migra; `ARCA_VERSION` 1→2 senza retrocompat;
-      istogramma extent in `ARCA_DEBUG` + distribuzione seed sysroot in
-      testsarca); W3 cache in cardo (wrapper `BlockStore` LRU a fasce R0
+      gate 6/6); W2 extent dinamici CHIUSA (ADR-0050: PrimRec kind EXTENT
+      12 inline + nodi MAP in catena all'indietro, kind PACKED riservato,
+      ARCA_VERSION 2; write a granularita' blocco con condivisione +
+      liveness al trim/delete in batch; migrazione legacy al primo write;
+      alloc_run con affinita' ultimo-run; host 24/24 con opcount lineare
+      2 MiB ~33K op + FakeVol fedele al volume; quota_blocks_for con MAP
+      oltre inline; XSTATS via ARCA_DEBUG; test59 append 512K bound ~1100
+      tick; retry throttled ring cardo→block contro backpressure burst;
+      bug trovati: riuso nodi MAP in avanti insano, double-free su drop
+      multipli, seqs_of cieca ai buchi pinnati, fresh-truncate perso nel
+      ramo Ext, stima quota; gate 6/6); W3 cache in cardo (wrapper `BlockStore` LRU a fasce R0
       metadati taggati dal motore / R1 MFU a 2 bit / R2, sizing da
       `SYS_MEMINFO`, readahead da pattern ftable + manopola tipo disco,
       serve-from-cache no-copy nel response ring, hook `pin()` riservato);
@@ -281,8 +283,9 @@ Voci con scope e vittoria dichiarati (non date).
       verso l'alto; misura spazio sysroot). Follow-up espliciti non
       promessi: clustering chiavi, shrinker kernel→cardo, defrag, hint
       allocsize-style, ZIL/log-tree (solo se fsync di S2.5 lo chiede).
-      Vittoria: gate 6/6 a ogni sottofase + append 2MB lineare (bound
-      test57 stretto) + N file piccoli in M<N blocchi dati.
+      Vittoria: gate 6/6 a ogni sottofase + append 512K lineare bound
+      (test59 ~1100 tick, opcount host 2 MiB ~33K op) + N file piccoli
+      in M<N blocchi dati.
 
 ## Parcheggiate
 

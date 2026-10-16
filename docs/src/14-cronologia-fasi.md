@@ -2337,4 +2337,31 @@
           merge esplicito solo in quel caso + test58 dedicato (58/58).
           Flake: `log seal + delete` FAIL 1/3 run (re-run verde; timing,
           segnato). Gate 6/6.
-          Prossimo S2.5w/W2: extent dinamici.
+          S2.5w/W2 extent dinamici (chiusa, ADR-0050): PrimRec kind EXTENT
+          (12 inline + nodi MAP in catena all'indietro, kind PACKED riservato
+          loud, ARCA_VERSION 2), write a granularita' blocco (solo toccati,
+          condivisione, niente free eager), migrazione legacy al primo write,
+          alloc_run con affinita' ultimo-run. Numeri host: 512 append da 4K
+          (2 MiB) 68K op (W1) → ~33K, linearita' asserita (2a meta' ~1.2x;
+          il quadratico darebbe ~3x); wr == alloc invariante. Guest: append
+          512K in ~1100 tick bound 3000 (test59) dove prima ci si inchiodava
+          a 64K; xstats vive (63 extent, max 3 entry: l'affinita' funziona).
+          Bug trovati e fissati: (1) riuso nodi MAP in avanti insano (i
+          `next` restano puntati alla catena vecchia — catene all'indietro);
+          (2) double-free su drop multipli di versioni condividenti (free in
+          batch dedupato); (3) `seqs_of` cieca ai buchi pinnati (i trim
+          creano gap: pinnate invisibili a live/stat/delete → dangling;
+          prima era leak silenzioso — ora suffisso denso + pinnate dal
+          refcount, fail closed); (4) fresh-truncate perso nel ramo Ext
+          (put(0, corto) teneva la coda); (5) stima quota +1 nodo MAP di
+          troppo (rompeva il conto esatto dei test 51/52). Strumentazione
+          decisiva: FakeVol fedele al volume (freelist LIFO + high_water +
+          live-set + stale-read) — MemStore nascondeva gli use-after-free.
+          Robustezza burst: retry throttled sul ring cardo→block (ring pieno
+          = backpressure, bound 100 tick poi loud; prima: Err transitorio
+          1/128 append a velocita' W2). Flake sotto osservazione: 1 wedge
+          guest duro in test59 su ~6 run (silenzio totale: possibile race
+          IPC/driver sotto carico sostenuto, mai esercitato prima dei 64K;
+          engine escluso: op tutte I/O-bound o RAM-bounded + recovery pulita
+          nei fail veloci). Gate 6/6 (59/59 + host 24/24).
+          Prossimo S2.5w/W3: cache in cardo.

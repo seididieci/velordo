@@ -318,7 +318,7 @@ use arcafs::format::ARCA_NODE_PAYLOAD_LEN;
 use arcafs::proto::{
     ARCA_SUB_ALLOC, ARCA_SUB_FREE, ARCA_SUB_OPEN, ARCA_SUB_QUOTA_GET,
     ARCA_SUB_QUOTA_SET, ARCA_SUB_READ, ARCA_SUB_STAT, ARCA_SUB_USEDISK,
-    ARCA_SUB_WRITE, R_ARCA_DEBUG,
+    ARCA_SUB_WRITE, ARCA_SUB_XSTATS, R_ARCA_DEBUG,
 };
 
 /// Invia un sub-op debug: ritorna (w0, w1, len) della reply SENZA consumare
@@ -414,6 +414,35 @@ pub fn arca_quota_get(bucket: &[u8]) -> Result<(u64, u64), Error> {
         Ok(_) => {
             resp_ring_consume(16);
             Ok((q, u))
+        }
+        Err(e) => {
+            resp_ring_consume(16);
+            Err(e)
+        }
+    }
+}
+
+/// Istogramma layout valori ArcaFS (W2 debug/tuning): (oggetti extent,
+/// entry totali, max entry singolo, legacy OV, inline).
+pub fn arca_extent_stats() -> Result<(u64, u64, u64, u64, u64), Error> {
+    let (ne, en, _) = arca_request(ARCA_SUB_XSTATS, &[])?;
+    match fs_reply_check(ne).and(fs_reply_check(en)) {
+        Ok(_) => {
+            let mut f = [0u8; 24];
+            resp_ring_read_payload(&mut f, 24);
+            let mut mx = [0u8; 8];
+            let mut ov = [0u8; 8];
+            let mut ii = [0u8; 8];
+            mx.copy_from_slice(&f[..8]);
+            ov.copy_from_slice(&f[8..16]);
+            ii.copy_from_slice(&f[16..24]);
+            Ok((
+                ne,
+                en,
+                u64::from_le_bytes(mx),
+                u64::from_le_bytes(ov),
+                u64::from_le_bytes(ii),
+            ))
         }
         Err(e) => {
             resp_ring_consume(16);
