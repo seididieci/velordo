@@ -1238,9 +1238,9 @@ fn real_main(_sp: u64) -> ! {
         c.ok("append 512KiB sequenziale", v59);
         // Istogramma layout + cache (W2/W3 tuning): informativo, mai FAIL.
         match civis::arca_extent_stats() {
-            Ok((ne, en, mx, ov, ii, hits, reads)) => println!(
-                "[testsarca] xstats: extent={} entries={} max={} legacy_ov={} inline={} hits={} reads={}",
-                ne, en, mx, ov, ii, hits, reads
+            Ok((ne, en, mx, ov, ii, hits, reads, np, pb, pu, pc)) => println!(
+                "[testsarca] xstats: extent={} entries={} max={} legacy_ov={} inline={} packed={} pblocks={} pused={} pcap={} hits={} reads={}",
+                ne, en, mx, ov, ii, np, pb, pu, pc, hits, reads
             ),
             Err(_) => println!("[testsarca] xstats: N/D"),
         }
@@ -1327,10 +1327,81 @@ fn real_main(_sp: u64) -> ! {
             good
         };
         c.ok("epoca kill-mid recovery", v60);
+
+        // 61. packing sub-blocco stesso-bucket (W5, ADR-0053): N oggetti
+        // piccoli condividono blocchi packed; spazio misurato via XSTATS;
+        // free eager al delete (refs->0); rebuild del bump al rimount.
+        let v61 = {
+            civis::mkdir("/arca/p61").is_ok()
+                && {
+                    let nobj = 16usize;
+                    let osize = 1000usize;
+                    let pat: alloc::vec::Vec<u8> =
+                        (0..osize).map(|i| (i % 251) as u8).collect();
+                    let names: &[&[u8]] = &[
+                        b"o0", b"o1", b"o2", b"o3", b"o4", b"o5", b"o6", b"o7",
+                        b"o8", b"o9", b"oa", b"ob", b"oc", b"od", b"oe", b"of",
+                    ];
+                    let mut all_ok = true;
+                    // Misura base prima di scrivere: packed stats del volume.
+                    let mut rd_packed = || -> Option<(u64, u64, u64, u64)> {
+                        civis::arca_extent_stats().ok().map(|(_, _, _, _, _, _, _, np, pb, pu, pc)| (np, pb, pu, pc))
+                    };
+                    let (np0, pb0, pu0, pc0) = rd_packed().unwrap_or((0, 0, 0, 0));
+                    let base_consistente = pc0 == pb0 * 3560;
+                    for (i, nm) in names.iter().take(nobj).enumerate() {
+                        let mut buf = [0u8; 64];
+                        let mut k = 0usize;
+                        for b in b"/arca/p61/" { buf[k] = *b; k += 1; }
+                        for b in nm.iter() { buf[k] = *b; k += 1; }
+                        let path = core::str::from_utf8(&buf[..k]).unwrap();
+                        let mut d = pat.clone();
+                        d[0] = i as u8;
+                        all_ok &= wr_all(path, civis::OPEN_CREATE, &d);
+                    }
+                    let _ = civis::disk_sync(civis::SYNC_GROUP);
+                    let (np1, pb1, pu1, pc1) = rd_packed().unwrap_or((0, 0, 0, 0));
+                    let consistente = pc1 == pb1 * 3560;
+                    // Condivisione: 16 nuovi oggetti packed devono creare MENO
+                    // di 16 nuovi blocchi (stesso bucket, bump condiviso).
+                    let delta_np = np1.saturating_sub(np0);
+                    let delta_pb = pb1.saturating_sub(pb0);
+                    let delta_pu = pu1.saturating_sub(pu0);
+                    let packed_ok = consistente && base_consistente
+                        && delta_np == nobj as u64        // 16 nuovi oggetti packed
+                        && delta_pb < nobj as u64         // condivisione: <16 blocchi
+                        && delta_pu == (nobj * osize) as u64; // byte usati crescono esattamente
+                    println!(
+                        "[testsarca] pack61: np0={} pb0={} np1={} pb1={} pu1={} pc1={} \
+                         dnp={} dpb={} dpu={} nobj={} osize={}",
+                        np0, pb0, np1, pb1, pu1, pc1, delta_np, delta_pb, delta_pu, nobj, osize
+                    );
+                    // Delete tutti -> i blocchi packed tornano al baseline (refs->0).
+                    for nm in names.iter().take(nobj) {
+                        let mut buf = [0u8; 64];
+                        let mut k = 0usize;
+                        for b in b"/arca/p61/" { buf[k] = *b; k += 1; }
+                        for b in nm.iter() { buf[k] = *b; k += 1; }
+                        let path = core::str::from_utf8(&buf[..k]).unwrap();
+                        let _ = civis::remove(path);
+                    }
+                    let _ = civis::disk_sync(civis::SYNC_GROUP);
+                    let (np2, pb2, _, _) = rd_packed().unwrap_or((0, 0, 0, 0));
+                    let freed_ok = np2 == np0 && pb2 == pb0;
+                    // Rimount: rebuild_pack_cur (baseline preservata).
+                    let _ = mount_root_arca();
+                    let (np3, pb3, _, _) = rd_packed().unwrap_or((0, 0, 0, 0));
+                    let rebuild_ok = np3 == np0 && pb3 == pb0;
+                    all_ok && packed_ok && freed_ok && rebuild_ok
+                }
+        };
+        c.ok("packing sub-blocco stesso-bucket", v61);
         // Cleanup best-effort (il volume resta pulito per i run dopo).
         let _ = civis::remove("/arca/keep/v");
         let _ = civis::remove("/arca/keep");
         let _ = civis::remove("/arca/f56");
+        let _ = civis::remove("/arca/p61/o0");
+        let _ = civis::remove("/arca/p61");
         let _ = civis::umount("/arca");
     } else {
         println!("[testsarca] nessun volume ACFS: salto 41-50");

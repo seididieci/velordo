@@ -13,7 +13,7 @@ nulla da solo.
 
 ## Stato (completate 1-55)
 
-Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 60/60` +
+Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 61/61` +
 `[posixtests] PASS 4/4` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12`, zero FAIL/PANIC/FAULT.
 
 | Fase | Descrizione | Stato |
@@ -254,7 +254,7 @@ Voci con scope e vittoria dichiarati (non date).
        guest-side O(n^2) documentato: file grandi solo da seed host).
         Prossimo: S2.5w (W1–W5, voce sotto) poi S2.5f/F1 (staticone su
         ArcaFS) + F2 (mini-sysroot).
-- [ ] **S2.5w scrittura ArcaFS** (extent variabili + cache cardo + epoche
+- [x] **S2.5w scrittura ArcaFS** (extent variabili + cache cardo + epoche
       minime; prima di S2.5f/F1: il write path O(n^2) non regge sysroot e
       output rustc in guest): W1 L0-lite + invariante immutabilita' CHIUSA
       (stat-vs-get in `ns_write` con merge esplicito nel prefix-overwrite,
@@ -285,16 +285,14 @@ Voci con scope e vittoria dichiarati (non date).
       commit⟹pulita; test60 kill-mid recovery: B/C durevoli, A persa,
       allocatore sano; fix test: rimontare /arca esplicito dopo il bounce —
       il root mount catch-all falsa la chiave `arca/...`; diagnostica
-      `reachable=` sul fallimento GC; gate 6/6); W5 packing
-      sub-blocco stesso-bucket (prossimo: banda (512,3560], 1 oggetto =
-      1 slice, bump-alloc, free via sweep GC/trim; oltre il blocco →
-      extent, solo verso l'alto; misura spazio sysroot). Follow-up
-      espliciti non promessi: clustering chiavi, shrinker kernel→cardo,
-      defrag, hint allocsize-style, ZIL/log-tree (solo se fsync di S2.5
-      lo chiede).
-      Vittoria: gate 6/6 a ogni sottofase + append 512K lineare bound
-      (test59 ~1100 tick, opcount host 2 MiB ~33K op) + N file piccoli
-      in M<N blocchi dati.
+      `reachable=` sul fallimento GC; gate 6/6); W5 packing sub-blocco
+      stesso-bucket (chiusa, ADR-0053: tipo nodo PACKED, header
+      `[used:u16][refs:u16][blen:u8][bucket]`, bump-alloc per bucket con
+      `pack_cur` ricostruito al bind, free eager per refcount + sweep GC al
+      bind; oltre il blocco → extent, solo verso l'alto; misura spazio
+      sysroot via XSTATS esteso). Vittoria: gate 6/6 a ogni sottofase +
+      append 512K lineare bound (test59 ~1100 tick, opcount host 2 MiB ~33K
+      op) + N file piccoli in M<N blocchi dati.
 
 ## Parcheggiate
 

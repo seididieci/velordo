@@ -20,7 +20,8 @@
 
 use super::format::{
     self, ARCA_NODE_PAYLOAD_LEN, ARCA_NODE_TYPE_DATA, ARCA_NODE_TYPE_INTERNAL,
-    ARCA_NODE_TYPE_LEAF, ARCA_NODE_TYPE_MAP, ARCA_NODE_TYPE_RAW,
+    ARCA_NODE_TYPE_LEAF, ARCA_NODE_TYPE_MAP, ARCA_NODE_TYPE_PACKED,
+    ARCA_NODE_TYPE_RAW,
 };
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -156,12 +157,17 @@ pub const EXT_RUN_MAX: u32 = 256;
 /// ≤16 MiB ⇒ ≤4714 blocchi; oltre = struttura corrotta, rifiuto loud
 /// anti-OOM invece di Vec giganti).
 pub const EXT_BLOCKS_MAX: usize = 8192;
+/// Tetto bytes per oggetto packed: `ARCA_NODE_PAYLOAD_LEN` meno l'header
+/// packed massimo (`used:2`+`refs:2`+`blen:1`+`bucket:16` = 21).
+pub const PACK_CAP: usize = ARCA_NODE_PAYLOAD_LEN - 21; // 3539
+/// Numero di u16 per gli header fissi prima del blocco bucket: `used`+`refs`.
+pub const PACKED_HDR_FIXED: usize = 4;
 
 /// Record primary encodato:
 /// `[id:8][seq:8][mtime:8][kind:1]` + inline `[dlen:2][data]` | overflow
 /// `[ov:8][size:8]` (legacy: solo lettura/migrazione, mai scritto nuovo) |
 /// extent `[size:8][n_ext:4][n_in:1][entries: n_in x (blk:8, nb:4)]`
-/// `[map_head:8 se n_ext > n_in]` | packed (kind 3: riservato, rifiuto loud).
+/// `[map_head:8 se n_ext > n_in]` | packed (kind 3: `[blk:8][off:2][len:2]`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PrimRec {
     pub id: u64,
@@ -183,6 +189,18 @@ pub enum DataRef {
     /// Mappa extent (tutte le nuove scritture): entry condivisibili tra
     /// versioni (free via liveness al trim, mai eager).
     Ext(ExtHead),
+    /// Oggetto packed (W5, ADR-0053): una slice contigua `(blk, off, len)`
+    /// in un blocco condiviso tra oggetti dello stesso bucket; immutabile
+    /// dopo la scrittura (invariante W1). `len` in `(INLINE_MAX, PACK_CAP]`.
+    Packed(PackRef), // (blk, off, len)
+}
+
+/// Slice contigua di un oggetto packed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackRef {
+    pub blk: u64,
+    pub off: u16,
+    pub len: u16,
 }
 
 /// Testa mappa extent (vedi costanti sopra per il formato).
@@ -222,6 +240,12 @@ fn prim_rec_encode(r: &PrimRec) -> Vec<u8> {
             if h.n_ext as usize > h.inline.len() {
                 wr64(&mut v, h.map_head);
             }
+        }
+        DataRef::Packed(p) => {
+            v.push(3);
+            wr64(&mut v, p.blk);
+            wr16(&mut v, p.off);
+            wr16(&mut v, p.len);
         }
     }
     v
@@ -281,8 +305,31 @@ fn prim_rec_parse(b: &[u8]) -> Option<(PrimRec, usize)> {
             PrimRec { id, seq, mtime, data: DataRef::Ext(ExtHead { size, inline, map_head, n_ext }) },
             off,
         ))
+    } else if kind == 3 {
+        let blk = rd64(b, 25)?;
+        let off = rd16(b, 33)? as usize;
+        let len = rd16(b, 35)? as usize;
+        if blk == 0 {
+            return None;
+        }
+        // len in banda packed; bound off+len (hdr/bucket e' noto solo al
+        // read del blocco, validato in packed_read).
+        if len == 0 || len > PACK_CAP
+            || off.checked_add(len).is_none() || off + len > ARCA_NODE_PAYLOAD_LEN
+        {
+            return None;
+        }
+        Some((
+            PrimRec {
+                id,
+                seq,
+                mtime,
+                data: DataRef::Packed(PackRef { blk, off: off as u16, len: len as u16 }),
+            },
+            37,
+        ))
     } else {
-        None // kind 3 PACKED riservato + futuri: rifiuto loud
+        None // kind riservati: rifiuto loud
     }
 }
 
@@ -586,6 +633,7 @@ fn value_size(r: &PrimRec) -> u64 {
         DataRef::Inline(d) => d.len() as u64,
         DataRef::Ov(_, size) => *size,
         DataRef::Ext(h) => h.size,
+        DataRef::Packed(p) => p.len as u64,
     }
 }
 
@@ -660,6 +708,11 @@ pub struct BTree<S: BlockStore> {
     /// liberabili/riusabili: un cursore stale leggerebbe dati altrui).
     pub range_cur: [(u64, u64, usize); 8],
     pub range_rr: usize,
+    /// Blocco di bump corrente per bucket (W5): (blocco, offset di coda).
+    /// RAM-only: ricostruito al bind dai blocchi packed raggiungibili
+    /// (max spazio libero per bucket). Persistito implicitamente nell'header
+    /// di ogni blocco packed (`used`+`refs`+`bucket`).
+    pub pack_cur: BTreeMap<Vec<u8>, (u64, u16)>,
 }
 
 impl<S: BlockStore> BTree<S> {
@@ -676,6 +729,7 @@ impl<S: BlockStore> BTree<S> {
             meta_root: 0, next_id: 1, next_snap: 1, snaps: BTreeMap::new(),
             quotas: BTreeMap::new(), by_id: BTreeMap::new(),
             range_cur: [(0, 0, 0); 8], range_rr: 0,
+            pack_cur: BTreeMap::new(),
         };
         me.fmt_empty(rp, TREE_PRIMARY)?;
         me.fmt_empty(rs, TREE_SECONDARY)?;
@@ -703,6 +757,7 @@ impl<S: BlockStore> BTree<S> {
             meta_root: 0, next_id: 1, next_snap: 1, snaps: BTreeMap::new(),
             quotas: BTreeMap::new(), by_id: BTreeMap::new(),
             range_cur: [(0, 0, 0); 8], range_rr: 0,
+            pack_cur: BTreeMap::new(),
         })
     }
 
@@ -743,6 +798,77 @@ impl<S: BlockStore> BTree<S> {
             }
         }
         Some(())
+    }
+
+    /// Ricostruisce `pack_cur` e riconta i `refs` dei blocchi packed dal vivo
+    /// (bind post-restart: i contatori in header possono essere sfasati da un
+    /// kill tra write-blocco e insert-record). Cammina il primary O(oggetti):
+    /// per ogni blocco packed referenziato riscrive `refs` esatto e sceglie,
+    /// per bucket, il blocco con piu' spazio libero come bump corrente.
+    #[inline(never)]
+    pub fn rebuild_pack_cur(&mut self) {
+        let mut refs_by_blk: BTreeMap<u64, usize> = BTreeMap::new();
+        let mut stack = alloc::vec![self.root_primary];
+        let mut seen: Vec<u64> = Vec::new();
+        while let Some(blk) = stack.pop() {
+            if blk == 0 || seen.contains(&blk) {
+                continue;
+            }
+            seen.push(blk);
+            let (_ty, tag, _, p) = match self.node_read(blk) {
+                Some(v) => v,
+                None => continue,
+            };
+            if tag != TREE_PRIMARY {
+                continue;
+            }
+            if _ty == ARCA_NODE_TYPE_INTERNAL {
+                if let Some(it) = internal_parse(&p[..], TREE_PRIMARY) {
+                    stack.extend(it.children.iter().copied());
+                }
+                continue;
+            }
+            if _ty != ARCA_NODE_TYPE_LEAF {
+                continue;
+            }
+            let Some(leaf) = leaf_parse(&p[..], TREE_PRIMARY) else {
+                continue;
+            };
+            for v in leaf.vals.iter() {
+                let Some((rec, _)) = prim_rec_parse(v) else {
+                    continue;
+                };
+                if let DataRef::Packed(p) = &rec.data {
+                    *refs_by_blk.entry(p.blk).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut best_free: BTreeMap<Vec<u8>, (u64, u16)> = BTreeMap::new();
+        for (blk, count) in refs_by_blk {
+            let mut payload = format::boxed_node();
+            if self.store.read_node(blk, &mut payload).is_none() {
+                continue;
+            }
+            let blen = match payload.get(4) {
+                Some(b) => *b as usize,
+                None => continue,
+            };
+            let bucket = payload.get(5..5 + blen).unwrap_or(&[]).to_vec();
+            let used = u16::from_le_bytes(payload[0..2].try_into().unwrap_or([0, 0]));
+            // Scrivi refs esatto (n. record live che referenziano il blocco).
+            payload[2..4].copy_from_slice(&(count as u16).to_le_bytes());
+            if self.store.write_node(blk, ARCA_NODE_TYPE_PACKED, self.gen, &payload) {
+                // pack_cur: blocco con piu' spazio libero (min used) per bucket,
+                // solo se ha coda libera.
+                if used < ARCA_NODE_PAYLOAD_LEN as u16 {
+                    let entry = best_free.entry(bucket).or_insert((blk, used));
+                    if used < entry.1 {
+                        *entry = (blk, used);
+                    }
+                }
+            }
+        }
+        self.pack_cur = best_free;
     }
 
     /// Scansione secondaria per prefisso (56.3, vista POSIX): tutte le chiavi
@@ -1626,14 +1752,73 @@ impl<S: BlockStore> BTree<S> {
     // liveness in trim/delete (mai eager).
 
     /// Scrive un valore primary da byte completi (nuovi oggetti, rollback,
-    /// clone, migrazioni): inline se piccolo, altrimenti extent freschi.
+    /// clone, migrazioni): inline se piccolo, packed se in banda, altrimenti
+    /// extent freschi. `bucket` serve per l'allocazione packed per-bucket.
     #[inline(never)]
-    fn value_write(&mut self, data: &[u8]) -> Option<DataRef> {
+    fn value_write(&mut self, bucket: &[u8], data: &[u8]) -> Option<DataRef> {
         if data.len() <= INLINE_MAX {
             return Some(DataRef::Inline(data.to_vec()));
         }
+        if data.len() <= PACK_CAP {
+            return self.packed_append(bucket, data);
+        }
         let h = self.ext_write_all(data)?;
         Some(DataRef::Ext(h))
+    }
+
+    /// Append di una slice packed in un blocco del bucket (bump-alloc per
+    /// bucket): riusa il blocco corrente se ha coda, altrimenti ne alloca uno
+    /// nuovo. `refs` del blocco cresce di 1 (record che lo referenzia).
+    /// Il blocco e' riscritto in un'unica `write_node` (header `used`+`refs`
+    /// + slice): nessuna modifica in place di slice esistenti (invariante W1).
+    #[inline(never)]
+    fn packed_append(&mut self, bucket: &[u8], data: &[u8]) -> Option<DataRef> {
+        let len = data.len();
+        let hdr = Self::packed_hdr(bucket) as u16;
+        let mut blk: u64;
+        let mut used: u16;
+        match self.pack_cur.get(bucket) {
+            Some(&(b, u)) => { blk = b; used = u; }
+            None => {
+                blk = Self::new_packed_block(self, bucket, hdr)?;
+                used = hdr;
+            }
+        }
+        // Coda insufficiente: nuovo blocco bump per questo bucket.
+        if used.checked_add(len as u16).is_none() || used + len as u16 > ARCA_NODE_PAYLOAD_LEN as u16 {
+            blk = Self::new_packed_block(self, bucket, hdr)?;
+            used = hdr;
+        }
+        let mut payload = format::boxed_node();
+        self.store.read_node(blk, &mut payload)?;
+        payload[used as usize..used as usize + len].copy_from_slice(data);
+        let new_used = used + len as u16;
+        payload[..2].copy_from_slice(&new_used.to_le_bytes());
+        let refs = u16::from_le_bytes(payload[2..4].try_into().ok()?);
+        payload[2..4].copy_from_slice(&(refs.checked_add(1)?).to_le_bytes());
+        if !self.store.write_node(blk, ARCA_NODE_TYPE_PACKED, self.gen, &payload) {
+            return None;
+        }
+        self.pack_cur.insert(bucket.to_vec(), (blk, new_used));
+        Some(DataRef::Packed(PackRef { blk, off: used, len: len as u16 }))
+    }
+
+    /// Alloca un blocco packed fresco per `bucket`, scrive l'header
+    /// (`used=hdr`, `refs=0`, bucket) e lo registra in `pack_cur`. Ritorna il
+    /// blocco; nulla e' ancora scritto come slice.
+    #[inline(never)]
+    fn new_packed_block(&mut self, bucket: &[u8], hdr: u16) -> Option<u64> {
+        let b = self.store.alloc()?;
+        let mut payload = format::boxed_node();
+        payload[..2].copy_from_slice(&hdr.to_le_bytes());
+        payload[2..4].copy_from_slice(&0u16.to_le_bytes());
+        payload[4] = bucket.len() as u8;
+        payload[5..5 + bucket.len()].copy_from_slice(bucket);
+        if !self.store.write_node(b, ARCA_NODE_TYPE_PACKED, self.gen, &payload) {
+            return None;
+        }
+        self.pack_cur.insert(bucket.to_vec(), (b, hdr));
+        Some(b)
     }
 
     /// Legge un valore primary (inline, overflow legacy od extent).
@@ -1655,7 +1840,35 @@ impl<S: BlockStore> BTree<S> {
                 }
                 Some(out)
             }
+            DataRef::Packed(p) => self.packed_read(p),
         }
+    }
+
+    /// Legge la slice di un oggetto packed: valida il tipo blocco e i bound
+    /// (`off >= hdr`, `off+len <= payload`, `len` in banda).
+    #[inline(never)]
+    fn packed_read(&self, p: &PackRef) -> Option<Vec<u8>> {
+        let mut payload = format::boxed_node();
+        let (ty, _) = self.store.read_node(p.blk, &mut payload)?;
+        if ty != ARCA_NODE_TYPE_PACKED {
+            return None;
+        }
+        let blen = *payload.get(4)? as usize;
+        let hdr = 5 + blen;
+        let off = p.off as usize;
+        let len = p.len as usize;
+        if off < hdr || len == 0 || len > PACK_CAP
+            || off.checked_add(len).is_none() || off + len > ARCA_NODE_PAYLOAD_LEN
+        {
+            return None;
+        }
+        payload.get(off..off + len).map(|s| s.to_vec())
+    }
+
+    /// Lunghezza header packed per `bucket`: `used:2`+`refs:2`+`blen:1`+`bucket`.
+    #[inline(never)]
+    fn packed_hdr(bucket: &[u8]) -> usize {
+        5 + bucket.len()
     }
 
     /// Scrive byte interi come extent freschi (run dall'allocatore con hint
@@ -1903,6 +2116,35 @@ impl<S: BlockStore> BTree<S> {
                 }
                 Some(())
             }
+            DataRef::Packed(p) => {
+                // Condiviso tra oggetti dello stesso bucket: contabile per
+                // la reachability/quota (dedup chiama mai il doppio), mai
+                // liberato eager qui (gestito dai `refs` del blocco).
+                out.push(p.blk);
+                Some(())
+            }
+        }
+    }
+
+    /// Come `value_blocks` ma **esclude** i blocchi packed: usata per il free
+    /// eager di trim/delete, che sui packed è delegato ai `refs` del blocco
+    /// (liberazione esatta per-block invece di dedup per-versione).
+    #[inline(never)]
+    fn value_blocks_freeable(&self, r: &PrimRec, out: &mut Vec<u64>) -> Option<()> {
+        match &r.data {
+            DataRef::Inline(_) => Some(()),
+            DataRef::Ov(ov, _) => self.walk_ov(*ov, out),
+            DataRef::Ext(h) => {
+                let (entries, nodes) = self.ext_entries(h)?;
+                out.extend(nodes);
+                for (blk, nb) in entries {
+                    for b in 0..nb {
+                        out.push(blk.checked_add(b as u64)?);
+                    }
+                }
+                Some(())
+            }
+            DataRef::Packed(_) => Some(()),
         }
     }
 
@@ -1949,15 +2191,48 @@ impl<S: BlockStore> BTree<S> {
                 let _ = self.ref_dec_free(id, *seq);
             }
         }
+        // Conteggi per-blocco packed tra le versioni droppate: refcount eager
+        // per blocco (condiviso tra id dello stesso bucket).
+        let mut packed_counts: BTreeMap<u64, usize> = BTreeMap::new();
+        for rec in recs.iter() {
+            if let DataRef::Packed(p) = &rec.data {
+                *packed_counts.entry(p.blk).or_insert(0) += 1;
+            }
+        }
         let mut to_free = Vec::new();
         for rec in recs.iter() {
-            self.value_blocks(rec, &mut to_free)?;
+            self.value_blocks_freeable(rec, &mut to_free)?;
         }
         to_free.sort_unstable();
         to_free.dedup();
         for b in to_free {
             if live.binary_search(&b).is_err() && !self.store.free(b) {
                 return None;
+            }
+        }
+        // Packed: decrementa `refs` per ogni blocco; a 0 libera e sgancia
+        // `pack_cur` se puntava qui.
+        for (blk, count) in packed_counts {
+            let mut payload = format::boxed_node();
+            self.store.read_node(blk, &mut payload)?;
+            let refs = u16::from_le_bytes(payload[2..4].try_into().ok()?) as usize;
+            let blen = *payload.get(4)? as usize;
+            let bucket = &payload[5..5 + blen];
+            let new_refs = refs.checked_sub(count)?;
+            if new_refs == 0 {
+                if let Some(&(b, _)) = self.pack_cur.get(bucket) {
+                    if b == blk {
+                        self.pack_cur.remove(bucket);
+                    }
+                }
+                if !self.store.free(blk) {
+                    return None;
+                }
+            } else {
+                payload[2..4].copy_from_slice(&(new_refs as u16).to_le_bytes());
+                if !self.store.write_node(blk, ARCA_NODE_TYPE_PACKED, self.gen, &payload) {
+                    return None;
+                }
             }
         }
         Some(())
@@ -2110,7 +2385,7 @@ impl<S: BlockStore> BTree<S> {
         // Nuovo riferimento dati + size (fresh a offset 0, patch sopra).
         let (data, new_size) = match head {
             None => {
-                let r = self.value_write(data)?;
+                let r = self.value_write(bucket, data)?;
                 (r, n as u64)
             }
             Some(h) => match h.data {
@@ -2121,13 +2396,13 @@ impl<S: BlockStore> BTree<S> {
                     }
                     next.get_mut(offset..end)?.copy_from_slice(data);
                     let size = next.len() as u64;
-                    let r = self.value_write(&next)?;
+                    let r = self.value_write(bucket, &next)?;
                     (r, size)
                 }
                 DataRef::Ov(ov, size) => {
                     if offset == 0 {
                         // Fresh: la base si scarta (niente lettura).
-                        let r = self.value_write(data)?;
+                        let r = self.value_write(bucket, data)?;
                         (r, n as u64)
                     } else {
                         // MIGRAZIONE one-time: materializza, patch, extent.
@@ -2138,7 +2413,7 @@ impl<S: BlockStore> BTree<S> {
                         }
                         base.get_mut(offset..end)?.copy_from_slice(data);
                         let size = base.len() as u64;
-                        let r = self.value_write(&base)?;
+                        let r = self.value_write(bucket, &base)?;
                         (r, size)
                     }
                 }
@@ -2146,11 +2421,31 @@ impl<S: BlockStore> BTree<S> {
                     if offset == 0 {
                         // Fresh: la mappa vecchia si scarta intera (truncate
                         // incluso) — parita' con Inline/Ov, mai patch.
-                        let r = self.value_write(data)?;
+                        let r = self.value_write(bucket, data)?;
                         (r, n as u64)
                     } else {
                         let (nh, size) = self.ext_put_span(&eh, offset, data, end)?;
                         (DataRef::Ext(nh), size)
+                    }
+                }
+                DataRef::Packed(p) => {
+                    if offset == 0 {
+                        // Fresh: la slice vecchia muore (refs-- gestito dal
+                        // trim/delete di questa versione; qui scriviamo
+                        // semplicemente una nuova slice).
+                        let r = self.value_write(bucket, data)?;
+                        (r, n as u64)
+                    } else {
+                        // Patch sopra una slice packed: materializza, patch,
+                        // nuova slice packed (la vecchia muore per refcount).
+                        let mut base = self.packed_read(&p)?;
+                        if base.len() < end {
+                            base.resize(end, 0);
+                        }
+                        base.get_mut(offset..end)?.copy_from_slice(data);
+                        let size = base.len() as u64;
+                        let r = self.value_write(bucket, &base)?;
+                        (r, size)
                     }
                 }
             },
@@ -2423,6 +2718,15 @@ impl<S: BlockStore> BTree<S> {
                 let size: usize = size.try_into().ok()?;
                 self.head_range_legacy(uuid, ov, size, offset, count)
             }
+            DataRef::Packed(p) => {
+                let data = self.packed_read(&p)?;
+                let size = data.len();
+                if offset >= size {
+                    return Some((size, Vec::new()));
+                }
+                let take = (size - offset).min(count);
+                Some((size, data[offset..offset + take].to_vec()))
+            }
         }
     }
 
@@ -2556,18 +2860,21 @@ impl<S: BlockStore> BTree<S> {
         Some((sec.uuid, value_size(&head), nv, head.mtime))
     }
 
-    /// Istogramma layout valori (W2 debug/tuning): (oggetti extent, entry
-    /// totali, max entry singolo, oggetti legacy OV, oggetti inline). Solo
-    /// diagnostica (costo O(oggetti) lookup: niente walk totali). Tollerante
-    /// agli indici stale (rename non aggiorna `by_id`, pre-esistente: qui si
-    /// salta, mai loud su una statistica).
+    /// Istogramma layout valori (W2/W5 debug/tuning):
+    /// (oggetti extent, entry totali, max entry singolo, oggetti legacy OV,
+    /// oggetti inline, oggetti packed, blocchi packed dedup, bytes packed
+    /// usati, capacita' blocchi packed). Solo diagnostica (costo O(oggetti);
+    /// niente walk totali). Tollerante agli indici stale.
     #[inline(never)]
-    pub fn extent_stats(&self) -> Option<(u64, u64, u64, u64, u64)> {
+    pub fn extent_stats(&self) -> Option<(u64, u64, u64, u64, u64, u64, u64, u64, u64)> {
         let mut n_ext = 0u64;
         let mut entries = 0u64;
         let mut max_e = 0u64;
         let mut n_ov = 0u64;
         let mut n_in = 0u64;
+        let mut n_packed = 0u64;
+        let mut packed_blocks: Vec<u64> = Vec::new();
+        let mut packed_used = 0u64;
         for (id, sk) in self.by_id.iter() {
             let (_, leaf, i, found) = self.btree_lookup(self.root_secondary, TREE_SECONDARY, sk)?;
             if !found {
@@ -2586,9 +2893,18 @@ impl<S: BlockStore> BTree<S> {
                 }
                 DataRef::Ov(..) => n_ov += 1,
                 DataRef::Inline(_) => n_in += 1,
+                DataRef::Packed(p) => {
+                    n_packed += 1;
+                    packed_blocks.push(p.blk);
+                    packed_used += p.len as u64;
+                }
             }
         }
-        Some((n_ext, entries, max_e, n_ov, n_in))
+        packed_blocks.sort_unstable();
+        packed_blocks.dedup();
+        let packed_blocks_count = packed_blocks.len() as u64;
+        let packed_cap = packed_blocks_count * ARCA_NODE_PAYLOAD_LEN as u64;
+        Some((n_ext, entries, max_e, n_ov, n_in, n_packed, packed_blocks_count, packed_used, packed_cap))
     }
 
     /// Stat per object_id: (size head, versioni contate, mtime head).
@@ -2807,7 +3123,7 @@ impl<S: BlockStore> BTree<S> {
         };
         let seq = head_seq + 1;
         let size = data.len() as u64;
-        let data = self.value_write(&data)?;
+        let data = self.value_write(bucket, &data)?;
         let rec = PrimRec { id: uuid, seq, mtime: now, data };
         let pk = prim_key(uuid, seq);
         let nr = self.btree_insert(self.root_primary, TREE_PRIMARY, pk.to_vec(), prim_rec_encode(&rec))?;
@@ -2851,7 +3167,7 @@ impl<S: BlockStore> BTree<S> {
             };
             let seq = head_seq + 1;
             let size = data.len() as u64;
-            let data = self.value_write(&data)?;
+            let data = self.value_write(dst, &data)?;
             let rec = PrimRec { id: uuid, seq, mtime: now, data };
             let pk = prim_key(uuid, seq);
             let nr = self.btree_insert(self.root_primary, TREE_PRIMARY, pk.to_vec(), prim_rec_encode(&rec))?;
@@ -2988,6 +3304,201 @@ mod tests {
         assert_eq!(t.get(b"v", b"k"), Some(b"hELLo".to_vec()));
         let (_, _, nv, _) = t.stat(b"v", b"k").unwrap();
         assert_eq!(nv, 2);
+    }
+
+    #[test]
+    fn pack_condivide_stesso_bucket() {
+        let mut t = engine();
+        let pat: Vec<u8> = (0..600).map(|i| (i % 251) as u8).collect();
+        // 5 oggetti (600 B) nello stesso bucket -> 1 blocco packed condiviso.
+        for i in 0..5u8 {
+            let mut d = pat.clone();
+            d[0] = i;
+            assert_eq!(t.put_chunk(b"b", &[b'k', i], 0, &d, 10 + i as u64, 8), Some(600));
+        }
+        let (np, pb, pu) = match t.extent_stats() {
+            Some((_, _, _, _, _, np, pb, pu, _)) => (np, pb, pu),
+            _ => panic!("extent_stats"),
+        };
+        assert_eq!(np, 5);
+        assert_eq!(pb, 1); // stessa bucket: stesso blocco
+        assert_eq!(pu, 3000);
+        for i in 0..5u8 {
+            let mut exp = pat.clone();
+            exp[0] = i;
+            assert_eq!(t.get(b"b", &[b'k', i]), Some(exp));
+        }
+        // Bucket diverso -> blocco separato (condivisione solo stesso-bucket).
+        assert_eq!(t.put_chunk(b"c", b"k1", 0, &pat, 100, 8), Some(600));
+        let (np2, pb2) = match t.extent_stats() {
+            Some((_, _, _, _, _, np2, pb2, _, _)) => (np2, pb2),
+            _ => panic!("extent_stats"),
+        };
+        assert_eq!(np2, 6);
+        assert_eq!(pb2, 2); // nuovo blocco per bucket c
+    }
+
+    #[test]
+    fn pack_patch_e_crescita_a_extent() {
+        let mut t = engine();
+        // Oggetto packed da 1000 B.
+        let pat: Vec<u8> = (0..1000).map(|i| (i % 251) as u8).collect();
+        assert_eq!(t.put_chunk(b"b", b"k", 0, &pat, 1, 8), Some(1000));
+        // Patch a offset 100 con 200 B: nuova slice packed, stessa size.
+        let patch: Vec<u8> = (0..200).map(|i| ((i + 7) % 251) as u8).collect();
+        assert_eq!(t.put_chunk(b"b", b"k", 100, &patch, 2, 8), Some(200));
+        let got = t.get(b"b", b"k").expect("get");
+        assert_eq!(&got[..100], &pat[..100]);
+        assert_eq!(&got[100..300], patch.as_slice());
+        assert_eq!(&got[300..], &pat[300..]);
+        let (_, _, nv, _) = t.stat(b"b", b"k").unwrap();
+        assert_eq!(nv, 2);
+        // Oltre PACK_CAP -> extent (non packed).
+        let big: Vec<u8> = (0..PACK_CAP + 1).map(|i| (i % 251) as u8).collect();
+        assert_eq!(t.put_chunk(b"b", b"big", 0, &big, 3, 8), Some(PACK_CAP + 1));
+        let (ne, np) = match t.extent_stats() {
+            Some((ne, _, _, _, _, np, _, _, _)) => (ne, np),
+            _ => panic!("extent_stats"),
+        };
+        assert_eq!(np, 1); // k e' packed
+        assert_eq!(ne, 1); // big e' extent
+        assert_eq!(t.get(b"b", b"big").as_deref(), Some(big.as_slice()));
+    }
+
+    #[test]
+    fn pack_free_drop_uno_sopravvive() {
+        let mut t = engine();
+        let pat: Vec<u8> = (0..600).map(|i| (i % 251) as u8).collect();
+        for (i, k) in [b"k1", b"k2", b"k3"].iter().enumerate() {
+            let mut d = pat.clone();
+            d[0] = i as u8;
+            assert_eq!(t.put_chunk(b"b", *k, 0, &d, 10 + i as u64, 8), Some(600));
+        }
+        let (np, pb) = match t.extent_stats() {
+            Some((_, _, _, _, _, np, pb, _, _)) => (np, pb),
+            _ => panic!("extent_stats"),
+        };
+        assert_eq!((np, pb), (3, 1)); // 3 oggetti, 1 blocco condiviso
+        // Cancella il primo: gli altri due restano leggibili, blocco vivo.
+        assert!(t.delete(b"b", b"k1").unwrap());
+        let mut exp2 = pat.clone(); exp2[0] = 1;
+        assert_eq!(t.get(b"b", b"k2"), Some(exp2));
+        let mut exp3 = pat.clone(); exp3[0] = 2;
+        assert_eq!(t.get(b"b", b"k3"), Some(exp3));
+        let (np, pb) = match t.extent_stats() {
+            Some((_, _, _, _, _, np, pb, _, _)) => (np, pb),
+            _ => panic!("extent_stats"),
+        };
+        assert_eq!((np, pb), (2, 1)); // blocco ancora vivo (refs=2)
+        // Cancella tutti: blocco liberato (refs->0).
+        assert!(t.delete(b"b", b"k2").unwrap());
+        assert!(t.delete(b"b", b"k3").unwrap());
+        assert_eq!(t.get(b"b", b"k2"), None);
+        assert_eq!(t.get(b"b", b"k3"), None);
+        let (np, pb) = match t.extent_stats() {
+            Some((_, _, _, _, _, np, pb, _, _)) => (np, pb),
+            _ => panic!("extent_stats"),
+        };
+        assert_eq!((np, pb), (0, 0)); // blocco packed rilasciato
+    }
+
+    #[test]
+    fn pack_free_patch_vecchia_slice_morta() {
+        let mut t = engine();
+        let pat: Vec<u8> = (0..600).map(|i| (i % 251) as u8).collect();
+        assert_eq!(t.put_chunk(b"b", b"k", 0, &pat, 1, 8), Some(600));
+        let mut exp = pat.clone(); exp[100] = 0xAA;
+        assert_eq!(t.put_chunk(b"b", b"k", 100, &[0xAA], 2, 8), Some(1));
+        assert_eq!(t.get(b"b", b"k"), Some(exp));
+        // Trim a 1 versione: la slice vecchia (600B) muore, il blocco resta
+        // riferito dalla nuova (sovrascritta nella stessa zona? no: nuova
+        // slice a off 100 len 1, ma value_write riscrive tutto l'oggetto ->
+        // nuova slice piena). Blocchi packed invarianti (1 oggetto vivo).
+        let (np, pb) = match t.extent_stats() {
+            Some((_, _, _, _, _, np, pb, _, _)) => (np, pb),
+            _ => panic!("extent_stats"),
+        };
+        assert_eq!((np, pb), (1, 1));
+    }
+
+    #[test]
+    fn rebuild_pack_cur_sim_bind() {
+        // Simula un bind: si ricostruisce il motore da store+radici (come
+        // btree_drv::bind) e si chiama rebuild_pack_cur.
+        let mut t = engine();
+        let pat: Vec<u8> = (0..600).map(|i| (i % 251) as u8).collect();
+        for i in 0..3u8 {
+            let mut d = pat.clone();
+            d[0] = i;
+            assert_eq!(t.put_chunk(b"b", &[b'k', i], 0, &d, 10 + i as u64, 8), Some(600));
+        }
+        let (gen, rp, rs, rr, nid) =
+            (t.gen, t.root_primary, t.root_secondary, t.root_refcount, t.next_id);
+        let store = t.into_store();
+        let mut t2 = BTree::new_with_roots(store, gen, rp, rs, rr).expect("new_with_roots");
+        t2.next_id = nid;
+        t2.rebuild_by_id().expect("rebuild_by_id");
+        t2.rebuild_pack_cur();
+        // Dopo il rebuild i dati sono ancora leggibili.
+        for i in 0..3u8 {
+            let mut exp = pat.clone();
+            exp[0] = i;
+            assert_eq!(t2.get(b"b", &[b'k', i]), Some(exp));
+        }
+        // pack_cur ripristinato (blocco condiviso con coda libera).
+        assert_eq!(t2.pack_cur.len(), 1);
+    }
+
+    #[test]
+    fn rebuild_pack_cur_bind_con_albero_interno() {
+        // Molti record per forzare split del primary (nodo INTERNAL + foglie),
+        // poi si simula il bind (new_with_roots + rebuild_pack_cur).
+        let mut t = engine();
+        let pat: Vec<u8> = (0..100).map(|i| (i % 251) as u8).collect();
+        for i in 0..200u64 {
+            let mut key = [0u8; 4];
+            key[0..2].copy_from_slice(&(i as u16).to_le_bytes());
+            let mut d = pat.clone();
+            d[0] = i as u8;
+            assert_eq!(t.put_chunk(b"b", &key, 0, &d, i, 8).is_some(), true);
+        }
+        let (gen, rp, rs, rr, nid) =
+            (t.gen, t.root_primary, t.root_secondary, t.root_refcount, t.next_id);
+        let store = t.into_store();
+        let mut t2 = BTree::new_with_roots(store, gen, rp, rs, rr).expect("new_with_roots");
+        t2.next_id = nid;
+        t2.rebuild_by_id().expect("rebuild_by_id");
+        t2.rebuild_pack_cur();
+        // Spot-check: il primo oggetto e' ancora leggibile.
+        let mut key = [0u8; 4];
+        key[0..2].copy_from_slice(&0u16.to_le_bytes());
+        assert!(t2.get(b"b", &key).is_some());
+    }
+
+    #[test]
+    fn pack_codec_roundtrip_e_rifiuti() {
+        let rec = PrimRec {
+            id: 7,
+            seq: 1,
+            mtime: 2,
+            data: DataRef::Packed(PackRef { blk: 42, off: 10, len: 500 }),
+        };
+        let enc = prim_rec_encode(&rec);
+        let (rec2, n) = prim_rec_parse(&enc).expect("parse");
+        assert_eq!(rec2, rec);
+        assert_eq!(n, enc.len());
+        // blk = 0: rifiuto
+        let mut bad: Vec<u8> = enc.clone();
+        bad[25..33].copy_from_slice(&0u64.to_le_bytes());
+        assert!(prim_rec_parse(&bad).is_none());
+        // len = 0: rifiuto
+        let mut bad2: Vec<u8> = enc.clone();
+        bad2[35..37].copy_from_slice(&0u16.to_le_bytes());
+        assert!(prim_rec_parse(&bad2).is_none());
+        // len oltre PACK_CAP: rifiuto
+        let mut bad3: Vec<u8> = enc.clone();
+        bad3[35..37].copy_from_slice(&(PACK_CAP as u16 + 1).to_le_bytes());
+        assert!(prim_rec_parse(&bad3).is_none());
     }
 
     #[test]
@@ -3317,7 +3828,7 @@ mod tests {
         let tiny = t.get(b"m", b"t512").unwrap();
         assert_eq!(tiny.len(), 513);
         assert!(tiny[..512].iter().all(|b| *b == 7) && tiny[512] == 9);
-        assert!(matches!(t.head_rec(2, 2).unwrap().data, DataRef::Ext(_)));
+        assert!(matches!(t.head_rec(2, 2).unwrap().data, DataRef::Packed(_)));
         t.put_chunk(b"m", b"t512", 0, &[7u8; 512], 45, 8).unwrap();
         assert!(matches!(t.head_rec(2, 3).unwrap().data, DataRef::Inline(_)));
         for (key, n) in [(b"b9".as_slice(), 3559usize), (b"b0".as_slice(), 3560usize), (b"b1".as_slice(), 3561usize)] {
@@ -3523,13 +4034,14 @@ mod tests {
         }
         // Snapshot finale: entry consistenti.
         let _ = snap;
-        let (ne, en, mx, ov, ii) = t.extent_stats().expect("xstats");
+        let (ne, en, mx, ov, ii, _np, _pb, _pu, _pc) = t.extent_stats().expect("xstats");
         assert!(ne > 0 && en > 0, "ne={ne} en={en} mx={mx} ov={ov} in={ii}");
     }
 
     #[test]
-    fn primrec_ext_codec_e_packed_rifiutato() {
-        // Roundtrip Ext (anche vuota) + kind 3 PACKED e futuri rifiutati loud.
+    fn primrec_ext_codec_e_packed_accettato() {
+        // Roundtrip Ext (anche vuota) + kind 3 PACKED accettato; futuri >=4
+        // rifiutati loud.
         let h = ExtHead {
             size: 9000,
             inline: alloc::vec![(11u64, 3u32), (20u64, 1u32)],
@@ -3547,10 +4059,18 @@ mod tests {
         };
         let enc0 = prim_rec_encode(&e0);
         assert_eq!(prim_rec_parse(&enc0).map(|(r, _)| r), Some(e0));
+        // Roundtrip Packed (kind 3).
+        let pk = PrimRec {
+            id: 7, seq: 1, mtime: 2,
+            data: DataRef::Packed(PackRef { blk: 42, off: 10, len: 500 }),
+        };
+        let encp = prim_rec_encode(&pk);
+        let (decp, lenp) = prim_rec_parse(&encp).expect("parse packed");
+        assert_eq!(decp, pk);
+        assert_eq!(lenp, encp.len());
+        // Futuro >= 4: rifiuto loud.
         let mut bad = enc.clone();
-        bad[24] = 3; // PACKED riservato
-        assert!(prim_rec_parse(&bad).is_none());
-        bad[24] = 9; // futuro
+        bad[24] = 9;
         assert!(prim_rec_parse(&bad).is_none());
     }
 

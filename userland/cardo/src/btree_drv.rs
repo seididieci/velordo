@@ -377,6 +377,10 @@ pub fn bind(mut store: VolumeStore) -> Option<DiskEngine> {
             println!("[cardo] arca-disk: bind load fallito (rebuild_by_id)");
             return None;
         }
+        // W5: ricontra i refs dei blocchi packed e ripristina il bump
+        // per-bucket dai blocchi raggiunti (stesso-bucket, header persistito).
+        // Best-effort: se non riuscita si riparte con un bump fresco.
+        eng.rebuild_pack_cur();
         // Tabella snapshot: meta assente (0) o illeggibile = tabella vuota,
         // loud ma mount avanti (disponibilita' prima di retention). Poi
         // next_snap oltre il max persistito (mai riuso sid, F2).
@@ -864,13 +868,14 @@ pub fn ns_get_range(
         .map(|(len, v)| (len as u64, v))
 }
 
-/// XSTATS (W2 istogramma + W3 cache): (n_extent, entries, max_entry,
-/// n_legacy_ov, n_inline, cache_hit, cache_reads). Solo motore disco.
+/// XSTATS (W2 istogramma + W3 cache + W5 packed): (n_extent, entries,
+/// max_entry, n_legacy_ov, n_inline, cache_hit, cache_reads, n_packed,
+/// packed_blocks, packed_used_bytes, packed_cap_bytes). Solo motore disco.
 #[inline(never)]
-pub fn disk_xstats(eng: &DiskEngine) -> Option<(u64, u64, u64, u64, u64, u64, u64)> {
-    let (ne, en, mx, ov, ii) = eng.extent_stats()?;
+pub fn disk_xstats(eng: &DiskEngine) -> Option<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64)> {
+    let (ne, en, mx, ov, ii, np, pb, pu, pc) = eng.extent_stats()?;
     let (hits, reads) = eng.store.cache_stats();
-    Some((ne, en, mx, ov, ii, hits, reads))
+    Some((ne, en, mx, ov, ii, hits, reads, np, pb, pu, pc))
 }
 
 /// STAT namespace: (size head, mtime head). Assente = `None`.

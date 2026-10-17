@@ -80,3 +80,4 @@
 - [ADR-0050: Layout extent ArcaFS (scrittura O(toccati))](./adr/0050-arca-extent-dinamici.md)
 - [ADR-0051: Cache nodi write-through in cardo](./adr/0051-cardo-block-cache.md)
 - [ADR-0052: Epoche transazionali minime in cardo (W4)](./adr/0052-cardo-epoche-minime.md)
+- [ADR-0053: Packing sub-blocco stesso-bucket in ArcaFS (W5)](./adr/0053-packing-subblocco-stesso-bucket.md)

@@ -980,21 +980,27 @@ fn real_main(_sp: u64) -> ! {
                         _ => Err(ERR),
                     }
                 } else if payload.first() == Some(&civis::ARCA_SUB_XSTATS) {
-                    // XSTATS (W2 istogramma + W3 cache): reply a due registri
-                    // (n_extent, entries) + frame `[max:8][n_legacy_ov:8]`
-                    // `[n_inline:8][cache_hit:8][cache_reads:8]`. Solo motore.
+                    // XSTATS (W2 istogramma + W3 cache + W5 packed): reply a
+                    // due registri (n_extent, entries) + frame
+                    // `[max:8][n_legacy_ov:8][n_inline:8][cache_hit:8]`
+                    // `[cache_reads:8][n_packed:8][packed_blocks:8]`
+                    // `[packed_used:8][packed_cap:8]`. Solo motore.
                     let out = match disk.as_mut() {
                         Some(d) => btree_drv::disk_xstats(d).ok_or(ERR),
                         None => Err(ERR),
                     };
                     match out {
-                        Ok((ne, en, mx, ov, ii, hits, reads)) => {
-                            let mut f = [0u8; 40];
+                        Ok((ne, en, mx, ov, ii, hits, reads, np, pb, pu, pc)) => {
+                            let mut f = [0u8; 72];
                             f[..8].copy_from_slice(&mx.to_le_bytes());
                             f[8..16].copy_from_slice(&ov.to_le_bytes());
                             f[16..24].copy_from_slice(&ii.to_le_bytes());
                             f[24..32].copy_from_slice(&hits.to_le_bytes());
                             f[32..40].copy_from_slice(&reads.to_le_bytes());
+                            f[40..48].copy_from_slice(&np.to_le_bytes());
+                            f[48..56].copy_from_slice(&pb.to_le_bytes());
+                            f[56..64].copy_from_slice(&pu.to_le_bytes());
+                            f[64..72].copy_from_slice(&pc.to_le_bytes());
                             rings::resp_ring_write(ne, en, &f);
                             let _ = civis::reply(0, ne, en);
                             continue;

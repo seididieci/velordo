@@ -2404,3 +2404,21 @@
           `reachable=` (ok + push fallita = I/O; reachable fallita =
           struttura illeggibile). Gate 6/6 (60/60 + host 24/24).
           Prossimo S2.5w/W5: packing sub-blocco stesso-bucket.
+          S2.5w/W5 packing sub-blocco stesso-bucket (chiusa, ADR-0053): nuovo
+          tipo nodo `PACKED` (5) con header `[used:u16][refs:u16][blen:u8]`
+          `[bucket]` e riferimento `DataRef::Packed(PackRef {blk,off,len})`;
+          `value_write(bucket, data)` sceglie Inline/`≤PACK_CAP`(packed bump
+          per bucket)`/>PACK_CAP`(extent, solo verso l'alto); `pack_cur`
+          RAM-only ricostruito al bind (`rebuild_pack_cur`: riconta `refs`
+          dai record live e sceglie per bucket il blocco con piu' spazio
+          libero); free eager per refcount in `free_dropped_versions` (packed
+          esclusi da `to_free`, refcount a 0 libera + sgancia `pack_cur`);
+          sweep al bind recupera gli orfani via `reachable_blocks`. `extent_stats`
+         /`disk_xstats`/`arca_extent_stats` estesi con `n_packed`,
+          `packed_blocks`, `packed_used_bytes`, `packed_cap_bytes` (tuple
+          esteso da 5 a 9 + 2 registri). Test host: condivisione
+          stesso-bucket, isolamento cross-bucket, patch, crescita→extent,
+          delete-uno/delete-tutti, codec kind3 roundtrip+rifiuti. Guest
+          test61: 16 oggetti da 1000 B → `packed_blocks < 16`,
+          `packed_used=16000`; delete tutti → 0; rimount → rebuild sano.
+          Gate 6/6 (61/61 + host 29/29).

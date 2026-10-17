@@ -71,6 +71,10 @@ pub const ARCA_NODE_TYPE_MAP: u8 = 3;
 /// scrittura (invariante W1 per la cache: solo radici/xhdr/freelist
 /// mutano in place).
 pub const ARCA_NODE_TYPE_DATA: u8 = 4;
+/// Blocco packed (W5): header `[used:u16][refs:u16][blen:u8][bucket:blen]`,
+/// poi slice contigue append-only (1 oggetto = 1 slice, immutabile dopo
+/// la scrittura, condiviso tra oggetti dello stesso bucket).
+pub const ARCA_NODE_TYPE_PACKED: u8 = 5;
 /// Offset del puntatore meta-root nel superblock (56.2c): coda di
 /// `mountpoint[64]`, 8 B a [108..116]. Il mountpoint effettivo e' clippato a
 /// 56 B (`superblock_build`): oltre, la meta si ignora loud al load (mai
