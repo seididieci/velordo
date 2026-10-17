@@ -79,3 +79,4 @@
 - [ADR-0049: FPU per thread, eager](./adr/0049-fpu-eager-per-thread.md)
 - [ADR-0050: Layout extent ArcaFS (scrittura O(toccati))](./adr/0050-arca-extent-dinamici.md)
 - [ADR-0051: Cache nodi write-through in cardo](./adr/0051-cardo-block-cache.md)
+- [ADR-0052: Epoche transazionali minime in cardo (W4)](./adr/0052-cardo-epoche-minime.md)

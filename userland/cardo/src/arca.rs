@@ -382,7 +382,7 @@ impl ArcaFs {
         if !matches!(self.classify(eng, link), NsKind::Missing) {
             return Err(crate::ERR_EXISTS);
         }
-        crate::btree_drv::ns_put(eng, &lk, 0, target.as_bytes())?;
+        crate::btree_drv::ns_put_sync(eng, &lk, 0, target.as_bytes())?;
         Ok(())
     }
 
@@ -513,10 +513,7 @@ impl ArcaFs {
                     Some(_) => {}
                     None => return Err(crate::ERR),
                 }
-                if crate::btree_drv::commit(eng) {
-                    return Ok(());
-                }
-                return Err(crate::ERR);
+                return crate::btree_drv::commit_or(eng, 0).map(|_| ());
             }
         }
         if old_is_file {
@@ -566,11 +563,7 @@ impl ArcaFs {
         for a in Self::ancestors(new) {
             self.ram_dirs.entry(a).or_insert(now);
         }
-        if crate::btree_drv::commit(eng) {
-            Ok(())
-        } else {
-            Err(crate::ERR)
-        }
+        crate::btree_drv::commit_or(eng, 0).map(|_| ())
     }
 
     /// Statvfs con motore esplicito (blocchi 3584; liberi illimitati come

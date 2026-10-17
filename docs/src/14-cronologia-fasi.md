@@ -2379,4 +2379,28 @@
           documentato). Lezione: ogni crescita di cardo va misurata contro
           i 16 KiB (LTO sposta i margini in silenzio). Gate 6/6 (i 139 di
           `utcli` sono fault-injection attesi).
-          Prossimo S2.5w/W4: epoche minime.
+          S2.5w/W4 epoche minime (chiusa, ADR-0052): commit batching per
+          ammortizzare il flip del superblock. Due contratti: gli fd-write
+          (`ns_put`) accumulano byte dirty e committano a close/SYNC/soglia
+          256 KiB/eta' 500 tick; le API senza fd (disk_put/disk_delete,
+          ns_delete/ns_rename, ns_put_sync per i symlink) restano sincrone
+          (`commit_or`) — i test32/v53 di crash (obj_put senza fd, quota al
+          bounce) restano verdi senza toccarli. Scoperta chiave in caccia:
+          l'epoca e' GLOBALE per volume, non per-fd — qualunque commit salva
+          TUTTE le write dirty insieme, quindi "epoca aperta persa" va letta
+          come "le write dall'ultimo commit sono perse in blocco", e il test
+          deve ordinare la write effimera DOPO l'ultimo commit. Il choke e'
+          `commit_or` (invariante: commit ⟹ epoca pulita; `epoch_reset`
+          dentro). Crash: ultimo commit durevole, orfani dell'epoca aperta
+          recuperati dalla GC al bind (56.2c, gia' esistente). Caccia lunga
+          e istruttiva: il test60 falliva con B/C "spariti" dopo il bounce
+          pur essendo il motore a posto — gli scan al bind (`r60 keys=3
+          resolvable=3`) dimostravano che i dati erano durevoli; il colpevole
+          era il remount del test: `mkdir("/arca/...") || (mount && mkdir)`
+          short-circuitava sul mkdir riuscito via root mount catch-all
+          (chiave `arca/r60/...` invece di `r60/...`). Fix: rimontare
+          `/arca` esplicito (pattern v50) e riordinare A dopo il SYNC di C.
+          Diagnostica permanente: sul fallimento GC al bind il log distingue
+          `reachable=` (ok + push fallita = I/O; reachable fallita =
+          struttura illeggibile). Gate 6/6 (60/60 + host 24/24).
+          Prossimo S2.5w/W5: packing sub-blocco stesso-bucket.

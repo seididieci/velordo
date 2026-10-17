@@ -145,7 +145,7 @@ fn seed_sys_disk(
             None => println!("[cardo] seed: {} oltre bound (D1: init panic loud)", path),
         }
     }
-    if seeded && !btree_drv::commit(disk) {
+    if seeded && btree_drv::commit_or(disk, 0).is_err() {
         println!("[cardo] seed: commit seed fallito (D1: init panic loud)");
     }
 }
@@ -764,7 +764,7 @@ fn real_main(_sp: u64) -> ! {
             }
 
             R_CLOSE => {
-                handlers::handle_close(&mut ftable, &mut pipes, chan, w0 as u32)
+                handlers::handle_close(&mut ftable, &mut pipes, chan, w0 as u32, &mut disk)
             }
 
             R_READDIR => {
@@ -893,8 +893,8 @@ fn real_main(_sp: u64) -> ! {
             R_OBJ_PUT => {
                 // Payload: [bucket_len][bucket]\0[key_len][key]\0[data...]
                 // w0 = payload_len (expect), w1 = offset nel blob.
-                // Backend unico 56.2b (blocchi, commit per-op); senza bind
-                // errore loud e il client ripiega (init → FAT).
+                // Backend unico 56.2b (blocchi, commit d'epoca W4); senza
+                // bind errore loud e il client ripiega (init → FAT).
                 match disk.as_mut() {
                     Some(d) => btree_drv::disk_put(d, payload, w1 as usize),
                     None => Err(ERR),

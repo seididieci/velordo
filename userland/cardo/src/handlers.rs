@@ -459,6 +459,7 @@ pub fn handle_close(
     pipes: &mut pipes::PipeTable,
     chan: u64,
     fd: u32,
+    disk: &mut Option<btree_drv::DiskEngine>,
 ) -> Result<u64, u64> {
     // Estremita' pipe: rimuovi l'fd e decrementa il conteggio (l'ultima
     // close libera il buffer, mai leak a pipeline finite).
@@ -471,7 +472,24 @@ pub fn handle_close(
     if let Some((driver_chan, remote_fd)) = ftable.get_remote(chan, fd) {
         let _ = civis::send(driver_chan, DEV_CLOSE, remote_fd as u64, 0);
     }
-    if ftable.close(chan, fd) { Ok(0) } else { Err(ERR_INVALID) }
+    // Solo i file locali possono aver sporcato l'epoca (ramfs/FAT non
+    // toccano il motore; pipe/remote escluse sopra): la loro close la
+    // commita (W4 commit batching — le read-only non sporcano mai, quindi
+    // la loro close resta no-op). Errore di commit onesto (stile EIO).
+    let flush = matches!(
+        ftable.get(chan, fd),
+        Some((_, mount_legacy::FsKind::Local, _, _))
+    );
+    if ftable.close(chan, fd) {
+        if flush {
+            if let Some(d) = disk {
+                btree_drv::epoch_flush(d)?;
+            }
+        }
+        Ok(0)
+    } else {
+        Err(ERR_INVALID)
+    }
 }
 
 #[inline(never)]
@@ -858,11 +876,13 @@ pub fn handle_sync(
                 return Err(ERR);
             }
         }
-        // 56.3 — ArcaFS commit per-op: la barriera e' un commit esplicito
-        // (no-op logico se niente e' dirty; loud a IO fallito). Senza motore
+        // 56.3/W4 — barriera ArcaFS = flush epoca esplicita (commit se
+        // dirty, no-op se pulita; loud a IO fallito). E' la SYNC esplicita
+        // del contratto crash (ADR-0052): chi vuole durevolezza subito la
+        // chiede qui invece di aspettare soglia/eta'/close. Senza motore
         // legato niente da committare (init ripiega come prima).
         if let Some(d) = disk {
-            if !btree_drv::commit(d) {
+            if btree_drv::commit_or(d, 0).is_err() {
                 return Err(ERR);
             }
         }

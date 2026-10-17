@@ -13,8 +13,8 @@ nulla da solo.
 
 ## Stato (completate 1-55)
 
-Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 54/54` +
-`[posixtests] PASS 4/4` + `[usertests] PASS 54/54` + shell (10/10 fasi), zero FAIL/PANIC/FAULT.
+Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 60/60` +
+`[posixtests] PASS 4/4` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12`, zero FAIL/PANIC/FAULT.
 
 | Fase | Descrizione | Stato |
 |------|-------------|-------|
@@ -248,7 +248,7 @@ Voci con scope e vittoria dichiarati (non date).
        `current_id()` pre-init: mai println prima di `init.init()`).
        S2.5e spawn argv (`SpawnMeta` 56 B, layout dual-base via direct map)
        + `--version` in guest (`rustc 1.100.0-nightly`, exit 0) chiusa,
-        gate 6/6 (59/59 testsarca con range + prefix-overwrite + append
+        gate 6/6 (60/60 testsarca con range + prefix-overwrite + append
         test). S2.5f/F0 range read
        ArcaFS chiusa (cursore LRU, invalidazione su mutazione; append
        guest-side O(n^2) documentato: file grandi solo da seed host).
@@ -276,14 +276,22 @@ Voci con scope e vittoria dichiarati (non date).
       MFU 2-bit + LRU, cap da `SYS_MEMINFO`, evict-on-free, hit/reads in
       XSTATS: hit 99.8% in gate, test59 1100→~850 tick; niente readahead
       sincrono (beneficio zero); stack hash in heap + firewall dopo caccia
-      con `-Z emit-stack-sizes`; gate 6/6); W4 epoche minime (commit batching su soglia dirty 256K + close di fd
-      dirty + shutdown, SYNC esplicita fd/volume, semantica crash
-      documentata, test kill-mid-epoch con recovery via GC); W5 packing
-      sub-blocco stesso-bucket (banda (512,3560], 1 oggetto = 1 slice,
-      bump-alloc, free via sweep GC/trim; oltre il blocco → extent, solo
-      verso l'alto; misura spazio sysroot). Follow-up espliciti non
-      promessi: clustering chiavi, shrinker kernel→cardo, defrag, hint
-      allocsize-style, ZIL/log-tree (solo se fsync di S2.5 lo chiede).
+      con `-Z emit-stack-sizes`; gate 6/6); W4 epoche minime CHIUSA
+      (ADR-0052: due contratti — fd-write a epoca con close/SYNC/soglia
+      256K/eta' 500 tick, API senza fd sincrona; epoca GLOBALE per volume,
+      non per-fd: un commit salva tutte le write dirty insieme; crash =
+      ultimo commit durevole, epoca aperta persa in blocco, orfani
+      recuperati dalla GC al bind; choke unico `commit_or` con invariante
+      commit⟹pulita; test60 kill-mid recovery: B/C durevoli, A persa,
+      allocatore sano; fix test: rimontare /arca esplicito dopo il bounce —
+      il root mount catch-all falsa la chiave `arca/...`; diagnostica
+      `reachable=` sul fallimento GC; gate 6/6); W5 packing
+      sub-blocco stesso-bucket (prossimo: banda (512,3560], 1 oggetto =
+      1 slice, bump-alloc, free via sweep GC/trim; oltre il blocco →
+      extent, solo verso l'alto; misura spazio sysroot). Follow-up
+      espliciti non promessi: clustering chiavi, shrinker kernel→cardo,
+      defrag, hint allocsize-style, ZIL/log-tree (solo se fsync di S2.5
+      lo chiede).
       Vittoria: gate 6/6 a ogni sottofase + append 512K lineare bound
       (test59 ~1100 tick, opcount host 2 MiB ~33K op) + N file piccoli
       in M<N blocchi dati.

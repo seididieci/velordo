@@ -324,7 +324,7 @@ pub fn bind(mut store: VolumeStore) -> Option<DiskEngine> {
         if !eng.store.vol_mut().sync_ids(1, 1) {
             return None;
         }
-        if !commit(&mut eng) {
+        if commit_or(&mut eng, 0).is_err() {
             return None;
         }
         println!("[cardo] arca-disk: init ok");
@@ -404,11 +404,17 @@ pub fn bind(mut store: VolumeStore) -> Option<DiskEngine> {
         let n_orph = match gc_run(&mut eng) {
             Some(n) => n,
             None => {
-                println!("[cardo] arca-disk: bind load fallito (orphan-GC)");
+                // Diagnostica permanente: reachable ok + push fallita = I/O
+                // in scrittura; reachable fallita = struttura illeggibile.
+                let r = eng.reachable_blocks().is_some();
+                println!(
+                    "[cardo] arca-disk: bind load fallito (orphan-GC reachable={})",
+                    r as u8
+                );
                 return None;
             }
         };
-        if !commit(&mut eng) {
+        if commit_or(&mut eng, 0).is_err() {
             println!("[cardo] arca-disk: bind load fallito (commit recovery)");
             return None;
         }
@@ -557,13 +563,92 @@ fn bounds_invalid(bucket: &[u8], key: &[u8]) -> bool {
     bucket.len() > civis::OBJ_BUCKET_MAX || key.len() > civis::OBJ_KEY_MAX
 }
 
+// ── Epoche transazionali minime (W4, ADR-0052) ──────────────────────────
+// Stato globale cardo (single-thread; precedent: wall.rs): byte dirty
+// (0 = pulita/chiusa) + tick di apertura. Invariante: commit ⟹ pulita
+// (reset dentro `commit_or`, unico choke di tutti i commit reali).
+// Durabilita': ultimo commit = durevole; epoca aperta persa al crash
+// (come TXG ZFS di default). Write-through (W3) rende l'ordinamento banale:
+// i blocchi sono gia' su disco, il commit flippa solo le radici — i nodi
+// dell'epoca aperta restano orfani per la GC al bind (56.2c).
+
+/// Soglia dirty per commit (256 KiB di dati per epoca).
+const EPOCH_BYTES: u64 = 256 * 1024;
+/// Eta' max epoca in tick (5 s come TXG: i trickle senza close non devono
+/// tenere l'epoca aperta all'infinito — crash perderebbe tutto dal commit).
+const EPOCH_TICKS: i64 = 500;
+
+static EPOCH_DIRTY: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static EPOCH_START: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Accumula byte dirty (apre l'epoca al primo). DOPO put riuscita.
+fn epoch_note(nbytes: u64) {
+    use core::sync::atomic::Ordering;
+    if EPOCH_DIRTY.fetch_add(nbytes, Ordering::Relaxed) == 0 {
+        EPOCH_START.store(civis::get_ticks() as u64, Ordering::Relaxed);
+    }
+}
+
+/// Chiude l'epoca (dopo ogni commit riuscito).
+fn epoch_reset() {
+    use core::sync::atomic::Ordering;
+    EPOCH_DIRTY.store(0, Ordering::Relaxed);
+    EPOCH_START.store(0, Ordering::Relaxed);
+}
+
+/// Epoca da chiudere? Soglia byte o eta' (mai su epoca pulita).
+fn epoch_should_commit() -> bool {
+    use core::sync::atomic::Ordering;
+    let dirty = EPOCH_DIRTY.load(Ordering::Relaxed);
+    if dirty == 0 {
+        return false;
+    }
+    if dirty >= EPOCH_BYTES {
+        return true;
+    }
+    let age =
+        civis::get_ticks().wrapping_sub(EPOCH_START.load(Ordering::Relaxed) as i64);
+    age >= EPOCH_TICKS
+}
+
 #[inline(never)]
-fn commit_or(eng: &mut DiskEngine, v: u64) -> Result<u64, u64> {
+pub(crate) fn commit_or(eng: &mut DiskEngine, v: u64) -> Result<u64, u64> {
     if commit(eng) {
+        epoch_reset();
         Ok(v)
     } else {
         Err(ERR)
     }
+}
+
+/// Commit differito per gli fd-write (`ns_put`): accumula e commita a
+/// soglia/eta'/close/SYNC, altrimenti Ok senza commit. Tutto il resto
+/// (disk API senza fd, snapshot, quota, rename: senza close che flushi)
+/// resta sincrono via `commit_or` — due contratti, mai ambigui (ADR-0052).
+#[inline(never)]
+pub(crate) fn epoch_commit_or(
+    eng: &mut DiskEngine,
+    v: u64,
+    nbytes: usize,
+) -> Result<u64, u64> {
+    epoch_note(nbytes as u64);
+    if epoch_should_commit() {
+        commit_or(eng, v)
+    } else {
+        Ok(v)
+    }
+}
+
+/// Flush esplicito (close/SYNC): commit se dirty, no-op se pulita.
+#[inline(never)]
+pub(crate) fn epoch_flush(eng: &mut DiskEngine) -> Result<(), u64> {
+    use core::sync::atomic::Ordering;
+    if EPOCH_DIRTY.load(Ordering::Relaxed) == 0 {
+        return Ok(());
+    }
+    commit_or(eng, 0).map(|_| ())
 }
 
 /// Cancello quota (A3, ADR-0044): il bucket puo' accogliere `add_bytes`?
@@ -578,9 +663,9 @@ fn quota_gate(eng: &DiskEngine, bucket: &[u8], add_bytes: usize) -> Result<(), u
     }
 }
 
-/// PUT chunk a `offset` (0 = nuova versione, >0 = patch): sempre commit.
-/// Gated quota sul blob risultante (`offset+len` conservativo per le patch:
-/// i blocchi vecchi sono ancora in `used`, il trim liberera' dopo).
+/// PUT chunk a `offset` (0 = nuova versione, >0 = patch): commit immediato
+/// (API disco senza fd: niente close che flushi — durevolezza esplicita,
+/// W4). Solo gli fd-write (`ns_put`) differiscono in epoca.
 #[inline(never)]
 pub fn disk_put(eng: &mut DiskEngine, payload: &[u8], offset: usize) -> Result<u64, u64> {
     let (bucket, key, data) = arcafs::wire::parse_obj_prefix(payload).ok_or(ERR_INVALID)?;
@@ -667,7 +752,8 @@ pub fn disk_stat_id(eng: &mut DiskEngine, payload: &[u8]) -> Result<(u64, u64, [
     Ok((size, nv, mtime.to_le_bytes()))
 }
 
-/// DELETE nome + catena viva (pin snapshot salvi): sempre commit.
+/// DELETE nome + catena viva (pin snapshot salvi): commit immediato (W4:
+/// solo gli fd-write differiscono).
 #[inline(never)]
 pub fn disk_delete(eng: &mut DiskEngine, payload: &[u8]) -> Result<u64, u64> {
     let (bucket, key, rest) = arcafs::wire::parse_obj_prefix(payload).ok_or(ERR_INVALID)?;
@@ -720,9 +806,27 @@ pub fn open_with_uuid(handle: u32, expected: u64) -> Option<VolumeStore> {
 }
 
 /// PUT namespace a `offset` (stessa semantica `put_chunk`: 0 = fresco,
-/// >0 = patch con zero-fill): sempre commit. Ritorna i byte scritti.
+/// >0 = patch con zero-fill): commit d'epoca W4 (fd-write: close/SYNC/
+/// soglia/eta' lo chiudono). Ritorna i byte scritti.
+/// Variante sincrona sotto (`ns_put_sync`) per i path senza fd (symlink).
 #[inline(never)]
 pub fn ns_put(eng: &mut DiskEngine, key: &[u8], offset: usize, data: &[u8]) -> Result<usize, u64> {
+    if key.len() > civis::OBJ_KEY_MAX {
+        return Err(ERR_INVALID);
+    }
+    let total = offset.checked_add(data.len()).ok_or(ERR_INVALID)?;
+    quota_gate(eng, NS_BUCKET, total)?;
+    let n = eng
+        .put_chunk(NS_BUCKET, key, offset, data, crate::wall::wall_secs(), RETAIN)
+        .ok_or(ERR)?;
+    epoch_commit_or(eng, n as u64, data.len()).map(|v| v as usize)
+}
+
+/// PUT namespace sincrona (stessa semantica, commit immediato): solo per i
+/// path senza fd che non avranno mai close-flush (symlink). Gli fd-write
+/// usano `ns_put` (epoca).
+#[inline(never)]
+pub fn ns_put_sync(eng: &mut DiskEngine, key: &[u8], offset: usize, data: &[u8]) -> Result<usize, u64> {
     if key.len() > civis::OBJ_KEY_MAX {
         return Err(ERR_INVALID);
     }
@@ -794,7 +898,7 @@ pub fn ns_rename(eng: &mut DiskEngine, old: &[u8], new: &[u8]) -> Result<(), u64
     }
 }
 
-/// DELETE namespace: sempre commit. Assente = `Err(ERR_NOTFOUND)`.
+/// DELETE namespace: commit immediato (W4). Assente = `Err(ERR_NOTFOUND)`.
 #[inline(never)]
 pub fn ns_delete(eng: &mut DiskEngine, key: &[u8]) -> Result<(), u64> {
     if key.len() > civis::OBJ_KEY_MAX {

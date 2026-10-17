@@ -55,6 +55,8 @@
 //! senza il quale `put_chunk(0)` troncherebbe la coda).
 //!  59. append 512 KiB sequenziali con bound (W2: O(1) per op con extent)
 //! + riga xstats informativa (distribuzione layout valori).
+//!  60. epoca kill-mid (W4: committed durevole, aperto perso, SYNC salva
+//! + recovery con GC al bind).
 //! Con `ARCA_IMG=1` (gate) i drive ci sono sempre; senza, solo 1-3 e 7-13
 //! adattivi e il resto saltato — n/n adattivo, mai FAIL per drive assente.
 
@@ -1242,6 +1244,89 @@ fn real_main(_sp: u64) -> ! {
             ),
             Err(_) => println!("[testsarca] xstats: N/D"),
         }
+        // 60. epoca kill-mid (W4, ADR-0052): committed durevole, aperto
+        // perso, SYNC salva. B committed (close-flush) sopravvive al bounce
+        // di cardo; A scritta senza close/sync sparisce (epoca aperta persa
+        // per disegno); C scritta + SYNC GROUP sopravvive; dopo il restart
+        // l'allocatore e' sano (si scrive e rilegge ancora).
+        let v60 = {
+            let bpat: alloc::vec::Vec<u8> = (0..8192).map(|i| (i % 251) as u8).collect();
+            let apat: alloc::vec::Vec<u8> = (0..4096).map(|i| (0xA0 + (i % 16)) as u8).collect();
+            let cpat: alloc::vec::Vec<u8> = (0..4096).map(|i| (0xC0 + (i % 16)) as u8).collect();
+            let _ = civis::remove("/arca/r60w");
+            // B: write + close => commit (durevole).
+            let mut good = civis::mkdir("/arca/r60").is_ok()
+                && wr_all("/arca/r60/keep", civis::OPEN_CREATE, &bpat);
+            // C: write + SYNC esplicita => commit (durevole senza close).
+            good = good
+                && match civis::open("/arca/r60/synced", civis::OPEN_CREATE) {
+                    Ok(fd) => {
+                        civis::write_fs(fd, &cpat, cpat.len()) == Ok(cpat.len())
+                            && civis::disk_sync(civis::SYNC_GROUP).is_ok()
+                    }
+                    Err(_) => false,
+                };
+            // A: fd aperto + write differito, MAI chiuso — e' l'UNICA scrittura
+            // dirty dell'epoca quando avviene il bounce (nessun commit dopo).
+            // L'ORDINE conta: l'epoca e' GLOBALE, non per-fd, quindi un commit
+            // successivo (es. il SYNC di C) porterebbe con se' anche A. Per
+            // mostrare "epoca aperta persa" A deve essere l'ultima scrittura.
+            good = good
+                && match civis::open("/arca/r60/ephem", civis::OPEN_CREATE) {
+                    Ok(fd) => civis::write_fs(fd, &apat, apat.len()) == Ok(apat.len()),
+                    Err(_) => false,
+                };
+            // Bounce cardo a epoca aperta (nessun close/sync/soglia/eta' dopo
+            // A: 4K sotto i 256K, microsecondi sotto i 5 s).
+            let bounced = match civis::init_bounce(civis::Service::Cardo) {
+                Ok(_) => {
+                    let gone = civis::poll_wait(1000, civis::POLL_PERIOD_TICKS, || {
+                        civis::service_pid(civis::Service::Cardo).is_err()
+                    });
+                    let back = civis::poll_value(2000, civis::POLL_PERIOD_TICKS, || {
+                        civis::service_pid(civis::Service::Cardo).ok()
+                    });
+                    gone && back.is_some()
+                }
+                Err(_) => false,
+            };
+            // Rewarm: il mount /arca e' morto col bounce (card-side) — va
+            // rimontato ESPLICITAMENTE (pattern v50). Il vecchio `mkdir ||
+            // (mount && mkdir)` short-circuitava sul mkdir riuscito via root
+            // catch-all (chiave "arca/..." invece di "r60/..."), falsando la
+            // lettura: il mount non e' idempotente, quindi prima si rimonta.
+            let re = bounced
+                && civis::poll_wait(2000, civis::POLL_PERIOD_TICKS, || {
+                    civis::service_pid(civis::Service::Cardo).is_ok() && mount_root_arca()
+                });
+            good = good && re;
+            if good {
+                let b_post = rd_all("/arca/r60/keep").map(|v| (v.len(), v == bpat));
+                let c_post = rd_all("/arca/r60/synced").map(|v| (v.len(), v == cpat));
+                let a_gone = civis::open("/arca/r60/ephem", 0).is_err();
+                // Allocatore sano dopo recovery (GC al bind): si scrive ancora.
+                let dpat: alloc::vec::Vec<u8> =
+                    (0..4096).map(|i| (0xE0 + (i % 16)) as u8).collect();
+                let d_ok = wr_all("/arca/r60/after", civis::OPEN_CREATE, &dpat)
+                    && matches!(rd_all("/arca/r60/after"), Some(v) if v == dpat);
+                println!(
+                    "[testsarca] ep60: B={:?} C={:?} A_gone={} D_ok={}",
+                    b_post, c_post, a_gone as u8, d_ok as u8
+                );
+                good = matches!(b_post, Some((_, true)))
+                    && matches!(c_post, Some((_, true)))
+                    && a_gone
+                    && d_ok;
+            }
+            let _ = civis::remove("/arca/r60/keep");
+            let _ = civis::remove("/arca/r60/synced");
+            let _ = civis::remove("/arca/r60/after");
+            let _ = civis::remove("/arca/r60/ephem");
+            let _ = civis::remove("/arca/r60w");
+            let _ = civis::remove("/arca/r60");
+            good
+        };
+        c.ok("epoca kill-mid recovery", v60);
         // Cleanup best-effort (il volume resta pulito per i run dopo).
         let _ = civis::remove("/arca/keep/v");
         let _ = civis::remove("/arca/keep");
