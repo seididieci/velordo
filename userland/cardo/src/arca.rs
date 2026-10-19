@@ -566,7 +566,7 @@ impl ArcaFs {
         crate::btree_drv::commit_or(eng, 0).map(|_| ())
     }
 
-    /// Statvfs con motore esplicito (blocchi 3584; liberi illimitati come
+    /// Statvfs con motore esplicito (blocchi 65536; liberi illimitati come
     /// ramfs — sensore vero con quota/taglio, mai numero inventato).
     #[inline(never)]
     pub fn ns_statvfs(&mut self, eng: &DiskEngine) -> Result<StatVfs, u64> {

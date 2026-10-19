@@ -22,8 +22,18 @@ fi
 OUT_DIR="$(dirname "$OUT")"
 mkdir -p "$OUT_DIR"
 
-# 1. Crea immagine 33 MiB (offset 63 settori + volume ArcaFS da 32 MiB).
-dd if=/dev/zero of="$OUT" bs=1M count=33 2>/dev/null
+# Dimensioni dal volume sorgente (S1.2/W6: non piu' cablate a 32 MiB).
+VOL_SIZE="$(wc -c < "$ARCA_IMG_FILE")"
+if [ "$VOL_SIZE" -le 0 ] || [ $((VOL_SIZE % 512)) -ne 0 ]; then
+    echo "[arca-part] errore: volume di $VOL_SIZE byte (non multiplo di 512), abort"
+    exit 1
+fi
+VOL_SECTORS=$((VOL_SIZE / 512))
+TOTAL_SECTORS=$((63 + VOL_SECTORS))
+OUT_BYTES=$((TOTAL_SECTORS * 512))
+
+# 1. Crea immagine: offset 63 settori + volume ArcaFS.
+dd if=/dev/zero of="$OUT" bs=512 count="$TOTAL_SECTORS" 2>/dev/null
 
 # 2. Scrivi MBR manualmente (512 byte esatti).
 #    Struttura MBR:
@@ -37,7 +47,7 @@ dd if=/dev/zero of="$OUT" bs=1M count=33 2>/dev/null
 #      [4] tipo (0x83 = Linux)
 #      [5-7] CHS end (stesso)
 #      [8-11] LBA start LE u32 (63)
-#      [12-15] settori LE u32 (67521 = 33MiB/512 - 63: copre tutto il volume)
+#      [12-15] settori LE u32 (VOL_SECTORS: copre tutto il volume)
 #
 #    BUG STORICO (Fase 55): la tabella partiva a offset 440 invece di 0x1BE
 #    e il file MBR era di 506 byte (short write su dd bs=512): la signature
@@ -52,7 +62,10 @@ dd if=/dev/zero of="$OUT" bs=1M count=33 2>/dev/null
     # Tabella partizioni: prima voce + padding fino a offset 510
     printf '\x80\x01\x01\x00\x83\x01\x01\x00'   # boot, CHS start, tipo=Linux, CHS end
     printf '\x3f\x00\x00\x00'                   # LBA start = 63 (LE u32)
-    printf '\xc1\x07\x01\x00'                   # settori = 67521 (LE u32)
+    SECT_LE="$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' \
+        $((VOL_SECTORS & 0xff)) $(((VOL_SECTORS >> 8) & 0xff)) \
+        $(((VOL_SECTORS >> 16) & 0xff)) $(((VOL_SECTORS >> 24) & 0xff)))"
+    printf '%b' "$SECT_LE"                      # settori = VOL_SECTORS (LE u32)
     dd if=/dev/zero bs=1 count=48 2>/dev/null   # padding: 48 byte a zero (fino a offset 510)
 
     # Signature MBR (2 byte a offset 0x1FE)
@@ -69,14 +82,13 @@ fi
 dd if=/tmp/mbr.bin of="$OUT" bs=512 count=1 conv=notrunc 2>/dev/null
 rm -f /tmp/mbr.bin
 
-# 3. Copia l'intero volume ArcaFS all'inizio della partizione (LBA63):
-#    il volume e' di 32 MiB, la partizione e' 33MiB-63 settori: spazio sufficiente.
+# 3. Copia l'intero volume ArcaFS all'inizio della partizione (LBA63).
 dd if="$ARCA_IMG_FILE" of="$OUT" bs=512 seek=63 conv=notrunc 2>/dev/null
 # Fail-loud se il volume sborda dalla partizione (dd estenderebbe il file oltre
-# i 33 MiB: layout non piu' quello dichiarato sopra).
+# il layout dichiarato sopra).
 OUT_SIZE="$(wc -c < "$OUT")"
-if [ "$OUT_SIZE" != "34603008" ]; then
-    echo "[arca-part] errore: size $OUT_SIZE (attesi 34603008: volume oltre la partizione?), abort"
+if [ "$OUT_SIZE" != "$OUT_BYTES" ]; then
+    echo "[arca-part] errore: size $OUT_SIZE (attesi $OUT_BYTES), abort"
     exit 1
 fi
 

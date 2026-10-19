@@ -363,9 +363,13 @@ pub fn arca_free(block: u64) -> Result<(), Error> {
     arca_scalar(ARCA_SUB_FREE, &block.to_le_bytes()).map(|_| ())
 }
 
-/// Legge un nodo verificato (3560 B di payload).
+/// Legge i primi `RING_MAX_PAYLOAD` byte del payload di un nodo verificato
+/// (debug: il payload intero da 64 KiB non entra in un frame ring; il resto
+/// e' noto al server e coperto dal checksum, qui non viaggia).
 pub fn arca_read_node(block: u64) -> Result<Vec<u8>, Error> {
-    let (a, _, _) = arca_request(ARCA_SUB_READ, &block.to_le_bytes())?;
+    let mut req = block.to_le_bytes().to_vec();
+    req.extend_from_slice(&(RING_MAX_PAYLOAD as u16).to_le_bytes());
+    let (a, _, _) = arca_request(ARCA_SUB_READ, &req)?;
     let n = match fs_reply_check(a) {
         Ok(v) if v == block => v,
         Ok(_) => {
@@ -378,14 +382,18 @@ pub fn arca_read_node(block: u64) -> Result<Vec<u8>, Error> {
         }
     };
     let _ = n;
-    let mut buf = vec![0u8; ARCA_NODE_PAYLOAD_LEN];
-    resp_ring_read_payload(&mut buf, ARCA_NODE_PAYLOAD_LEN);
+    let mut buf = vec![0u8; RING_MAX_PAYLOAD];
+    resp_ring_read_payload(&mut buf, RING_MAX_PAYLOAD);
     Ok(buf)
 }
 
-/// Scrive un nodo opaco (type RAW, gen 0 server-side).
-pub fn arca_write_node(block: u64, data: &[u8; ARCA_NODE_PAYLOAD_LEN]) -> Result<(), Error> {
-    let mut p = Vec::with_capacity(8 + ARCA_NODE_PAYLOAD_LEN);
+/// Scrive un nodo opaco (type RAW, gen 0 server-side). `data` e' il prefisso
+/// del payload (il server azzera la coda): deve stare in un frame ring.
+pub fn arca_write_node(block: u64, data: &[u8]) -> Result<(), Error> {
+    if data.len() > RING_MAX_PAYLOAD - 9 {
+        return Err(Error::Invalid); // 1 sub + 8 block + data <= frame
+    }
+    let mut p = Vec::with_capacity(8 + data.len());
     p.extend_from_slice(&block.to_le_bytes());
     p.extend_from_slice(data);
     arca_scalar(ARCA_SUB_WRITE, &p).map(|_| ())

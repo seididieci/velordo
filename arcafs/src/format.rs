@@ -2,22 +2,24 @@
 //! encode/decode/verifica condivise tra guest e tool host: il layout e'
 //! definito UNA volta sola qui.
 //!
-//! Blocco = 3584 B = 7 settori (1 op `DISK_*` esatta), partition-relative:
-//! blocco N = settori N*7..N*7+6. Blocco 0 = superblock (LBA0) + shadow
-//! (LBA1) + header-estensione (settori 2-6, i primi 1024 B restano intoccati
-//! per non sfiorare mai superblock/shadow). Il blocco 0 non si alloca mai.
+//! Blocco = 65536 B = 128 settori (chunkati a <=7 settori per IPC dal
+//! `BlockSource`), partition-relative: blocco N = settori N*128..N*128+127.
+//! Blocco 0 = superblock (LBA0) + shadow (LBA1) + header-estensione (settori
+//! 2-6, i primi 1024 B restano intoccati per non sfiorare mai
+//! superblock/shadow). Il blocco 0 non si alloca mai.
 
 use alloc::boxed::Box;
 use syscall_numbers::image_hash;
 
 /// Magic superblock + versione formato.
 pub const ARCA_MAGIC: &[u8; 4] = b"ACFS";
-/// Versione formato (W2 extent: 2; la 1 aveva solo catene OV. Niente
+/// Versione formato (W2 extent: 2; W6 blocchi 64 KiB: 3; niente
 /// retrocompat: le immagini si rigenerano (tool host e guest condividono
-/// questo crate), un mount v1 fallisce loud in `superblock_verify`).
-pub const ARCA_VERSION: u32 = 2;
-/// Block size negoziato (fisso v1) = 1 chunk DISK_* esatto.
-pub const ARCA_BLOCK_SIZE: u32 = 3584;
+/// questo crate), un mount v1/v2 fallisce loud in `superblock_verify`).
+pub const ARCA_VERSION: u32 = 3;
+/// Block size negoziato = 64 KiB (128 settori da 512 B): riduce metadata e
+/// I/O su file grandi (200 GB -> ~3M blocchi invece di ~56M con 3.5 KiB).
+pub const ARCA_BLOCK_SIZE: u32 = 65536;
 /// Superblock: 128 B a LBA0 (+ shadow LBA1); checksum FNV-1a di [0..120].
 pub const ARCA_SUPER_LEN: usize = 128;
 pub const ARCA_OFF_MAGIC: usize = 0;
@@ -32,8 +34,8 @@ pub const ARCA_OFF_MOUNT: usize = 52;
 pub const ARCA_OFF_AUTO: usize = 116;
 pub const ARCA_OFF_FLAGS: usize = 117;
 pub const ARCA_OFF_CHECK: usize = 120;
-/// Settori per blocco.
-pub const ARCA_BLOCK_SECTORS: usize = 7;
+/// Settori per blocco (65536 / 512 = 128).
+pub const ARCA_BLOCK_SECTORS: usize = 128;
 /// Byte offset dell'header-estensione nel blocco 0 (salta LBA0+LBA1).
 pub const ARCA_XHDROFF: usize = 1024;
 /// Magic header-estensione + versione.
@@ -53,38 +55,32 @@ pub const ARCA_XHOFF_CHECK: usize = 48;
 /// flippato). Acceso a inizio mutazione, spento al flip superblock (56.2b);
 /// a mount con DIRTY acceso serve orphan-GC (56.2c).
 pub const ARCA_XH_DIRTY: u64 = 1;
-/// Nodo blocco (3584 B): magic "ANOD" 0:4, type 4:1 (RAW=0 opaco 56.2a;
-/// LEAF=1/INTERNAL=2 riservati 56.2b), gen 8:8 (0 in 56.2a), payload
-/// 16:3560, check 3576:8 (FNV-1a di [0..3576]).
+/// Nodo blocco (65536 B): magic "ANOD" 0:4, type 4:1, gen 8:8, payload
+/// 16:65512, check 65528:8 (FNV-1a di [0..65528]).
 pub const ARCA_NMAGIC: &[u8; 4] = b"ANOD";
 pub const ARCA_NODE_TYPE_RAW: u8 = 0;
 pub const ARCA_NODE_TYPE_LEAF: u8 = 1;
 pub const ARCA_NODE_TYPE_INTERNAL: u8 = 2;
-/// Mappa extent (W2): `[prev:8][n:2 LE][entries: n x (blk:8, nb:4)]`
-/// (295 entry/nodo). Catena ALL'INDIETRO (ogni nodo punta al piu' vecchio):
-/// le versioni riusano i nodi invariati e riscrivono solo dalla prima
-/// entry cambiata in poi — i `prev` riusati restano sempre validi (mai
-/// patch in place, invariante W1). Punta solo blocchi DATA.
+/// Mappa extent (W2/W6): `[prev:8][n:2 LE][entries: n x (blk:8, nb:4)]`
+/// (5458 entry/nodo MAP con payload 65512). Catena ALL'INDIETRO (ogni nodo
+/// punta al piu' vecchio): le versioni riusano i nodi invariati e riscrivono
+/// solo dalla prima entry cambiata in poi. Punta solo blocchi DATA.
 pub const ARCA_NODE_TYPE_MAP: u8 = 3;
-/// Blocco dati extent (W2): 3560 B di dati puri, niente header interno
-/// (a differenza di RAW che riserva `[next:8]`). Immutabile dopo la
-/// scrittura (invariante W1 per la cache: solo radici/xhdr/freelist
-/// mutano in place).
+/// Blocco dati extent (W2): 65512 B di dati puri, niente header interno.
+/// Immutabile dopo la scrittura (invariante W1 per la cache).
 pub const ARCA_NODE_TYPE_DATA: u8 = 4;
 /// Blocco packed (W5): header `[used:u16][refs:u16][blen:u8][bucket:blen]`,
 /// poi slice contigue append-only (1 oggetto = 1 slice, immutabile dopo
 /// la scrittura, condiviso tra oggetti dello stesso bucket).
 pub const ARCA_NODE_TYPE_PACKED: u8 = 5;
 /// Offset del puntatore meta-root nel superblock (56.2c): coda di
-/// `mountpoint[64]`, 8 B a [108..116]. Il mountpoint effettivo e' clippato a
-/// 56 B (`superblock_build`): oltre, la meta si ignora loud al load (mai
-/// collisioni silenziose, mai bump di versione formato per 8 byte).
+/// `mountpoint[64]`, 8 B a [108..116].
 pub const ARCA_OFF_META: usize = 108;
 /// Lunghezza effettiva massima del mountpoint (56 B: [52..108]).
 pub const ARCA_MOUNT_MAX: usize = 56;
 pub const ARCA_NODE_PAYLOAD: usize = 16;
-pub const ARCA_NODE_PAYLOAD_LEN: usize = 3560;
-pub const ARCA_NODE_CHECK: usize = 3576;
+pub const ARCA_NODE_PAYLOAD_LEN: usize = ARCA_BLOCK_SIZE as usize - ARCA_NODE_PAYLOAD - 8; // 65512
+pub const ARCA_NODE_CHECK: usize = ARCA_BLOCK_SIZE as usize - 8; // 65528
 
 /// Header-estensione parsata.
 pub struct HeaderExt {
@@ -248,7 +244,7 @@ pub fn xhdr_decode(b: &[u8]) -> Option<HeaderExt> {
 }
 
 /// Riempie un blocco-nodo (header + payload + checksum).
-pub fn node_fill(blk: &mut [u8; 3584], ty: u8, gen: u64, payload: &[u8; ARCA_NODE_PAYLOAD_LEN]) {
+pub fn node_fill(blk: &mut [u8; ARCA_BLOCK_SIZE as usize], ty: u8, gen: u64, payload: &[u8; ARCA_NODE_PAYLOAD_LEN]) {
     blk[..4].copy_from_slice(ARCA_NMAGIC);
     blk[4] = ty;
     blk[8..16].copy_from_slice(&gen.to_le_bytes());
@@ -258,7 +254,7 @@ pub fn node_fill(blk: &mut [u8; 3584], ty: u8, gen: u64, payload: &[u8; ARCA_NOD
 }
 
 /// Verifica un blocco-nodo (magic + checksum): `(type, gen)` o `None`.
-pub fn node_verify(blk: &[u8; 3584]) -> Option<(u8, u64)> {
+pub fn node_verify(blk: &[u8; ARCA_BLOCK_SIZE as usize]) -> Option<(u8, u64)> {
     if blk[..4] != *ARCA_NMAGIC {
         return None;
     }

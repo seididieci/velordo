@@ -13,7 +13,7 @@ nulla da solo.
 
 ## Stato (completate 1-55)
 
-Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 61/61` +
+Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 62/62` +
 `[posixtests] PASS 4/4` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12`, zero FAIL/PANIC/FAULT.
 
 | Fase | Descrizione | Stato |
@@ -289,10 +289,14 @@ Voci con scope e vittoria dichiarati (non date).
       stesso-bucket (chiusa, ADR-0053: tipo nodo PACKED, header
       `[used:u16][refs:u16][blen:u8][bucket]`, bump-alloc per bucket con
       `pack_cur` ricostruito al bind, free eager per refcount + sweep GC al
-      bind; oltre il blocco → extent, solo verso l'alto; misura spazio
-      sysroot via XSTATS esteso). Vittoria: gate 6/6 a ogni sottofase +
-      append 512K lineare bound (test59 ~1100 tick, opcount host 2 MiB ~33K
-      op) + N file piccoli in M<N blocchi dati.
+      bind; oltre il blocco -> extent, solo verso l'alto; misura spazio
+      sysroot via XSTATS esteso); W6 blocchi 64 KiB e rimozione cap 16 MiB
+      (chiusa, ADR-0054: `ARCA_BLOCK_SIZE` 65536, `ARCA_VERSION` 3, nessun
+      cap oggetto, bound `EXT_BLOCKS_MAX` blocchi ~17 GiB, rimosso rifiuto
+      `EXT_BLOCKS_MAX` da `ext_entries`; test62 file grande 512 KiB).
+      Vittoria: gate 6/6 a ogni sottofase (62/62 testsarca) +
+      append 512K bound sotto gate (test59 <6000 tick su QEMU/PIO; opcount
+      host su 512 oggetti da 4 KiB) + N file piccoli in M<N blocchi dati.
 
 ## Parcheggiate
 

@@ -28,9 +28,10 @@ cp "$ROOT/tools/arca/target/release/arca" "$TOOL_BIN"
 # Crea il volume con uuid fisso (Fase 2: la root si sceglie per UUID, mai
 # prima voce trovata). Derivate (arca-part.img / arca-gpt.img) usano `arca
 # uuid` per ottenere UUID distinti senza resettare il volume.
-# S1.2: dimensione parametrica (default 32: le derivate MBR/GPT sono
-# cablate su volumi piccoli; oltre restano artefatti non generati, vedi run.sh).
-$TOOL_BIN create "$OUT" --uuid 4152434100000001 --size-mib "${ARCA_SIZE_MIB:-32}"
+# S1.2/W6: dimensione parametrica (default 128 MiB = 2048 blocchi 64 KiB:
+# il gate scrive > 512 blocchi e la vecchia immagine da 32 MiB finiva lo
+# spazio). Le derivate MBR/GPT seguono la dimensione del volume.
+$TOOL_BIN create "$OUT" --uuid 4152434100000001 --size-mib "${ARCA_SIZE_MIB:-128}"
 echo "[arca] tool in $TOOL_BIN, immagine $OUT"
 
 # Seed del volume con i file di boot (Fase 2 + D1): `/bin` + `/bin/posix` +

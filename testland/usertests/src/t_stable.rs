@@ -307,14 +307,14 @@ pub fn t_disk() -> bool {
     }
     // Barriera Group riuscita sopra (primo disk_sync): i FLUSH sono
     // atterrati senza Err. Sensore spazio: FAT con blocchi/libéri coerenti,
-    // root ArcaFS (Fase A: bsize 3584, illimitata MAX come la ramfs prima).
+    // root ArcaFS (Fase A: bsize 65536, illimitata MAX come la ramfs prima).
     let mut vfs = civis::StatVfs { bsize: 0, blocks: 0, bfree: 0, bavail: 0 };
     if civis::statvfs("/fat", &mut vfs).is_err() || vfs.bsize == 0 || vfs.blocks == 0 || vfs.bfree > vfs.blocks {
         println!("[usertests] t32: statvfs /fat assurdo ({}/{}/{})", vfs.bsize, vfs.blocks, vfs.bfree);
         return false;
     }
     println!("[usertests] t32: statvfs /fat bsize={} blocks={} bfree={}", vfs.bsize, vfs.blocks, vfs.bfree);
-    if civis::statvfs("/", &mut vfs).is_err() || vfs.bsize != 3584 || vfs.bfree != u64::MAX {
+    if civis::statvfs("/", &mut vfs).is_err() || vfs.bsize != 65536 || vfs.bfree != u64::MAX {
         println!("[usertests] t32: statvfs / assurdo ({}/{}/{})", vfs.bsize, vfs.blocks, vfs.bfree);
         return false;
     }

@@ -45,7 +45,7 @@ const BM_ST_ACTIVE: u8 = 0x01;
 const BM_ST_ERROR: u8 = 0x02;
 const BM_ST_INTR: u8 = 0x04;
 /// Bound poll pre-wait (stesso del PIO in `block.rs`: solo un freno).
-const DMA_TIMEOUT: u32 = 200_000;
+const DMA_TIMEOUT: u32 = 2_000_000;
 /// Staging: PRD (8 entry × 8 B) a offset 0, dati a offset 64 (allineato).
 pub const PRD_MAX_ENTRIES: usize = 8;
 const DATA_OFF: u64 = 64;

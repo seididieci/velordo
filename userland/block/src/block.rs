@@ -13,7 +13,7 @@ use civis::pio as io;
 /// Su QEMU senza disco il controller non clear mai BSY: 2M iterazioni di `inb`
 /// emulato costano decine di secondi; con disco la risposta arriva in pochi
 /// microsecondi, quindi un timeout contenuto basta ed evita il blocco.
-const TIMEOUT: u32 = 200_000;
+const TIMEOUT: u32 = 2_000_000;
 
 pub struct AtaDisk {
     /// Porta base comandi (0x1F0 primario, 0x170 secondario).

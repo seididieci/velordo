@@ -17,6 +17,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::exit;
 
 use arcafs as af;
+use arcafs::format::{ARCA_BLOCK_SECTORS, ARCA_BLOCK_SIZE};
 
 fn usage() -> ! {
     eprintln!("uso: arca create <path> [--uuid HEX16] [--size-mib N]  (default 1 MiB, uuid auto)");
@@ -31,9 +32,9 @@ fn usage() -> ! {
 fn init_empty_volume(f: &mut std::fs::File, base: u64, uuid: u64) {
     use std::io::{Seek, SeekFrom, Write};
     // Root vuota al blocco 1 (relativo a `base`).
-    let mut root = [0u8; 3584];
+    let mut root = [0u8; ARCA_BLOCK_SIZE as usize];
     af::format::node_fill(&mut root, af::format::ARCA_NODE_TYPE_RAW, 0, &[0u8; af::format::ARCA_NODE_PAYLOAD_LEN]);
-    let root_off = (base + 7) * 512;
+    let root_off = (base + ARCA_BLOCK_SECTORS as u64) * 512;
     if f.seek(SeekFrom::Start(root_off)).is_err() || f.write_all(&root).is_err() {
         eprintln!("scrittura root fallita");
         exit(1);
@@ -359,9 +360,9 @@ impl FileStore {
         n.checked_mul(af::format::ARCA_BLOCK_SIZE as u64)?.checked_add(self.base)
     }
 
-    fn read_block(&self, n: u64) -> Option<[u8; 3584]> {
+    fn read_block(&self, n: u64) -> Option<[u8; ARCA_BLOCK_SIZE as usize]> {
         let off = self.blk_off(n)?;
-        let mut b = [0u8; 3584];
+        let mut b = [0u8; ARCA_BLOCK_SIZE as usize];
         let mut fh = self.f.borrow_mut();
         use std::io::{Seek, SeekFrom};
         fh.seek(SeekFrom::Start(off)).ok()?;
@@ -369,7 +370,7 @@ impl FileStore {
         Some(b)
     }
 
-    fn write_block(&self, n: u64, b: &[u8; 3584]) -> bool {
+    fn write_block(&self, n: u64, b: &[u8; ARCA_BLOCK_SIZE as usize]) -> bool {
         let off = match self.blk_off(n) {
             Some(o) => o,
             None => return false,
@@ -403,7 +404,7 @@ impl af::btree::BlockStore for FileStore {
         if blk == 0 || !self.live.contains(&blk) {
             return false;
         }
-        let mut b = [0u8; 3584];
+        let mut b = [0u8; ARCA_BLOCK_SIZE as usize];
         af::format::node_fill(&mut b, ty, gen, payload);
         self.write_block(blk, &b)
     }
@@ -432,7 +433,7 @@ impl af::btree::BlockStore for FileStore {
         if n == 0 || !self.live.remove(&n) {
             return false;
         }
-        let mut blk = [0u8; 3584];
+        let mut blk = [0u8; ARCA_BLOCK_SIZE as usize];
         blk[..8].copy_from_slice(&self.xh.free_head.to_le_bytes());
         if !self.write_block(n, &blk) {
             self.live.insert(n);

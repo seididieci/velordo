@@ -35,7 +35,7 @@ pub const OBJ_KEY_MAX: usize = 255;
 /// Debug formato/allocatore (Fase 56.2a, scaffold: volume di scratch nel
 /// gate; gating di policy in A7). UN solo tag globale; il primo byte del
 /// payload e' il sub-op qui sotto. OPEN: path device → bind; ALLOC: → nuovo blocco; FREE: `[sub][block:8]`; READ: `[sub][block:8]`
-/// → frame 3584 B; WRITE: `[sub][block:8][3584]`; STAT: `[sub]` →
+/// → frame ring (prefisso); WRITE: `[sub][block:8][<= RING_MAX_PAYLOAD-9]`; STAT: `[sub]` →
 /// (high_water, live) + frame `[free_head:8]`. Blocco 0 mai toccato.
 pub const R_ARCA_DEBUG: u32 = 0x40;
 /// Sub-opcode di `R_ARCA_DEBUG` (primo byte payload).

@@ -1,8 +1,10 @@
 //! Volume ArcaFS on-disk (Fase 56.2a: formato + allocatore + nodi opachi).
 //!
-//! Blocco = 3584 B = 7 settori (1 op `DISK_*` esatta), partition-relative:
-//! blocco N = settori N*7..N*7+6. Blocco 0 = superblock (LBA0) + shadow
-//! (LBA1) + header-estensione (settori 2-6). Il blocco 0 non si alloca mai.
+//! Blocco = 65536 B = 128 settori (chunkati a <=7 settori per IPC dal
+//! `BlockSource`), partition-relative:
+//! blocco N = settori N*128..N*128+127. Blocco 0 = superblock (LBA0) +
+//! shadow (LBA1) + header-estensione (settori 2-6). Il blocco 0 non si
+//! alloca mai.
 //! Layout e checksum vivono in `arcafs::format` (condivisi col tool host):
 //! qui solo I/O + freelist + guardia live.
 //!
@@ -17,8 +19,8 @@ use arcafs::format::{
     self, HeaderExt, ARCA_BLOCK_SECTORS, ARCA_NODE_PAYLOAD_LEN, ARCA_XHDROFF, ARCA_XHDRLEN,
 };
 
-/// Byte di un blocco (ARCA_BLOCK_SIZE = 3584).
-pub const BLOCK_BYTES: usize = 3584;
+/// Byte di un blocco (ARCA_BLOCK_SIZE = 65536).
+pub const BLOCK_BYTES: usize = arcafs::format::ARCA_BLOCK_SIZE as usize;
 
 #[inline(never)]
 fn block_lba(n: u64) -> Option<u64> {

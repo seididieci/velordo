@@ -10,7 +10,7 @@
 use civis::pio as io;
 
 /// Timeout di polling in iterazioni (come `block.rs`).
-const TIMEOUT: u32 = 200_000;
+const TIMEOUT: u32 = 2_000_000;
 
 /// Canale ATA: base comandi + registro di controllo.
 pub struct AtaChannel {

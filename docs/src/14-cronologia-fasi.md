@@ -2422,3 +2422,17 @@
           test61: 16 oggetti da 1000 B → `packed_blocks < 16`,
           `packed_used=16000`; delete tutti → 0; rimount → rebuild sano.
           Gate 6/6 (61/61 + host 29/29).
+          S2.5w/W6 blocchi 64 KiB e rimozione cap 16 MiB (chiusa, ADR-0054):
+          `ARCA_BLOCK_SIZE` da 3584 a 65536, `ARCA_NODE_PAYLOAD_LEN` da 3560
+          a 65512, `ARCA_VERSION` da 2 a 3 (niente retrocompat: immagini
+          rigenerate, mount v1/v2 fallisce loud). Rimosso il cap 16 MiB da
+          `put_chunk` (nuovo bound: `EXT_BLOCKS_MAX` blocchi, ~17 GiB) e il
+          rifiuto `EXT_BLOCKS_MAX` da `ext_entries`; rimosso il check
+          `tblks > EXT_BLOCKS_MAX`. `reachable_blocks`/`ext_entries`/
+          `value_blocks` mantengono `Vec` per semplicita' (lo streaming
+          completo e' differito a W6b se necessario per OOM al bind).
+          Test host: oggetto > 16 MiB accettato, extent con > 12 entry (nodi
+          MAP attivati), quota con packing sharing. Guest test62: file da 512
+          KiB (> PACK_CAP) su ArcaFS, write sequenziale, read-back
+          integrale, read a offset sparsi, delete + reclaim + rimount.
+          Gate 6/6 (62/62 + host 31/31).

@@ -408,17 +408,21 @@ fn real_main(_sp: u64) -> ! {
                 _ => false,
             };
             c.ok("alloc distinti mai-zero", v23);
-            // 24. write/read round-trip 3560 B (checksum verificata dal server).
-            let mut pat = [0u8; civis::ARCA_NODE_PAYLOAD_LEN];
-            for (i, b) in pat.iter_mut().enumerate() {
-                *b = ((i * 7) % 251) as u8;
-            }
+            // 24. write/read round-trip del prefisso di payload che entra in
+            // un frame ring; il server azzera la coda e il checksum copre
+            // tutto il payload 64 KiB. Mai 64 KiB sullo stack (guardia 16 KiB).
+            let npat = civis::RING_MAX_PAYLOAD - 440;
+            let mut pat: alloc::vec::Vec<u8> = (0..npat).map(|i| ((i * 7) % 251) as u8).collect();
             let v24 = match (b1, b2) {
                 (Some(a), Some(b)) => {
                     civis::arca_write_node(a, &pat).is_ok()
-                        && matches!(civis::arca_read_node(a), Ok(v) if v == pat)
+                        && matches!(civis::arca_read_node(a), Ok(ref v)
+                            if v.len() == civis::RING_MAX_PAYLOAD
+                                && &v[..npat] == pat.as_slice()
+                                && v[npat..].iter().all(|&x| x == 0))
                         && civis::arca_write_node(b, &pat).is_ok()
-                        && matches!(civis::arca_read_node(b), Ok(v) if v == pat)
+                        && matches!(civis::arca_read_node(b), Ok(ref v)
+                            if &v[..npat] == pat.as_slice())
                 }
                 _ => false,
             };
@@ -732,32 +736,34 @@ fn real_main(_sp: u64) -> ! {
             c.ok("gc orfani + snapshot sopravvissuto", v33);
             // 51-54. Quota per bucket (A3, ADR-0044): budget blocchi dati +
             // `ERR_NOSPC` tipizzato prima di allocare (mai mezze scritte).
-            // Bucket isolati `q5*`, blob 3000 B = 1 blocco dati + slack COW
-            // 8: tetto 10 = due blob dentro (0+9, 1+9), il terzo fuori (2+9).
+            // Bucket isolati `q5*`, blob 3000 B: un solo frame (obj_put non
+            // spezza, quindi il put e' atomico) e un blocco packed condiviso.
+            // Con blocchi 64 KiB il tetto utile e' 9: 0 usati + 1 blocco +
+            // slack 8 = 9 al primo put; al secondo 1 + 9 > 9 → NoSpace.
             let qbig = |seed: u8| -> alloc::vec::Vec<u8> {
                 (0..3000u32).map(|i| ((i + seed as u32 * 7) % 251) as u8).collect()
             };
             // 51. over-budget: rifiuto ESATTAMENTE NoSpace, dati intatti.
             let v51 = {
                 let (a, b, cc) = (qbig(51), qbig(52), qbig(53));
-                let mut ok = civis::arca_quota_set(b"q51", 10).is_ok();
-                ok = ok && civis::obj_put(b"q51", b"k1", &a) == Ok(a.len() as u64);
-                ok = ok && civis::obj_put(b"q51", b"k2", &b) == Ok(b.len() as u64);
-                ok = ok && civis::obj_put(b"q51", b"k3", &cc) == Err(civis::Error::NoSpace);
+                let mut ok = civis::arca_quota_set(b"q51", 9).is_ok();
+                let p1 = civis::obj_put(b"q51", b"k1", &a);
+                let p2 = civis::obj_put(b"q51", b"k2", &b);
+                ok = ok && p1 == Ok(a.len() as u64);
+                ok = ok && p2 == Err(civis::Error::NoSpace);
                 ok = ok && matches!(civis::obj_get(b"q51", b"k1"), Ok(v) if v == a);
-                ok = ok && matches!(civis::obj_get(b"q51", b"k2"), Ok(v) if v == b);
+                ok = ok && civis::obj_get(b"q51", b"k2").is_err();
                 ok = ok && civis::obj_get(b"q51", b"k3").is_err();
-                ok = ok && matches!(civis::arca_quota_get(b"q51"), Ok((10, 2)));
+                ok = ok && matches!(civis::arca_quota_get(b"q51"), Ok((9, 1)));
                 ok
             };
             c.ok("quota over-budget NoSpace + intatti", v51);
             // 52. indipendenza bucket: tetto su uno, l'altro libero.
             let v52 = {
                 let (a, b, cc, d) = (qbig(54), qbig(55), qbig(56), qbig(57));
-                let mut ok = civis::arca_quota_set(b"q52a", 10).is_ok();
+                let mut ok = civis::arca_quota_set(b"q52a", 9).is_ok();
                 ok = ok && civis::obj_put(b"q52a", b"k1", &a) == Ok(a.len() as u64);
-                ok = ok && civis::obj_put(b"q52a", b"k2", &b) == Ok(b.len() as u64);
-                ok = ok && civis::obj_put(b"q52a", b"k3", &cc) == Err(civis::Error::NoSpace);
+                ok = ok && civis::obj_put(b"q52a", b"k2", &b) == Err(civis::Error::NoSpace);
                 ok = ok && civis::obj_put(b"q52b", b"k1", &a) == Ok(a.len() as u64);
                 ok = ok && civis::obj_put(b"q52b", b"k2", &b) == Ok(b.len() as u64);
                 ok = ok && civis::obj_put(b"q52b", b"k3", &cc) == Ok(cc.len() as u64);
@@ -804,7 +810,10 @@ fn real_main(_sp: u64) -> ! {
                     }
                 };
                 ok = ok && civis::obj_put(b"q54", b"k", &b) == Ok(b.len() as u64);
-                ok = ok && matches!(civis::arca_quota_get(b"q54"), Ok((0, 2)));
+                // Con blocchi 64 KiB le due versioni (3000 B) condividono lo
+                // stesso blocco packed: used resta 1 finche' lo snapshot pinna
+                // la versione vecchia, poi scende a 0.
+                ok = ok && matches!(civis::arca_quota_get(b"q54"), Ok((0, 1)));
                 ok = ok && civis::obj_delete(b"q54", b"k").is_ok();
                 ok = ok && matches!(civis::arca_quota_get(b"q54"), Ok((0, 1)));
                 ok = ok && match sid {
@@ -1231,9 +1240,9 @@ fn real_main(_sp: u64) -> ! {
                 good = false;
             }
             println!("[testsarca] append512: pos={} dt={}", pos, dt);
-            // 512 append da 4K in ~1100 tick misurati (il layout quadratico
-            // non finiva 2 MiB e si inchiodava a 64 KiB): bound ~3x.
-            good && pos == TOTAL && dt >= 0 && dt < 3000
+            // 512 append da 4K: W6 (blocchi 64 KiB) misura ~3800 tick,
+            // bound ~1.5x per assorbire il jitter di QEMU.
+            good && pos == TOTAL && dt >= 0 && dt < 6000
         };
         c.ok("append 512KiB sequenziale", v59);
         // Istogramma layout + cache (W2/W3 tuning): informativo, mai FAIL.
@@ -1348,7 +1357,7 @@ fn real_main(_sp: u64) -> ! {
                         civis::arca_extent_stats().ok().map(|(_, _, _, _, _, _, _, np, pb, pu, pc)| (np, pb, pu, pc))
                     };
                     let (np0, pb0, pu0, pc0) = rd_packed().unwrap_or((0, 0, 0, 0));
-                    let base_consistente = pc0 == pb0 * 3560;
+                    let base_consistente = pc0 == pb0 * 65512;
                     for (i, nm) in names.iter().take(nobj).enumerate() {
                         let mut buf = [0u8; 64];
                         let mut k = 0usize;
@@ -1361,7 +1370,7 @@ fn real_main(_sp: u64) -> ! {
                     }
                     let _ = civis::disk_sync(civis::SYNC_GROUP);
                     let (np1, pb1, pu1, pc1) = rd_packed().unwrap_or((0, 0, 0, 0));
-                    let consistente = pc1 == pb1 * 3560;
+                    let consistente = pc1 == pb1 * 65512;
                     // Condivisione: 16 nuovi oggetti packed devono creare MENO
                     // di 16 nuovi blocchi (stesso bucket, bump condiviso).
                     let delta_np = np1.saturating_sub(np0);
@@ -1396,12 +1405,88 @@ fn real_main(_sp: u64) -> ! {
                 }
         };
         c.ok("packing sub-blocco stesso-bucket", v61);
+
+        // 62. file grande (W6, blocchi 64 KiB, nessun cap 16 MiB): write
+        // sequenziale di un oggetto > PACK_CAP, read-back integrale, read a
+        // offset sparsi, delete + reclaim + rimount. 512 KiB = 8 blocchi DATA
+        // (4 MiB rendeva il path append O(n^2) impraticabile nel gate).
+        let v62 = {
+            civis::mkdir("/arca/p62").is_ok()
+                && {
+                    let size: usize = 512 * 1024;
+                    let pat: alloc::vec::Vec<u8> =
+                        (0..size).map(|i| (i % 251) as u8).collect();
+                    let path = "/arca/p62/bigfile";
+                    let (ne0, _, _, _, _, _, _, np0, pb0, _, _) =
+                        civis::arca_extent_stats().unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+                    let write_ok = wr_all(path, civis::OPEN_CREATE, &pat);
+                    let _ = civis::disk_sync(civis::SYNC_GROUP);
+                    let (ne1, _, _, _, _, _, _, np1, pb1, pu1, pc1) =
+                        civis::arca_extent_stats().unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+                    // > PACK_CAP(65491) => extent, non packed: i contatori
+                    // packed globali non cambiano (delta, non zero assoluto).
+                    let large_ok = ne1 > ne0 && np1 == np0 && pb1 == pb0;
+                    println!(
+                        "[testsarca] big62: ne={}->{} np={}->{} pb={}->{} pu={} pc={} size={}",
+                        ne0, ne1, np0, np1, pb0, pb1, pu1, pc1, size
+                    );
+                    let read_ok = rd_all(path).as_deref() == Some(pat.as_slice());
+                    // Read a offset sparsi: seek esplicito (prima si leggeva
+                    // sempre dall'inizio, con pattern degenere).
+                    let mut rand_ok = true;
+                    for off in [0usize, 4096, size / 2, size - 4096] {
+                        match civis::open(path, 0) {
+                            Ok(fd) => {
+                                let mut buf = [0u8; 4096];
+                                let seek_ok = civis::lseek(fd, off as i64, civis::SEEK_START)
+                                    == Ok(off as u64);
+                                let r = civis::read_fs(fd, &mut buf, 4096);
+                                let _ = civis::close(fd);
+                                if !seek_ok || r != Ok(4096)
+                                    || &buf[..] != &pat[off..off + 4096]
+                                {
+                                    rand_ok = false;
+                                }
+                            }
+                            Err(_) => rand_ok = false,
+                        }
+                    }
+                    if civis::open(path, 0)
+                        .ok()
+                        .map(|fd| {
+                            let r = civis::lseek(fd, size as i64, civis::SEEK_START)
+                                == Ok(size as u64)
+                                && civis::read_fs(fd, &mut [0u8; 1], 1) == Ok(0);
+                            let _ = civis::close(fd);
+                            r
+                        })
+                        != Some(true)
+                    {
+                        rand_ok = false;
+                    }
+                    // Delete + reclaim.
+                    let _ = civis::remove(path);
+                    let _ = civis::disk_sync(civis::SYNC_GROUP);
+                    let (ne2, _, _, _, _, _, _, np2, pb2, _, _) =
+                        civis::arca_extent_stats().unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+                    let freed_ok = ne2 == ne0 && np2 == np0 && pb2 == pb0;
+                    // Rimount: rebuild sano.
+                    let _ = mount_root_arca();
+                    let (ne3, _, _, _, _, _, _, np3, pb3, _, _) =
+                        civis::arca_extent_stats().unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+                    let rebuild_ok = ne3 == ne0 && np3 == np0 && pb3 == pb0;
+                    write_ok && large_ok && read_ok && rand_ok && freed_ok && rebuild_ok
+                }
+        };
+        c.ok("file grande (>PACK_CAP, blocchi 64 KiB)", v62);
         // Cleanup best-effort (il volume resta pulito per i run dopo).
         let _ = civis::remove("/arca/keep/v");
         let _ = civis::remove("/arca/keep");
         let _ = civis::remove("/arca/f56");
         let _ = civis::remove("/arca/p61/o0");
         let _ = civis::remove("/arca/p61");
+        let _ = civis::remove("/arca/p62/bigfile");
+        let _ = civis::remove("/arca/p62");
         let _ = civis::umount("/arca");
     } else {
         println!("[testsarca] nessun volume ACFS: salto 41-50");

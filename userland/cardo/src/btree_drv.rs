@@ -15,7 +15,7 @@
 //! sconsigliati (freelist condivisa: corretti, ma sorprendenti).
 
 use super::*;
-use arcafs::btree::{BlockStore, BTree, TREE_PRIMARY, TREE_REFCOUNT, TREE_SECONDARY};
+use arcafs::btree::{BlockStore, BTree, EXT_BLOCKS_MAX, TREE_PRIMARY, TREE_REFCOUNT, TREE_SECONDARY};
 use arcafs::format::{
     self, ARCA_NODE_PAYLOAD_LEN, ARCA_NODE_TYPE_DATA, ARCA_NODE_TYPE_INTERNAL,
     ARCA_NODE_TYPE_LEAF, ARCA_NODE_TYPE_MAP, ARCA_NODE_TYPE_RAW, ARCA_XH_DIRTY,
@@ -1059,10 +1059,10 @@ pub fn scan_and_open() -> Option<VolumeStore> {
 
 /// Esito RAW: scalare (reply generica) o con frame dedicato (il chiamante
 /// scrive reply a due registri e fa `continue`, pattern PIPE). Blocco in
-/// `Box` (heap): mai 3.5K sullo stack di questa funzione (regola §18).
+/// `Box` (heap): mai 64K sullo stack di questa funzione (regola §18).
 pub enum ArcaDebugOut {
     Scalar(u64),
-    Read(u64, Box<[u8; arcafs::format::ARCA_NODE_PAYLOAD_LEN]>),
+    Read(u64, Box<[u8; arcafs::format::ARCA_NODE_PAYLOAD_LEN]>, usize),
     Stats(u64, u64, u64),
     /// QUOTA_GET: (quota_blocks, used_blocks misurata).
     Quota(u64, u64),
@@ -1098,20 +1098,26 @@ pub fn handle_raw_debug(
             }
         }
         ARCA_SUB_READ => {
-            let n = arcafs::wire::parse_u64(rest).ok_or(ERR_INVALID)?;
+            let (n, extra) = arcafs::wire::split_id_rest(rest).ok_or(ERR_INVALID)?;
+            let want = match extra {
+                [] => RING_MAX_PAYLOAD,
+                [lo, hi] => u16::from_le_bytes([*lo, *hi]) as usize,
+                _ => return Err(ERR_INVALID),
+            };
+            let len = want.min(RING_MAX_PAYLOAD).min(ARCA_NODE_PAYLOAD_LEN);
             let mut data = format::boxed_node();
             match store.read_node(n, &mut data) {
-                Some(_) => Ok(ArcaDebugOut::Read(n, data)),
+                Some(_) => Ok(ArcaDebugOut::Read(n, data, len)),
                 None => Err(ERR),
             }
         }
         ARCA_SUB_WRITE => {
             let (n, data) = arcafs::wire::split_id_rest(rest).ok_or(ERR_INVALID)?;
-            if data.len() != arcafs::format::ARCA_NODE_PAYLOAD_LEN {
+            if data.len() > ARCA_NODE_PAYLOAD_LEN {
                 return Err(ERR_INVALID);
             }
             let mut buf = format::boxed_node();
-            buf.copy_from_slice(data);
+            buf[..data.len()].copy_from_slice(data);
             if store.write_node(n, arcafs::format::ARCA_NODE_TYPE_RAW, 0, &buf) {
                 Ok(ArcaDebugOut::Scalar(0))
             } else {

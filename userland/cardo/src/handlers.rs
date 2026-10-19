@@ -923,7 +923,7 @@ pub fn handle_statvfs(
         0
     };
     // Fase A: niente shortcut — `/` si risolve via mount come gli altri
-    // path (root ArcaFS: bsize 3584; la ramfs resta solo sotto /tmp).
+    // path (root ArcaFS: bsize 65536; la ramfs resta solo sotto /tmp).
     // Device: foglie senza blocchi (mai contabilizzati).
     if mount_legacy::resolve_mount(path, mounts).is_some() {
         return Err(ERR_INVALID);

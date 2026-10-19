@@ -3,14 +3,14 @@
 
 Uso: scripts/build-arca-gpt.sh [out_img]   (default userland/disk/arca-gpt.img)
 
-Layout (65664 settori da 512B = 33 MiB + 63 settori):
+Layout (64 settori di testa + volume + 64 settori di coda):
   LBA0      protective MBR (entry0 tipo 0xEE start=1 size=SECTORS-1 + sig AA55)
   LBA1      GPT header (magic "EFI PART", current=1, backup=SECTORS-1,
             usable 34..SECTORS-34, entries a LBA2, 128 entry da 128B; CRC zero:
             il parser A1 li salta, solo diagnostica futura)
   LBA2..33  array entry (entry0 = partizione ArcaFS start=64 last=65599,
             type GUID = ARCAFS_TYPE_GUID placeholder da registrare)
-  LBA64..   intero volume ArcaFS da arca.img (32 MiB, partition-relative
+  LBA64..   intero volume ArcaFS da arca.img (partition-relative
             LBA0/LBA1..., arcafs.md §16.4 — Fase C: copia TUTTA, non solo i
             primi 14 settori, o i dati seedati restano fuori)
   backup array entry a SECTORS-33, backup header a SECTORS-1 (il parser A1
@@ -27,9 +27,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "userland/disk/arca-gpt.img")
 ARCA_IMG = os.path.join(ROOT, "userland/disk/arca.img")
 
-SECTORS = 65664  # 64 (offset) + 65536 (volume 32 MiB) + 64 (backup)
 PART_START = 64
-PART_LAST = PART_START + 65536 - 1  # 65599: la partizione copre tutto il volume
 
 # Type GUID ArcaFS = ARCAFS_TYPE_GUID in userland/disk/src/part.rs
 # (placeholder, da registrare con UUID alias prima del rilascio).
@@ -48,12 +46,15 @@ def die(msg):
 
 if not os.path.isfile(ARCA_IMG):
     die("%s non trovato (creare prima con scripts/arca-tool.sh)" % ARCA_IMG)
-# Intero volume (Fase C: 32 MiB — i dati seedati vivono nei blocchi >= 2,
-# oltre i primi 14 settori; copiarne solo la testa lascia un volume vuoto).
+# Intero volume (Fase C: i dati seedati vivono nei blocchi >= 2, oltre i
+# primi 14 settori; copiarne solo la testa lascia un volume vuoto).
 with open(ARCA_IMG, "rb") as f:
     vol = f.read()
-if len(vol) != 65536 * 512 or vol[0:4] != b"ACFS":
-    die("volume invalido in %s (attesi 33554432 B + magic ACFS)" % ARCA_IMG)
+if not vol or len(vol) % 512 != 0 or vol[0:4] != b"ACFS":
+    die("volume invalido in %s (attesi N*512 B + magic ACFS)" % ARCA_IMG)
+VOL_SECTORS = len(vol) // 512
+SECTORS = PART_START + VOL_SECTORS + 64
+PART_LAST = PART_START + VOL_SECTORS - 1
 
 img = bytearray(SECTORS * 512)
 
@@ -93,8 +94,8 @@ struct.pack_into("<Q", e0, 40, PART_LAST)
 arr[0:128] = e0
 img[2 * 512:2 * 512 + len(arr)] = arr
 
-# Partizione: intero volume arca.img a PART_START (il volume da 32 MiB ci
-# sta: PART_LAST - PART_START + 1 == 65536 settori).
+# Partizione: intero volume arca.img a PART_START.
+# PART_LAST - PART_START + 1 == VOL_SECTORS.
 img[PART_START * 512:PART_START * 512 + len(vol)] = vol
 
 # Backup: array a SECTORS-33, header a SECTORS-1 (current/backup scambiati)

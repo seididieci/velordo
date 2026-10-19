@@ -1022,8 +1022,8 @@ fn real_main(_sp: u64) -> ! {
                     };
                     match out {
                         Ok(btree_drv::ArcaDebugOut::Scalar(v)) => Ok(v),
-                        Ok(btree_drv::ArcaDebugOut::Read(block, data)) => {
-                            rings::resp_ring_write(block, 0, &data[..]);
+                        Ok(btree_drv::ArcaDebugOut::Read(block, data, len)) => {
+                            rings::resp_ring_write(block, 0, &data[..len]);
                             let _ = civis::reply(0, block, 0);
                             continue;
                         }
