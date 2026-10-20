@@ -434,3 +434,83 @@ taglierebbe i round trip di un ordine di grandezza.
 
 Nota: nessun cambiamento al gate (seed condizionale `RUN_S25=1`, volume
 root 384 MiB in quel run soltanto).
+
+## S2.5w/P4 — write-path ArcaFS: Fase 0/1 (2026-10)
+
+Misura del costo reale delle scritture e primi tagli a basso rischio, senza
+cambiare formato, cache o contratto di commit. Numeri KVM (`-accel kvm
+-cpu host`), un run per gruppo (`4k`, `native`, `1m`), valori assoluti non
+mediati e non confrontabili con le tabelle 23/25/38/53 di altri host.
+
+### Fase 0 — strumentazione
+
+- Contatori in `BTreeStats` (`put_chunks/bytes`, `ext_spans/bytes`,
+  `trim_drops`, `freed_versions`, `commits`), `VolumeIoStats` (nodi per tipo,
+  alloc/free, header-ext) e `DiskIoStats` (richieste IPC e settori).
+- Sub-op debug `ARCA_SUB_IO_STATS = 12` su `R_ARCA_DEBUG`, frame di 27
+  `u64`; wrapper client `civis::arca_io_stats()`.
+- `testland/bench` stampa per ogni workload una riga `[bench-io]` col delta
+  dei contatori (es. `nodeW=... freeB=... xh=... diskWr=.../...s`), fuori
+  dal gate (`RUN_BENCH` non attivo).
+
+### Baseline: dove va il tempo
+
+Totali sulle iterazioni misurate (hot 3 write, cold 2, nativo 1, 4K hot 25,
+cold 15): `cyc/op` e' la media, le altre colonne sono i totali della run.
+
+| Caso | cyc/op | nodeW | freeB | xh | diskWr | settori |
+|------|--------|-------|-------|----|--------|---------|
+| POSIX 1M hot | 153.65G | 3408 | 65.1 MiB | 4541 | 89.167 | 574.108 |
+| POSIX 1M cold | 156.38G | 2272 | 43.2 MiB | 3026 | 59.406 | 382.482 |
+| Nativo 1M | 166.87G | 1151 | 21.3 MiB | 1997 | 30.871 | 193.499 |
+| POSIX 4K hot | 805.10M | 251 | 192 KiB | 207 | 5.083 | 32.769 |
+| POSIX 4K cold | 640.65M | 92 | 0 | 92 | 1.870 | 11.898 |
+
+Lettura: una write POSIX da 1 MiB muoveva ~98 MB di settori. Il costo non
+era il payload (4 KiB per chunk) ma l'amplificazione del blocco da 64 KiB:
+ogni nodo riscritto intero, ogni `free` riscriveva 64 KiB, ogni alloc/free
+aggiornava l'header-ext, e ogni blocco veniva spezzato in ~19 IPC/DMA da
+7 settori (`DISK_MAX_SECTORS`). Il 4K era gia' dominato dai nodi (251 write
+per 25 op), non dai free.
+
+### Fase 1 — tagli applicati
+
+- **1a, free a un settore**: il push in freelist scrive solo il primo settore
+  (next-pointer); il resto del blocco non e' raggiungibile finche' non viene
+  riallocato, e `write_node` riscrive sempre il blocco intero. `freeB` passa
+  da 65 MiB a centinaia di KiB nel 1M.
+- **1b, header-ext differita su free/GC**: la testa della freelist si
+  persiste al commit (o alla successiva allocazione), non a ogni free/orfano.
+  Gli `alloc` restano sincroni: un blocco preso dalla freelist e' ancora
+  nella catena persistita, e sovrascriverne il primo settore senza avanzare
+  prima l'header puo' corrompere la freelist dopo un crash. Il contratto W4
+  resta invariato (ultimo commit durevole; epoca aperta persa; orfani
+  recuperati al bind).
+
+La 1a/1b non toccano il bound di `append 512KiB`: il test e' tornato sotto
+il limite (`6571 -> 5697` tick su KVM, limite `6000`) e il gate resta 62/62.
+
+| Caso | cyc/op (prima -> dopo) | diskWr | settori | freeB | xh |
+|------|------------------------|--------|---------|-------|----|
+| POSIX 1M hot | 153.65G -> **130.75G** (-14.9%) | 89.167 -> **69.364** | 574.108 -> **440.836** | 65.1 MiB -> **520 KiB** | 4541 -> **3488** |
+| POSIX 1M cold | 156.38G -> **138.25G** (-11.6%) | 59.406 -> **46.246** | 382.482 -> **293.894** | 43.2 MiB -> **346 KiB** | 3026 -> **2328** |
+| Nativo 1M | 166.87G -> **129.62G** (-22.3%) | 30.871 -> **24.392** | 193.499 -> **149.851** | 21.3 MiB -> **170.5 KiB** | 1997 -> **1656** |
+| POSIX 4K hot | 805.10M -> 890.97M | 5.083 -> 5.026 | 32.769 -> 32.385 | 192 KiB -> 1.5 KiB | 207 -> 204 |
+| POSIX 4K cold | 640.65M -> 727.14M | 1.870 -> 1.870 | 11.898 -> 11.898 | 0 -> 0 | 92 -> 92 |
+
+Il 1M e il nativo mostrano il guadagno atteso: **-21/-23% di IPC e settori**
+e **-15/-22% di cicli**. Il 4K non mostra il guadagno (`freeB` scende ma i
+cicli peggiorano); con una sola run e con FAT hot variata nello stesso
+intervallo, il dato non basta per attribuire una regressione al free. Il 4K
+resta dominato dalle riscritture dei nodi e va rimisurato con `RUNS=3`
+prima di farne un finding.
+
+### Cosa resta
+
+Il collo di bottiglia residuo e' la **riscrittura dei nodi da 64 KiB** e il
+loro trasporto a 7 settori per IPC (1M hot: 3408 nodi, ~69K richieste disco).
+I prossimi candidati sono W7 (finestra DMA multi-pagina / payload piu'
+grandi) e il write-back a epoche con flush unico per commit; non sono parte
+di questa fase. Il `free` a un settore lascia payload vecchi nei blocchi
+liberi: e' un tradeoff di performance accettato qui, non una promessa di
+secure erase.

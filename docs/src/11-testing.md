@@ -73,6 +73,11 @@ Righe di gate:
 [threadtest] PASS 12/12
 ```
 
+> Write-path ArcaFS (Fase 1a/1b): il test `append 512KiB sequenziale` e'
+> tornato sotto il bound dopo free a un settore + header-ext differita
+> (`dt=5697` su KVM, limite `6000`; prima `6571`). Il bound non e' stato
+> toccato e `testsarca` resta `62/62`.
+
 ## Test shell interattivi (QEMU + sendkey, fuori dal gate kernel)
 
 Un boot QEMU per file di test: seriale su file + monitor su unix socket,

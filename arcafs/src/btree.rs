@@ -675,6 +675,20 @@ pub struct Snapshot {
     pub entries: Vec<(Vec<u8>, u64, u64)>,
 }
 
+/// Contatori diagnostici del motore (Fase 0 write-path, solo misura).
+/// Cumulativi per istanza: il benchmark li legge prima/dopo ogni workload e
+/// stampa il delta. Mai usati per decisioni di formato o allocazione.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct BTreeStats {
+    pub put_chunks: u64,
+    pub put_bytes: u64,
+    pub ext_spans: u64,
+    pub ext_bytes: u64,
+    pub trim_drops: u64,
+    pub freed_versions: u64,
+    pub commits: u64,
+}
+
 /// Motore B+tree COW: tre radici + allocazione id/snapshot + tabella snapshot.
 /// `S` = store blocchi (volume reale o `MemStore` nei test host).
 pub struct BTree<S: BlockStore> {
@@ -713,6 +727,8 @@ pub struct BTree<S: BlockStore> {
     /// (max spazio libero per bucket). Persistito implicitamente nell'header
     /// di ogni blocco packed (`used`+`refs`+`bucket`).
     pub pack_cur: BTreeMap<Vec<u8>, (u64, u16)>,
+    /// Contatori diagnostici cumulativi (Fase 0 write-path).
+    pub stats: BTreeStats,
 }
 
 impl<S: BlockStore> BTree<S> {
@@ -729,7 +745,7 @@ impl<S: BlockStore> BTree<S> {
             meta_root: 0, next_id: 1, next_snap: 1, snaps: BTreeMap::new(),
             quotas: BTreeMap::new(), by_id: BTreeMap::new(),
             range_cur: [(0, 0, 0); 8], range_rr: 0,
-            pack_cur: BTreeMap::new(),
+            pack_cur: BTreeMap::new(), stats: BTreeStats::default(),
         };
         me.fmt_empty(rp, TREE_PRIMARY)?;
         me.fmt_empty(rs, TREE_SECONDARY)?;
@@ -757,7 +773,7 @@ impl<S: BlockStore> BTree<S> {
             meta_root: 0, next_id: 1, next_snap: 1, snaps: BTreeMap::new(),
             quotas: BTreeMap::new(), by_id: BTreeMap::new(),
             range_cur: [(0, 0, 0); 8], range_rr: 0,
-            pack_cur: BTreeMap::new(),
+            pack_cur: BTreeMap::new(), stats: BTreeStats::default(),
         })
     }
 
@@ -2172,6 +2188,7 @@ impl<S: BlockStore> BTree<S> {
     /// a meta' i record sono gia' via (orfani alla GC, mai dati altrui).
     #[inline(never)]
     fn free_dropped_versions(&mut self, id: u64, drops: &[u64], live: &[u64]) -> Option<()> {
+        self.stats.freed_versions = self.stats.freed_versions.saturating_add(drops.len() as u64);
         let mut recs = Vec::new();
         for seq in drops {
             let pk = prim_key(id, *seq);
@@ -2362,6 +2379,8 @@ impl<S: BlockStore> BTree<S> {
         self.range_clear();
         let sk = seckey_encode(bucket, key)?;
         let n = data.len();
+        self.stats.put_chunks = self.stats.put_chunks.saturating_add(1);
+        self.stats.put_bytes = self.stats.put_bytes.saturating_add(n as u64);
         let end = offset.checked_add(n)?;
         // Bound anti-OOM: oggetto singolo ≤ EXT_BLOCKS_MAX blocchi (~17 GiB
         // con 64 KiB blocchi). Oltre, splitta l'oggetto in piu' oggetti-chunk
@@ -2481,6 +2500,8 @@ impl<S: BlockStore> BTree<S> {
         data: &[u8],
         end: usize,
     ) -> Option<(ExtHead, u64)> {
+        self.stats.ext_spans = self.stats.ext_spans.saturating_add(1);
+        self.stats.ext_bytes = self.stats.ext_bytes.saturating_add(data.len() as u64);
         let old_size = h.size as usize;
         let new_size = old_size.max(end) as u64;
         let (entries, map_nodes) = self.ext_entries(h)?;
@@ -2602,6 +2623,7 @@ impl<S: BlockStore> BTree<S> {
                 drops.push(*seq);
             }
         }
+        self.stats.trim_drops = self.stats.trim_drops.saturating_add(drops.len() as u64);
         // Vivi = tutto il resto (storia + pinnate, mai rimosse dal primary).
         let live = self.live_blocks_except(id, head_seq, &drops)?;
         self.free_dropped_versions(id, &drops, &live)?;

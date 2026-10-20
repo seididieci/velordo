@@ -27,6 +27,28 @@ fn block_lba(n: u64) -> Option<u64> {
     n.checked_mul(ARCA_BLOCK_SECTORS as u64)
 }
 
+/// Contatori diagnostici del volume (Fase 0 write-path): chiamate e byte
+/// realmente transitati per nodo/header-estensione/freelist.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct VolumeIoStats {
+    pub node_writes: u64,
+    pub node_write_bytes: u64,
+    pub node_reads: u64,
+    pub node_read_bytes: u64,
+    pub node_data: u64,
+    pub node_packed: u64,
+    pub node_leaf: u64,
+    pub node_internal: u64,
+    pub node_map: u64,
+    pub node_other: u64,
+    pub allocs: u64,
+    pub frees: u64,
+    pub free_block_writes: u64,
+    pub free_block_bytes: u64,
+    pub xh_writes: u64,
+    pub xh_bytes: u64,
+}
+
 /// Volume aperto: handle nodo + header-estensione + guardia allocazioni.
 pub struct ArcaVolume {
     disk: IpcDisk,
@@ -35,12 +57,43 @@ pub struct ArcaVolume {
     /// UUID dal superblock (56.3: la vista POSIX serve solo il volume del
     /// motore globale — mount di altri volumi = errore loud, mai dati altrui).
     uuid: u64,
+    /// Cumulativi diagnostici (Cell: anche i path `&self` li aggiornano).
+    /// Su HEAP: `ArcaVolume` vive dentro `VolumeStore`, a sua volta locale
+    /// del loop server (stack 16 KiB); 16 u64 inline lo sfonderebbero.
+    stats: alloc::boxed::Box<core::cell::Cell<VolumeIoStats>>,
 }
 
 impl ArcaVolume {
     /// UUID del volume (identita' stabile, dal superblock letto in `open`).
     pub fn uuid(&self) -> u64 {
         self.uuid
+    }
+
+    /// Snapshot dei contatori del volume (solo diagnostica).
+    pub fn io_stats(&self) -> VolumeIoStats {
+        self.stats.get()
+    }
+
+    /// Snapshot dei contatori del client disco (richieste IPC + settori).
+    pub fn disk_stats(&self) -> ipc_disk::DiskIoStats {
+        self.disk.stats()
+    }
+
+    fn note_alloc(&self) {
+        let mut s = self.stats.get();
+        s.allocs = s.allocs.saturating_add(1);
+        self.stats.set(s);
+    }
+
+    fn note_free_block(&self) {
+        let mut s = self.stats.get();
+        s.frees = s.frees.saturating_add(1);
+        s.free_block_writes = s.free_block_writes.saturating_add(1);
+        // Fase 1a: il push in freelist scrive UN settore (next-pointer);
+        // il resto del blocco non e' significativo finche' non viene
+        // riallocato (write_node riscrive il blocco intero).
+        s.free_block_bytes = s.free_block_bytes.saturating_add(512);
+        self.stats.set(s);
     }
 
     /// Generation dal superblock (diagnostica per lo stub del mount root,
@@ -96,6 +149,7 @@ impl ArcaVolume {
     fn write_xh_raw(&self, xh: &[u8; ARCA_XHDRLEN]) -> bool {
         let mut sec = [0u8; 512];
         let mut done = 0usize;
+        let mut written = 0u64;
         let mut lba = (ARCA_XHDROFF / 512) as u64;
         while done < ARCA_XHDRLEN {
             let take = (ARCA_XHDRLEN - done).min(512);
@@ -105,8 +159,13 @@ impl ArcaVolume {
                 return false;
             }
             done += take;
+            written += 512;
             lba += 1;
         }
+        let mut s = self.stats.get();
+        s.xh_writes = s.xh_writes.saturating_add(1);
+        s.xh_bytes = s.xh_bytes.saturating_add(written);
+        self.stats.set(s);
         true
     }
 
@@ -135,6 +194,7 @@ impl ArcaVolume {
             xh: HeaderExt { free_head: 0, high_water: 0, next_id: 0, next_snap: 0, flags: 0 },
             live: BTreeSet::new(),
             uuid,
+            stats: alloc::boxed::Box::new(core::cell::Cell::new(VolumeIoStats::default())),
         };
         let mut raw = [0u8; ARCA_XHDRLEN];
         if !v.read_xh_raw(&mut raw) {
@@ -166,6 +226,7 @@ impl ArcaVolume {
             xh: HeaderExt { free_head: 0, high_water: 2, next_id: 1, next_snap: 1, flags: 0 },
             live: BTreeSet::new(),
             uuid,
+            stats: alloc::boxed::Box::new(core::cell::Cell::new(VolumeIoStats::default())),
         };
         format::superblock_set_root(&mut sec, 1)?;
         if !v.disk.write_sector(0, &sec) {
@@ -233,10 +294,12 @@ impl ArcaVolume {
     }
 
     /// Spinge una lista di orfani in freelist (GC): per ognuno scrive il
-    /// next-pointer nel primo settore e avanza la testa; UN solo store_xh
-    /// alla fine. La lista deve essere dedupata e senza 0 (il chiamante
-    /// garantisce: vedi `gc_collect`). Niente guardia live qui — il chiamante
-    /// ha gia' escluso i live (fresh handle dopo restart: guardia vuota).
+    /// next-pointer nel primo settore e avanza la testa. L'header-ext si
+    /// persiste al commit successivo (Fase 1b; gli orfani sono comunque
+    /// irraggiungibili dalle radici correnti, quindi un crash li ritrova).
+    /// La lista deve essere dedupata e senza 0 (il chiamante garantisce:
+    /// vedi `gc_collect`). Niente guardia live qui — il chiamante ha gia'
+    /// escluso i live (fresh handle dopo restart: guardia vuota).
     /// A IO fallito: stato disco intatto (freelist persistita intoccata),
     /// i blocchi toccati erano orfani irraggiungibili.
     #[inline(never)]
@@ -252,7 +315,7 @@ impl ArcaVolume {
             }
             self.xh.free_head = n;
         }
-        self.store_xh()
+        true
     }
 
     /// Riscrive il primo settore di un blocco (solo unlink freelist: i
@@ -289,10 +352,15 @@ impl ArcaVolume {
         if n == 0 || !self.live.insert(n) {
             return None; // blocco 0 o double-alloc (guardia RAM)
         }
+        // Un blocco preso dalla freelist e' ancora nella catena persistita:
+        // l'header va scritto PRIMA di sovrascriverne il primo settore col
+        // nodo, altrimenti un crash lascerebbe la testa puntata a un blocco
+        // che non contiene piu' il next. Fase 1b differisce solo free/GC.
         if !self.store_xh() {
             self.live.remove(&n);
             return None;
         }
+        self.note_alloc();
         Some(n)
     }
 
@@ -327,8 +395,9 @@ impl ArcaVolume {
     /// Alloca uno SPECIFICO blocco (56.2b: secondary root fissa al blocco 2).
     /// Lo sgancia dalla freelist se presente, altrimenti lo prende solo se e'
     /// la cima (`high_water`, caso volume fresco). Blocco 0, live o oltre la
-    /// cima → false. Scrive header-ext come `alloc`. Walk a settori (mai
-    /// 3.5K stack — regola §18; vedi `write_first_sector` per la patch).
+    /// cima → false. Come `alloc`, scrive header-ext prima di restituire il
+    /// blocco. Walk a settori (mai 3.5K stack — regola §18; vedi
+    /// `write_first_sector`).
     #[inline(never)]
     pub fn alloc_specific(&mut self, n: u64) -> bool {
         if n == 0 || !self.live.insert(n) {
@@ -346,6 +415,7 @@ impl ArcaVolume {
                 self.live.remove(&n);
                 return false;
             }
+            self.note_alloc();
             return true;
         }
         // Walk: cerca il prev il cui next e' n (letture da 1 settore,
@@ -375,6 +445,7 @@ impl ArcaVolume {
                     self.live.remove(&n);
                     return false;
                 }
+                self.note_alloc();
                 return true;
             }
             prev = next;
@@ -386,6 +457,7 @@ impl ArcaVolume {
                 self.live.remove(&n);
                 return false;
             }
+            self.note_alloc();
             return true;
         }
         self.live.remove(&n);
@@ -394,22 +466,24 @@ impl ArcaVolume {
 
     /// Libera un blocco: push in freelist (next nei primi 8 B) + unmark live.
     /// Blocco 0, mai-allocato o double-free → false (guardia RAM, mai IO).
-    /// Buffer intero sull'heap (mai 3.5K stack — regola §18).
+    /// Fase 1a: basta il PRIMO settore (il resto del payload e' irraggiungibile
+    /// dalla freelist; `write_node` riscrive sempre il blocco intero quando
+    /// viene riallocato). Evita 64 KiB di scrittura per ogni free.
     #[inline(never)]
     pub fn free(&mut self, n: u64) -> bool {
         if n == 0 || !self.live.remove(&n) {
             return false;
         }
-        let mut blk = format::boxed_block();
-        blk[..8].copy_from_slice(&self.xh.free_head.to_le_bytes());
-        if !self.write_block(n, &blk) {
+        let mut sec = [0u8; 512];
+        sec[..8].copy_from_slice(&self.xh.free_head.to_le_bytes());
+        if !self.write_first_sector(n, &sec) {
             self.live.insert(n);
             return false;
         }
+        self.note_free_block();
         self.xh.free_head = n;
-        if !self.store_xh() {
-            return false;
-        }
+        // Fase 1b: la testa della freelist si persiste al commit insieme
+        // agli id/flags; fino a lì il blocco e' gia' marcato live=assente.
         true
     }
 
@@ -424,7 +498,22 @@ impl ArcaVolume {
         }
         let mut blk = format::boxed_block();
         format::node_fill(&mut blk, ty, generation, payload);
-        self.write_block(n, &blk)
+        let ok = self.write_block(n, &blk);
+        if ok {
+            let mut s = self.stats.get();
+            s.node_writes = s.node_writes.saturating_add(1);
+            s.node_write_bytes = s.node_write_bytes.saturating_add(BLOCK_BYTES as u64);
+            match ty {
+                format::ARCA_NODE_TYPE_DATA => s.node_data = s.node_data.saturating_add(1),
+                format::ARCA_NODE_TYPE_PACKED => s.node_packed = s.node_packed.saturating_add(1),
+                format::ARCA_NODE_TYPE_LEAF => s.node_leaf = s.node_leaf.saturating_add(1),
+                format::ARCA_NODE_TYPE_INTERNAL => s.node_internal = s.node_internal.saturating_add(1),
+                format::ARCA_NODE_TYPE_MAP => s.node_map = s.node_map.saturating_add(1),
+                _ => s.node_other = s.node_other.saturating_add(1),
+            }
+            self.stats.set(s);
+        }
+        ok
     }
 
     /// Legge e verifica un nodo: magic + checksum. Il payload va in `out`.
@@ -441,6 +530,10 @@ impl ArcaVolume {
         if !self.read_block(n, &mut blk) {
             return None;
         }
+        let mut s = self.stats.get();
+        s.node_reads = s.node_reads.saturating_add(1);
+        s.node_read_bytes = s.node_read_bytes.saturating_add(BLOCK_BYTES as u64);
+        self.stats.set(s);
         let (ty, generation) = format::node_verify(&blk)?;
         out.copy_from_slice(&blk[arcafs::format::ARCA_NODE_PAYLOAD..arcafs::format::ARCA_NODE_PAYLOAD + ARCA_NODE_PAYLOAD_LEN]);
         Some((ty, generation))

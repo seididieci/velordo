@@ -501,6 +501,7 @@ fn gc_run(eng: &mut DiskEngine) -> Option<usize> {
 /// generazione e' intatta).
 #[inline(never)]
 pub fn commit(eng: &mut DiskEngine) -> bool {
+    eng.stats.commits = eng.stats.commits.saturating_add(1);
     let (nid, nsn, rp, rs, rr, meta) = (
         eng.next_id,
         eng.next_snap,
@@ -536,6 +537,57 @@ pub fn commit(eng: &mut DiskEngine) -> bool {
         return false; // flip
     }
     vol.store_meta(nid, nsn, flags & !ARCA_XH_DIRTY)
+}
+
+/// Frame serializzato dei contatori write-path (Fase 0), su HEAP: il loop
+/// del server cardo ha stack 16 KiB e LTO; un array locale qui lo sfonderebbe
+/// (regola §18). Il chiamante scrive il frame nel response ring.
+#[inline(never)]
+pub fn disk_io_stats_frame(eng: &DiskEngine) -> Box<[u8; civis::ARCA_IO_STATS_WORDS * 8]> {
+    let words = disk_io_stats(eng);
+    let mut f = Box::new([0u8; civis::ARCA_IO_STATS_WORDS * 8]);
+    for (i, w) in words.iter().enumerate() {
+        f[i * 8..(i + 1) * 8].copy_from_slice(&w.to_le_bytes());
+    }
+    f
+}
+
+/// Snapshot dei contatori write-path (Fase 0). Layout stabile con
+/// `civis::arca_io_stats`: 27 parole `u64`, little-endian.
+#[inline(never)]
+pub fn disk_io_stats(eng: &DiskEngine) -> [u64; civis::ARCA_IO_STATS_WORDS] {
+    let v = eng.store.vol().io_stats();
+    let d = eng.store.vol().disk_stats();
+    let b = eng.stats;
+    [
+        v.node_writes,
+        v.node_write_bytes,
+        v.node_reads,
+        v.node_read_bytes,
+        v.node_data,
+        v.node_packed,
+        v.node_leaf,
+        v.node_internal,
+        v.node_map,
+        v.node_other,
+        v.allocs,
+        v.frees,
+        v.free_block_writes,
+        v.free_block_bytes,
+        v.xh_writes,
+        v.xh_bytes,
+        d.read_reqs,
+        d.read_sectors,
+        d.write_reqs,
+        d.write_sectors,
+        b.put_chunks,
+        b.put_bytes,
+        b.ext_spans,
+        b.ext_bytes,
+        b.trim_drops,
+        b.freed_versions,
+        b.commits,
+    ]
 }
 
 /// Lega il motore al volume (consuma `dbgvol`, lazy dopo lo scaffold RAW).

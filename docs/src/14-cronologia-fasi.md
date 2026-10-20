@@ -2519,3 +2519,30 @@
           e indipendente dal bench (`RUN_BENCH` non e' attivo nel gate);
           resta il bound I/O noto da indagare/allargare, non una regressione
           introdotta dalla campagna. Zero FAIL/PANIC/FAULT nelle altre suite.
+- [x] S2.5w/P4 follow-up — write-path ArcaFS (Fase 0/1, 2026-10): la
+      campagna per-size aveva lasciato un solo FAIL funzionale,
+      `append 512KiB` a `6571` tick su KVM contro il bound `6000`. Prima di
+      toccare il bound si e' misurato il write-path con contatori
+      `BTreeStats`/`VolumeIoStats`/`DiskIoStats`, sub-op
+      `ARCA_SUB_IO_STATS = 12` (frame 27 `u64`) e righe `[bench-io]` nel
+      bench. Baseline 1M POSIX: ~98 MB di settori per 1 MiB utile, con
+      `freeB` 65 MiB, `xh` 4541 e 3408 nodi riscritti (3 write misurate);
+      ogni free riscriveva 64 KiB e ogni alloc/free l'header-ext, mentre un
+      blocco da 64 KiB costa ~19 IPC/DMA da 7 settori. Fase 1a: `free`
+      scrive solo il primo settore (next freelist; il payload torna a
+      contare solo dopo la riallocazione, che riscrive tutto). Fase 1b:
+      l'header-ext di `free`/GC si persiste al commit (o alla successiva
+      allocazione), non a ogni blocco; gli `alloc` restano sincroni perche'
+      un blocco ancora nella catena persistita non puo' essere sovrascritto
+      prima di avanzare l'header, altrimenti un crash corrompe la freelist.
+      Il contratto W4 resta invariato (ultimo commit durevole, epoca aperta
+      persa, orfani recuperati al bind). Misure KVM (1 run): 1M POSIX hot
+      `153.65G -> 130.75G` cicli/op (-14.9%), IPC `89.167 -> 69.364`,
+      settori `574.108 -> 440.836`, `freeB` 65.1 MiB -> 520 KiB, `xh`
+      `4541 -> 3488`; cold `156.38G -> 138.25G` (-11.6%); nativo 1M
+      `166.87G -> 129.62G` (-22.3%). Il 4K, dominato dai nodi, non mostra
+      guadagno (`805 -> 891M` hot, `641 -> 727M` cold) e va rimisurato con
+      `RUNS=3`, senza attribuirlo al free. `append 512KiB` scende a `5697`
+      tick (bound invariato) e il gate resta 6/6 (62/62 testsarca). Restano
+      W7 (DMA multi-pagina / payload piu' grandi) e il write-back a epoche;
+      dettagli e caveat in `13-performance.md`.

@@ -72,6 +72,17 @@ pub struct IpcDiskInfo {
     pub serial_len: usize,
 }
 
+/// Contatori I/O del client disco (Fase 0 write-path): richieste IPC
+/// effettivamente completate e settori trasferiti. Una richiesta write
+/// corrisponde a un DMA + FLUSH nel driver block.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct DiskIoStats {
+    pub read_reqs: u64,
+    pub read_sectors: u64,
+    pub write_reqs: u64,
+    pub write_sectors: u64,
+}
+
 pub struct IpcDisk {
     /// Handle nodo di mount codificato (disco<<16|sub): 0 = sda whole-disk.
     handle: u32,
@@ -83,11 +94,34 @@ pub struct IpcDisk {
     /// statica a driver vivo, e a morte driver il canale cade (qui sotto) e
     /// la riconnessione rivalida. Mai stale silenzioso.)
     open_ok: Cell<bool>,
+    /// Contatori cumulativi (solo diagnostica).
+    read_reqs: Cell<u64>,
+    read_sectors: Cell<u64>,
+    write_reqs: Cell<u64>,
+    write_sectors: Cell<u64>,
 }
 
 impl IpcDisk {
     pub fn new(handle: u32) -> Self {
-        Self { handle, chan: Cell::new(None), open_ok: Cell::new(false) }
+        Self {
+            handle,
+            chan: Cell::new(None),
+            open_ok: Cell::new(false),
+            read_reqs: Cell::new(0),
+            read_sectors: Cell::new(0),
+            write_reqs: Cell::new(0),
+            write_sectors: Cell::new(0),
+        }
+    }
+
+    /// Contatori cumulativi (Fase 0 write-path): snapshot senza side effect.
+    pub fn stats(&self) -> DiskIoStats {
+        DiskIoStats {
+            read_reqs: self.read_reqs.get(),
+            read_sectors: self.read_sectors.get(),
+            write_reqs: self.write_reqs.get(),
+            write_sectors: self.write_sectors.get(),
+        }
     }
 
     /// Dimentica la connessione (canale caduto o epoca cambiata): il prossimo
@@ -258,7 +292,9 @@ impl IpcDisk {
                     return false;
                 }
                 let ok = unsafe { Self::frame_read(out, n * 512) };
-                if !ok {
+                if ok {
+                    self.read_reqs.set(self.read_reqs.get().saturating_add(1));
+                    self.read_sectors.set(self.read_sectors.get().saturating_add(n as u64));
                 }
                 ok
             }
@@ -333,7 +369,14 @@ impl IpcDisk {
             ring_wait();
         }
         match civis::send(chan, DISK_WRITE, self.handle as u64, lba) {
-            Ok(rep) => rep.w0 != ERR,
+            Ok(rep) => {
+                let ok = rep.w0 != ERR;
+                if ok {
+                    self.write_reqs.set(self.write_reqs.get().saturating_add(1));
+                    self.write_sectors.set(self.write_sectors.get().saturating_add(n as u64));
+                }
+                ok
+            }
             Err(_) => {
                 self.drop_conn();
                 false

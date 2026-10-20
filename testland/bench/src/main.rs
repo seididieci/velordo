@@ -255,6 +255,10 @@ fn run(
             return false;
         }
     }
+    // Fase 0: snapshot write-path dopo il warmup (esclude il setup) e
+    // delta sulle sole iterazioni misurate. Una IPC di sola lettura: non
+    // tocca nodi, cache o disco (righe FAT/ramfs restano a delta zero).
+    let io_before = civis::arca_io_stats().ok();
     let t0 = civis::rdtsc();
     let mut max_cyc = 0u64;
     for _ in 0..iters {
@@ -279,6 +283,23 @@ fn run(
         "[bench] {} iters={} warm={} cyc_op={} max_cyc={} kb_s={}",
         name, iters, warm, cyc_op, max_cyc, kb_s
     );
+    if let (Some(before), Ok(after)) = (io_before, civis::arca_io_stats()) {
+        let d = after.delta(before);
+        if !d.is_zero() {
+            println!(
+                "[bench-io] {} put={}/{}B ext={}/{}B nodeW={} (data={} packed={} leaf={} int={} map={}) nodeR={} freeW={} freeB={} xh={}/{}B diskWr={}/{}s diskRd={}/{}s alloc={} trim={} freed={} commits={}",
+                name,
+                d.put_chunks, d.put_bytes, d.ext_spans, d.ext_bytes,
+                d.node_writes, d.node_data, d.node_packed, d.node_leaf,
+                d.node_internal, d.node_map, d.node_reads,
+                d.free_block_writes, d.free_block_bytes,
+                d.xh_writes, d.xh_bytes,
+                d.disk_write_reqs, d.disk_write_sectors,
+                d.disk_read_reqs, d.disk_read_sectors,
+                d.allocs, d.trim_drops, d.freed_versions, d.commits
+            );
+        }
+    }
     true
 }
 

@@ -152,6 +152,17 @@ fn seed_sys_disk(
 
 civis::entry!(real_main);
 #[inline(never)]
+/// Risposta IO_STATS (Fase 0): funzione separata `#[inline(never)]` per non
+/// gonfiare il frame del loop server (stack cardo 16 KiB).
+#[inline(never)]
+fn reply_io_stats(disk: &mut Option<btree_drv::DiskEngine>) -> Result<(), u64> {
+    let d = disk.as_mut().ok_or(ERR)?;
+    let f = btree_drv::disk_io_stats_frame(d);
+    rings::resp_ring_write(0, 0, &f[..]);
+    let _ = civis::reply(0, 0, 0);
+    Ok(())
+}
+
 fn real_main(_sp: u64) -> ! {
     println!("[cardo] starting");
 
@@ -978,6 +989,13 @@ fn real_main(_sp: u64) -> ! {
                             continue;
                         }
                         _ => Err(ERR),
+                    }
+                } else if payload.first() == Some(&civis::ARCA_SUB_IO_STATS) {
+                    // IO_STATS (Fase 0 write-path): frame di 27 u64, solo
+                    // motore legato (pre-bind = ERR). Nessun effetto.
+                    match reply_io_stats(&mut disk) {
+                        Ok(()) => continue,
+                        Err(e) => Err(e),
                     }
                 } else if payload.first() == Some(&civis::ARCA_SUB_XSTATS) {
                     // XSTATS (W2 istogramma + W3 cache + W5 packed): reply a

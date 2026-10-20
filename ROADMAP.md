@@ -305,6 +305,18 @@ Voci con scope e vittoria dichiarati (non date).
       Vittoria: gate 6/6 a ogni sottofase (62/62 testsarca) +
       append 512K bound sotto gate (test59 <6000 tick su QEMU/PIO; opcount
       host su 512 oggetti da 4 KiB) + N file piccoli in M<N blocchi dati.
+- [x] **S2.5w/P4 follow-up — write-path ArcaFS (Fase 0/1)** (chiusa,
+      2026-10): strumentazione `ARCA_SUB_IO_STATS` + righe `[bench-io]` per
+      attribuire il costo (nodi, free, header-ext, IPC/settori); free a UN
+      settore (non piu' 64 KiB) e header-ext di free/GC persistita al commit
+      (gli alloc restano sincroni per non corrompere la catena freelist dopo
+      crash). Su KVM, 1M POSIX hot `153.65G -> 130.75G` (-14.9%, IPC
+      `89.167 -> 69.364`, settori `574.108 -> 440.836`), cold
+      `156.38G -> 138.25G` (-11.6%), nativo 1M `166.87G -> 129.62G`
+      (-22.3%); gate 6/6 e `append512` `6571 -> 5697` tick (bound 6000).
+      Il 4K non mostra guadagno (dominato dai nodi; da rimisurare con
+      `RUNS=3`). Restano W7 (DMA multi-pagina / payload piu' grandi) e
+      write-back a epoche. Dettagli e caveat in `13-performance.md`.
 
 ## Parcheggiate
 

@@ -65,3 +65,9 @@ pub const ARCA_SUB_XSTATS: u8 = 10;
 /// misura "fredda" deterministica di ArcaFS: lo spoiler di block evince la
 /// cache settoriale, ma non quella in cardo.
 pub const ARCA_SUB_CACHE_FLUSH: u8 = 11;
+/// IO_STATS (Fase 0 write-path): payload `[12]` → frame di contatori
+/// `u64` little-endian (layout in `btree_drv::disk_io_stats`). Solo
+/// diagnostica: nessun effetto su formato, cache o allocatore.
+pub const ARCA_SUB_IO_STATS: u8 = 12;
+/// Numero di parole `u64` del frame IO_STATS (il client le legge tutte).
+pub const ARCA_IO_STATS_WORDS: usize = 27;

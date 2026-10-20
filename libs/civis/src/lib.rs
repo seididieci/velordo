@@ -78,6 +78,7 @@ pub use arcafs::proto::{
     R_ARCA_DEBUG, ARCA_SUB_OPEN, ARCA_SUB_ALLOC, ARCA_SUB_FREE, ARCA_SUB_READ,
     ARCA_SUB_WRITE, ARCA_SUB_STAT, ARCA_SUB_USEDISK, ARCA_SUB_QUOTA_SET,
     ARCA_SUB_QUOTA_GET, ARCA_SUB_XSTATS, ARCA_SUB_CACHE_FLUSH,
+    ARCA_SUB_IO_STATS, ARCA_IO_STATS_WORDS,
 };
 /// Blocchi on-disk ArcaFS (Fase 56.2a): casa `arcafs`, riesportati qui.
 pub use arcafs::format::{
