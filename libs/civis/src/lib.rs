@@ -38,6 +38,8 @@ pub use syscall_numbers::{USER_FS_BUFFER, USER_RESP_RING, CLI_REQ_VA, CLI_RESP_V
 pub use syscall_numbers::Service;
 /// Tag della notifica kernel→parent della morte di un figlio (Fase 14).
 pub use syscall_numbers::EXIT_NOTIFY;
+/// Tag IPC del servizio Identis (ADR-0055).
+pub use syscall_numbers::{IDENTIS_ADD_USER, IDENTIS_LIST, IDENTIS_VERIFY};
 /// Tag del cancel cooperativo parent→figlio (Fase 44b, job control: Ctrl-C).
 pub use syscall_numbers::JOB_CANCEL;
 /// Tag della notify kernel→kbd su IRQ1 (Fase 15, bridge interrupt→IPC).

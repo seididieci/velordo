@@ -37,3 +37,27 @@ pub fn chdir(path: &Path) -> io::Result<()> {
 pub fn temp_dir() -> PathBuf {
     PathBuf::from("/tmp")
 }
+
+/// Separatore delle liste di path (`PATH`, `RUST_TARGET_PATH`): `:`, la
+/// convenzione che i toolchain si aspettano (il meccanismo non ne impone una).
+const PATH_SEP: u8 = b':';
+
+/// `std::env::split_paths` (S2.5f/F2): rustc la chiama SEMPRE per risolvere
+/// il target host (`RUST_TARGET_PATH`, anche vuota) — lo stub unsupported
+/// panicava e abortiva il compilatore prima di leggere la sorgente.
+pub struct SplitPaths<'a>(core::slice::Split<'a, u8, fn(&u8) -> bool>);
+
+pub fn split_paths(unparsed: &OsStr) -> SplitPaths<'_> {
+    fn is_sep(b: &u8) -> bool {
+        *b == PATH_SEP
+    }
+    SplitPaths(unparsed.as_bytes().split(is_sep as fn(&u8) -> bool))
+}
+
+impl<'a> Iterator for SplitPaths<'a> {
+    type Item = PathBuf;
+
+    fn next(&mut self) -> Option<PathBuf> {
+        self.0.next().map(|b| PathBuf::from(OsStrExt::from_bytes(b)))
+    }
+}

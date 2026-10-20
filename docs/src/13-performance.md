@@ -248,6 +248,7 @@ Lettura per A2 (decisione rinviata ai numeri — eccoli):
 
 Gate invariato (5/5 + 7/7 + 57/57 + shell verde); bench mai nel gate.
 
+<<<<<<< HEAD
 ## A/B ArcaFS vs FAT + nativo vs POSIX (estensione Fase 23/53)
 
 Contesto: da ADR-0043 la root `/` e' ArcaFS; `/tmp` e' la ramfs vera e
@@ -410,3 +411,26 @@ Le righe 4M sono solo lettura per contenere la durata; il PUT nativo 1M ha
 come finding sulla durabilita' per chiamata, non come riga di throughput
 generale. La stessa asimmetria vale per il PUT nativo 4K (2 commit per
 chiamata) contro il fd-write POSIX (commit a close/soglia/eta').
+## S2.5f/F1 — 100 MB su ArcaFS (lettura sequenziale, QEMU TCG)
+
+Misura del primo payload grande su ArcaFS: lo staticone rustc
+(100 135 752 B) letto da `s25fuse` a slice da 4 KiB con range read F0
+(`get_range` con cursore LRU) in un run 1 GiB (`RUN_S25=1 RUN_MEM=1G`).
+
+| Voce | Valore |
+|------|--------|
+| Byte letti | 100 135 752 |
+| Tempo load | ~47.5 s (~2.1 MB/s) |
+| Slice | 4 KiB (cap ring FS: `RING_MAX_PAYLOAD` 4000) |
+| Round trip stimati | ~56 K (25.6 K IPC a cardo + ~19 IPC DMA per blocco 64 KiB) |
+
+Lettura: il tetto **non** e' ArcaFS (la cache nodi fa hit sui blocchi da
+64 KiB: 1 miss ogni 16 slice) ma il numero di round trip seriali. Ogni
+slice = 1 IPC a cardo; ogni blocco da 64 KiB = 128 settori letti in chunk
+da 7 settori (`DISK_MAX_SECTORS`, finestra PRD) = ~19 IPC al driver. Con
+~0.9 ms per round trip il conto torna. Candidato W7 (fuori dal gate):
+finestra DMA multi-pagina + payload FS piu' grandi (64 KiB per op), che
+taglierebbe i round trip di un ordine di grandezza.
+
+Nota: nessun cambiamento al gate (seed condizionale `RUN_S25=1`, volume
+root 384 MiB in quel run soltanto).

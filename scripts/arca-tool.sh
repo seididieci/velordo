@@ -122,6 +122,32 @@ if [ "${RUN_S25:-0}" = "1" ]; then
     SEED_NS+=( "ns:tool/rustc.bin=$ROOT/build-meta/rustc-velordo.bin" )
     echo "[arca] + staticone rustc (RUN_S25=1)"
 fi
+# Mini-sysroot F2 (S2.5f/F2): rlib+rmeta del target, target JSON e fixture di
+# compilazione. Solo nel run del toolchain (RUN_S25=1) e solo se la PAL e'
+# stata costruita (`scripts/build-pal.sh`, `$PAL_WORK`): senza sysroot il run
+# resta quello S2.5d (`--version`), quindi qui non si fallisce loud.
+if [ "${RUN_S25:-0}" = "1" ]; then
+    PAL_WORK="${PAL_WORK:-/tmp/opencode-pal}"
+    VE_LIB="$PAL_WORK/sysroot-velordo/lib/rustlib/x86_64-unknown-velordo/lib"
+    if [ -d "$VE_LIB" ]; then
+        n_sys=0
+        for f in "$VE_LIB"/lib*.rlib "$VE_LIB"/lib*.rmeta; do
+            [ -f "$f" ] || continue
+            SEED_NS+=( "ns:usr/lib/velordo/lib/rustlib/x86_64-unknown-velordo/lib/$(basename "$f")=$f" )
+            n_sys=$((n_sys + 1))
+        done
+        SEED_NS+=( "ns:usr/lib/velordo/x86_64-unknown-velordo.json=$ROOT/targets/x86_64-unknown-velordo.json" )
+        # Fallback host: rustc risolve anche il target HOST
+        # (`x86_64-unknown-velordo`, non builtin) da
+        # `<sysroot>/lib/rustlib/<tuple>/target.json`.
+        SEED_NS+=( "ns:usr/lib/velordo/lib/rustlib/x86_64-unknown-velordo/target.json=$ROOT/targets/x86_64-unknown-velordo.json" )
+        SEED_NS+=( "ns:tool/rustc.args=$ROOT/scripts/f2/rustc.args" )
+        SEED_NS+=( "ns:test/f2/hello.rs=$ROOT/scripts/f2/hello.rs" )
+        echo "[arca] + mini-sysroot F2 ($n_sys file) + target JSON + fixture"
+    else
+        echo "[arca] mini-sysroot F2 assente ($VE_LIB): run S25 solo --version"
+    fi
+fi
 # Script shell /test/sh (stessi di inject-bins.sh: *.txt + *.sh).
 for s in scripts/sh/*.txt scripts/sh/*.sh; do
     if [ ! -f "$ROOT/$s" ]; then
@@ -175,5 +201,12 @@ if [ -n "${BENCH_GROUP:-}" ]; then
     SEED_NS+=( "ns:test/bench-group.txt=$BENCH_GROUP_FILE" )
     echo "[arca] + bench group $BENCH_GROUP"
 fi
+# Seed bucket Identis (ADR-0055): utente root con hash BLAKE2s-256 di "root".
+# Seedato sempre (gate inclusi): il volume parte con un utente valido.
+IDENTIS_CFG="$(mktemp)"
+printf 'root:%s\n' "0cb8a879dc5d94ed67eb49cc7a4d3052d6a346f2e28fcd9e10e5822aba92eb39" > "$IDENTIS_CFG"
+SEED_NS+=( "ns:identis:config=$IDENTIS_CFG" )
+echo "[arca] + identis:config (root/root)"
 $TOOL_BIN seed "$OUT" "${SEED_NS[@]}"
+rm -f "$IDENTIS_CFG"
 echo "[arca] seed completato su $OUT"

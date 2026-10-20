@@ -21,6 +21,10 @@ mcopy -i "$IMG" userland/build/porta.bin       ::/bin/porta.bin     || exit 1
 mcopy -i "$IMG" flavours/posix/build/usershell.bin   ::/bin/shell.bin   || exit 1
 # Server di personalita' POSIX (Fase 40.3, P1): skeleton supervisionato.
 mcopy -i "$IMG" flavours/posix/build/userposix.bin   ::/bin/posix.bin   || exit 1
+# Servizio identita'/autenticazione utenti (ADR-0055).
+mcopy -i "$IMG" userland/build/identis.bin    ::/bin/identis.bin    || exit 1
+# Programma login (ADR-0055): sostituisce la shell al primo boot.
+mcopy -i "$IMG" userland/build/login.bin      ::/bin/login.bin      || exit 1
 # Fornitore di data/ora (Fase 50, P1 orologio).
 mcopy -i "$IMG" userland/build/usertime.bin    ::/bin/time.bin    || exit 1
 # Gateway centrale di logging L1 (Fase 57, ADR-0039).

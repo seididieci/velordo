@@ -18,6 +18,7 @@
 #![no_main]
 
 extern crate alloc;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use civis;
@@ -28,6 +29,9 @@ civis::entry!(real_main);
 /// Path del payload su ArcaFS (bucket `ns` della root, seedato da
 /// `scripts/arca-tool.sh` solo se lo staticone e' stato costruito).
 const PAYLOAD: &str = "/tool/rustc.bin";
+/// Argomenti opzionali per lo staticone (S2.5f/F2): se presente, sostituisce
+/// il default `--version` con una compilazione vera.
+const ARGS_FILE: &str = "/tool/rustc.args";
 /// Slice di lettura (una pagina ring: oltre si splitta comunque).
 const SLICE: usize = 4096;
 
@@ -65,9 +69,27 @@ fn real_main(_sp: u64) -> ! {
         done(false);
     }
     println!("[s25fuse] load ok totale={}B", img.len());
-    // S2.5e: argv ["rustc", "--version"] (scala graduata: --version non
-    // tocca il sysroot; il blocco packed deve vivere fino alla spawn).
-    let argblock = match civis::pack_args(&[b"rustc", b"--version"], &[]) {
+    // S2.5e: argv di default ["rustc", "--version"] (scala graduata: non
+    // tocca il sysroot). S2.5f/F2: se `/tool/rustc.args` esiste, i suoi
+    // token sono gli argomenti veri (compilazione; vedi `scripts/f2/`),
+    // con `-o <path>` letto per verificare l'artefatto a fine corsa.
+    let cli = read_args();
+    let f2 = cli.is_some();
+    let out_path = cli.as_ref().and_then(|a| output_arg(a));
+    let mut argv: Vec<&[u8]> = Vec::with_capacity(1 + cli.as_ref().map_or(1, |a| a.len()));
+    argv.push(b"rustc");
+    match &cli {
+        Some(tokens) => argv.extend(tokens.iter().map(|t| t.as_slice())),
+        None => argv.push(b"--version"),
+    }
+    if f2 {
+        println!(
+            "[s25fuse] F2 argomenti: {} token, out={}",
+            cli.as_ref().map_or(0, |a| a.len()),
+            out_path.as_deref().unwrap_or("<nessuno>")
+        );
+    }
+    let argblock = match civis::pack_args(&argv, &[]) {
         Some(b) => b,
         None => {
             println!("[s25fuse] FAIL: pack_args");
@@ -99,13 +121,98 @@ fn real_main(_sp: u64) -> ! {
     loop {
         match civis::recv() {
             Ok(m) if m.channel == chan as u64 && m.tag == civis::EXIT_NOTIFY => {
-                println!("[s25fuse] staticone uscito code={} pid={}", m.w0 as i64, m.w1);
-                done(true);
+                let code = m.w0 as i64;
+                println!("[s25fuse] staticone uscito code={} pid={}", code, m.w1);
+                if !f2 {
+                    // S2.5d: basta che il compilatore sia nato, vissuto ed
+                    // uscito da solo (anche l'usage-error prova esecuzione).
+                    done(true);
+                }
+                // F2: verdetto sull'output, non solo sull'exit code.
+                let ok = code == 0 && match &out_path {
+                    Some(p) => report_artifact(p),
+                    None => {
+                        println!("[s25fuse] FAIL: args senza -o");
+                        false
+                    }
+                };
+                done(ok);
             }
             Ok(_) => {}
             Err(_) => {}
         }
     }
+}
+
+/// Token di `/tool/rustc.args` (whitespace ASCII). None = file assente
+/// (run S2.5d: resta `--version`) o illeggibile (stesso fallback).
+fn read_args() -> Option<Vec<Vec<u8>>> {
+    let fd = civis::open(ARGS_FILE, 0).ok()?;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 256];
+    let cap = chunk.len();
+    loop {
+        match civis::read_fs(fd, &mut chunk, cap) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(_) => {
+                let _ = civis::close(fd);
+                return None;
+            }
+        }
+    }
+    let _ = civis::close(fd);
+    let mut tokens = Vec::new();
+    let mut cur: Vec<u8> = Vec::new();
+    for &b in buf.iter() {
+        if b.is_ascii_whitespace() {
+            if !cur.is_empty() {
+                tokens.push(core::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(b);
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    Some(tokens)
+}
+
+/// Path dopo `-o` (ultima occorrenza vince, come rustc).
+fn output_arg(tokens: &[Vec<u8>]) -> Option<String> {
+    let mut out = None;
+    let mut i = 0;
+    while i + 1 < tokens.len() {
+        if tokens[i] == b"-o" {
+            out = core::str::from_utf8(&tokens[i + 1])
+                .ok()
+                .map(alloc::string::String::from);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Verifica l'artefatto F2: esiste, dimensione e magic ELF (0x7f 'E' 'L' 'F').
+fn report_artifact(path: &str) -> bool {
+    let mut st = civis::Stat { size: 0, kind: 0, readonly: false, mtime: 0 };
+    if civis::stat(path, &mut st).is_err() {
+        println!("[s25fuse] FAIL: {} assente (stat)", path);
+        return false;
+    }
+    let mut head = [0u8; 4];
+    let elf = match civis::open(path, 0) {
+        Ok(fd) => {
+            let cap = head.len();
+            let n = civis::read_fs(fd, &mut head, cap).unwrap_or(0);
+            let _ = civis::close(fd);
+            n == 4 && head == *b"\x7fELF"
+        }
+        Err(_) => false,
+    };
+    println!("[s25fuse] F2 out={} size={} elf={}", path, st.size, elf);
+    st.size > 0 && elf
 }
 
 /// Segnala TEST_DONE a init e termina (noreturn per costruzione).

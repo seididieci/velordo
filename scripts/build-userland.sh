@@ -45,6 +45,11 @@ build_one userland/gpu     userland/gpu/src/gpu.ld         gpu.bin         gpu
 build_one userland/kbd     userland/kbd/src/kbd.ld         kbd.bin         kbd
 build_one userland/porta   userland/porta/src/porta.ld     porta.bin       porta
 build_one userland/uptime  userland/uptime/src/uptime.ld   useruptime.bin  useruptime
+# Servizio identita'/autenticazione utenti (ADR-0055): identis gestisce il
+# bucket `identis:config` (nome -> hash password). identis-login e' il primo
+# programma interattivo al posto della shell (chiede utente/password, stampa SUCCESS/FAIL).
+build_one userland/identis  userland/identis/src/identis.ld identis.bin   identis
+build_one userland/identis-login userland/identis-login/src/login.ld login.bin   identis-login
 # Fornitore di data/ora (Fase 50, P1 orologio): prima di gen-service-hashes
 # cosi' il manifest Strato 2 lo copre (HASH_USERTIME).
 build_one userland/time     userland/time/src/time.ld       usertime.bin    usertime

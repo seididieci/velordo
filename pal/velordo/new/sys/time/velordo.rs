@@ -1,8 +1,11 @@
-//! Orologio Velordo (S1.3): Instant monotonico su ticks PIT (100 Hz).
-//! SystemTime resta unsupported qui dentro (wall-clock vera richiede il
-//! servizio Time via IPC: S2) — copiata pari pari da `time/unsupported.rs`
-//! perche' `time/mod.rs` non ha modulo unsupported.
+//! Orologio Velordo: `Instant` monotonico su ticks PIT (100 Hz),
+//! `SystemTime::now()` dal servizio `Time` (Fase 50: RTC CMOS all'avvio +
+//! PIT) via IPC grezza (la PAL non dipende da `civis`). Servizio assente =
+//! `UNIX_EPOCH`, mai panic: un compilatore non deve morire per un orologio
+//! mancante (S2.5f/F2).
 
+use crate::sys::pal::numbers::{SERVICE_TIME, SYS_SEND, SYS_SERVICE_LOOKUP, TIME_NOW};
+use crate::sys::pal::{syscall4, syscall4_out};
 use crate::sys::pal::{ticks as pal_ticks};
 use crate::time::Duration;
 
@@ -45,7 +48,15 @@ impl SystemTime {
     }
 
     pub fn now() -> SystemTime {
-        panic!("wall-clock non implementata su Velordo v1 (serve il servizio Time: S2)")
+        match wall_clock() {
+            // `w1` = centesimi nel secondo corrente (PIT 100 Hz).
+            Some((secs, centis)) => SystemTime(
+                Duration::from_secs(secs) + Duration::from_millis(centis.min(99) * 10),
+            ),
+            // Servizio `Time` assente/morto: orologio non inventato, ma
+            // nemmeno panic (rustc chiama `SystemTime::now()` all'avvio).
+            None => UNIX_EPOCH,
+        }
     }
 
     pub fn sub_time(&self, other: &SystemTime) -> Result<Duration, Duration> {
@@ -59,4 +70,19 @@ impl SystemTime {
     pub fn checked_sub_duration(&self, other: &Duration) -> Option<SystemTime> {
         Some(SystemTime(self.0.checked_sub(*other)?))
     }
+}
+
+/// `(secondi epoch UTC, centesimi)` dal servizio `Time`, o `None` se il
+/// servizio non e' registrato / e' morto. Una `send` sincrona, niente cache.
+fn wall_clock() -> Option<(u64, u64)> {
+    let chan = unsafe { syscall4(SYS_SERVICE_LOOKUP, SERVICE_TIME, 0, 0, 0) };
+    if chan < 0 {
+        return None;
+    }
+    let (rax, _chan, tag, w0, w1) =
+        unsafe { syscall4_out(SYS_SEND, chan as u64, TIME_NOW, 0, 0) };
+    if rax < 0 || tag != TIME_NOW {
+        return None;
+    }
+    Some((w0, w1))
 }

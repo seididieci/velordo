@@ -31,8 +31,8 @@ pub(super) fn sys_thread_create(entry: u64, stack: u64, fs: u64, flags: u64) -> 
     }
 }
 
-/// thread_exit(code): termina il thread corrente (l'ultimo chiude il gruppo
-/// con la via completa di exit — stessa `exit_current`, semantica unificata).
+/// thread_exit(code): termina SOLO il thread corrente (solo la morte del
+/// leader chiude il gruppo, con la via completa di exit).
 pub(super) fn sys_thread_exit(code: i64) -> ! {
     crate::ordo::sched::exit_current(code)
 }

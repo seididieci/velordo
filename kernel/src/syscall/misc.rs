@@ -2,9 +2,10 @@
 use core::ptr::{addr_of, addr_of_mut};
 use super::entry::{current_id, PERCPU};
 
-/// exit(code): termina il processo corrente. Non ritorna (tipo `!` → i64).
+/// exit(code): termina il processo corrente (tutto il gruppo, da qualunque
+/// thread). Non ritorna (tipo `!` → i64).
 pub(super) fn sys_exit(code: i64) -> i64 {
-    crate::ordo::sched::exit_current(code)
+    crate::ordo::sched::exit_process(code)
 }
 
 /// Fase 14 — `kill(pid, code)`: termina un processo user per la stessa via di

@@ -80,7 +80,7 @@ La numerazione e' definita nel dispatch di `syscall_handler` in `kernel/src/sysc
 
 | Num | Syscall | Note |
 |-----|---------|------|
-| 0 | `exit(code)` | termina il processo corrente (`sched::exit_current`) |
+| 0 | `exit(code)` | termina il processo corrente, da qualunque thread (`sched::exit_process`: tutto il gruppo) |
 | 2 | `write(con, buf, count)` | `CONSOLE_OUT`/`CONSOLE_ERR` → seriale; altre maniglie → `-1` (non fd POSIX) |
 | 3-7 | (ritirate) | erano `open/read/write_fs/close/readdir` kernel-side; dalla Fase 9.6 sono IPC dirette client→cardo (wrapper `civis` su ring, Fase 10.2) |
 | 8 | `getpid()` | id del processo corrente |
@@ -204,7 +204,7 @@ extern "C" fn syscall_handler() -> i64 {
 
 | Syscall | Numero | Descrizione |
 |---------|--------|-------------|
-| `exit` | 0 | Termina il processo corrente (`sched::exit_current`) |
+| `exit` | 0 | Termina il processo corrente, da qualunque thread (`sched::exit_process`: tutto il gruppo) |
 | `getpid` | 8 | Restituisce il PID corrente |
 | `send` | 16 | IPC per canale (0 = parent): invia e blocca in attesa della reply |
 | `recv` | 17 | IPC per canale: blocca finche' non arriva un messaggio |
@@ -219,7 +219,7 @@ extern "C" fn syscall_handler() -> i64 {
 | `suspend`/`resume` | 50/51 | congela/rimette in schedulazione un processo user (Fase 44a, job control, ADR-0035) |
 | `meminfo` | 52 | fermo immagine RAM del PMM (Fase 52, P3): rax=frame liberi, rdi=totali, rsi=usati; mai fallisce, sensore per swap/quota (il kernel non decide mai) |
 | `thread_create` | 54 | thread 1:1 nel gruppo del chiamante (S-T, ADR-0046): entry/stack/fs → tid o -1; mm/canali/fd condivisi, kernel stack + TSS propri |
-| `thread_exit` | 55 | termina solo il thread corrente (l'ultimo chiude il gruppo con la via di exit) |
+| `thread_exit` | 55 | termina solo il thread corrente (solo la morte del leader chiude il gruppo) |
 | `futex_wait` | 56 | dorme se `*addr == expected` fino a WAKE o deadline a tick (0 = mai): 0 svegliato / 1 no / -1 errore |
 | `futex_wake` | 57 | sveglia fino a `n` waiter su `addr` → svegliati |
 | `thread_set_fs` | 58 | base TLS (FS) del thread corrente (S-T T2, FSGSBASE da ring 3 se presente) |

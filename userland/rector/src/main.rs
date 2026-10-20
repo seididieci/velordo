@@ -554,6 +554,23 @@ const SVC_SHELL: SvcMeta = SvcMeta {
     prio: 16,
     io: &[],
 };
+// Servizio identita'/autenticazione utenti (ADR-0055): identis gestisce il
+// bucket `identis:config` (nome -> hash password). identis-login e' il primo
+// programma interattivo (chiede utente/password, stampa SUCCESS/FAIL).
+const SVC_IDENTIS: SvcMeta = SvcMeta {
+    bin: b"identis",
+    path: Some("/fat/bin/identis.bin"),
+    obj: None,
+    prio: 16,
+    io: &[],
+};
+const SVC_LOGIN: SvcMeta = SvcMeta {
+    bin: b"identis-login",
+    path: Some("/fat/bin/login.bin"),
+    obj: None,
+    prio: 16,
+    io: &[],
+};
 const SVC_TIME: SvcMeta = SvcMeta {
     bin: b"usertime",
     path: Some("/fat/bin/time.bin"),
@@ -755,8 +772,15 @@ fn real_main(_sp: u64) -> ! {
         run_test(&TEST_S25, &mut supervised);
     }
 
-    if boot_svc(&SVC_SHELL, false).is_none() {
-        println!("[init] boot FAILED (shell), panic");
+    // Identis (servizio identita'): deve partire prima di login.
+    if boot_svc(&SVC_IDENTIS, true).is_none() {
+        println!("[init] boot FAILED (identis), panic");
+        civis::exit(1);
+    }
+    let _ = civis::vestigia::log(b"init", b"identis ready");
+    // Login al posto della shell: chiede utente/password, stampa SUCCESS/FAIL.
+    if boot_svc(&SVC_LOGIN, false).is_none() {
+        println!("[init] boot FAILED (login), panic");
         civis::exit(1);
     }
 

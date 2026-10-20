@@ -30,8 +30,8 @@ pub use crate::ffi::OsString as EnvKey;
 use super::env::{CommandEnv, CommandEnvs, CommandResolvedEnvs};
 use crate::sys::fs::velordo as vfs;
 use crate::sys::pal::velordo::numbers::{
-    ARGS_MAX, EXIT_NOTIFY, SYS_CHDIR, SYS_EXEC, SYS_EXIT, SYS_KILL, SYS_RECV, SYS_RECV_NONBLOCK,
-    SYS_REPLY, SYS_SPAWN_COPY,
+    ARGS_MAX, EXIT_NOTIFY, SYS_CHDIR, SYS_EXEC, SYS_EXIT, SYS_GETPID, SYS_KILL, SYS_RECV,
+    SYS_RECV_NONBLOCK, SYS_REPLY, SYS_SPAWN_COPY,
 };
 use crate::sys::pal::{syscall4, syscall4_out};
 use crate::sys::pal::write_console;
@@ -634,7 +634,11 @@ impl Process {
 pub type ChildPipe = crate::sys::pipe::Pipe;
 
 pub fn getpid() -> u32 {
-    panic!("no pids on this platform")
+    // SYS_GETPID (8): id del processo corrente (S2.5f/F2 — rustc lo usa
+    // all'avvio, es. per i nomi dei file di profiling: un panic qui
+    // abortiva il compilatore prima di leggere la sorgente).
+    let r = unsafe { syscall4(SYS_GETPID, 0, 0, 0, 0) };
+    if r < 0 { 0 } else { r as u32 }
 }
 
 pub struct CommandArgs<'a> {

@@ -32,13 +32,18 @@ atomici come `ipc_recv`), validazione via walk di presenza con bit U (le
 `on_tick`. Ritorni: 0 svegliato / 1 no (mismatch, timeout, spuria da
 solo-runnable) / -1 errore. Join/mutex restano userspace (PAL/libc).
 
-Lifecycle di gruppo: exit leader/kill = morte di tutto il gruppo;
-thread_exit = solo il thread (reclaim: stack+TSS+PID, mai mm/text/notify);
-kill/suspend/resume su tid risolvono al leader (suspend/resume a tutto il
-gruppo); fork da thread = figlio single del gruppo (parent = leader, VMA/brk
-del gruppo); exec solo dal leader (da thread = -1 loud: il morph di
-leadership non ha semantica sicura senza trasferimento canali); churn con
-rotazione in coda per il leader con thread vivi (mai spin sul posto).
+Lifecycle di gruppo: `exit` (SYS_EXIT) da QUALUNQUE thread = morte di
+tutto il gruppo (semantica di `exit()`; S2.5f/F2: `abort()` del driver
+rustc su un thread secondario lasciava il leader appeso nel join — il
+kernel chiude il gruppo, non il solo chiamante), e cosi' i fault user
+(#PF/#GP → `exit_process`, mai un leader zombie); kill = morte di tutto il
+gruppo; thread_exit = solo il thread (reclaim: stack+TSS+PID, mai
+mm/text/notify); kill/suspend/resume su tid risolvono al leader
+(suspend/resume a tutto il gruppo); fork da thread = figlio single del
+gruppo (parent = leader, VMA/brk del gruppo); exec solo dal leader (da
+thread = -1 loud: il morph di leadership non ha semantica sicura senza
+trasferimento canali); churn con rotazione in coda per il leader con thread
+vivi (mai spin sul posto).
 
 IPC di gruppo (T5): i thread inviano come leader (`sender_of`: stessa
 sessione FS/fd, req_id dal contatore unico) ma dormono da thread; la reply
@@ -53,6 +58,9 @@ leader (mai orfani con tid riusabile).
 - Nuove syscall 54–58 + `Error` invariato (futex usa `Invalid`/`Ok(bool)`).
 - Suite `threadtest` 11/11 (create/stack/TLS×2/futex×3/IPC/fd/stress-32).
 - Sblocca S1-PAL-thread e S2 (rustc nativo); A8 (rete) resta fuori scala.
+- S2.5f/F2: `SYS_EXIT` e i fault user chiudono il gruppo da qualunque
+  thread (`abort()` su un thread secondario non lascia piu' il leader in
+  join); `SYS_THREAD_EXIT` resta l'unica via thread-only (trampolino).
 - Limiti dichiarati: niente thread-server (reply a thread-server non
   instradata), niente exec da non-leader, niente join nel kernel, VMA 64 e
   waiter 64 come bound fail-loud.

@@ -7,7 +7,22 @@ use super::ctx::{SCHED, INITIALIZED, switch_to};
 use super::ps::{name_buf, name_str_of};
 use super::queue::Scheduler;
 
+/// `SYS_EXIT`: termina il PROCESSO, da qualunque thread (semantica di
+/// `exit()`: il gruppo muore intero). Un exit da un thread non-leader non
+/// deve lasciare il leader bloccato in join — caso reale: `abort()` del
+/// driver rustc nativo eseguito su un thread secondario (S2.5f/F2).
+pub fn exit_process(code: i64) -> ! {
+    exit_target(code, true)
+}
+
+/// `SYS_THREAD_EXIT`: termina SOLO il thread corrente (trampoline di
+/// `thread::spawn` dopo il wake del join). Se chiamata dal leader la via
+/// resta quella completa (morte del gruppo), come prima di S2.5f/F2.
 pub fn exit_current(code: i64) -> ! {
+    exit_target(code, false)
+}
+
+fn exit_target(code: i64, whole_process: bool) -> ! {
     if !INITIALIZED.load(Ordering::Acquire) {
         loop {
             hlt();
@@ -21,7 +36,8 @@ pub fn exit_current(code: i64) -> ! {
             Some(prev) => {
                 // Fase 14: morte logica (terminate) + switch via. Il teardown
                 // fisico e' differito (`drain_reclaim` in `on_tick`).
-                sched.terminate(prev, code);
+                let target = if whole_process { group_of(sched, prev) } else { prev };
+                sched.terminate(target, code);
                 match sched.pick_next() {
                     Some(n) if n != prev => Some((prev, n)),
                     _ => None,

@@ -205,7 +205,7 @@ ARMS = [
     (
         "sys/paths/mod.rs",
         '    target_os = "hermit" => {\n        mod hermit;\n        #[expect(dead_code)]\n        mod unsupported;\n        mod imp {\n            pub use super::hermit::{getcwd, temp_dir};\n            pub use super::unsupported::{\n                JoinPathsError, SplitPaths, chdir, current_exe, home_dir, join_paths, split_paths,\n            };\n        }\n    }\n',
-        '    target_os = "velordo" => {\n        mod velordo;\n        #[expect(dead_code)]\n        mod unsupported;\n        mod imp {\n            pub use super::velordo::{chdir, getcwd, temp_dir};\n            pub use super::unsupported::{\n                JoinPathsError, SplitPaths, current_exe, home_dir, join_paths, split_paths,\n            };\n        }\n    }\n',
+        '    target_os = "velordo" => {\n        mod velordo;\n        #[expect(dead_code)]\n        mod unsupported;\n        mod imp {\n            pub use super::velordo::{SplitPaths, chdir, getcwd, split_paths, temp_dir};\n            pub use super::unsupported::{JoinPathsError, current_exe, home_dir, join_paths};\n        }\n    }\n',
     ),
 ]
 

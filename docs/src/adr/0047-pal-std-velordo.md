@@ -58,3 +58,14 @@ mute) a una copia di `library/` da rust-src, build con cargo +
   ricompila (apply.py fail-loud sugli anchor).
 - `targets/x86_64-unknown-velordo.json` ora ha `singlethread` (S1.0 l'aveva
   senza).
+
+## Aggiornamenti
+
+- **S2.5f/F2 (rustc nativo in guest)**: due stub che abortivano il
+  compilatore all'avvio sono stati implementati.
+  `SystemTime::now()` legge il servizio `Time` (`TIME_NOW`: epoch UTC +
+  centesimi) con IPC grezza — la PAL non dipende da `civis`; servizio
+  assente/morto → `UNIX_EPOCH` (orologio non inventato, mai panic).
+  `getpid()` risponde a `SYS_GETPID` (8) invece di panicare. Restano stub
+  dichiarati: `accessed`/`created` (mtime non tracciato), `current_exe`,
+  `home_dir`, `ftruncate`, `remove_dir_all`.

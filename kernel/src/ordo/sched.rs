@@ -27,7 +27,7 @@ pub use ipc::{IpcResult, ipc_send, ipc_send_async, ipc_recv, ipc_recv_nonblock, 
 #[allow(unused_imports)]
 pub use ps::PsSnap;
 pub use ps::{process_state, process_ps, set_owned_name, set_parent_chan, parent_channel, process_of, process_name, process_cr3, process_image_hash, set_thread_fs, group_leader, set_cwd, get_cwd};
-pub use lifecycle::{exit_current, kill, suspend, resume};
+pub use lifecycle::{exit_current, exit_process, kill, suspend, resume};
 
 /// Quanto dura il timeslice in tick di PIT (100 Hz) → 2 tick = 20 ms.
 const QUANTUM_TICKS: u64 = 2;

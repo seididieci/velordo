@@ -381,6 +381,11 @@ pub const LOG_RAM_TAIL: usize = 128;
 /// (Fase 14, ADR-0010). Non e' una richiesta: il parent non deve rispondere.
 pub const EXIT_NOTIFY: u64 = 0x7C;
 
+/// Tag IPC del servizio `Identis` (ADR-0055, gestione utenti).
+pub const IDENTIS_VERIFY: u64 = 0x70;   // w0=nome_ptr, w1=pwd_ptr -> w0=0 SUCCESS / 1 FAIL
+pub const IDENTIS_ADD_USER: u64 = 0x71; // w0=nome_ptr, w1=hash_ptr -> w0=0 OK / 1 ESISTENTE
+pub const IDENTIS_LIST: u64 = 0x72;     // w0=0 -> w1=numero utenti (risposta multi-frame, semplificato)
+
 // ── Protocollo DISK_* (data-plane cardo→block, Fase 16) ───────────────
 // Single source of truth dei tag (Fase 16c): prima duplicati in
 // `userland/fs/src/ipc_disk.rs` e `userland/disk/src/main.rs`. I tag viaggiano
@@ -720,6 +725,10 @@ pub enum Service {
     /// nel bucket `log` nativo (+ coda RAM senza volume), lettura, seal via
     /// snapshot, contatori. Supervisionato da init dopo `Time`.
     Vestigia = 10,
+    /// Servizio identita'/autenticazione utenti (ADR-0055): detiene il bucket
+    /// `identis:config` (nome -> hash BLAKE2s-256 della password), verifica
+    /// login e crea nuovi utenti. Supervisionato da init.
+    Identis = 11,
 }
 
 /// Massimo numero di servizi conosciuti = dimensione del registro kernel.

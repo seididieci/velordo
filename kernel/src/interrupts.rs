@@ -190,10 +190,10 @@ extern "x86-interrupt" fn page_fault_handler(
 }
 
 /// Termina il processo `pid` che ha provocato un fault di memoria non
-/// recuperabile (29), loggando indirizzo/errore/rip. Usa `exit_current`
-/// (morte logica + switch via, teardown differito): il fault handler gira sul
-/// kernel stack del processo e non ci ritorna mai — come il timer handler che
-/// fa `switch_to` da IRQ. Non ritorna.
+/// recuperabile (29), loggando indirizzo/errore/rip. Usa `exit_process`
+/// (morte del gruppo + switch via, teardown differito): il fault handler gira
+/// sul kernel stack del processo e non ci ritorna mai — come il timer handler
+/// che fa `switch_to` da IRQ. Non ritorna.
 fn fault_kill(
     pid: usize,
     fault_addr: u64,
@@ -219,7 +219,7 @@ fn fault_kill(
         pid,
         pname,
     );
-    crate::ordo::sched::exit_current(syscall_numbers::FAULT_EXIT_CODE)
+    crate::ordo::sched::exit_process(syscall_numbers::FAULT_EXIT_CODE)
 }
 
 /// Invalida la TLB per una singola pagina (dopo un demand-map).
@@ -253,7 +253,7 @@ extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_co
     if user {
         // Errore del processo (es. `in`/`out` su una porta non concessa dalla
         // sua I/O bitmap TSS): muore il processo, mai il kernel (come 29).
-        crate::ordo::sched::exit_current(syscall_numbers::FAULT_EXIT_CODE)
+        crate::ordo::sched::exit_process(syscall_numbers::FAULT_EXIT_CODE)
     }
     halt();
 }
