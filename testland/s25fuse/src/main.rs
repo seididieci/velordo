@@ -1,15 +1,16 @@
-//! s25fuse — carica lo staticone rustc da FAT e lo spawna (S2.5d, prima
-//! accensione del compilatore in guest).
+//! s25fuse — carica lo staticone rustc da ArcaFS e lo spawna (S2.5d, prima
+//! accensione del compilatore in guest; S2.5f/F1: payload su ArcaFS).
 //!
-//! Lo staticone (~99 MB) viaggia su `/fat/tool/rustc.bin`: la read FAT e'
-//! lineare (solo i settori richiesti, mai materializzazione intera — a
-//! differenza di obj_get/ns_read su ArcaFS, quadratici oltre i 16 MiB).
-//! Qui: open + read sequenziali da 4 KiB in heap (serve RAM: run a 1G) e
-//! `spawn_image` con flag bigstack (lo staticone vuole MB di stack). Poi
-//! attende l'EXIT_NOTIFY sul canale di nascita (w0 = exit code) e segnala
-//! TEST_DONE a init con l'esito (ok = il figlio e' nato, vissuto ed uscito
-//! da solo — qualunque code: anche l'usage-error di argc=0 prova esecuzione
-//! di codice rustc).
+//! Lo staticone (~99 MB) viaggia su `/tool/rustc.bin` (bucket `ns` del
+//! volume root, seedato da `scripts/arca-tool.sh`): la read a offset passa
+//! da F0 (`ns_read` → `get_range` con cursore LRU), quindi e' O(1) per
+//! slice sequenziale — niente materializzazione quadratica del blob. Qui:
+//! open + read sequenziali da 4 KiB in heap (serve RAM: run a 1G+ e volume
+//! a 384 MiB) e `spawn_image` con flag bigstack (lo staticone vuole MB di
+//! stack). Poi attende l'EXIT_NOTIFY sul canale di nascita (w0 = exit code)
+//! e segnala TEST_DONE a init con l'esito (ok = il figlio e' nato, vissuto
+//! ed uscito da solo — qualunque code: anche l'usage-error di argc=0 prova
+//! esecuzione di codice rustc).
 //!
 //! Mai nel gate (run dedicato RUN_S25=1, volume + RAM grandi).
 
@@ -24,13 +25,14 @@ use civis::println;
 
 civis::entry!(real_main);
 
-/// Path del payload su FAT (8.3, seedato da inject-bins.sh se esiste).
-const PAYLOAD: &str = "/fat/tool/rustc.bin";
+/// Path del payload su ArcaFS (bucket `ns` della root, seedato da
+/// `scripts/arca-tool.sh` solo se lo staticone e' stato costruito).
+const PAYLOAD: &str = "/tool/rustc.bin";
 /// Slice di lettura (una pagina ring: oltre si splitta comunque).
 const SLICE: usize = 4096;
 
 fn real_main(_sp: u64) -> ! {
-    println!("[s25fuse] avvio (caricamento staticone da FAT)");
+    println!("[s25fuse] avvio (caricamento staticone da ArcaFS)");
     let fd = match civis::open(PAYLOAD, 0) {
         Ok(f) => f,
         Err(_) => {

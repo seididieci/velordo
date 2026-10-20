@@ -118,6 +118,27 @@ di init non matcha i binari su disco e il boot fallisce loud).
 > passati dai test restano rispettati; il boot aggiunge `-cpu host` come
 > `bench.sh`.
 
+## Run dedicati (fuori dal gate)
+
+Boot separati, costosi per costruzione (toolchain host + RAM/volume grandi):
+non entrano in `run-tests.sh`, si lanciano a mano e hanno esito esplicito nel
+log seriale.
+
+- **hello std** (S1.3…S2.4): `scripts/build-pal.sh` (PAL + sysroot in
+  `$PAL_WORK`) produce `pal/build/hello-std.bin`, seedato come
+  `/test/stdhello.bin`; `python3 scripts/test-shell-std.py` fa il resto
+  (SKIP rumoroso se il binario manca).
+- **staticone rustc** (S2.5d/F1): `scripts/build-velordo-rustc.sh velordo` +
+  copia in `build-meta/rustc-velordo.bin`, poi
+  `RUN_S25=1 RUN_MEM=1G ./run.sh`. Con `RUN_S25=1` il seed mette il payload
+  nel bucket `ns` di ArcaFS (`tool/rustc.bin`, 100 135 752 B) e il volume
+  root sale a 384 MiB (`ARCA_SIZE_MIB` esplicito vince); `s25fuse` lo legge a
+  slice da 4 KiB via range read F0 e lo spawna. Misura S2.5f/F1: load in
+  ~47.5 s (~2.1 MB/s), `--version` → `rustc 1.100.0-nightly`, exit 0.
+  Il tetto e' il costo per round trip seriale, non ArcaFS: 1 IPC a cardo per
+  slice da 4 KiB + 19 IPC DMA per blocco da 64 KiB (`DISK_MAX_SECTORS` = 7
+  settori) → candidato W7 (finestra DMA multi-pagina + payload piu' grandi).
+
 ## Cosa copre `usertests` (54 test meccanismo; t34 per ultimo: i drop dei
 diritti sono irrevocabili sul canale della suite)
 

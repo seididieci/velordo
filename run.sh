@@ -92,7 +92,9 @@ fi
 # esiste o il parametro e' assente → kernel panic loud.
 if [ -f userland/disk/arca.img ]; then
     APPEND="root=UUID=4152434100000001"
-    # S2.5d: run dedicato allo staticone (volume + RAM grandi via env).
+    # S2.5d/F1: run dedicato allo staticone (volume + RAM grandi via env).
+    # Il payload e' seedato in ArcaFS da scripts/arca-tool.sh; il volume
+    # default sale a 384 MiB quando RUN_S25=1 (vedi arca-tool.sh).
     if [ "${RUN_S25:-0}" = "1" ]; then
         APPEND="$APPEND s25=1"
     fi

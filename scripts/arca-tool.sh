@@ -31,6 +31,12 @@ cp "$ROOT/tools/arca/target/release/arca" "$TOOL_BIN"
 # S1.2/W6: dimensione parametrica (default 128 MiB = 2048 blocchi 64 KiB:
 # il gate scrive > 512 blocchi e la vecchia immagine da 32 MiB finiva lo
 # spazio). Le derivate MBR/GPT seguono la dimensione del volume.
+# S2.5f/F1: il run dedicato allo staticone (RUN_S25=1) alza il default a
+# 384 MiB — 100 MB di payload + seed di boot + (F2) mini-sysroot. Il gate
+# resta a 128 MiB: ARCA_SIZE_MIB esplicito vince sempre.
+if [ "${RUN_S25:-0}" = "1" ] && [ -z "${ARCA_SIZE_MIB:-}" ]; then
+    ARCA_SIZE_MIB=384
+fi
 $TOOL_BIN create "$OUT" --uuid 4152434100000001 --size-mib "${ARCA_SIZE_MIB:-128}"
 echo "[arca] tool in $TOOL_BIN, immagine $OUT"
 
@@ -94,14 +100,27 @@ if [ -f "$ROOT/pal/build/hello-std.bin" ]; then
     SEED_NS+=( "ns:test/stdhello.bin=$ROOT/pal/build/hello-std.bin" )
     echo "[arca] + stdhello (PAL)"
 fi
-# Fuse s25 (S2.5d): il binario che carica lo staticone da FAT. Solo chiave
-# obj `tst` (+ ns per ispezione): init lo carica per object_id come le altre
-# suite. (Il payload viaggia su FAT per linearita': obj_get su ArcaFS
-# materializza l'oggetto intero per slice — quadratico oltre i 16 MiB.)
+# Fuse s25 (S2.5d/F1): il binario che carica lo staticone e lo spawna. Solo
+# chiave obj `tst` (+ ns per ispezione): init lo carica per object_id come le
+# altre suite. Il payload (~100 MB) vive su ArcaFS (bucket `ns`): la read a
+# offset usa F0 (`get_range` con cursore), O(1) per slice sequenziale.
 if [ -f "$ROOT/testland/build/users25fuse.bin" ]; then
     SEED_NS+=( "ns:tool/s25fuse.bin=$ROOT/testland/build/users25fuse.bin" )
     SEED_NS+=( "tst:tool/s25fuse.bin=$ROOT/testland/build/users25fuse.bin" )
     echo "[arca] + s25fuse"
+fi
+# Staticone rustc (S2.5f/F1): payload del run dedicato (RUN_S25=1), solo se
+# costruito (scripts/build-velordo-rustc.sh velordo + copia in build-meta/).
+# Condizionale come stdhello: il gate default resta byte-identico e il fs non
+# paga 100 MB di seed che nessuno legge. Fail-loud se richiesto ma assente:
+# un run S25 senza payload e' rosso subito, non un FAIL criptico in guest.
+if [ "${RUN_S25:-0}" = "1" ]; then
+    if [ ! -f "$ROOT/build-meta/rustc-velordo.bin" ]; then
+        echo "[arca] errore: RUN_S25=1 ma build-meta/rustc-velordo.bin assente" >&2
+        exit 1
+    fi
+    SEED_NS+=( "ns:tool/rustc.bin=$ROOT/build-meta/rustc-velordo.bin" )
+    echo "[arca] + staticone rustc (RUN_S25=1)"
 fi
 # Script shell /test/sh (stessi di inject-bins.sh: *.txt + *.sh).
 for s in scripts/sh/*.txt scripts/sh/*.sh; do

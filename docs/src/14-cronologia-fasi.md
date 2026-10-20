@@ -2436,3 +2436,20 @@
           KiB (> PACK_CAP) su ArcaFS, write sequenziale, read-back
           integrale, read a offset sparsi, delete + reclaim + rimount.
           Gate 6/6 (62/62 + host 31/31).
+          S2.5f/F1 staticone su ArcaFS (chiusa): il payload del rustc
+          nativo (~100 MB) smette di viaggiare su FAT. `scripts/arca-tool.sh`
+          lo seeda in UN put nel bucket `ns` (`tool/rustc.bin`) solo quando
+          `RUN_S25=1` (fail-loud se il file manca; il gate default resta
+          byte-identico, stesso pattern condizionale di stdhello) e, nello
+          stesso run, alza il volume a 384 MiB (`ARCA_SIZE_MIB` esplicito
+          vince). `s25fuse` legge `/tool/rustc.bin` a slice da 4 KiB: il
+          percorso e' F0 (`ns_read` → `get_range` con cursore LRU), quindi
+          niente materializzazione quadratica. `inject-bins.sh` perde il
+          ramo FAT (nessun payload da 100 MB su mcopy). Misura in QEMU 1G:
+          100 135 752 B letti in ~47.5 s (~2.1 MB/s), `--version` →
+          `rustc 1.100.0-nightly`, exit 0, frame liberi dopo il reclaim
+          233890/262144. Diagnosi del tetto: non e' ArcaFS ma il round trip
+          seriale (1 IPC a cardo per slice da 4 KiB + 19 IPC DMA per blocco
+          da 64 KiB: `DISK_MAX_SECTORS` = 7 settori) → candidato W7 (DMA
+          multi-pagina + payload piu' grandi), fuori dal gate. Gate
+          invariato 6/6 (62/62 + host 31/31).

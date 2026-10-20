@@ -252,8 +252,16 @@ Voci con scope e vittoria dichiarati (non date).
         test). S2.5f/F0 range read
        ArcaFS chiusa (cursore LRU, invalidazione su mutazione; append
        guest-side O(n^2) documentato: file grandi solo da seed host).
-        Prossimo: S2.5w (W1–W5, voce sotto) poi S2.5f/F1 (staticone su
-        ArcaFS) + F2 (mini-sysroot).
+       S2.5f/F1 staticone su ArcaFS CHIUSA: payload `tool/rustc.bin` nel
+       bucket `ns` (seed condizionale `RUN_S25=1`, volume 384 MiB), s25fuse
+       legge a slice da 4 KiB via range read F0 e spawna — 100 135 752 B in
+       ~47.5 s (~2.1 MB/s), `--version` exit 0, FAT fuori dal percorso.
+       Misura: il tetto e' il round trip seriale (1 IPC a cardo per slice da
+       4 KiB + 19 IPC DMA per blocco da 64 KiB, `DISK_MAX_SECTORS` = 7), non
+       ArcaFS → candidato W7 (DMA multi-pagina + payload piu' grandi).
+        Prossimo: F2 (mini-sysroot: rlib/rmeta in `/usr/lib/velordo` +
+       compilazione `--emit=obj` in guest) poi sonda `rust-lld` host per
+       il link (se regge si evita il linker proprio di ADR-0048).
 - [x] **S2.5w scrittura ArcaFS** (extent variabili + cache cardo + epoche
       minime; prima di S2.5f/F1: il write path O(n^2) non regge sysroot e
       output rustc in guest): W1 L0-lite + invariante immutabilita' CHIUSA
