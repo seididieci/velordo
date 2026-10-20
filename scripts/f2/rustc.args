@@ -1,0 +1,8 @@
+--target /usr/lib/velordo/x86_64-unknown-velordo.json
+-Zunstable-options
+--sysroot /usr/lib/velordo
+--crate-name f2hello
+--edition 2021
+--emit=obj
+-o /tmp/f2-hello.o
+/test/f2/hello.rs
