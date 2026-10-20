@@ -2453,3 +2453,69 @@
           da 64 KiB: `DISK_MAX_SECTORS` = 7 settori) → candidato W7 (DMA
           multi-pagina + payload piu' grandi), fuori dal gate. Gate
           invariato 6/6 (62/62 + host 31/31).
+          Bench A/B ArcaFS vs FAT + nativo vs POSIX (estensione 23/53,
+          2026-10): fix di labeling (con la root ArcaFS di ADR-0043 le righe
+          `bulk_ramfs_*` battevano la root, non la ramfs; ora `/tmp`), nuovo
+          sub-op debug `ARCA_SUB_CACHE_FLUSH = 11` (+ `VolumeStore::cache_clear`,
+          wrapper `civis::arca_cache_flush`) per il cold ArcaFS deterministico
+          accanto a `spoil_cache`; `run()` parametrico sul warmup; stessa
+          matrice small/4K/16K/64K/256K/1M/4M hot+cold su arca e fat; righe
+          `*_native` per l'API `R_OBJ_*` sullo stesso volume (commit per
+          chiamata dichiarato). Comparator `scripts/bench-compare.py` (due
+          tabelle, rapporti e spread) invocato da `bench.sh` (`TIMEOUT_S=900`).
+          La campagna esporta `ARCA_SIZE_MIB=512`: la orphan-GC ArcaFS gira
+          solo al bind, e con i 128 MiB del gate i ~650 commit della matrice
+          esauriscono i blocchi (verificato: `ERR` a meta' `small_ow`); il
+          bench non fa cleanup (`remove` = altre mutazioni/commit) e riduce
+          `arca_small_ow` a 200 iterazioni (FAT resta 1000), perche' ogni
+          close committa e il costo/op e' di durevolezza, non di throughput
+          piccolo-file. Mai nel gate. Metodologia e caveat in
+          `13-performance.md`.
+          Profili + early-stop + pre-seed (2026-10): il profilo `reduced`
+          (feature cargo `reduced`, 512 MiB, `RUNS=1`) valida l'harness in
+          ~4m53 wall (bench 272.6 s, `DONE ok=1`, zero FAIL; `small_ow`
+          Arca=50, cold 4K/16K/64K ridotti, niente 1M/4M/native 1M). Il
+          profilo `full` usa 4096 MiB e pre-seeda host-side SOLO i fixture
+          read-only (1M cold-read, 4M hot/cold): i fixture scrivibili
+          restano guest-side. Un write su file seedato da host fallisce dopo
+          ~28 KiB (`ns_put` patch) mentre il file creato guest-side funziona:
+          bug annotato, fuori dallo scope della campagna. `bench.sh` chiude
+          QEMU appena legge `DONE` (early-stop, `setsid` + kill del process
+          group); il timeout resta solo rete di sicurezza. Comparator
+          corretto per il prefisso seriale `[<sec>]` del kernel. Mai nel gate.
+          Per-size + fixture FAT (2026-10): il primo run `full` monolitico
+          non arriva al `DONE` entro 90 min (si ferma a 1M cold: la creazione
+          guest-side del fixture FAT da 4M e' patologica, ~17 min senza una
+          nuova riga `[bench]`). Due fix: (1) `inject-bins.sh` pre-seeda
+          host-side anche i fixture FAT read-only (`R1M00/01`, `AB_4M`,
+          `R4M00`) per il profilo full, evitando la crescita a chunk del 4M
+          (ogni chunk ripercorre la catena FAT da `first_cluster`: O(n²));
+          (2) nuova modalita' per-size `scripts/bench-split.sh`: un boot per
+          gruppo (`small`/`4k`/`16k`/`64k`/`256k`/`1m`/`4m`/`native`),
+          marker `/test/bench-group.txt` letto dal bench (i gruppi saltano le
+          righe non proprie senza creare fixture), timeout per-gruppo
+          (1800 s; 2400 s per `1m`), log `/tmp/bench-<gruppo>.log` uniti dal
+          comparator. Campagna split completa: **8/8 gruppi `DONE ok=1`**,
+          zero FAIL/PANIC; `4m` chiude in 15.5 s (FAT hot 3.27G vs Arca hot
+          167.6M cyc/op), `1m` in 1540.6 s, `native` in 243.6 s (prima
+          passata; rerun di validazione wrapper 176.1 s). Il wrapper
+          segnalava `native FALLITO` solo perche' il comparator per-gruppo
+          non trova coppie A/B: fix `BENCH_NO_COMPARE=1` nei run per-gruppo e
+          compare finale unico su tutti i log (tollerante se i gruppi
+          selezionati non hanno coppie). Risultati: scritture ArcaFS 5.7–36x
+          FAT (commit/close), read competitive o migliori (4M hot ~19x FAT),
+          nativo `R_OBJ_*` 0.30–0.88x il POSIX su read/stat/PUT e 1.21x sul
+          write 4K; il PUT 1M resta dominato da 262 commit e varia
+          166G–231G cyc/op tra run (0.88x–1.23x). Il monolitico resta
+          disponibile, ma sugli host lenti la matrice si lancia per-size.
+          Mai nel gate.
+          Validazione funzionale (2026-10): il gate senza `SCHED_DEBUG`
+          (`RUN_TESTS=1 ARCA_IMG=1 ./run.sh`) passa testfs 5/5, testfat 7/7,
+          posixtests 4/4, usertests 58/58, threadtest 12/12, ma testsarca
+          chiude **61/62**: `append 512KiB sequenziale` supera il bound
+          (dt 10631 tick su TCG, 7656 su un secondo TCG, 6571 su KVM con
+          `-accel kvm -cpu host`, contro il limite 6000; il commento del test
+          stima ~3800 su host di riferimento). Il fallimento e' riproducibile
+          e indipendente dal bench (`RUN_BENCH` non e' attivo nel gate);
+          resta il bound I/O noto da indagare/allargare, non una regressione
+          introdotta dalla campagna. Zero FAIL/PANIC/FAULT nelle altre suite.

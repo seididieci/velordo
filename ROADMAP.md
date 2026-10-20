@@ -68,7 +68,7 @@ Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 62/62` +
 | 50 | Orologio P1 (`Service::Time`, `usertime` CMOS+`TIME_NOW`, `mtime` veri ramfs+FAT via trait, t38 esteso) | ✅ Completata |
 | 51 | Vocabolario disco P2 (`DISK/R_DISK_LIST+INFO`, IDENTIFY estesa, relay cardo, `libr::disk_*`, t32 esteso, dati S1/S2) | ✅ Completata |
 | 52 | Durabilita' P3 (`R_SYNC` modi+barriera, `RIGHTS_SYNC`, `R_STATVFS` nel trait, `SYS_MEMINFO`, contratto, t32/t37 estesi) | ✅ Completata |
-| 53 | Misura bulk P4 (audit CAP, sweep 4K/16K/64K ramfs+FAT hot/cold in userbench, tabella costo-vs-dimensione) | ✅ Completata |
+| 53 | Misura bulk P4 (audit CAP, sweep 4K/16K/64K ramfs+FAT hot/cold in userbench, tabella costo-vs-dimensione); estensione A/B ArcaFS vs FAT + nativo `R_OBJ_*` vs POSIX, file fino a 4M, cold ArcaFS via `ARCA_SUB_CACHE_FLUSH`, profili `reduced/full`, early-stop, pre-seed fixture 1M/4M su ArcaFS+FAT e modalita' per-size `bench-split.sh` (gruppi con timeout proprio) (2026-10, `13-performance.md`) | ✅ Completata |
 | 54 | Integrita' + attrezzi P5 (crate `blake2s`, `R_GET_HASH`, superblock ArcaFS, `negotiate()`→arcafs stub, `arca create` host, `arca list/stat` guest, testsarca 8/8) | ✅ Completata |
 | 55 | ArcaFS A1+N0 (`R_OBJ_PUT/GET` + store in-memory, parser GPT per spec, mount MBR/GPT in partizione, `sys` seedato, init dual-mode + doppio pinning FNV/BLAKE2s, fallback FAT provato, testsarca 13/13, t58) | ✅ Completata |
 

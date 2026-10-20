@@ -1,4 +1,4 @@
-# Performance (Fasi 23–25 — baseline + ottimizzazioni; 38 — DMA/IRQ)
+# Performance (Fasi 23–25 — baseline + ottimizzazioni; 38 — DMA/IRQ; A/B ArcaFS/FAT)
 
 > Piattaforma di riferimento: **KVM** (`-accel kvm -cpu host`). I tempi TCG
 > sono emulati e NON di riferimento. Orologio: TSC in ring 3 (CR4.TSD mai
@@ -9,12 +9,46 @@
 
 ## Harness
 
-- `testland/bench` (`userbench`, `/test/bench.bin`): 6 op end-to-end con
-  warmup, stampa righe `[bench] <nome> iters=<n> cyc_op=<c> max_cyc=<m> kb_s=<k>`.
-- `scripts/bench.sh` (`RUNS=3`, `TIMEOUT_S=300`): N boot KVM, fail-loud se il
-  bench non completa (`DONE ok=1`). Esecuzione: `RUN_BENCH=1` compila init
-  con feature `bench` (ortogonale a `skip_tests`): il bench gira dopo
-  l'eventuale suite, prima della shell — **mai nel gate** di regressione.
+- `testland/bench` (`userbench`, `/test/bench.bin`): op end-to-end con
+  warmup parametrico (`run(name, iters, warm, …)`), stampa righe
+  `[bench] <nome> iters=<n> warm=<w> cyc_op=<c> max_cyc=<m> kb_s=<k>`.
+- `scripts/bench.sh`: N boot KVM, fail-loud se il bench non completa
+  (`DONE ok=1`); al termine esegue `scripts/bench-compare.sh` (due tabelle,
+  rapporti e spread tra run). Esecuzione: `RUN_BENCH=1` compila init con
+  feature `bench` (ortogonale a `skip_tests`): il bench gira dopo l'eventuale
+  suite, prima della shell — **mai nel gate** di regressione.
+- `scripts/bench-split.sh`: modalita' **per-size** (consigliata su host lenti
+  e per evitare un timeout unico): un boot per gruppo (`small`, `4k`, `16k`,
+  `64k`, `256k`, `1m`, `4m`, `native`), con timeout per-gruppo (1800 s;
+  2400 s per `1m`) e log separati `/tmp/bench-<gruppo>.log`. Ogni run seeda
+  `/test/bench-group.txt`; il guest esegue solo le righe del gruppo e stampa
+  il suo `DONE ok=1`. Alla fine i log vengono passati insieme a
+  `bench-compare.py` (nessuna riga duplicata, quindi niente spread tra
+  gruppi). Si lancia anche come `BENCH_PROFILE=split ./scripts/bench.sh`;
+  `BENCH_GROUPS="1m 4m native" ./scripts/bench-split.sh` limita i gruppi.
+- **Profili** (`BENCH_PROFILE`, default `full`): `full` = campagna di
+  riferimento (`RUNS=3`, `TIMEOUT_S=5400`, `ARCA_SIZE_MIB=4096`); `reduced` =
+  validazione rapida su host lenti (`RUNS=1`, `TIMEOUT_S=900`,
+  `ARCA_SIZE_MIB=512`, feature cargo `reduced` che salta 1M/4M e nativo 1M).
+  Ogni default e' sovrascrivibile via env (`RUNS`, `TIMEOUT_S`,
+  `ARCA_SIZE_MIB`, `BENCH_REDUCED`).
+- **Early-stop**: `bench.sh` avvia QEMU in un process group (`setsid`) e
+  chiude appena compare `DONE ok=` nel log; il `TIMEOUT_S` resta la rete di
+  sicurezza per build/boot bloccati (QEMU resta sulla shell dopo il bench).
+  `DONE ok=0`, timeout o uscita senza `DONE` sono fail-loud.
+- **Fixture grandi pre-seedate** (`RUN_BENCH=1`, solo full): `arca-tool.sh`
+  scrive host-side SOLO i file `read-only` ArcaFS (4M hot/cold, 1M cold-read);
+  `inject-bins.sh` fa lo stesso su FAT per 1M cold-read e 4M. `ensure_fixture`
+  nel bench salta la creazione se `stat` riporta la size attesa. Evita
+  1024/262 chunk di creazione prima della misura cold e, sul FAT, la crescita
+  guest-side del 4M (walk della catena a ogni chunk: patologicamente lenta).
+  I fixture scrivibili (1M hot, 1M cold-write, `bch:k1m`) restano creati dal
+  guest: un write su un file ArcaFS seedato da host fallisce dopo ~28 KiB
+  (`ns_put` patch) mentre il file creato guest-side funziona — bug del motore
+  annotato, fuori dallo scope della campagna. Il gate non imposta
+  `RUN_BENCH`, quindi non se ne accorge.
+- **Parser**: `bench-compare.py` ignora il prefisso seriale `[<sec>]` del
+  kernel; le righe `[bench]` restano la single-source dei campi.
 
 ## Baseline 23 (KVM, media 3 run, TSC ~4.45 GHz) → 24 (stessa base)
 
@@ -213,3 +247,166 @@ Lettura per A2 (decisione rinviata ai numeri — eccoli):
   al FAT, non alla RAM.
 
 Gate invariato (5/5 + 7/7 + 57/57 + shell verde); bench mai nel gate.
+
+## A/B ArcaFS vs FAT + nativo vs POSIX (estensione Fase 23/53)
+
+Contesto: da ADR-0043 la root `/` e' ArcaFS; `/tmp` e' la ramfs vera e
+`/fat` il FAT32. Le righe `bulk_ramfs_*` della campagna 53 battevano quindi
+in realta' la root ArcaFS (label sbagliata, non numeri sbagliati). Il fix
+sposta la ramfs su `/tmp` e aggiunge il confronto che mancava: **stesso
+client POSIX/VFS** su ArcaFS (`/`) e FAT (`/fat`), piu' l'API nativa
+`R_OBJ_*` contro il percorso POSIX **sullo stesso volume ArcaFS**.
+
+Metodologia (uniforme a 53: open/op/close per iter, offset 0):
+
+- **Hot**: fixture pre-cresciuto, `warm` iterazioni di riscaldamento prima
+  della misura (per le size grandi il "caldo" e' limitato: block ha 256
+  entry × 512 B ≈ 128 KiB, la `NodeCache` di cardo 256–16384 nodi da 64 KiB).
+- **Cold**: `iters + warm` file/oggetti **distinti** + UN solo flush prima
+  della misura: `spoil_cache()` (300 settori, eviction della cache
+  settoriale) e, solo per ArcaFS, `arca_cache_flush()` (nuovo sub-op debug
+  `ARCA_SUB_CACHE_FLUSH = 11` su `R_ARCA_DEBUG`, wrapper
+  `civis::arca_cache_flush()`). I nodi indice tornano caldi dopo la prima
+  iterazione: caveat dichiarato, non "cold per op".
+- **FAT**: niente `mkdir`/`remove`/`rename`, nomi 8.3; i fixture restano
+  fino alla rigenerazione dell'immagine a ogni `run.sh` (filesystem
+  limitato, non simmetria artificiale). Anche il bench non fa cleanup su
+  nessuno dei due FS: il volume e' rigenerato a ogni run e su ArcaFS un
+  `remove` e' un'altra mutazione B+tree (commit + orfani), che falserebbe
+  la campagna.
+- **Spazio/GC ArcaFS**: la orphan-GC gira solo al bind (56.2c); in una
+  sessione i nodi COW sostituiti restano allocati fino al remount. Ogni
+  commit di un piccolo overwrite lascia ~192 KiB di orfani (foglia primaria
+  + secondaria riscritte, piu' il remove del trim). Con i 128 MiB di default
+  la campagna esauriva i blocchi dopo ~650 commit (`ERR` a meta'
+  `small_ow`); il profilo `reduced` usa `ARCA_SIZE_MIB=512`, il `full` 4096
+  (stima ~1 GiB di orfani dopo il pre-seed dei fixture grandi). L'immagine e'
+  rigenerata a ogni `run.sh`. Non e' un target di performance: e' headroom
+  per misurare la matrice, non un test di NOSPC.
+- **`small_ow` Arca**: 200 iterazioni misurate (FAT resta 1000). Il costo/op
+  Arca e' dominato dal commit a close (W4); 1000 commit sono un test di
+  durabilita'/spazio, non un campione di throughput piccolo-file. Il
+  rapporto con FAT resta su `cyc/op` (gli `iters` possono differire).
+- **Readdir**: confronto tra radici (`/` ArcaFS, `/fat` FAT) — misura il
+  costo del listing, non l'uguaglianza dei contenuti (caveat).
+- **Nativo vs POSIX**: oggetti nel bucket dedicato `bch`. `obj_put` senza fd
+  committa **a ogni chunk** (4000 B): 1 MiB = ~262 commit, durevolezza
+  esplicita per chiamata; il path POSIX con fd usa epoche (commit a close/
+  soglia 256 KiB/eta'), quindi il confronto sul PUT grande va letto come
+  "costo della durevolezza per chiamata", non come regressione.
+  `obj_get`/`obj_stat` sono il floor del motore (niente VFS/namespace).
+
+Matrice delle righe `[bench]` (tutte fuori dal gate):
+
+| Famiglia | Righe | Size |
+|----------|-------|------|
+| Metadati A/B | `{fat,arca}_small_orc`, `_small_ow`, `_stat`, `_readdir` | 25 B / listing |
+| Bulk hot A/B | `bulk_{fat,arca}_<S>_{write,read}_hot` | 4K/16K/64K/256K/1M |
+| Bulk cold A/B | `bulk_{fat,arca}_<S>_{write,read}_cold` | 4K/16K/64K/1M |
+| Scaling 4M | `bulk_{fat,arca}_4M_read_{hot,cold}` | 4M (solo read) |
+| Nativo | `arca_*_native`, `bulk_arca_<S>_*_native` | small/4K/1M (+1M cold) |
+| Anchor | `zero_1B`, `sda_512B_seq`, `fat_4K_oow`, `ramfs_4K_*`, `bulk_ramfs_*` | storici (ramfs ora su `/tmp`) |
+
+Gruppi di `bench-split.sh`: `small` = metadati + anchor + ramfs;
+`4k`/`16k`/`64k`/`256k` = solo le righe bulk di quella size (hot+cold);
+`1m` = hot+cold 1M; `4m` = sole read hot/cold 4M; `native` = setup oggetti
+`bch` e righe `R_OBJ_*`.
+
+## Campagna split 2026-10 (1 run, KVM)
+
+Log per-gruppo `/tmp/bench-{small,4k,16k,64k,256k,1m,4m,native}.log`,
+TSC medio ~1.93 GHz, `spread=0/0` (un solo run: i numeri assoluti sono una
+fotografia, non una media; i rapporti A/B sono la parte utile). `A/B > 1` =
+ArcaFS piu' lento di FAT; per le read un A/B < 1 significa ArcaFS piu' veloce.
+Il gruppo `native` e' stato rilanciato una volta dopo il fix del wrapper: il
+PUT nativo 1M varia sensibilmente tra run (vedi caveat sotto).
+
+| Caso | A/B | arca cyc/op | fat cyc/op | Lettura |
+|------|-----|-------------|------------|---------|
+| `small_ow` (25 B, commit) | **35.76x** | 383.83M | 10.73M | ogni close ArcaFS committa un'epoca |
+| `stat` | **3.49x** | 2.59M | 742.3K | metadati ArcaFS piu' costosi |
+| `small_orc` | 0.48x | 712.5K | 1.50M | ArcaFS avvantaggiata su open+read |
+| `readdir` | 0.17x | 132.0K | 789.0K | listing ArcaFS molto piu' economico |
+| `bulk_4K_write_hot` | **36.40x** | 884.38M | 24.30M | commit per close + chunk |
+| `bulk_4K_read_hot` | 0.65x | 1.98M | 3.04M | ArcaFS piu' veloce |
+| `bulk_4K_read_cold` | 1.10x | 5.44M | 4.95M | quasi pari |
+| `bulk_16K_write_hot` | **29.28x** | 2605.93M | 89.00M | |
+| `bulk_16K_read_hot` | 0.22x | 2.60M | 11.99M | |
+| `bulk_16K_read_cold` | 1.46x | 23.40M | 16.00M | cold ArcaFS piu' caro |
+| `bulk_64K_write_hot` | **28.10x** | 10069.00M | 358.31M | |
+| `bulk_64K_read_hot` | 0.99x | 36.89M | 37.22M | pari |
+| `bulk_64K_read_cold` | 1.08x | 59.75M | 55.48M | pari entro rumore |
+| `bulk_256K_write_hot` | **15.88x** | 45306.25M | 2853.22M | |
+| `bulk_256K_read_hot` | 0.84x | 137.37M | 164.40M | |
+| `bulk_1M_write_hot` | 5.66x | 188532.94M | 33288.33M | |
+| `bulk_1M_write_cold` | 5.70x | 202193.66M | 35446.80M | |
+| `bulk_1M_read_hot` | 0.82x | 549.68M | 671.61M | |
+| `bulk_1M_read_cold` | 0.56x | 517.96M | 923.07M | |
+| `bulk_4M_read_hot` | **0.05x** | 167.60M | 3266.72M | ArcaFS ~19x piu' veloce |
+| `bulk_4M_read_cold` | 0.34x | 1286.04M | 3787.59M | |
+
+Nativo `R_OBJ_*` (A) vs POSIX ArcaFS (B), stesso volume:
+
+| Caso | A/B | native cyc/op | posix cyc/op |
+|------|-----|---------------|--------------|
+| `small_orc` | 0.39x | 281.1K | 712.5K |
+| `stat` | 0.30x | 767.5K | 2.59M |
+| `4K_read_hot` | 0.31x | 618.2K | 1.98M |
+| `4K_write_hot` | 1.21x | 1070.26M | 884.38M |
+| `1M_read_hot` | 0.72x | 397.15M | 549.68M |
+| `1M_read_cold` | 0.69x | 356.60M | 517.96M |
+| `1M_write_hot` | 0.88x | 166075.25M | 188532.94M |
+
+Lettura: il costo ArcaFS resta dominato dalle **mutazioni/commit** (write
+4K–1M ~5.7–36x FAT; `small_ow` ~36x), mentre le **read** sono competitive e
+sulle size grandi spesso migliori (4M hot ~19x FAT). Le read native sono al
+floor del motore e battono il percorso POSIX; il PUT nativo 1M e' dominato
+dai **262 commit** (uno per chunk) e la misura varia molto tra run
+(166G–231G cyc/op, rapporto 0.88x–1.23x): va letta come costo della
+durabilita' per chiamata, non come throughput stabile. Il 4M FAT hot/cold e'
+misurato su fixture host-seedati: senza pre-seed la crescita guest-side
+(catena ripercorsa a ogni chunk) rendeva il gruppo impraticabile.
+
+
+Campagna e lettura dei risultati:
+
+```bash
+# campagna di riferimento (KVM; log /tmp/bench-run{1,2,3}.log):
+BENCH_PROFILE=full RUNS=3 ./scripts/bench.sh
+# validazione rapida su host lenti (~5 min, un run):
+BENCH_PROFILE=reduced ./scripts/bench.sh
+# matrice full divisa per size (un boot per gruppo; log /tmp/bench-<g>.log):
+./scripts/bench-split.sh
+BENCH_PROFILE=split ./scripts/bench.sh
+BENCH_GROUPS="1m 4m native" ./scripts/bench-split.sh
+# solo confronto su log gia' raccolti (accetta anche il prefisso seriale):
+./scripts/bench-compare.sh /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
+```
+
+Il profilo `split` e' il modo robusto di misurare la matrice su un host
+lento: ogni gruppo ha un timeout proprio e un `DONE ok=1` indipendente, e i
+log parziali restano analizzabili anche se un gruppo fallisce. I gruppi
+`small`/`4k`/`16k`/`64k`/`256k` usano un'immagine ArcaFS da 512 MiB; `1m`,
+`4m` e `native` usano 4096 MiB per gli orfani COW e il PUT nativo 1M. Il
+profilo `full` monolitico resta disponibile per una singola fotografia, ma
+su host WSL lenti la matrice completa puo' superare i 90 minuti.
+
+Il comparator stampa due tabelle: **ArcaFS (A) vs FAT (B)** e **nativo (A)
+vs POSIX (B)**. `A/B > 1` = A piu' lento (piu' cicli per op); `spread%` =
+`(max−min)/media` sui run. La soglia di non-regressione resta quella del
+repo (>10% peggioramento a parita' di host KVM); i numeri assoluti delle
+campagne 23/25/38/53 restano snapshot di altri host e NON sono
+confrontabili con questa matrice (stesso host, stessa campagna).
+
+Il profilo `full` su un host WSL lento (ArcaFS ~31 s per una write 256K,
+~2 min per 1M, piu' la creazione guest-side dei fixture 1M) richiede
+~55-65 min, build inclusa; `reduced` chiude in ~5 min e
+serve solo a validare l'harness, non a produrre numeri di riferimento.
+`bench-split.sh` spezza la matrice per size e resta la via consigliata quando
+la build/boot e' lenta o il 4M FAT rischia il timeout monolitico.
+
+Le righe 4M sono solo lettura per contenere la durata; il PUT nativo 1M ha
+`warm=0, iters=1` (un PUT misurato, ~262 commit da 4000 B) e va riportato
+come finding sulla durabilita' per chiamata, non come riga di throughput
+generale. La stessa asimmetria vale per il PUT nativo 4K (2 commit per
+chiamata) contro il fd-write POSIX (commit a close/soglia/eta').

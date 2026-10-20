@@ -316,9 +316,9 @@ pub fn obj_delete(bucket: &[u8], key: &[u8]) -> Result<(), Error> {
 
 use arcafs::format::ARCA_NODE_PAYLOAD_LEN;
 use arcafs::proto::{
-    ARCA_SUB_ALLOC, ARCA_SUB_FREE, ARCA_SUB_OPEN, ARCA_SUB_QUOTA_GET,
-    ARCA_SUB_QUOTA_SET, ARCA_SUB_READ, ARCA_SUB_STAT, ARCA_SUB_USEDISK,
-    ARCA_SUB_WRITE, ARCA_SUB_XSTATS, R_ARCA_DEBUG,
+    ARCA_SUB_ALLOC, ARCA_SUB_CACHE_FLUSH, ARCA_SUB_FREE, ARCA_SUB_OPEN,
+    ARCA_SUB_QUOTA_GET, ARCA_SUB_QUOTA_SET, ARCA_SUB_READ, ARCA_SUB_STAT,
+    ARCA_SUB_USEDISK, ARCA_SUB_WRITE, ARCA_SUB_XSTATS, R_ARCA_DEBUG,
 };
 
 /// Invia un sub-op debug: ritorna (w0, w1, len) della reply SENZA consumare
@@ -356,6 +356,12 @@ pub fn arca_open(path: &str) -> Result<(), Error> {
 /// Alloca un blocco (mai 0).
 pub fn arca_alloc() -> Result<u64, Error> {
     arca_scalar(ARCA_SUB_ALLOC, &[])
+}
+
+/// Svuota la cache nodi del motore ArcaFS (solo bench/debug): cold
+/// deterministico dopo lo spoiler della cache settoriale di block.
+pub fn arca_cache_flush() -> Result<(), Error> {
+    arca_scalar(ARCA_SUB_CACHE_FLUSH, &[]).map(|_| ())
 }
 
 /// Libera un blocco (0/mai-allocato/doppio → errore).

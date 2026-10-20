@@ -5,6 +5,11 @@ edition = "2024"
 
 [workspace]
 
+[features]
+# Profilo di validazione ridotta (mai nel gate): tiene l'harness completo ma
+# salta 1M/4M e le righe native 1M, che su host lenti dominano la durata.
+reduced = []
+
 [dependencies]
 civis = { path = "../../libs/civis" }
 

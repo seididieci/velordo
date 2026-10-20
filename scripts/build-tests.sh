@@ -42,7 +42,15 @@ build_one testland/threadtest testland/threadtest/src/threadtest.ld threadtest.b
 build_one testland/usertest-client testland/usertest-client/src/client.ld usertestcli.bin usertestcli
 build_one testland/usertest-spin testland/usertest-spin/src/spin.ld usertestspin.bin usertestspin
 build_one testland/utcbstest testland/utcbstest/src/utcbstest.ld utcbstest.bin utcbstest
-build_one testland/bench testland/bench/src/bench.ld userbench.bin userbench
+# Bench: BENCH_REDUCED=1 compila il profilo ridotto (feature `reduced`), per
+# la validazione rapida su host lenti. Mai nel gate.
+BENCH_FEATURES=""
+if [ "${BENCH_REDUCED:-0}" = "1" ]; then
+    BENCH_FEATURES="--features reduced"
+    echo "[build] userbench CON profilo reduced"
+fi
+# shellcheck disable=SC2086
+build_one testland/bench testland/bench/src/bench.ld userbench.bin userbench $BENCH_FEATURES
 # Attore "ignoto" di t57 (Fase 45): binario testland ESCLUSO dalla tabella
 # policy (gen-test-policy.sh lo salta per nome) per provare il default
 # restrittivo fail-closed sugli hash fuori manifest.

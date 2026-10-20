@@ -155,6 +155,12 @@ impl NodeCache {
     fn evict(&mut self, blk: u64) {
         self.map.remove(&blk);
     }
+
+    /// Svuota la cache (bench cold): le entry sono write-through, non c'e'
+    /// nulla da flushare; i contatori restano per XSTATS.
+    fn clear(&mut self) {
+        self.map.clear();
+    }
 }
 
 /// Adattatore volume → `BlockStore`: possiede `ArcaVolume` (un solo handle,
@@ -179,6 +185,13 @@ impl VolumeStore {
     pub fn cache_stats(&self) -> (u64, u64) {
         let c = self.cache.borrow();
         (c.hits, c.reads)
+    }
+
+    /// Svuota la cache nodi (ARCA_SUB_CACHE_FLUSH, solo bench): cold
+    /// deterministico senza restart. Niente I/O e niente commit.
+    #[inline(never)]
+    pub fn cache_clear(&self) {
+        self.cache.borrow_mut().clear();
     }
 
     /// Volume per le op RAW di scaffold e il commit (stesso handle del
@@ -1131,6 +1144,13 @@ pub fn handle_raw_debug(
             let (high, live, free) =
                 (store.vol().stats().0, store.vol().stats().1, store.vol().stats().2);
             Ok(ArcaDebugOut::Stats(high, live, free))
+        }
+        ARCA_SUB_CACHE_FLUSH => {
+            if !rest.is_empty() {
+                return Err(ERR_INVALID);
+            }
+            store.cache_clear();
+            Ok(ArcaDebugOut::Scalar(0))
         }
         _ => Err(ERR_INVALID),
     }

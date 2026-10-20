@@ -142,5 +142,38 @@ R57_BIN="$ROOT/testland/build/r57.bin"
 python3 -c "import sys; sys.stdout.buffer.write(bytes((i % 251) for i in range(102400)))" > "$R57_BIN"
 SEED_NS+=( "ns:test/r57.bin=$R57_BIN" )
 echo "[arca] + r57 (range fixture)"
+# Fixture grandi del bench (profili full): seed host-side SOLO i file
+# READ-ONLY (4M hot/cold, 1M cold-read), perche' crearli guest-side costa
+# 1024/262 chunk su ArcaFS. I fixture scrivibili (AB_1M hot, W1M* cold-write,
+# bch:k1m nativo) restano creati dal guest: scrivere su un file seedato da
+# host fallisce dopo ~28 KiB con `ns_put` patch (bug del motore da
+# investigare separatamente), mentre il file creato guest-side funziona.
+# Solo con RUN_BENCH=1 (gate invariato) e solo full; il reduced non tocca
+# 1M/4M.
+if [ "${RUN_BENCH:-0}" = "1" ] && [ "${BENCH_REDUCED:-0}" != "1" ]; then
+    BENCH_FIX="$ROOT/testland/build/bench-fixtures"
+    mkdir -p "$BENCH_FIX"
+    python3 -c "import sys; sys.stdout.buffer.write(bytes((i % 251) for i in range(1048576)))" > "$BENCH_FIX/1m.bin"
+    python3 -c "import sys; sys.stdout.buffer.write(bytes((i % 251) for i in range(4194304)))" > "$BENCH_FIX/4m.bin"
+    case "${BENCH_GROUP:-all}" in
+        1m|all)
+            SEED_NS+=( "ns:R1M00.BIN=$BENCH_FIX/1m.bin" "ns:R1M01.BIN=$BENCH_FIX/1m.bin" )
+            ;;
+    esac
+    case "${BENCH_GROUP:-all}" in
+        4m|all)
+            SEED_NS+=( "ns:AB_4M.BIN=$BENCH_FIX/4m.bin" "ns:R4M00.BIN=$BENCH_FIX/4m.bin" )
+            ;;
+    esac
+    echo "[arca] + fixture bench full read-only (gruppo ${BENCH_GROUP:-all})"
+fi
+# Gruppo per-size del profilo split: il guest legge il marker da ArcaFS
+# (`/test/bench-group.txt`) e salta le righe degli altri gruppi.
+if [ -n "${BENCH_GROUP:-}" ]; then
+    BENCH_GROUP_FILE="$ROOT/testland/build/bench-group.txt"
+    printf '%s\n' "$BENCH_GROUP" > "$BENCH_GROUP_FILE"
+    SEED_NS+=( "ns:test/bench-group.txt=$BENCH_GROUP_FILE" )
+    echo "[arca] + bench group $BENCH_GROUP"
+fi
 $TOOL_BIN seed "$OUT" "${SEED_NS[@]}"
 echo "[arca] seed completato su $OUT"

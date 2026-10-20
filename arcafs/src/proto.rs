@@ -60,3 +60,8 @@ pub const ARCA_SUB_QUOTA_GET: u8 = 9;
 /// (n_extent, entries_totali) + frame `[max_entry:8][n_legacy_ov:8]`
 /// `[n_inline:8]`. Solo diagnostica/tuning (costo O(oggetti)).
 pub const ARCA_SUB_XSTATS: u8 = 10;
+/// CACHE_FLUSH (bench A/B): payload `[11]` → svuota la cache nodi del
+/// `VolumeStore` legato (write-through, nessun effetto sul disco). Serve alla
+/// misura "fredda" deterministica di ArcaFS: lo spoiler di block evince la
+/// cache settoriale, ma non quella in cardo.
+pub const ARCA_SUB_CACHE_FLUSH: u8 = 11;

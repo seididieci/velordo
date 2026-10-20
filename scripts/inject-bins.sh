@@ -63,4 +63,26 @@ for s in scripts/sh/*.txt scripts/sh/*.sh; do
     b="$(basename "$s")"
     mcopy -i "$IMG" "$s" "::/test/sh/$b" || exit 1
 done
+
+# Fixture grandi read-only anche su FAT (solo profilo bench full/split): la
+# creazione guest-side dei file da 4M e' patologicamente lenta e faceva
+# scadere il timeout monolitico. Sono file di sola lettura per le righe
+# `*_read_hot`/`cold`: i fixture scrivibili restano creati dal guest.
+if [ "${RUN_BENCH:-0}" = "1" ] && [ "${BENCH_REDUCED:-0}" != "1" ]; then
+    BENCH_FIX="testland/build/bench-fixtures"
+    mkdir -p "$BENCH_FIX"
+    group="${BENCH_GROUP:-all}"
+    if [ "$group" = "1m" ] || [ "$group" = "all" ]; then
+        python3 -c "import sys; sys.stdout.buffer.write(bytes((i % 251) for i in range(1048576)))" > "$BENCH_FIX/1m.bin"
+        mcopy -i "$IMG" "$BENCH_FIX/1m.bin" ::/R1M00.BIN || exit 1
+        mcopy -i "$IMG" "$BENCH_FIX/1m.bin" ::/R1M01.BIN || exit 1
+        echo "[inject] + fixture bench FAT 1M cold-read"
+    fi
+    if [ "$group" = "4m" ] || [ "$group" = "all" ]; then
+        python3 -c "import sys; sys.stdout.buffer.write(bytes((i % 251) for i in range(4194304)))" > "$BENCH_FIX/4m.bin"
+        mcopy -i "$IMG" "$BENCH_FIX/4m.bin" ::/AB_4M.BIN || exit 1
+        mcopy -i "$IMG" "$BENCH_FIX/4m.bin" ::/R4M00.BIN || exit 1
+        echo "[inject] + fixture bench FAT 4M read-only"
+    fi
+fi
 echo "[inject] servizi in /bin + /test su $IMG"
