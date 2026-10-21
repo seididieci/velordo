@@ -450,7 +450,7 @@ pub fn t_vela_restart() -> bool {
 /// t28 — restart di cardo end-to-end (Fase 14). Uccide cardo (pid via
 /// `service_pid`) e attende che init lo riavvii. Poi verifica: fixture fresh
 /// funzionanti (mkdir/write/read su /tmp scratch ramfs), hello.txt persistente
-/// su ArcaFS (seedato, non toccato da cardo restart), /fat leggibile
+/// su ArcaFS (seedato, non toccato da cardo restart), la root leggibile
 /// (persistente su disco: contrasto), /dev/null operativo (driver
 /// re-registrati via ensure_mounted). Bound generosi, mai hang.
 pub fn t_cardo_restart() -> bool {
@@ -557,16 +557,16 @@ pub fn t_cardo_restart() -> bool {
         println!("[usertests] t28: probe sopravvissuto al restart?!");
         return false;
     }
-    // Persistente: /fat leggibile (rimontato dal disco).
-    let Ok(ff) = civis::open("/fat/HELLO.TXT", 0) else {
-        println!("[usertests] t28: /fat/HELLO.TXT illeggibile");
+    // Persistente: la root ArcaFS leggibile (rimontata dal disco).
+    let Ok(ff) = civis::open(helpers::ARCA_HELLO_PATH, 0) else {
+        println!("[usertests] t28: /hello.txt illeggibile");
         return false;
     };
     let mut fb = [0u8; 32];
     let nf = civis::read_fs(ff, &mut fb, 32).unwrap_or(0);
     let _ = civis::close(ff);
     if nf == 0 {
-        println!("[usertests] t28: /fat/HELLO.TXT vuoto");
+        println!("[usertests] t28: /hello.txt vuoto");
         return false;
     }
     // Driver re-registrati: /dev/null operativo. Retry con bound (throttled):

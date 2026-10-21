@@ -1,36 +1,46 @@
 use super::*;
 
-/// t33 — mount/umount espliciti (Fase 16b).
-/// mkdir /mnt (ramfs) → mount /dev/sda /mnt → /mnt/HELLO.TXT col contenuto
-/// FAT → umount busy rifiutato con fd aperto → close → umount ok → /mnt
-/// torna ramfs (readdir senza entry FAT). Error paths: sorgente inesistente
-/// o senza disco, target invalido, doppio mount (idempotente: ok e ancora
-/// operativo), umount di non-montato e di `/`. Ultimo test: dopo solo shell.
+/// t33 — mount/umount espliciti (Fase 16b; ADR-0058: il FAT esce, il
+/// mount e' sul volume **ArcaFS** root — scoperto dal magic, mai per lettera).
+/// mkdir /mnt (ramfs) → mount <dev ArcaFS> /mnt → /mnt/hello.txt col
+/// contenuto del fixture → umount busy rifiutato con fd aperto → close →
+/// umount ok → /mnt torna ramfs (readdir senza l'entry). Error paths:
+/// sorgente inesistente o senza disco, target invalido, doppio mount
+/// (idempotente: ok e ancora operativo), umount di non-montato e di `/`.
 pub fn t_mount() -> bool {
     helpers::drain_stray();
     if civis::mkdir("/mnt").is_err() {
         println!("[usertests] t33: mkdir /mnt FAILED");
         return false;
     }
-    if civis::mount("/dev/sda", "/mnt").is_err() {
-        println!("[usertests] t33: mount /dev/sda /mnt FAILED");
+    let dev = match helpers::find_arca_device() {
+        Some(d) => d,
+        None => {
+            println!("[usertests] t33: nessun volume ArcaFS trovato");
+            return false;
+        }
+    };
+    if civis::mount(&dev, "/mnt").is_err() {
+        println!("[usertests] t33: mount {} /mnt FAILED", dev);
         return false;
     }
     // Re-mount identico: idempotente (replace), resta operativo.
-    if civis::mount("/dev/sda", "/mnt").is_err() {
+    if civis::mount(&dev, "/mnt").is_err() {
         println!("[usertests] t33: re-mount FAILED");
         return false;
     }
-    // Contenuto via mount dinamico (stesso della statica /fat).
-    let Ok(fd) = civis::open("/mnt/HELLO.TXT", 0) else {
-        println!("[usertests] t33: open /mnt/HELLO.TXT FAILED");
+    // Contenuto via mount dinamico (stesso volume della root).
+    let Ok(fd) = civis::open("/mnt/hello.txt", 0) else {
+        println!("[usertests] t33: open /mnt/hello.txt FAILED");
+        let _ = civis::umount("/mnt");
         return false;
     };
     let mut hb = [0u8; 32];
     let n = helpers::t33_read_all(fd, &mut hb);
-    if n != helpers::FAT_HELLO.len() || hb[..helpers::FAT_HELLO.len()] != *helpers::FAT_HELLO {
-        println!("[usertests] t33: /mnt/HELLO.TXT corrotto");
+    if n != helpers::ARCA_HELLO.len() || hb[..helpers::ARCA_HELLO.len()] != *helpers::ARCA_HELLO {
+        println!("[usertests] t33: /mnt/hello.txt corrotto");
         let _ = civis::close(fd);
+        let _ = civis::umount("/mnt");
         return false;
     }
     // Umount busy: fd aperto sul mount → rifiutato.
@@ -57,13 +67,13 @@ pub fn t_mount() -> bool {
         while i < eb.len() && eb[i] != 0 {
             i += 1;
         }
-        if &eb[start..i] == b"HELLO.TXT" || &eb[start..i] == b"SUB" {
+        if &eb[start..i] == b"hello.txt" {
             fat_left = true;
         }
         i += 1;
     }
     if fat_left {
-        println!("[usertests] t33: entry FAT dopo umount?!");
+        println!("[usertests] t33: entry del volume dopo umount?!");
         return false;
     }
     // Error paths.
@@ -75,7 +85,7 @@ pub fn t_mount() -> bool {
         println!("[usertests] t33: mount disco assente accettato?!");
         return false;
     }
-    if civis::mount("/dev/sda", "/a/../b").is_ok() {
+    if civis::mount(&dev, "/a/../b").is_ok() {
         println!("[usertests] t33: mount target invalido accettato?!");
         return false;
     }
@@ -97,9 +107,9 @@ pub fn t_mount() -> bool {
 /// mount valido ancora operativo dopo i rifiuti (tabella intatta).
 pub fn t_resolve() -> bool {
     helpers::drain_stray();
-    // 1. Nome ben formato ma assente (fat.img non partizionata: niente sda1).
-    if civis::mount("/dev/sda1", "/phantom").is_ok() {
-        println!("[usertests] t35: mount sda1 assente accettato?!");
+    // 1. Nome ben formato ma assente (nessun disco sdz: le lettere sono a..h).
+    if civis::mount("/dev/sdz1", "/phantom").is_ok() {
+        println!("[usertests] t35: mount sdz1 assente accettato?!");
         return false;
     }
     // Nessuna spec fantasma: umount deve fallire.
@@ -117,20 +127,27 @@ pub fn t_resolve() -> bool {
         return false;
     }
     // 3. Mount valido ancora operativo dopo i rifiuti (tabella intatta).
-    if civis::mount("/dev/sda", "/mnt").is_err() {
-        println!("[usertests] t35: mount /dev/sda /mnt FAILED");
+    let dev = match helpers::find_arca_device() {
+        Some(d) => d,
+        None => {
+            println!("[usertests] t35: nessun volume ArcaFS trovato");
+            return false;
+        }
+    };
+    if civis::mount(&dev, "/mnt").is_err() {
+        println!("[usertests] t35: mount {} /mnt FAILED", dev);
         return false;
     }
-    let Ok(fd) = civis::open("/mnt/HELLO.TXT", 0) else {
-        println!("[usertests] t35: open /mnt/HELLO.TXT FAILED");
+    let Ok(fd) = civis::open("/mnt/hello.txt", 0) else {
+        println!("[usertests] t35: open /mnt/hello.txt FAILED");
         let _ = civis::umount("/mnt");
         return false;
     };
     let mut hb = [0u8; 32];
     let n = helpers::t33_read_all(fd, &mut hb);
     let _ = civis::close(fd);
-    if n != helpers::FAT_HELLO.len() || hb[..helpers::FAT_HELLO.len()] != *helpers::FAT_HELLO {
-        println!("[usertests] t35: /mnt/HELLO.TXT corrotto");
+    if n != helpers::ARCA_HELLO.len() || hb[..helpers::ARCA_HELLO.len()] != *helpers::ARCA_HELLO {
+        println!("[usertests] t35: /mnt/hello.txt corrotto");
         let _ = civis::umount("/mnt");
         return false;
     }
@@ -140,7 +157,7 @@ pub fn t_resolve() -> bool {
         let _ = civis::umount("/mnt");
         return false;
     }
-    let Ok(fd4) = civis::open("/mnt/HELLO.TXT", 0) else {
+    let Ok(fd4) = civis::open("/mnt/hello.txt", 0) else {
         println!("[usertests] t35: buon mount distrutto dal bad replace?!");
         let _ = civis::umount("/mnt");
         return false;
@@ -157,7 +174,7 @@ pub fn t_resolve() -> bool {
 /// Diretto sul canale di usertests (nessun helper: la semantica e' proprio
 /// "riduco i MIEI diritti"). ESEGUITO PER ULTIMO: i drop sono irrevocabili.
 /// (1) GET default = ALL+root, baseline write+read ok. (2) drop WRITE:
-/// write -1, read ok (riapertura: OPEN resta). (3) drop MOUNT + subtree /fat:
+/// write -1, read ok (riapertura: OPEN resta). (3) drop MOUNT + subtree /bin:
 /// mount -1, open fuori -1, open dentro + read + readdir dentro ok, readdir
 /// fuori -1 (ogni rifiuto e' seguito da un'op valida: nessun disallineamento
 /// ring). (4) widen a root rifiutato, GET conferma i diritti invariati.
@@ -200,13 +217,13 @@ pub fn t_rights() -> bool {
         return false;
     }
     let _ = civis::close(fd);
-    // 3. Drop MOUNT + subtree /fat.
+    // 3. Drop MOUNT + subtree /bin (dir reale sulla radice ArcaFS).
     if civis::rights_drop(
         civis::RIGHTS_ALL & !civis::RIGHTS_WRITE & !civis::RIGHTS_MOUNT,
-        Some("/fat"),
+        Some("/bin"),
     ).is_err()
     {
-        println!("[usertests] t34: rights_drop MOUNT+/fat FAILED");
+        println!("[usertests] t34: rights_drop MOUNT+/bin FAILED");
         return false;
     }
     if civis::mount("/dev/sda", "/mnt").is_ok() {
@@ -217,19 +234,13 @@ pub fn t_rights() -> bool {
         println!("[usertests] t34: open fuori subtree accettato?!");
         return false;
     }
-    let Ok(fd) = civis::open("/fat/HELLO.TXT", 0) else {
+    let Ok(fd) = civis::open("/bin/gpu.bin", 0) else {
         println!("[usertests] t34: open dentro subtree FAILED");
         return false;
     };
-    let mut hb = [0u8; 32];
-    let n = helpers::t33_read_all(fd, &mut hb);
     let _ = civis::close(fd);
-    if n != helpers::FAT_HELLO.len() || hb[..helpers::FAT_HELLO.len()] != *helpers::FAT_HELLO {
-        println!("[usertests] t34: /fat/HELLO.TXT corrotto");
-        return false;
-    }
     let mut eb = [0u8; 256];
-    if civis::readdir("/fat", &mut eb, 256).is_err() {
+    if civis::readdir("/bin", &mut eb, 256).is_err() {
         println!("[usertests] t34: readdir dentro subtree FAILED");
         return false;
     }
@@ -237,15 +248,15 @@ pub fn t_rights() -> bool {
         println!("[usertests] t34: readdir fuori subtree accettato?!");
         return false;
     }
-    // 4. Widen a root rifiutato (da /fat): Err e diritti invariati.
+    // 4. Widen a root rifiutato (da /bin): Err e diritti invariati.
     if civis::rights_drop(civis::RIGHTS_ALL, Some("/")).is_ok() {
         println!("[usertests] t34: widen a root accettato?!");
         return false;
     }
     let mut sb2 = [0u8; 32];
     let want = civis::RIGHTS_ALL & !civis::RIGHTS_WRITE & !civis::RIGHTS_MOUNT;
-    if civis::rights_get(&mut sb2) != Ok(want) || sb2[..3] != *b"fat" || sb2[3] != 0 {
-        println!("[usertests] t34: GET finale non mask+/fat");
+    if civis::rights_get(&mut sb2) != Ok(want) || sb2[..3] != *b"bin" || sb2[3] != 0 {
+        println!("[usertests] t34: GET finale non mask+/bin");
         return false;
     }
     true
@@ -366,17 +377,17 @@ pub fn t_stat() -> bool {
         println!("[usertests] t38: stat dopo rm accettata?!");
         return false;
     }
-    // FAT (scrivibile dalla Fase 20): file + dir NON readonly.
-    if civis::stat("/fat/HELLO.TXT", &mut st).is_err()
+    // Radice ArcaFS (scrivibile): file + dir NON readonly.
+    if civis::stat("/hello.txt", &mut st).is_err()
         || !st.is_file()
         || st.size == 0
         || st.readonly
     {
-        println!("[usertests] t38: stat /fat/HELLO.TXT FAILED");
+        println!("[usertests] t38: stat /hello.txt FAILED");
         return false;
     }
-    if civis::stat("/fat", &mut st).is_err() || !st.is_dir() || st.readonly {
-        println!("[usertests] t38: stat /fat FAILED");
+    if civis::stat("/bin", &mut st).is_err() || !st.is_dir() || st.readonly {
+        println!("[usertests] t38: stat /bin FAILED");
         return false;
     }
     // Device: tipo device, size 0; padri sintetizzati: dir.
@@ -469,9 +480,9 @@ pub fn t_stat() -> bool {
         println!("[usertests] t38: mtime non cresciuto ({} -> {})", m1, st.mtime);
         return false;
     }
-    // FAT: HELLO.TXT ha timestamp DOS validi (mkfat) → mtime noto (> 0).
-    if civis::stat("/fat/HELLO.TXT", &mut st).is_err() || st.mtime == 0 {
-        println!("[usertests] t38: mtime FAT assente ({})", st.mtime);
+    // Il fixture seedato ha un mtime noto (> 0).
+    if civis::stat("/hello.txt", &mut st).is_err() || st.mtime == 0 {
+        println!("[usertests] t38: mtime del fixture assente ({})", st.mtime);
         return false;
     }
     let _ = civis::remove("/t38mtime");
@@ -479,22 +490,22 @@ pub fn t_stat() -> bool {
     true
 }
 
-/// t39 — servizi da disco (Fase 21): i binari in `/bin` e `/test` (iniettati
-/// a build via mcopy) esistono e sono non vuoti, e tutti i servizi sono up
-/// per nome (= il boot da disco ha funzionato: gpu/kbd/porta/shell non
-/// sono piu' embedded ma girano).
+/// t39 — servizi da disco (Fase 21; ADR-0058: i binari vivono in ArcaFS,
+/// non piu' iniettati in un FAT): i binari in `/bin` e `/test` esistono e
+/// sono non vuoti, e tutti i servizi sono up per nome (= il boot da disco ha
+/// funzionato: gpu/kbd/porta/shell non sono piu' embedded ma girano).
 pub fn t_diskboot() -> bool {
     let mut st = civis::Stat { size: 0, kind: 0, readonly: false, mtime: 0 };
     for path in [
-        "/fat/bin/gpu.bin",
-        "/fat/bin/uptime.bin",
-        "/fat/bin/vela.bin",
-        "/fat/bin/kbd.bin",
-        "/fat/bin/porta.bin",
-        "/fat/bin/shell.bin",
-        "/fat/test/testfs.bin",
-        "/fat/test/testfat.bin",
-        "/fat/test/tests.bin",
+        "/bin/gpu.bin",
+        "/bin/uptime.bin",
+        "/bin/vela.bin",
+        "/bin/kbd.bin",
+        "/bin/porta.bin",
+        "/bin/posix/shell.bin",
+        "/test/testfs.bin",
+        "/test/testfat.bin",
+        "/test/tests.bin",
     ] {
         if civis::stat(path, &mut st).is_err() || !st.is_file() || st.size == 0 {
             println!("[usertests] t39: {} mancante/vuoto", path);

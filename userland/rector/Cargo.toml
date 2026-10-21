@@ -16,10 +16,14 @@ blake2s = { path = "../../blake2s" }
 # usertests in sequenza prima della shell (gate di regressione).
 # Feature `bench` (via `RUN_BENCH=1`, vedi scripts/bench.sh, ortogonale a
 # skip_tests): esegue userbench prima della shell (mai nel gate).
+# Feature `fat_tests` (ADR-0058): esegue la suite FAT32 — FUORI dal gate
+# (il FAT non e' piu' il filesystem di sistema): serve il run dedicato con
+# un disco FAT attaccato (vedi scripts/run-fat-tests.sh).
 [features]
 default = ["skip_tests"]
 skip_tests = []
 bench = []
+fat_tests = []
 
 [profile.dev]
 panic = "abort"

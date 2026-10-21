@@ -13,10 +13,10 @@ sonde in smoke41.py).
 import socket, subprocess, sys, time, os, re
 
 KERNEL_DFLT = "target/x86_64-unknown-none/release/velord"
-FAT_DFLT = "userland/fs/fat.img"
+# ADR-0058: i dischi FAT non esistono piu' nel boot (FAT_DFLT/FAT2_DFLT
+# rimossi: il boot e' solo ArcaFS).
 # Secondo disco (stessa fixture di run.sh: UUID C0FFEE01, label SECOND):
 # senza, t36 fallisce per ambiente (mount UUID impossibile).
-FAT2_DFLT = "userland/fs/fat2.img"
 # Terzo disco (Fase A/E1: root ArcaFS — senza, cardo va in panic loud per
 # root=UUID assente e la shell non parte mai).
 ARCA_DFLT = "userland/disk/arca.img"
@@ -25,7 +25,7 @@ ARCA_DFLT = "userland/disk/arca.img"
 # 'dot'; MAIUSCOLE come combo 'shift-x'; '>' e '<' = shift-dot/shift-comma;
 # nomi parser Fase 41 sondati live in smoke41.py; '\\' e '|' richiedono il
 # fix Us104Fix in porta).
-KEYMAP = {" ": "spc", ".": "dot", "-": "minus", "/": "slash", "&": "shift-7",
+KEYMAP = {" ": "spc", "\n": "ret", ".": "dot", "-": "minus", "/": "slash", "&": "shift-7",
           ">": "shift-dot", "<": "shift-comma", "!": "shift-1",
           "'": "apostrophe", '"': "shift-apostrophe",
           "\\": "backslash", "|": "shift-backslash",
@@ -63,35 +63,28 @@ T_DUMP = 0.3 if FAST else 0.6
 
 
 def parse_shell_args(mon_dflt, serial_dflt):
-    """CLI minima dei file di fase: --mon/--serial/--fat/--fat2/--arca/
-    --kernel/--fat-format/--arca-format/--no-prep (il runner parallelo li
-    passa per isolare le istanze; in locale valgono i default)."""
+    """CLI minima dei file di fase: --mon/--serial/--arca/--kernel/
+    --arca-format/--no-prep (il runner parallelo li passa per isolare le
+    istanze; in locale valgono i default). ADR-0058: i dischi FAT sono
+    spariti (il boot e' solo ArcaFS)."""
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--mon", default=mon_dflt)
     ap.add_argument("--serial", default=serial_dflt)
-    ap.add_argument("--fat", default=FAT_DFLT)
-    ap.add_argument("--fat2", default=FAT2_DFLT)
     ap.add_argument("--arca", default=ARCA_DFLT)
     ap.add_argument("--kernel", default=KERNEL_DFLT)
-    ap.add_argument("--fat-format", default="raw",
-                    help="raw (default) o qcow2 per gli overlay paralleli")
     ap.add_argument("--arca-format", default="raw",
                     help="raw (default) o qcow2 per gli overlay paralleli")
     ap.add_argument("--no-prep", action="store_true",
-                    help="salta mkfat+inject+arca-seed (il runner li fa una volta sola)")
+                    help="salta il seed ArcaFS (il runner lo fa una volta sola)")
     return ap.parse_args()
 
 
-def prep_images(fat=FAT_DFLT, fat2=FAT2_DFLT, arca=ARCA_DFLT):
-    """Rigenera le immagini FAT + inietta /bin e /test + seed ArcaFS (come
-    run.sh). La root e' sul volume: senza seed fresco la shell parte su dati
-    stantii (E1: persistenza root tra fasi)."""
-    subprocess.run(["python3", "scripts/mkfat.py", fat], check=True)
-    subprocess.run(["python3", "scripts/mkfat.py", fat2,
-                    "--serial", "C0FFEE01", "--label", "SECOND",
-                    "--marker", "second disk marker"], check=True)
-    subprocess.run(["bash", "scripts/inject-bins.sh"], check=True)
+def prep_images(arca=ARCA_DFLT):
+    """Seed fresco del volume ArcaFS (come run.sh). ADR-0058: niente piu'
+    immagini FAT ne' iniettore — i binari vivono nel volume. La root e' sul
+    volume: senza seed fresco la shell parte su dati stantii (E1:
+    persistenza root tra fasi)."""
     subprocess.run(["bash", "scripts/arca-tool.sh",
                     os.path.join(os.getcwd(), arca)
                     if not os.path.isabs(arca) else arca], check=True)
@@ -135,15 +128,11 @@ class Shell:
     """Una istanza QEMU + shell Velordo. I path distinguono le istanze
     parallele (il runner li assegna per fase)."""
 
-    def __init__(self, mon, serial, fat=FAT_DFLT, fat2=FAT2_DFLT,
-                 kernel=KERNEL_DFLT, fat_format="raw", arca_img=None,
+    def __init__(self, mon, serial, kernel=KERNEL_DFLT, arca_img=None,
                  arca_format="raw"):
         self.mon = mon
         self.serial = serial
-        self.fat = fat
-        self.fat2 = fat2
         self.kernel = kernel
-        self.fat_format = fat_format
         self.arca_img = ARCA_DFLT if arca_img is None else arca_img
         self.arca_format = arca_format
         self.q = None
@@ -320,9 +309,24 @@ class Shell:
 
     # ── Boot / teardown ───────────────────────────────────────────
 
+    def login(self, user="root", pwd="root", timeout=40):
+        """Login al boot (ADR-0055): il login e' l'entry point nativo —
+        chiede utente e password, poi avvia la shell. Aspetta il prompt
+        'Nome utente:', digita le credenziali e lascia che la shell
+        prenda il console."""
+        t0 = time.time()
+        while b"Nome utente:" not in self.read_log():
+            if time.time() - t0 > timeout:
+                raise RuntimeError("prompt di login mai comparso")
+            time.sleep(T_WAIT_POLL)
+        self.type_text(user + "\n")
+        time.sleep(0.3)
+        self.type_text(pwd + "\n")
+
     def boot(self, timeout=60):
-        """Avvia QEMU e attende la shell pronta (produzione: niente test,
-        shell subito). Ritorna il Popen (anche in self.q)."""
+        """Avvia QEMU, fa il login e attende la shell pronta (produzione:
+        niente test, login e shell subito). Ritorna il Popen (anche in
+        self.q)."""
         for p in (self.serial, self.mon):
             try:
                 os.unlink(p)
@@ -333,11 +337,10 @@ class Shell:
             "-serial", "file:" + self.serial,
             "-monitor", "unix:%s,server=on,wait=off" % self.mon,
             "-no-reboot", "-kernel", self.kernel,
-            "-drive", "file=%s,format=%s,if=ide" % (self.fat, self.fat_format),
-            "-drive", "file=%s,format=%s,if=ide" % (self.fat2, self.fat_format),
         ]
-        # E1: terzo drive ArcaFS sempre (root obbligatoria, come run.sh) +
-        # cmdline root=UUID. Senza, cardo va in panic loud e niente shell.
+        # E1: il drive ArcaFS (root obbligatoria, come run.sh) + cmdline
+        # root=UUID. Senza, cardo va in panic loud e niente shell. ADR-0058:
+        # i dischi FAT non vengono piu' attaccati.
         args.append("-drive")
         args.append("file=%s,format=%s,if=ide" % (self.arca_img, self.arca_format))
         args.append("-append")
@@ -353,6 +356,8 @@ class Shell:
         kvm_tail = [l for l in kvm_info if "kvm" in l.lower()][-1:]
         print("info accel: %s (timing %s)" % (" | ".join(kvm_tail) if kvm_tail else kvm_info[-1:],
               "fast" if FAST else "slow"), flush=True)
+        # Il login parte col boot (ADR-0055): credenziali e poi la shell.
+        self.login()
         deadline = time.time() + timeout
         while time.time() < deadline:
             data = self.read_log()

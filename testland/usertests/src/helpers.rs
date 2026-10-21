@@ -1,4 +1,5 @@
 use super::*;
+use alloc::string::String;
 
 // Tags protocollo (speculari a usertest-client / usertest-spin).
 pub const T_CFG: u64 = 100;
@@ -212,20 +213,64 @@ pub fn stop_flooder(fchan: u64) {
     let _ = wait_exit(fchan);
 }
 
-/// Contenuto atteso di /fat/HELLO.TXT (come testfat Test 2).
-pub const FAT_HELLO: &[u8] = b"Hello from Velordo FAT32!\n";
+/// Contenuto atteso del fixture `hello.txt` sulla radice ArcaFS (seedato a
+/// build-time: `scripts/arca-tool.sh` -> `ns:hello.txt`).
+pub const ARCA_HELLO: &[u8] = b"Hello from Velordo ramfs!\n";
 
-/// Apre /dev/sda raw (throttled, Livello 1), legge il settore 0 e verifica la
-/// firma boot 0x55AA a offset 510 (stesso settore del mount /fat: prova il
-/// data-plane DISK di block e il relay DEV di cardo in un colpo solo).
-pub fn disk_sector0_ok() -> bool {
-    let Ok(fd) = civis::open_wait("/dev/sda", 0, 1000, civis::POLL_PERIOD_TICKS) else {
+/// Path del fixture sulla radice (volume root ArcaFS).
+pub const ARCA_HELLO_PATH: &str = "/hello.txt";
+
+/// Magic del superblock ArcaFS (4 byte a offset 0 del volume).
+pub const ACFS_MAGIC: &[u8; 4] = b"ACFS";
+
+/// Device che ospita il volume ArcaFS root. **Mai per lettera**: l'ordine
+/// IDE puo' essere inverso (SWAP_DRIVES) e il volume si riconosce dal magic
+/// ACFS nel settore 0 (whole-disk o partizione: il superblock sta a LBA0
+/// del nodo). Ritorna il path `/dev/<nome>` del primo nodo che risponde.
+pub fn find_arca_device() -> Option<String> {
+    let mut eb = [0u8; 1024];
+    let cap = eb.len();
+    // NB: `readdir` restituisce il NUMERO di entry, non i byte: il bound
+    // della scansione e' la capienza del buffer (voci NUL-separate).
+    if civis::readdir("/dev", &mut eb, cap).is_err() {
+        return None;
+    }
+    let mut i = 0usize;
+    while i < cap && eb[i] != 0 {
+        let start = i;
+        while i < cap && eb[i] != 0 {
+            i += 1;
+        }
+        let name = &eb[start..i];
+        if name.len() >= 3 && &name[..2] == b"sd" {
+            let path = format!("/dev/{}", core::str::from_utf8(name).unwrap_or(""));
+            if node_is_arca(&path) {
+                return Some(path);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Il nodo ha un superblock ArcaFS (magic ACFS) nel settore 0?
+fn node_is_arca(path: &str) -> bool {
+    let Ok(fd) = civis::open_wait(path, 0, 1000, civis::POLL_PERIOD_TICKS) else {
         return false;
     };
     let mut buf = [0u8; 512];
     let n = civis::read_fs(fd, &mut buf, 512).unwrap_or(0);
     let _ = civis::close(fd);
-    n == 512 && buf[510] == 0x55 && buf[511] == 0xAA
+    n == 512 && &buf[..4] == ACFS_MAGIC
+}
+
+/// Il device ArcaFS root e' leggibile raw (settore 0 col magic ACFS)?
+/// Prova il data-plane DISK di block e il relay DEV di cardo in un colpo solo.
+pub fn disk_sector0_ok() -> bool {
+    match find_arca_device() {
+        Some(p) => node_is_arca(&p),
+        None => false,
+    }
 }
 
 /// Legge tutto il file `fd` in `dst` (come testfat `read_all`).

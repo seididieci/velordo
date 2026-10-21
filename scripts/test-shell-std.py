@@ -16,22 +16,19 @@ def main():
         prep_images()
     # Binario assente = SKIP (non FAIL): la PAL si compila a parte.
     import subprocess
-    has = subprocess.run(
-        ["mdir", "-i", args.fat, "::/test/stdhello.bin"],
-        capture_output=True,
-    ).returncode == 0
+    # ADR-0058: il binario vive nel volume ArcaFS (seed "ns:test/stdhello.bin"),
+    # non piu' in un FAT: la presenza si verifica sull'host.
+    has = os.path.exists(os.path.join(os.getcwd(), "pal/build/hello-std.bin"))
     if not has:
         print("[std] SKIP: /test/stdhello.bin assente (scripts/build-pal.sh prima)")
         return 0
-    sh = Shell(mon=args.mon, serial=args.serial, fat=args.fat, fat2=args.fat2,
-               kernel=args.kernel, fat_format=args.fat_format,
-               arca_img=args.arca, arca_format=args.arca_format)
+    sh = Shell(mon=args.mon, serial=args.serial, kernel=args.kernel, arca_img=args.arca, arca_format=args.arca_format)
     c = Checker()
     try:
         sh.boot()
         # S2.4: l'hello dura ~350ms (pipe+fork) contro T_RUN=0.4s: aspettare
         # DONE esplicito, mai sleep fisso (il troncamento tagliava la coda).
-        out = sh.run_until("run /fat/test/stdhello.bin", b"[stdhello] DONE", timeout=60)
+        out = sh.run_until("run /test/stdhello.bin", b"[stdhello] DONE", timeout=60)
         c.check("stdhello println", b"[stdhello] ciao da std su Velordo" in out)
         c.check("stdhello vec", b"[stdhello] vec len=8 sum=140" in out)
         c.check("stdhello mutex", b"[stdhello] mutex=41" in out)
@@ -39,7 +36,7 @@ def main():
         c.check("stdhello instant", b"[stdhello] instant ok" in out)
         # S2.0: argv/env/cwd (export prima, run con argv dopo).
         sh.run_out("export VELORDO_S2=s2ok")
-        out = sh.run_until("run /fat/test/stdhello.bin foo bar", b"[stdhello] DONE", timeout=60)
+        out = sh.run_until("run /test/stdhello.bin foo bar", b"[stdhello] DONE", timeout=60)
         c.check("stdhello argv", b"[stdhello] argv=foo,bar" in out)
         c.check("stdhello env", b"[stdhello] env VELORDO_S2=s2ok" in out)
         c.check("stdhello set_var", b"[stdhello] set_var STD_SET=42" in out)

@@ -11,11 +11,12 @@ ricompilare se stesso. Ordina le priorita' (storage veloce prima, servizi
 fuori dal kernel poi, personalita' per software reale dopo) senza pianificare
 nulla da solo.
 
-## Stato (completate 1-56)
+## Stato (completate 1-57)
 
-Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 62/62` +
-`[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 58/58` +
-`[threadtest] PASS 12/12`, zero FAIL/PANIC/FAULT.
+Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
+`[identistest] PASS 11/11` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12`,
+zero FAIL/PANIC/FAULT. La suite FAT32 e' **fuori dal gate** (ADR-0058:
+`scripts/run-fat-tests.sh`).
 
 | Fase | Descrizione | Stato |
 |------|-------------|-------|
@@ -73,6 +74,7 @@ Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 62/62` +
 | 54 | Integrita' + attrezzi P5 (crate `blake2s`, `R_GET_HASH`, superblock ArcaFS, `negotiate()`→arcafs stub, `arca create` host, `arca list/stat` guest, testsarca 8/8) | ✅ Completata |
 | 55 | ArcaFS A1+N0 (`R_OBJ_PUT/GET` + store in-memory, parser GPT per spec, mount MBR/GPT in partizione, `sys` seedato, init dual-mode + doppio pinning FNV/BLAKE2s, fallback FAT provato, testsarca 13/13, t58) | ✅ Completata |
 | 56 | Gestione utenti — Fase 3.1: protocollo Identis (`libs/identis-proto`: framing, magic, codici), **token di sessione** emesso da Identis al login, `IDENTIS_ADD_USER` (0x71) con validazione server-side del nome, `IDENTIS_LIST` (0x72), transazione **legata al canale** (BUSY + retry: il secondo client non corrompe piu' il buffer), client `create-user` (hash in locale, token da env `VELORDO_SESSION`), gate `identistest` 11/11 (ADR-0057) | ✅ Completata |
+| 57 | **FAT fuori dal boot e dalla suite** (ADR-0058): ArcaFS unico filesystem di sistema (init carica **tutto** da ArcaFS: `SvcMeta.path` sparisce, `inject-bins.sh` cancellato, `identis`/`login` ora pinnati come gli altri), suite FAT32 **fuori dal gate** (run dedicato `scripts/run-fat-tests.sh`), test migrati su ArcaFS con device **scoperti** per magic/UUID (mai per lettera), superblock **v4** (192 B: `label` + `mountpoint` dichiarato, il campo mountpoint era morto), tool host `arca create --label/--mountpoint` + `arca set`, uuid ArcaFS esposto dal driver disco (by-uuid 16 hex), gate 6 righe + shell 10/10 | ✅ Completata |
 
 ## Pianificate
 
@@ -97,6 +99,17 @@ Voci con scope e vittoria dichiarati (non date).
       `create-user` (oggi creato ma non lanciato da nessuno) diventa un
       comando. Vittoria: dalla console si crea un utente e l'utente nuovo si
       autentica con la sua password.
+- [ ] **Multi-engine + auto-mount dichiarativo** (ADR-0058 §6): oggi un
+      solo `DiskEngine` globale e' legato al volume root, quindi un **secondo
+      volume ArcaFS si monta ma e' uno stub non leggibile** (la directory
+      vuota che sembrerebbe montata e' una promessa non mantenuta). Serve:
+      (a) un engine per volume (la tabella dei mount tiene il suo), (b) il
+      **probe** che legge il `mountpoint` dichiarato nel superblock v4 e
+      monta il volume lì (ZFS-style: ogni volume dichiarato viene montato,
+      con le guardie: superblock che verifica, path valido, niente
+      collisione, la root mai, la policy esplicita vince), (c) la
+      **discovery by-label** (USB: una chiavetta con la sua etichetta). E'
+      il prerequisito del supporto USB.
 - [ ] **S3.3 — Hardening utenti** (debiti dichiarati in ADR-0057): (a)
       **proteggere il bucket `identis:config`** in cardo (path protetto ->
       solo il canale del servizio Identis: i channel id sono simmetrici,

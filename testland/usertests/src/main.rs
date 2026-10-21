@@ -13,6 +13,7 @@
 #![no_main]
 
 extern crate alloc;
+use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 

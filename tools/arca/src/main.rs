@@ -20,8 +20,9 @@ use arcafs as af;
 use arcafs::format::{ARCA_BLOCK_SECTORS, ARCA_BLOCK_SIZE};
 
 fn usage() -> ! {
-    eprintln!("uso: arca create <path> [--uuid HEX16] [--size-mib N]  (default 1 MiB, uuid auto)");
+    eprintln!("uso: arca create <path> [--uuid HEX16] [--size-mib N] [--label L] [--mountpoint M]  (default 1 MiB, uuid auto)");
     eprintln!("     arca uuid <img> <HEX16> [--lba N]  (patch uuid superblock a LBA N, default 0)");
+    eprintln!("     arca set <img> [--uuid HEX16] [--label L] [--mountpoint M] [--lba N]  (patch identita' volume)");
     eprintln!("     arca seed <img> [--lba N] [ns:chiave=host]... [sys:chiave=host]...  (solo volumi freschi)");
     exit(2);
 }
@@ -261,8 +262,68 @@ fn main() {
     match args[1].as_str() {
         "create" => cmd_create(&args),
         "uuid" => cmd_uuid(&args),
+        "set" => cmd_set(&args),
         "seed" => cmd_seed(&args),
         _ => usage(),
+    }
+}
+
+/// Patch del superblock: uuid e/o label e/o mountpoint, checksum ricalcolato.
+/// Fallisce loud su qualunque errore (mai immagini mute).
+fn patch_superblock(
+    path: &str,
+    lba: u64,
+    uuid: Option<u64>,
+    label: Option<&str>,
+    mountpoint: Option<&str>,
+) {
+    let mut f = match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("set {}: {}", path, e);
+            exit(1);
+        }
+    };
+    let mut sec = [0u8; 512];
+    let ok = f.seek(SeekFrom::Start(lba * 512)).is_ok()
+        && std::io::Read::read_exact(&mut f, &mut sec).is_ok()
+        && af::format::superblock_verify(&sec).is_some();
+    if !ok {
+        eprintln!("set {}: superblock ACFS assente a LBA {}", path, lba);
+        exit(1);
+    }
+    if let Some(u) = uuid {
+        sec[af::format::ARCA_OFF_UUID..af::format::ARCA_OFF_UUID + 8]
+            .copy_from_slice(&u.to_le_bytes());
+    }
+    // `superblock_set_identity` ricalcola il checksum: se i campi testuali
+    // non cambiano, lo ricalcoliamo a mano (stessa formula).
+    if label.is_some() || mountpoint.is_some() {
+        if af::format::superblock_set_identity(&mut sec, label, mountpoint).is_none() {
+            eprintln!("set {}: superblock non valido", path);
+            exit(1);
+        }
+    } else {
+        let check = af::image_hash(&sec[..af::format::ARCA_OFF_CHECK]);
+        sec[af::format::ARCA_OFF_CHECK..af::format::ARCA_OFF_CHECK + 8]
+            .copy_from_slice(&check.to_le_bytes());
+    }
+    let ok = f.seek(SeekFrom::Start(lba * 512)).is_ok() && f.write_all(&sec).is_ok();
+    if !ok {
+        eprintln!("set {}: scrittura fallita", path);
+        exit(1);
+    }
+    let id = af::format::superblock_identity(&sec);
+    match id {
+        Some(i) => println!(
+            "arca: {} LBA{} uuid={:016X} label='{}' mountpoint='{}'",
+            path,
+            lba,
+            i.uuid,
+            i.label_str(),
+            i.mountpoint_str()
+        ),
+        None => println!("arca: {} LBA{} patchato", path, lba),
     }
 }
 
@@ -310,25 +371,77 @@ fn cmd_uuid(args: &[String]) {
             exit(1);
         }
     };
-    let mut sec = [0u8; 512];
-    let ok = f.seek(SeekFrom::Start(lba * 512)).is_ok()
-        && std::io::Read::read_exact(&mut f, &mut sec).is_ok()
-        && af::format::superblock_verify(&sec).is_some();
-    if !ok {
-        eprintln!("uuid {}: superblock ACFS assente a LBA {}", path, lba);
-        exit(1);
+    drop(f);
+    patch_superblock(path, lba, Some(uuid), None, None);
+}
+
+/// `arca set <img> [--uuid HEX16] [--label L] [--mountpoint M] [--lba N]`:
+/// patch dell'identita' del volume (v4): il nome (label) e il posto dove
+/// vuole essere montato (mountpoint, path RELATIVO alla root).
+fn cmd_set(args: &[String]) {
+    if args.len() < 3 {
+        usage();
     }
-    sec[af::format::ARCA_OFF_UUID..af::format::ARCA_OFF_UUID + 8]
-        .copy_from_slice(&uuid.to_le_bytes());
-    let check = af::image_hash(&sec[..af::format::ARCA_OFF_CHECK]);
-    sec[af::format::ARCA_OFF_CHECK..af::format::ARCA_OFF_CHECK + 8]
-        .copy_from_slice(&check.to_le_bytes());
-    let ok = f.seek(SeekFrom::Start(lba * 512)).is_ok() && f.write_all(&sec).is_ok();
-    if !ok {
-        eprintln!("uuid {}: scrittura fallita", path);
-        exit(1);
+    let path = &args[2];
+    let mut uuid: Option<u64> = None;
+    let mut label: Option<String> = None;
+    let mut mountpoint: Option<String> = None;
+    let mut lba: u64 = 0;
+    let mut i = 3;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--uuid" => {
+                i += 1;
+                uuid = match args.get(i).and_then(|s| u64::from_str_radix(s, 16).ok()) {
+                    Some(v) if v != 0 => Some(v),
+                    _ => {
+                        eprintln!("--uuid: atteso esadecimale non-zero (es. 4152434100000002)");
+                        exit(2);
+                    }
+                };
+            }
+            "--label" => {
+                i += 1;
+                label = match args.get(i) {
+                    Some(v) => Some(v.clone()),
+                    None => {
+                        eprintln!("--label: atteso un testo");
+                        exit(2);
+                    }
+                };
+            }
+            "--mountpoint" => {
+                i += 1;
+                mountpoint = match args.get(i) {
+                    Some(v) => Some(v.clone()),
+                    None => {
+                        eprintln!("--mountpoint: atteso un path (relativo, es. tests)");
+                        exit(2);
+                    }
+                };
+            }
+            "--lba" => {
+                i += 1;
+                lba = match args.get(i).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("--lba: atteso intero >= 0");
+                        exit(2);
+                    }
+                };
+            }
+            other => {
+                eprintln!("argomento ignoto: {}", other);
+                usage();
+            }
+        }
+        i += 1;
     }
-    println!("arca: uuid {} LBA{} = {:016X}", path, lba, uuid);
+    if uuid.is_none() && label.is_none() && mountpoint.is_none() {
+        eprintln!("set: serve almeno --uuid, --label o --mountpoint");
+        exit(2);
+    }
+    patch_superblock(path, lba, uuid, label.as_deref(), mountpoint.as_deref());
 }
 
 /// Store su file per il seed (Fase 2): specchio host di `VolumeStore`
@@ -638,6 +751,12 @@ fn cmd_create(args: &[String]) {
     // `--uuid` resta solo come override esplicito (test deterministici).
     let mut uuid: u64 = auto_uuid();
     let mut size_mib: u64 = 1;
+    // v4 (ADR-0058): il volume si presenta — `label` (il nome) e
+    // `mountpoint` (dove vuole essere montato, path RELATIVO alla root).
+    // Default: il mountpoint segue la label ("TESTS" -> "tests"); vuoto =
+    // il volume non dichiara niente e non viene auto-montato.
+    let mut label = String::new();
+    let mut mountpoint: Option<String> = None;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -647,6 +766,26 @@ fn cmd_create(args: &[String]) {
                     Some(v) => v,
                     None => {
                         eprintln!("--uuid: atteso esadecimale (es. 4152434100000001)");
+                        exit(2);
+                    }
+                };
+            }
+            "--label" => {
+                i += 1;
+                label = match args.get(i) {
+                    Some(v) => v.clone(),
+                    None => {
+                        eprintln!("--label: atteso un testo");
+                        exit(2);
+                    }
+                };
+            }
+            "--mountpoint" => {
+                i += 1;
+                mountpoint = match args.get(i) {
+                    Some(v) => Some(v.clone()),
+                    None => {
+                        eprintln!("--mountpoint: atteso un path (relativo, es. tests)");
                         exit(2);
                     }
                 };
@@ -668,8 +807,13 @@ fn cmd_create(args: &[String]) {
         }
         i += 1;
     }
+    // Mountpoint di default = la label (minuscola): "TESTS" -> "tests".
+    let mount = match mountpoint {
+        Some(m) => m,
+        None => label.to_lowercase(),
+    };
 
-    let sb = af::format::superblock_build(uuid, 1, "");
+    let sb = af::format::superblock_build(uuid, 1, &label, &mount);
 
     // Determina se e' una partizione o whole-disk
     let is_partition = path.trim_start_matches("/dev/")
@@ -761,7 +905,7 @@ mod seed_tests {
         {
             let mut f = OpenOptions::new().create(true).read(true).write(true).truncate(true).open(&path).unwrap();
             let uuid = 0x41524341000000A1u64;
-            let sb = af::format::superblock_build(uuid, 1, "");
+            let sb = af::format::superblock_build(uuid, 1, "TEST", "tests");
             f.write_all(&sb).unwrap();
             f.seek(SeekFrom::Start(512)).unwrap();
             f.write_all(&sb).unwrap();

@@ -2629,3 +2629,58 @@
       `userland/rector/` (ordine di boot), `scripts/{build-userland,build-tests,inject-bins,arca-tool}.sh`;
       docs ADR-0057 (nuovo), revisione di ADR-0055, `11-testing.md`,
       `SUMMARY.md`, `ROADMAP.md`, `AGENTS.md`.
+- [x] Fase 3.2 — **Il FAT esce dal boot e dalla suite** (2026-10-21,
+      ADR-0058): ArcaFS diventa l'unico filesystem di sistema; il provider
+      FAT32 resta in cardo come riferimento prestazionale e base per l'USB,
+      ma non e' piu' media di boot ne' piano di prova. Fuori dal boot:
+      `SvcMeta.path` sparisce (init carica **tutto** da ArcaFS: oggetti
+      `sys`/`vela`/`usr`/`tst`), `scripts/inject-bins.sh` cancellato (i
+      binari sono nel volume, non piu' iniettati con mcopy su un FAT), i due
+      dischi FAT non vengono piu' attaccati a `run.sh`, e `identis`/`login`
+      — che arrivavano dal FAT **senza manifest** (mai pinnati) — entrano
+      nel doppio pinning FNV+BLAKE2s come tutti gli altri. Fuori dalla
+      suite: `testfat` (7/7) esce dal gate (resta nel repo: feature
+      `fat_tests` + `scripts/run-fat-tests.sh`, run dedicato con un disco
+      FAT); i test che guardavano il FAT sono migrati su ArcaFS con i
+      device **scoperti per magic/UUID** (mai per lettera — sparisce un
+      disco e `sda` cambia significato: `t32` scopre il device col
+      superblock ACFS, `t33`/`t35` montano il volume root, `t34` usa il
+      subtree `/bin`, `t36` riscritto sulla dimensione UUID (la LABEL e'
+      rinviata: e' roba da USB), `t58` confronta l'oggetto col path `ns`,
+      `foreign` t57 usa un file sulla root, `testsarca` scopre i device
+      (senza, i gruppi 22-32 e 41-50 venivano **saltati**: verde ma non
+      testati), la suite shell allega un disco invece di tre e i path
+      `/fat/…` diventano path della root, il PAL semina `hello-std.bin` in
+      ArcaFS). Superblock **v4** (ARCA_VERSION 3→4): 128→192 B dentro il
+      settore (l'header-extension resta a 1024: la geometria del blocco non
+      cambia) e il campo `mountpoint`, che era **morto** (scritto da
+      `superblock_build`, letto da nessuno), diventa vivo accanto alla
+      nuova `label` (32 B): il volume ha un *nome* e un *posto dichiarato*
+      (path relativo alla root; la vista POSIX aggiunge la "/"). Il tool
+      host impara a scriverli (`arca create --label/--mountpoint`, nuovo
+      `arca set` che patcha il superblock ricalcolando il checksum) e il
+      driver disco espone l'uuid a 64 bit del volume (`sniff_arca_uuid`,
+      magic+versione+block-size+checksum) come identita' del nodo:
+      `/dev/disk/by-uuid/<16hex>` (formato distinto dal seriale FAT a 8
+      hex) e chiave `UUID=<16hex>` nella risoluzione delle source. Il
+      modello che ne esce: **ArcaFS dichiarativo** (il volume dice come si
+      chiama e dove vuole stare), **FAT imperativo** (decide il sistema) —
+      con la voce FAT in `STATIC_MOUNTS` resa *iniettiva* (assente il disco
+      il mount non si attiva: il boot non dipende da nulla). **Rinviato**
+      l'auto-mount dichiarativo: un secondo volume ArcaFS si monta ma e'
+      uno **stub non leggibile** (un solo `DiskEngine` globale legato alla
+      root) → montarlo sarebbe una promessa non mantenuta; l'auto-mount
+      arriva col multi-engine, che e' anche il prerequisito dell'USB.
+      Validazione: gate **6 righe** (testfs 5/5, testsarca 64/64 con i due
+      casi nuovi `identita' volume v4`, posixtests 4/4, identistest 11/11,
+      usertests 58/58, threadtest 12/12), zero FAIL/PANIC/FAULT; suite
+      shell **10/10** (con il login all'avvio: il login e' l'entry point
+      nativo, non piu' un programma "al posto" della shell ma il suo
+      predecessore — e il prompt va flushato perche' una console
+      interattiva senza flush non mostra niente). Lezioni: (1) un
+      filesystem in un ruolo solo (media di boot) e' un peso che si paga a
+      ogni build (mcopy, nomi 8.3, path con prefisso); (2) **mai la
+      lettera del device**: con un disco in meno `sda` cambia significato
+      e i test che lo assumevano saltavano gruppi interi senza dire nulla;
+      (3) un campo nel formato che nessuno legge e' un campo che sparisce:
+      il `mountpoint` era morto da tre fasi e nessuno se n'era accorto.

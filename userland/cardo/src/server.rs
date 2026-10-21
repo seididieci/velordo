@@ -178,22 +178,21 @@ fn real_main(_sp: u64) -> ! {
         println!("[cardo] FAILED to register service Fs");
     }
 
-    // Mount FAT32 dalle spec statiche (Fase 16b: stesso codice dei mount
-    // dinamici; IpcDisk riconnette da solo a ogni restart di block, quindi
-    // i mount sopravvivono alla morte del driver — t32). Spec inattive
-    // (disco assente) restano in tabella e ritentano lazy al primo accesso.
+    // Mount statici dalle spec (Fase 16b: stesso codice dei mount dinamici;
+    // IpcDisk riconnette da solo a ogni restart di block, quindi i mount
+    // sopravvivono alla morte del driver — t32). Spec inattive (disco
+    // assente) restano in tabella e ritentano lazy al primo accesso.
+    // ADR-0058: la tabella e' vuota (il FAT esce dal boot: i volumi ArcaFS
+    // si montano da soli, la root per UUID dalla cmdline).
     let mut fat_mounts: Vec<mount::FsMount> = Vec::new();
     // Identita' stabili dei mount (Fase 49, F2): monotoniche, mai riusate.
     let mut next_mount_id: u64 = 1;
     for (src, tgt) in mount::STATIC_MOUNTS {
         if mount::apply_mount_spec(&mut fat_mounts, src, tgt, "", &mut next_mount_id) {
-            println!("[cardo] FAT32 montato a /{} (via block)", tgt);
+            println!("[cardo] mount statico /{} (via block)", tgt);
         } else {
             println!("[cardo] mount {} -> {} inattivo (disco assente?)", src, tgt);
         }
-    }
-    if fat_mounts.iter().all(|m| !m.is_active()) {
-        println!("[cardo] nessun FAT attivo: ramfs only");
     }
 
     // Fase 2 (root su volume): parse `root=UUID=<8hex>` dalla cmdline PVH,
@@ -230,6 +229,8 @@ fn real_main(_sp: u64) -> ! {
     }
     // Scansiona i dischi per trovare il volume con l'uuid richiesto.
     let mut root_store: Option<btree_drv::VolumeStore> = None;
+    // Handle del volume root (per rileggerne l'identita' v4: uuid+label).
+    let mut root_handle: u32 = 0;
     if let Some(uuid) = root_uuid {
         // Itera sda..sdh + partizioni sdXn (stesso pattern di scan_and_open).
         for disk in 0..8u8 {
@@ -247,6 +248,7 @@ fn real_main(_sp: u64) -> ! {
                     if let Some(v) = btree_drv::open_with_uuid(handle, uuid) {
                         println!("[cardo] root: volume ArcaFS trovato uuid={:016X} handle={} path={}", uuid, handle, p);
                         root_store = Some(v);
+                        root_handle = handle;
                         break;
                     }
                 } else {
@@ -265,6 +267,7 @@ fn real_main(_sp: u64) -> ! {
                             if let Some(v) = btree_drv::open_with_uuid(handle, uuid) {
                                 println!("[cardo] root: volume ArcaFS trovato uuid={:016X} handle={} path={}", uuid, handle, p);
                                 root_store = Some(v);
+                                root_handle = handle;
                                 break;
                             }
                         } else {
@@ -331,7 +334,18 @@ fn real_main(_sp: u64) -> ! {
     next_mount_id = next_mount_id.wrapping_add(1);
     fat_mounts.push(mount::FsMount::root_arca(root_gen, root_uuid_v, root_id));
     fat_gen = fat_gen.wrapping_add(1);
-    println!("[cardo] root ArcaFS montata su / (uuid={:016X})", root_uuid_v);
+    // ADR-0058 (v4): il volume si presenta — uuid + label (il nome).
+    let root_label = {
+        let mut sec = [0u8; 512];
+        match mount::probe_arca(root_handle) {
+            Some(id) => alloc::string::String::from(id.label_str()),
+            None => String::new(),
+        }
+    };
+    println!(
+        "[cardo] root ArcaFS montata su / (uuid={:016X}, label='{}')",
+        root_uuid_v, root_label
+    );
 
     // Client registrati: pid → (req_ring_phys, resp_ring_phys).
     let mut rings: BTreeMap<u64, (u64, u64)> = BTreeMap::new();

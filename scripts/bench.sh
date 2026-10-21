@@ -83,7 +83,9 @@ for i in $(seq 1 "$RUNS"); do
     # setsid: nuovo gruppo; al DONE chiudiamo noi QEMU invece di attendere il
     # timeout (QEMU resta sulla shell dopo il bench). `timeout` resta la rete
     # di sicurezza per build/boot bloccati.
-    RUN_BENCH=1 setsid timeout "$TIMEOUT_S" ./run.sh "${ACCEL[@]}" >"$log" 2>&1 &
+    # FAT_IMG=1: il confronto A/B ArcaFS-vs-FAT ha bisogno del disco FAT
+    # (ADR-0058: il boot di per se non lo usa, il bench sì).
+    FAT_IMG=1 RUN_BENCH=1 setsid timeout "$TIMEOUT_S" ./run.sh "${ACCEL[@]}" >"$log" 2>&1 &
     pid=$!
     deadline=$((SECONDS + TIMEOUT_S))
     timed_out=0

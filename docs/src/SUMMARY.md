@@ -85,3 +85,4 @@
 - [ADR-0055: User and Authentication Management (S3.x)](./adr/0055-user-management.md)
 - [ADR-0056: LAPIC minimale e MSI-X per virtio-gpu (L0a/L0b)](./adr/0056-lapic-msix-minimi.md)
 - [ADR-0057: Creazione utenti, token di sessione e protocollo Identis (Fase 3.1)](./adr/0057-creazione-utenti-token-sessione.md)
+- [ADR-0058: Il FAT esce dal boot e dalla suite — ArcaFS unico filesystem di sistema](./adr/0058-fat-fuori-boot-arcafs-unico.md)

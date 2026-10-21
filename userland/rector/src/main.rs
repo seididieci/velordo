@@ -38,6 +38,8 @@ fn expected_hash(bin: &[u8]) -> Option<u64> {
         b"usershell" => Some(HASH_USERSHELL),
         b"usertime" => Some(HASH_USERTIME),
         b"vestigia" => Some(HASH_VESTIGIA),
+        b"identis" => Some(HASH_IDENTIS),
+        b"identis-login" => Some(HASH_IDENTIS_LOGIN),
         _ => None,
     }
 }
@@ -57,6 +59,8 @@ fn expected_blake(bin: &[u8]) -> Option<[u8; 32]> {
         b"usershell" => Some(BLAKE_USERSHELL),
         b"usertime" => Some(BLAKE_USERTIME),
         b"vestigia" => Some(BLAKE_VESTIGIA),
+        b"identis" => Some(BLAKE_IDENTIS),
+        b"identis-login" => Some(BLAKE_IDENTIS_LOGIN),
         _ => None,
     }
 }
@@ -144,14 +148,18 @@ fn spawn_child(name: &[u8]) -> Option<i64> {
     }
 }
 
-/// Metadati di un servizio avviabile da disco (Fase 21): `path=None` = binario
-/// embedded (spawn per nome, solo disk/fs/log restano embedded — log per
-/// primo per disegno ADR-0039); `path=Some` =
-/// file da leggere via FS e spawnare con `spawn_image`. `io`/`prio` servono
-/// solo al path da disco (l'embedded li prende dalla tabella kernel).
+/// Metadati di un servizio avviabile: `obj=None` = binario embedded (spawn
+/// per nome, solo disk/fs/log restano embedded — log per primo per disegno
+/// ADR-0039); `obj=Some((bucket, key))` = oggetto ArcaFS letto col
+/// filesystem e spawnato con `spawn_image` (Fase 55, N0).
+///
+/// **Il FAT non e' piu' una sorgente** (ADR-0058): il boot non attacca piu'
+/// dischi FAT e i binari vivono tutti in ArcaFS (bucket di classe: `sys`
+/// per i servizi, `vela` per i driver, `tst` per la suite, `usr` per i
+/// programmi utente). `io`/`prio` valgono per il path da disco (l'embedded
+/// li prende dalla tabella kernel).
 struct SvcMeta {
     bin: &'static [u8],
-    path: Option<&'static str>,
     obj: Option<(&'static [u8], &'static [u8])>,
     prio: u8,
     io: &'static [(u16, u16)],
@@ -164,63 +172,6 @@ const KBD_PS2_RANGES: &[(u16, u16)] = &[(0x60, 0x64)];
 /// CMOS/RTC per il fornitore di data/ora (Fase 50, P1 orologio): indice
 /// `0x70` + dati `0x71` (accessi a byte, una sola entry).
 const TIME_CMOS_RANGES: &[(u16, u16)] = &[(0x70, 0x71)];
-
-/// Spawna un servizio da disco (Fase 21): legge il file, costruisce SpawnMeta
-/// e chiama `spawn_image`. Ritorna il channel id o None (file mancante,
-/// meta invalida, spawn rifiutato). Il boot fallisce loud (panic), la
-/// supervisione ritenta con backoff+hold come per gli embedded.
-/// Fase 36 (identita' misurata): prima dello spawn ricalcola l'hash dei byte
-/// caricati e lo confronta col manifest generato a build-time; mismatch =
-/// None (a boot e' panic come sopra; in restart e' retry-con-hold con log
-/// loud a ogni finestra — un disco manomesso non diventa mai servizio).
-fn spawn_file(meta: &SvcMeta) -> Option<i64> {
-    let path = meta.path?;
-    print_str!("[init] load ");
-    civis::write_raw(path.as_ptr(), path.len());
-    let img = match civis::load_file(path) {
-        Some(b) if !b.is_empty() => b,
-        _ => {
-            println!(" -> FAILED (file illeggibile)");
-            return None;
-        }
-    };
-    // `checked` = un pinning da manifest esisteva ed e' passato: solo allora
-    // il log dice `hash-ok` (mai claim senza verifica). Doppio pinning N0:
-    // FNV + BLAKE2s (un disco manomesso non diventa mai servizio).
-    let pinned = expected_hash(meta.bin).is_some() || expected_blake(meta.bin).is_some();
-    let checked = if pinned {
-        if !verify_image(meta.bin, &img) {
-            println!(" -> FAILED (hash mismatch)");
-            return None;
-        }
-        true
-    } else {
-        false
-    };
-    let name = match core::str::from_utf8(meta.bin) {
-        Ok(s) => s,
-        Err(_) => return None,
-    };
-    let sm = match civis::SpawnMeta::new(name, meta.prio, meta.io) {
-        Some(m) => m,
-        None => return None,
-    };
-    print_str!(" -> spawn ");
-    match civis::spawn_image(&img, &sm) {
-        Ok(chan) => {
-            if checked {
-                println!("{}B hash-ok -> child chan={}", img.len(), chan);
-            } else {
-                println!("{}B -> child chan={}", img.len(), chan);
-            }
-            Some(chan)
-        }
-        Err(_) => {
-            println!(" -> FAILED (spawn_image rifiutato)");
-            None
-        }
-    }
-}
 
 /// Spawna un servizio da ArcaFS via `obj_get()` (Fase 55, N0).
 fn spawn_object(bucket: &[u8], key: &[u8]) -> Option<alloc::vec::Vec<u8>> {
@@ -241,7 +192,10 @@ fn spawn_image_from_vec(img: &[u8], meta: &SvcMeta) -> Option<i64> {
         Err(_) => return None,
     };
     // Doppio pinning N0 (vedi `verify_image`): mismatch = None (a boot e'
-    // panic come prima; in restart e' retry-con-hold con log loud).
+    // panic come prima; in restart e' retry-con-hold con log loud). Il log
+    // dice `hash-ok` solo se c'era un pinning dal manifest (mai claim senza
+    // verifica).
+    let pinned = expected_hash(meta.bin).is_some() || expected_blake(meta.bin).is_some();
     if !verify_image(meta.bin, img) {
         println!(" -> FAILED (hash mismatch)");
         return None;
@@ -252,7 +206,11 @@ fn spawn_image_from_vec(img: &[u8], meta: &SvcMeta) -> Option<i64> {
     };
     match civis::spawn_image(img, &sm) {
         Ok(chan) => {
-            println!("{}B -> child chan={}", img.len(), chan);
+            if pinned {
+                println!("{}B hash-ok -> child chan={}", img.len(), chan);
+            } else {
+                println!("{}B -> child chan={}", img.len(), chan);
+            }
             Some(chan)
         }
         Err(_) => {
@@ -262,10 +220,11 @@ fn spawn_image_from_vec(img: &[u8], meta: &SvcMeta) -> Option<i64> {
     }
 }
 
-/// Spawna da manifest (embedded, oggetto o disco) + log unificato.
+/// Spawna da manifest (embedded o oggetto ArcaFS) + log unificato.
 /// D1 (niente fallback): a oggetto assente/diverso ritorna None senza
-/// ripiegare su FAT — a boot il chiamante fa panic loud, al restart ritenta
-/// con hold (vedi `restart_service`). I TEST_* restano su path FAT (D2).
+/// ripiegare su un'altra sorgente — a boot il chiamante fa panic loud, al
+/// restart ritenta con hold (vedi `restart_service`). **Il FAT non e' piu'
+/// una sorgente** (ADR-0058): il boot carica tutto da ArcaFS.
 fn spawn_entry(meta: &SvcMeta) -> Option<i64> {
     if let Some((bucket, key)) = meta.obj {
         print_str!("[init] load obj ");
@@ -279,10 +238,7 @@ fn spawn_entry(meta: &SvcMeta) -> Option<i64> {
         };
         return spawn_image_from_vec(&img, meta);
     }
-    match meta.path {
-        None => spawn_child(meta.bin),
-        Some(_) => spawn_file(meta),
-    }
+    spawn_child(meta.bin)
 }
 
 /// Cerca il token `s25=1` nella cmdline di boot (S2.5d: run dedicato allo
@@ -507,49 +463,42 @@ fn restart_service(e: &mut Supervised) {
 /// build via mcopy) e parte via `spawn_image`. Priorita': 16 Normal, 1 Low.
 const SVC_CONSOLE: SvcMeta = SvcMeta {
     bin: b"gpu",
-    path: Some("/fat/bin/gpu.bin"),
     obj: Some((b"vela", b"bin/gpu.bin")),
     prio: 16,
     io: VGA_CURSOR_RANGES,
 };
 const SVC_UPTIME: SvcMeta = SvcMeta {
     bin: b"useruptime",
-    path: Some("/fat/bin/uptime.bin"),
     obj: Some((b"sys", b"bin/uptime.bin")),
     prio: 1,
     io: &[],
 };
 const SVC_VELA: SvcMeta = SvcMeta {
     bin: b"vela",
-    path: Some("/fat/bin/vela.bin"),
     obj: Some((b"sys", b"bin/vela.bin")),
     prio: 16,
     io: &[],
 };
 const SVC_KBD: SvcMeta = SvcMeta {
     bin: b"kbd",
-    path: Some("/fat/bin/kbd.bin"),
     obj: Some((b"vela", b"bin/kbd.bin")),
     prio: 16,
     io: KBD_PS2_RANGES,
 };
 const SVC_PORTA: SvcMeta = SvcMeta {
     bin: b"porta",
-    path: Some("/fat/bin/porta.bin"),
     obj: Some((b"sys", b"bin/porta.bin")),
     prio: 16,
     io: &[],
 };
 const SVC_POSIX: SvcMeta = SvcMeta {
     bin: b"userposix",
-    path: Some("/fat/bin/posix.bin"),
     obj: Some((b"sys", b"bin/posix/posix.bin")),
     prio: 16,
     io: &[],
 };
 const SVC_SHELL: SvcMeta = SvcMeta {
     bin: b"usershell",
-    path: Some("/fat/bin/shell.bin"),
     obj: Some((b"sys", b"bin/posix/shell.bin")),
     prio: 16,
     io: &[],
@@ -559,21 +508,18 @@ const SVC_SHELL: SvcMeta = SvcMeta {
 // programma interattivo (chiede utente/password, stampa SUCCESS/FAIL).
 const SVC_IDENTIS: SvcMeta = SvcMeta {
     bin: b"identis",
-    path: Some("/fat/bin/identis.bin"),
-    obj: None,
+    obj: Some((b"sys", b"bin/identis.bin")),
     prio: 16,
     io: &[],
 };
 const SVC_LOGIN: SvcMeta = SvcMeta {
     bin: b"identis-login",
-    path: Some("/fat/bin/login.bin"),
-    obj: None,
+    obj: Some((b"sys", b"bin/identis-login.bin")),
     prio: 16,
     io: &[],
 };
 const SVC_TIME: SvcMeta = SvcMeta {
     bin: b"usertime",
-    path: Some("/fat/bin/time.bin"),
     obj: Some((b"vela", b"bin/time.bin")),
     prio: 16,
     io: TIME_CMOS_RANGES,
@@ -583,32 +529,31 @@ const SVC_TIME: SvcMeta = SvcMeta {
 /// per nome, mai da disco). Primo dopo init, supervisionato con restart.
 const SVC_VESTIGIA: SvcMeta = SvcMeta {
     bin: b"vestigia",
-    path: None,
     obj: None,
     prio: 16,
     io: &[],
 };
 // Suite di test (D2): caricate per object_id dal bucket `tst` (hash-pinned
 // come i servizi); `path` resta come gemello FAT documentato (t39 lo prova).
-const TEST_FS: SvcMeta = SvcMeta { bin: b"usertestfs", path: Some("/fat/test/testfs.bin"), obj: Some((b"tst", b"test/testfs.bin")), prio: 16, io: &[] };
-const TEST_FAT: SvcMeta = SvcMeta { bin: b"usertestfat", path: Some("/fat/test/testfat.bin"), obj: Some((b"tst", b"test/testfat.bin")), prio: 16, io: &[] };
-const TEST_ARCA: SvcMeta = SvcMeta { bin: b"usertestsarca", path: Some("/fat/test/testarca.bin"), obj: Some((b"tst", b"test/testarca.bin")), prio: 16, io: &[] };
+const TEST_FS: SvcMeta = SvcMeta { bin: b"usertestfs", obj: Some((b"tst", b"test/testfs.bin")), prio: 16, io: &[] };
+const TEST_FAT: SvcMeta = SvcMeta { bin: b"usertestfat", obj: Some((b"tst", b"test/testfat.bin")), prio: 16, io: &[] };
+const TEST_ARCA: SvcMeta = SvcMeta { bin: b"usertestsarca", obj: Some((b"tst", b"test/testarca.bin")), prio: 16, io: &[] };
 // Suite della personalita' POSIX (Fase 58.5, ADR-0041): gira PRIMA di
 // usertests (t54 deve precedere i drop di diritti di t34 in usertests).
-const TEST_POSIX: SvcMeta = SvcMeta { bin: b"userposixtests", path: Some("/fat/test/posixtst.bin"), obj: Some((b"tst", b"test/posixtst.bin")), prio: 16, io: &[] };
+const TEST_POSIX: SvcMeta = SvcMeta { bin: b"userposixtests", obj: Some((b"tst", b"test/posixtst.bin")), prio: 16, io: &[] };
 // Protocollo di autenticazione/creazione utenti (ADR-0055, Fase 3.1):
 // sessione con token, add_user, duplicati, nomi non conformi, elenco.
-const TEST_IDENTIS: SvcMeta = SvcMeta { bin: b"identistest", path: Some("/fat/test/idtest.bin"), obj: Some((b"tst", b"test/idtest.bin")), prio: 16, io: &[] };
-const TESTS: SvcMeta = SvcMeta { bin: b"usertests", path: Some("/fat/test/tests.bin"), obj: Some((b"tst", b"test/tests.bin")), prio: 16, io: &[] };
+const TEST_IDENTIS: SvcMeta = SvcMeta { bin: b"identistest", obj: Some((b"tst", b"test/idtest.bin")), prio: 16, io: &[] };
+const TESTS: SvcMeta = SvcMeta { bin: b"usertests", obj: Some((b"tst", b"test/tests.bin")), prio: 16, io: &[] };
 // Thread 1:1 (S-T, ADR-0046): dopo usertests (nessuna dipendenza dai diritti),
 // prima della shell interattiva.
-const TEST_THREADS: SvcMeta = SvcMeta { bin: b"userthreadtest", path: Some("/fat/test/thread.bin"), obj: Some((b"tst", b"test/thread.bin")), prio: 16, io: &[] };
+const TEST_THREADS: SvcMeta = SvcMeta { bin: b"userthreadtest", obj: Some((b"tst", b"test/thread.bin")), prio: 16, io: &[] };
 // Fuse staticone (S2.5d): ricompone i chunk rustc e lo spawna bigstack.
 // Solo obj (niente FAT: i chunk vivono solo su arca grande), solo se la
 // cmdline contiene `s25=1` (run dedicato, mai nel gate).
-const TEST_S25: SvcMeta = SvcMeta { bin: b"s25fuse", path: None, obj: Some((b"tst", b"tool/s25fuse.bin")), prio: 16, io: &[] };
+const TEST_S25: SvcMeta = SvcMeta { bin: b"s25fuse", obj: Some((b"tst", b"tool/s25fuse.bin")), prio: 16, io: &[] };
 #[cfg(feature = "bench")]
-const TEST_BENCH: SvcMeta = SvcMeta { bin: b"userbench", path: Some("/fat/test/bench.bin"), obj: Some((b"tst", b"test/bench.bin")), prio: 16, io: &[] };
+const TEST_BENCH: SvcMeta = SvcMeta { bin: b"userbench", obj: Some((b"tst", b"test/bench.bin")), prio: 16, io: &[] };
 
 /// Spawna dal manifest SENZA attesa (spawn parallelo, Fase 57): il chiamante
 /// sincronizza con `wait_any`. Fallimento = None (fail loud al chiamante).
@@ -734,8 +679,8 @@ fn real_main(_sp: u64) -> ! {
     //
     // Disk/fs embedded: manifest inline (path=None) con gli stessi nomi: il
     // restart riusa `spawn_child` come a boot.
-    const META_DISK: SvcMeta = SvcMeta { bin: b"block", path: None, obj: None, prio: 16, io: &[] };
-    const META_FS: SvcMeta = SvcMeta { bin: b"cardo", path: None, obj: None, prio: 16, io: &[] };
+    const META_DISK: SvcMeta = SvcMeta { bin: b"block", obj: None, prio: 16, io: &[] };
+    const META_FS: SvcMeta = SvcMeta { bin: b"cardo", obj: None, prio: 16, io: &[] };
     let mut supervised = [
         Supervised { meta: &SVC_CONSOLE, svc: civis::Service::Gpu, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
         Supervised { meta: &META_DISK, svc: civis::Service::Block, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
@@ -761,6 +706,10 @@ fn real_main(_sp: u64) -> ! {
     {
         println!("[init] avvio test suite");
         run_test(&TEST_FS, &mut supervised);
+        // ADR-0058: la suite FAT32 esce dal gate (il FAT non e' piu' il
+        // filesystem di sistema). Resta nel repo e gira solo con il feature
+        // `fat_tests` (run dedicato con un disco FAT attaccato).
+        #[cfg(feature = "fat_tests")]
         run_test(&TEST_FAT, &mut supervised);
         run_test(&TEST_ARCA, &mut supervised);
         run_test(&TEST_POSIX, &mut supervised);

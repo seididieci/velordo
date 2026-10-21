@@ -325,13 +325,13 @@ fn wait_all(chans: &[u64]) -> Vec<Option<i64>> {
     done
 }
 /// PATH di default (D1: root su ArcaFS): prima i programmi utente, poi i
-/// servizi — su volume (`/usr/bin`, `/bin`), mai su FAT.
+/// servizi — sul volume ArcaFS (`/usr/bin`, `/bin`).
 const DEFAULT_PATH: &str = "/usr/bin:/bin";
 
 /// Risolve un nome programma (43a): con `/` e' path diretto (`cwd::resolve`),
 /// senza e' cercato nelle dir di `$PATH` (`:`-separate, default D1 sopra).
 /// Per dir si prova il nome esatto e poi con suffisso `.bin` (gli eseguibili
-/// su FAT 8.3 sono `.bin`: `runhello` trova `/fat/bin/runhello.bin`).
+/// hanno il suffisso `.bin`: `runhello` trova `/usr/bin/runhello.bin`).
 /// La sonda e' via `stat` (1 round trip, niente dati); il load resta al
 /// chiamante (TOCTOU → `cannot load` loud). `None` = non trovato.
 pub(crate) fn resolve_prog(name: &str) -> Option<String> {

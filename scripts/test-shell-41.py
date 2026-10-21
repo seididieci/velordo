@@ -17,9 +17,7 @@ def main():
     args = parse_shell_args("/tmp/velordo-41-mon.sock", "/tmp/velordo-41-serial.log")
     if not args.no_prep:
         prep_images()
-    sh = Shell(mon=args.mon, serial=args.serial, fat=args.fat, fat2=args.fat2,
-               kernel=args.kernel, fat_format=args.fat_format,
-               arca_img=args.arca, arca_format=args.arca_format)
+    sh = Shell(mon=args.mon, serial=args.serial, kernel=args.kernel, arca_img=args.arca, arca_format=args.arca_format)
     c = Checker()
     try:
         sh.boot()

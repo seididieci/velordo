@@ -1,2 +1,2 @@
-# base: ls -l /fat (script separato: l'assenza di (ro) e' sullo slice).
-ls -l /fat
+# base: ls -l / (la radice ArcaFS, scrivibile: niente piu' /fat, ADR-0058).
+ls -l /

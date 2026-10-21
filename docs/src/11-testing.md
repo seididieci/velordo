@@ -2,8 +2,10 @@
 
 > I conteggi di suite citati negli ADR e nelle sotto-fasi del libro sono
 > **snapshot all'epoca** di ciascuna fase (es. 17/17, 21/21, 32/32). Il gate
-> corrente e' quello qui sotto (5/5 + 7/7 + 62/62 + 4/4 + 11/11 + 58/58 +
-> 12/12 + shell) e in `AGENTS.md`.
+> corrente e' quello qui sotto (5/5 + 64/64 + 4/4 + 11/11 + 58/58 + 12/12 +
+> shell) e in `AGENTS.md`. La suite **FAT32** e' **fuori dal gate**
+> (ADR-0058: il FAT non e' piu' il filesystem di sistema): vive in
+> `scripts/run-fat-tests.sh`, un run dedicato con un disco FAT attaccato.
 
 La regressione automatica del sistema gira **dentro QEMU** a ogni boot: i
 binari di test sono processi user reali, spawnati da `init` in sequenza prima
@@ -22,7 +24,7 @@ flavours/posix/
 testland/   test suite meccanismo + repro + demo storiche
   testfs        usertestfs   — ramfs (read/write/mkdir/errori)   → PASS 5/5
   testfat       usertestfat  — FAT32 scrivibile (Fase 20) + /dev/null, /dev/zero → PASS 7/7
-  testsarca     usertestsarca — ArcaFS P5+A1+56.1+56.2a+56.2b+56.2c (B+tree COW + commit, recovery/GC + sys-dal-volume) + logging L1 Fase 57 (gateway `Log` RAM-first, bucket per identita', seal, stats, bounce) + namespace POSIX 56.3 (dir emergenti + set RAM, ADR-0042) + quota per bucket A3 (budget, ERR_NOSPC, persistenza, ADR-0044) + rename/symlink S1.1 (file/dir, link+follow, ERR tipizzati) + range read 2 MiB S2.5f/F0 + prefix-overwrite W1 (merge esplicito `ns_write`) + extent dinamici S2.5w/W2 (ADR-0050: COW a blocchi, liveness, XSTATS) + append 512K bound (test59) + cache write-through S2.5w/W3 (ADR-0051: fasce R0/R1/R2, sizing meminfo, hit/reads in XSTATS) + epoche minime S2.5w/W4 (ADR-0052: fd-write a epoca, crash kill-mid recovery, test60) + packing sub-blocco stesso-bucket S2.5w/W5 (ADR-0053: tipo nodo PACKED, bump per bucket, refcount eager + rebuild al bind, test61) + blocchi 64 KiB e rimozione cap 16 MiB S2.5w/W6 (ADR-0054: ARCA_VERSION 3, nessun cap oggetto, walk streaming, test62) → PASS 62/62
+  testsarca     usertestsarca — ArcaFS P5+A1+56.1+56.2a+56.2b+56.2c (B+tree COW + commit, recovery/GC + sys-dal-volume) + logging L1 Fase 57 (gateway `Log` RAM-first, bucket per identita', seal, stats, bounce) + namespace POSIX 56.3 (dir emergenti + set RAM, ADR-0042) + quota per bucket A3 (budget, ERR_NOSPC, persistenza, ADR-0044) + rename/symlink S1.1 (file/dir, link+follow, ERR tipizzati) + range read 2 MiB S2.5f/F0 + prefix-overwrite W1 (merge esplicito `ns_write`) + extent dinamici S2.5w/W2 (ADR-0050: COW a blocchi, liveness, XSTATS) + append 512K bound (test59) + cache write-through S2.5w/W3 (ADR-0051: fasce R0/R1/R2, sizing meminfo, hit/reads in XSTATS) + epoche minime S2.5w/W4 (ADR-0052: fd-write a epoca, crash kill-mid recovery, test60) + packing sub-blocco stesso-bucket S2.5w/W5 (ADR-0053: tipo nodo PACKED, bump per bucket, refcount eager + rebuild al bind, test61) + blocchi 64 KiB e rimozione cap 16 MiB S2.5w/W6 (ADR-0054: ARCA_VERSION 3, nessun cap oggetto, walk streaming, test62) + identita' del volume v4 (ADR-0058: superblock 192 B, label + mountpoint dichiarato, test63-64) → PASS 64/64
   usertests     usertests    — suite meccanismo (58 test, +t59 rename/+t60 symlink/+t61 chdir/+t62 chmod S1.1) → PASS 58/58
   identistest   identistest  — protocollo Identis (ADR-0057): sessione/token, verifica credenziali, creazione utente, duplicati, nomi non conformi, elenco utenti, formato del bucket `identis:config` → PASS 11/11
   threadtest    userthreadtest — thread 1:1 (S-T, ADR-0046: create/stack/TLS/futex/IPC/fd/stress-32/FPU-S2.5b) → PASS 12/12
@@ -58,19 +60,20 @@ isolati, 41-50 su mount root esplicito, 51-54 quota A3 in bucket `q5*`,
 55-62 namespace/rename/range/W1-W6; senza quarto drive salta 12-13, resta
 PASS adattivo).
 
-Ordine di suite: testfs, testfat, testsarca, **posixtests**, **identistest**,
+Ordine di suite: testfs, testsarca, **posixtests**, **identistest**,
 usertests, threadtest (posixtests PRIMA di usertests cosi' t54 precede i drop
 di diritti di t34; identistest dopo posixtests e prima di usertests: parla
 con Identis e scrive nel bucket delle credenziali, ma non tocca i diritti FS
 che t34 verifica; threadtest ultimo: non dipende dai diritti e stressa lo
-scheduler a servizi caldi).
+scheduler a servizi caldi). **La suite FAT32 non c'e' piu'** (ADR-0058: il FAT
+e' fuori dal boot): `scripts/run-fat-tests.sh` la esegue in un run dedicato
+con un disco FAT attaccato (feature `fat_tests` di init).
 
 Righe di gate:
 
 ```
 [testfs] PASS 5/5
-[testfat] PASS 7/7
-[testsarca] PASS 62/62
+[testsarca] PASS 64/64
 [posixtests] PASS 4/4
 [identistest] PASS 11/11
 [usertests] PASS 58/58

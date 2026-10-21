@@ -154,10 +154,11 @@ pub use syscall_numbers::{
 /// Formato superblock ArcaFS: casa `arcafs` (condiviso guest/host); `civis`
 /// li riesporta cosi' i client esistenti non cambiano import.
 pub use arcafs::format::{
-    ARCA_BLOCK_SIZE, ARCA_MAGIC, ARCA_OFF_ALLOC, ARCA_OFF_AUTO, ARCA_OFF_BLOCK_SIZE,
-    ARCA_OFF_CHECK, ARCA_OFF_FLAGS, ARCA_OFF_GEN, ARCA_OFF_MAGIC, ARCA_OFF_MOUNT,
-    ARCA_OFF_REFCOUNT, ARCA_OFF_ROOT, ARCA_OFF_UUID, ARCA_OFF_VERSION, ARCA_SUPER_LEN,
-    ARCA_VERSION,
+    ARCA_BLOCK_SIZE, ARCA_LABEL_MAX, ARCA_MAGIC, ARCA_MOUNT_MAX, ARCA_OFF_ALLOC,
+    ARCA_OFF_AUTO, ARCA_OFF_BLOCK_SIZE, ARCA_OFF_CHECK, ARCA_OFF_FLAGS, ARCA_OFF_GEN,
+    ARCA_OFF_LABEL, ARCA_OFF_MAGIC, ARCA_OFF_META, ARCA_OFF_MOUNT, ARCA_OFF_REFCOUNT,
+    ARCA_OFF_ROOT, ARCA_OFF_UUID, ARCA_OFF_VERSION, ARCA_SUPER_LEN, ARCA_VERSION, Superblock,
+    superblock_identity,
 };
 
 // ── Meccanismo neutro (ADR-0025, ADR-0041) ───────────────────────────

@@ -42,9 +42,9 @@ fn console_write(data: &[u8]) {
     }
     let s = core::str::from_utf8(data).unwrap_or("");
     civis::print_str(s);
-    if data.ends_with(&[b'\n']) {
-        civis::flush();
-    }
+    // Flush SEMPRE: la console e' interattiva (un prompt senza newline
+    // resterebbe nel buffer seriale e nessuno lo vedrebbe).
+    civis::flush();
 }
 
 /// Entry: apre console e tastiera, fa il self-test, poi chiede credenziali.
@@ -106,12 +106,33 @@ fn real_main(_sp: u64) -> ! {
         Err(_) => console_write(b"[login] ERRORE IPC\n"),
     }
 
-    // Resta vivo, ma **dormendo**: `recv` blocca finche' non arriva un
-    // messaggio. Uno spin puro qui brucerebbe una CPU per sempre (il
-    // programma interattivo e' un placeholder: la shell nativa, Fase 3.2,
-    // prenderà il posto).
-    loop {
-        let _ = civis::ipc::recv();
+    // La shell prende il posto del login: il login e' il programma di
+    // autenticazione, non il terminale. Oggi e' la shell **POSIX** (la
+    // personalita' ha la sua shell: `bin/posix/shell.bin` nel bucket `sys`);
+    // la shell **nativa** — che eredita anche la sessione — arriva con la
+    // Fase 3.2. Il binario e' spawnato *detached*: quando il login esce, la
+    // shell viene ri-parentata a init (senza, la cascata della morte del
+    // parent la ucciderebbe).
+    spawn_shell();
+    civis::exit(0);
+}
+
+/// Spawla la shell POSIX dall'oggetto ArcaFS (`sys:bin/posix/shell.bin`).
+fn spawn_shell() {
+    let img = match civis::obj_get(b"sys", b"bin/posix/shell.bin") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            console_write(b"[login] shell POSIX non trovata su ArcaFS\n");
+            return;
+        }
+    };
+    let Some(meta) = civis::SpawnMeta::new("usershell", 16, &[]) else {
+        console_write(b"[login] SpawnMeta non valido\n");
+        return;
+    };
+    match civis::spawn_image(&img, &meta.detached()) {
+        Ok(chan) => console_write(b"[login] shell POSIX avviata\n"),
+        Err(_) => console_write(b"[login] spawn della shell fallito\n"),
     }
 }
 

@@ -17,9 +17,7 @@ def main():
     args = parse_shell_args("/tmp/velordo-base-mon.sock", "/tmp/velordo-base-serial.log")
     if not args.no_prep:
         prep_images()
-    sh = Shell(mon=args.mon, serial=args.serial, fat=args.fat, fat2=args.fat2,
-               kernel=args.kernel, fat_format=args.fat_format,
-               arca_img=args.arca, arca_format=args.arca_format)
+    sh = Shell(mon=args.mon, serial=args.serial, kernel=args.kernel, arca_img=args.arca, arca_format=args.arca_format)
     c = Checker()
     SHOT0 = args.serial + ".shot0.ppm"
     SHOT1 = args.serial + ".shot1.ppm"
@@ -30,21 +28,21 @@ def main():
         ok = True
 
         # Suite di boot (se il kernel bootato la include: dipende da come e'
-        # stato compilato init): t36 richiede il secondo disco (FAT2 sopra).
-        # Senza FAT2 falliva per ambiente restando invisibile — ora si asserisce
-        # quando la suite e' presente, si salta in boot di produzione.
+        # stato compilato init): si asserisce quando la suite e' presente, si
+        # salta in boot di produzione.
         data = sh.read_log()
         if b"[usertests] SUMMARY" in data:
             found = b"t36 UUID/LABEL + discovery stabile: PASS" in data
             c.check("t36 suite pre-shell", found)
 
         # ls + cat + mkdir (script base1). E1 (root ArcaFS): in / ci sono
-        # anche bin, test (/bin, /test) e tmp (ramfs su /tmp).
+        # anche bin, test (/bin, /test), usr, tool e tmp (ramfs su /tmp).
+        # ADR-0058: niente piu' "fat" (il FAT e' uscito dal boot).
         out = sh.run_source(SH + "/base1.txt")
         found = (b"hello.txt" in out and b"test.txt" in out
-                 and b"fat" in out and b"dev" in out
+                 and b"dev" in out
                  and b"bin" in out and b"test" in out and b"tmp" in out)
-        c.check("ls / (hello.txt, test.txt, fat, dev, bin, test, tmp)", found)
+        c.check("ls / (hello.txt, test.txt, dev, bin, test, tmp)", found)
         found = b"Hello from Velordo ramfs!" in out
         c.check("cat hello.txt", found)
         # "prova" non appare nell'eco (source silenzioso, niente echo su
@@ -109,10 +107,10 @@ def main():
         c.check("ls -l (tipo + size)", found)
         found = b"d 0 lldir" in out
         c.check("ls -l (marcatore dir)", found)
-        # /fat in script separato: l'assenza di (ro) e' sullo slice.
+        # La radice in script separato: l'assenza di (ro) e' sullo slice.
         out = sh.run_source(SH + "/base3b.txt")
-        found = b"- 26 HELLO.TXT" in out and b"(ro)" not in out
-        c.check("ls -l /fat (scrivibile)", found)
+        found = b"- 26 hello.txt" in out and b"(ro)" not in out
+        c.check("ls -l / (scrivibile)", found)
 
         # kill errori + ps.
         out = sh.run_source(SH + "/base4k.txt")
@@ -147,18 +145,15 @@ def main():
         found = b"cannot open" in out
         c.check("mv rimuove sorgente", found)
 
-        # Fase 20 (/fat scrivibile): cp verso /fat CREA + read-back; rm resta
-        # rifiutato (niente unlink su FAT, fuori scope); HELLO.TXT intatta.
+        # Fase 20 (radice scrivibile): cp verso /bin CREA + read-back; rm
+        # riesce (su ArcaFS l'unlink esiste: sul FAT era rifiutato).
         out = sh.run_source(SH + "/base7.txt")
-        found = b"Hello from Velordo FAT32!" in out
-        c.check("cp /fat/HELLO.TXT -> ramfs", found)
         found = b"Hello from Velordo ramfs!" in out
-        c.check("cp verso /fat + read-back", found)
-        found = b"cannot remove" in out
-        c.check("rm su /fat ancora rifiutato", found)
-        c.check("rm su /fat rifiutato", b"cannot remove" in out)
-        found = b"Hello from Velordo FAT32!" in out
-        c.check("/fat/HELLO.TXT intatto", found)
+        c.check("cp hello.txt -> ramfs", found)
+        found = b"Hello from Velordo ramfs!" in out
+        c.check("cp verso /bin + read-back", found)
+        found = b"cannot remove" not in out
+        c.check("rm su /bin riuscito (unlink su ArcaFS)", found)
 
         # clear: scherma testo, pulisce, shell resta viva (interattivo, VGA).
         sh.wait_prompt()

@@ -174,10 +174,12 @@ fn real_main(_sp: u64) -> ! {
         disk_sectors.push(infos[i].sectors);
         // Identità del whole-disk dallo stesso settore 0 (Fase 16d).
         let (wd_uuid, wd_label) = nodes::sniff_identity(disk, 0);
+        let wd_arca = nodes::sniff_arca_uuid(disk, 0);
         nodes.push(nodes::Node {
             name: alloc::format!("sd{}", letter),
             handle: (i as u32) << 16,
             vol_uuid: wd_uuid,
+            vol_arca_uuid: wd_arca,
             vol_label: wd_label,
         });
         let mut disk_parts: Vec<nodes::PartLoc> = Vec::new();
@@ -197,10 +199,12 @@ fn real_main(_sp: u64) -> ! {
                         // Identità della partizione dal suo boot sector (Fase 16d:
                         // un settore in più per partizione, solo a boot).
                         let (pu, pl) = nodes::sniff_identity(disk, part.start as u64);
+                        let pa = nodes::sniff_arca_uuid(disk, part.start as u64);
                         nodes.push(nodes::Node {
                             name: alloc::format!("sd{}{}", letter, p + 1),
                             handle: ((i as u32) << 16) | (p as u32 + 1),
                             vol_uuid: pu,
+                            vol_arca_uuid: pa,
                             vol_label: pl,
                         });
                         disk_parts.push(nodes::PartLoc { start: part.start as u64, sectors: part.sectors as u64 });
@@ -217,10 +221,12 @@ fn real_main(_sp: u64) -> ! {
                         );
                         // Identità della partizione dal suo boot sector (Fase 16d).
                         let (pu, pl) = nodes::sniff_identity(disk, part.start);
+                        let pa = nodes::sniff_arca_uuid(disk, part.start);
                         nodes.push(nodes::Node {
                             name: alloc::format!("sd{}{}", letter, p + 1),
                             handle: ((i as u32) << 16) | (p as u32 + 1),
                             vol_uuid: pu,
+                            vol_arca_uuid: pa,
                             vol_label: pl,
                         });
                         disk_parts.push(nodes::PartLoc { start: part.start, sectors: part.sectors });
@@ -241,6 +247,11 @@ fn real_main(_sp: u64) -> ! {
         if let Some(u) = n.vol_uuid {
             reg_prefixes.push(alloc::format!("/dev/disk/by-uuid/{:08X}", u));
         }
+        // ArcaFS (ADR-0058): uuid a 64 bit = 16 hex (formato distinto dal
+        // seriale FAT a 8 hex: nessuna ambiguità fra i due).
+        if let Some(u) = n.vol_arca_uuid {
+            reg_prefixes.push(alloc::format!("/dev/disk/by-uuid/{:016X}", u));
+        }
         if let Some(l) = &n.vol_label {
             reg_prefixes.push(alloc::format!("/dev/disk/by-label/{}", l));
         }
@@ -249,6 +260,9 @@ fn real_main(_sp: u64) -> ! {
         let mut idline = alloc::format!("[block] {}: handle={:#x}", n.name, n.handle);
         if let Some(u) = n.vol_uuid {
             idline.push_str(&alloc::format!(" uuid={:08X}", u));
+        }
+        if let Some(u) = n.vol_arca_uuid {
+            idline.push_str(&alloc::format!(" uuid={:016X}", u));
         }
         if let Some(l) = &n.vol_label {
             idline.push_str(&alloc::format!(" label='{}'", l));

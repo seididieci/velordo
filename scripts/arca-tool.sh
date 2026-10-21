@@ -37,7 +37,10 @@ cp "$ROOT/tools/arca/target/release/arca" "$TOOL_BIN"
 if [ "${RUN_S25:-0}" = "1" ] && [ -z "${ARCA_SIZE_MIB:-}" ]; then
     ARCA_SIZE_MIB=384
 fi
-$TOOL_BIN create "$OUT" --uuid 4152434100000001 --size-mib "${ARCA_SIZE_MIB:-128}"
+# ADR-0058 (v4): il volume si presenta — label (il nome) + mountpoint
+# dichiarato (vuoto: la root la sceglie la cmdline, non il volume).
+$TOOL_BIN create "$OUT" --uuid 4152434100000001 --size-mib "${ARCA_SIZE_MIB:-128}" \
+    --label SYSTEM --mountpoint ""
 echo "[arca] tool in $TOOL_BIN, immagine $OUT"
 
 # Seed del volume con i file di boot (Fase 2 + D1): `/bin` + `/bin/posix` +
@@ -70,6 +73,10 @@ seed_bin userland/build/kbd.bin bin/kbd.bin vela bin/kbd.bin
 seed_bin userland/build/porta.bin bin/porta.bin sys bin/porta.bin
 seed_bin userland/build/usertime.bin bin/time.bin vela bin/time.bin
 seed_bin userland/build/vestigia.bin bin/vestigia.bin sys bin/vestigia.bin
+# Servizio identita'/autenticazione utenti (ADR-0055) + il suo client login
+# (ADR-0058: il boot non carica piu' da /fat, tutto da ArcaFS).
+seed_bin userland/build/identis.bin bin/identis.bin sys bin/identis.bin
+seed_bin userland/build/identis-login.bin bin/identis-login.bin sys bin/identis-login.bin
 # Personalita' POSIX in `/bin/posix` (D1: MOVE da /bin, solo ArcaFS).
 seed_bin flavours/posix/build/usershell.bin bin/posix/shell.bin sys bin/posix/shell.bin
 seed_bin flavours/posix/build/userposix.bin bin/posix/posix.bin sys bin/posix/posix.bin

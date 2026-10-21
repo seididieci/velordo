@@ -21,22 +21,15 @@ else
     cargo build --release
 fi
 
-# Immagini disco FAT32 (Fase 9.2 + 16d): generate a ogni run.
-# fat.img = disco di boot (UUID 4F4C4556, label VELORDO, montato a /fat);
-# fat2.img = secondo disco (UUID e label diversi + MARKER.TXT) per i test di
-# identità stabile (t36) e il reorder (SWAP_DRIVES=1 inverte l'ordine IDE:
-# le lettere sdX si scambiano, UUID=/LABEL= restano validi).
-python3 scripts/mkfat.py userland/fs/fat.img
-python3 scripts/mkfat.py userland/fs/fat2.img --serial C0FFEE01 --label SECOND --marker "second disk marker"
-
-# Servizi da disco (Fase 21): /bin + /test iniettati via script condiviso
-# (stesso usato da test-shell.py) DOPO mkfat. Fail-loud.
-bash scripts/inject-bins.sh
-
+# ADR-0058: **il FAT esce dal boot**. I dischi FAT non vengono piu'
+# generati ne' attaccati: il boot usa solo ArcaFS (root su arca.img + le
+# derivate opzionali). `scripts/mkfat.py` resta solo per la suite FAT
+# opt-in e per il confronto prestazionale ArcaFS-vs-FAT (run dedicati, fuori
+# gate).
+#
 # ArcaFS (Fase 54, P5): build del tool host + `arca.img` (superblock LBA0 +
-# shadow). Sempre generata (economica); il terzo drive si aggiunge solo con
-# ARCA_IMG=1, cosi' il boot default resta a due dischi (sda/sdb stabili per
-# t32/t36).
+# shadow). Sempre generata (economica); le derivate si aggiungono solo con
+# ARCA_IMG=1 (test 12-13 e i volumi secondari).
 ./scripts/arca-tool.sh
 
 # Fase 55, Parte 4 + E2: crea arca-part.img (MBR, LBA63) e arca-gpt.img
@@ -59,6 +52,10 @@ if [ "${ARCA_IMG:-0}" = "1" ]; then
     ARCA_TOOL_BIN="${ARCA_TOOL_BIN:-$ROOT/build-meta/arca}"
     "$ARCA_TOOL_BIN" uuid userland/disk/arca-part.img 4152434100000002 --lba 63
     "$ARCA_TOOL_BIN" uuid userland/disk/arca-gpt.img 4152434100000003 --lba 64
+    # ADR-0058 (v4): i volumi derivati si presentano con una label (il loro
+    # nome: la discovery by-label arriva con la fase USB).
+    "$ARCA_TOOL_BIN" set userland/disk/arca-part.img --label PART --lba 63
+    "$ARCA_TOOL_BIN" set userland/disk/arca-gpt.img --label GPT --lba 64
 fi
 
 KERNEL=target/x86_64-unknown-none/release/velord
@@ -66,24 +63,33 @@ DISPLAY="${RUN_DISPLAY:-none}"   # RUN_DISPLAY=gtk per vedere la VGA in locale
 
 # Boot diretto via protocollo PVH (ELF64 + nota XEN_ELFNOTE_PHYS32_ENTRY):
 # QEMU carica il kernel e trasferisce il controllo in protected mode 32-bit.
-# Due drive IDE (Fase 16d): block li enumera sda,sdb in ordine di probe
-# e cardo monta a /fat per UUID (mai per lettera).
-if [ "${SWAP_DRIVES:-0}" = "1" ]; then
-    DRIVES="-drive file=userland/fs/fat2.img,format=raw,if=ide -drive file=userland/fs/fat.img,format=raw,if=ide"
+# Drive IDE: il volume ArcaFS root (sda) SEMPRE; le derivate (GPT/MBR)
+# opzionali con ARCA_IMG=1. `SWAP_DRIVES=1` inverte l'ordine IDE: le lettere
+# sdX si scambiano, ma la root e' scelta per **UUID** (mai per lettera) —
+# e' la prova che l'identita' del volume non dipende dalla posizione.
+if [ "${SWAP_DRIVES:-0}" = "1" ] && [ -f userland/disk/arca-gpt.img ]; then
+    DRIVES="-drive file=userland/disk/arca-gpt.img,format=raw,if=ide -drive file=userland/disk/arca.img,format=raw,if=ide"
 else
-    DRIVES="-drive file=userland/fs/fat.img,format=raw,if=ide -drive file=userland/fs/fat2.img,format=raw,if=ide"
+    DRIVES="-drive file=userland/disk/arca.img,format=raw,if=ide"
 fi
-# Terzo drive ArcaFS SEMPRE attaccato (Fase A: e' la root `/`, scelta per UUID —
-# sda/sdb restano i due FAT). Quarto drive (partizione GPT su arca-gpt.img =
-# secondary slave) opt-in con ARCA_IMG=1 per i test 12-13 e il mount in
-# partizione di 4-8 (E2: il PC ha solo 4 IDE; la MBR resta artefatto per run
-# manuali — mount-in-partizione coperto via GPT, vedi 11-testing).
-# La suite cerca i volumi via magic/UUID, mai per lettera.
-DRIVES="$DRIVES -drive file=userland/disk/arca.img,format=raw,if=ide"
-# S1.2: quarto drive solo se la derivata esiste davvero (QEMU fallirebbe su
-# file assente).
+# Drive secondario (partizione GPT su arca-gpt.img) opt-in con ARCA_IMG=1:
+# serve ai test 12-13 e al mount in partizione (E2: il PC ha solo 4 IDE; la
+# MBR resta artefatto per run manuali — mount-in-partizione coperto via GPT,
+# vedi 11-testing). La suite cerca i volumi via magic/UUID, mai per lettera.
 if [ "${ARCA_IMG:-0}" = "1" ] && [ -f userland/disk/arca-gpt.img ]; then
     DRIVES="$DRIVES -drive file=userland/disk/arca-gpt.img,format=raw,if=ide"
+fi
+# FAT opzionale (ADR-0058): il boot NON usa il FAT, ma i run opt-in sì
+# (suite FAT `run-fat-tests.sh`, confronto prestazionale ArcaFS-vs-FAT in
+# scripts/bench.sh). Con FAT_IMG=1 le immagini FAT vengono create e
+# attaccate; senza, il sistema parte solo con ArcaFS.
+if [ "${FAT_IMG:-0}" = "1" ]; then
+    python3 scripts/mkfat.py userland/fs/fat.img
+    python3 scripts/mkfat.py userland/fs/fat2.img --serial C0FFEE01 \
+        --label SECOND --marker "second disk marker"
+    DRIVES="$DRIVES -drive file=userland/fs/fat.img,format=raw,if=ide"
+    DRIVES="$DRIVES -drive file=userland/fs/fat2.img,format=raw,if=ide"
+    echo "[run] FAT_IMG=1: dischi FAT attaccati (run opt-in)"
 fi
 # Fase 2 (root su volume): passa la cmdline `-append` a QEMU. Il kernel legge
 # `hvm_start_info.cmdline_paddr` al boot e lo rende a userland via SYS_BOOT_

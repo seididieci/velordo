@@ -2,7 +2,7 @@
 # Build dei binari della TEST SUITE in modalita' freestanding.
 #
 # testland/ contiene ogni binario NON "ad uso utente": demo, i test
-# ramfs/fat (usertestfs/usertestfat), gli strumenti di stress (hogheap,
+# ramfs/ArcaFS (usertestfs/usertestsarca), gli strumenti di stress (hogheap,
 # gli strumenti di stress (hogheap, devreader) e la suite di regressione
 # completa (usertests + helper client/spin).
 #

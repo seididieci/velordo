@@ -39,7 +39,7 @@ fn real_main(_sp: u64) -> ! {
     }
 
     // Serve un fd per provare il diniego di GRANT e una read lecita.
-    if let Ok(fd) = civis::open("/fat/HELLO.TXT", 0) {
+    if let Ok(fd) = civis::open("/hello.txt", 0) {
         // bit2: grant negato.
         if civis::dup_grant(fd).is_err() {
             esiti |= 4;

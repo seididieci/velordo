@@ -8,12 +8,18 @@ delega tutto al FS server.
 
 ```
 Processi userspace (PID instabili per riuso: i peer si indirizzano per nome/canale):
-  cardo    -- ramfs + FAT32 (scrivibile dalla Fase 20) + mount table
+  cardo    -- ArcaFS (root su volume, ADR-0058) + FAT32 (opt-in) + mount table
   vela -- /dev/null, /dev/zero
   block  -- driver ATA + nodi /dev/sdX + alias by-uuid/by-label (Fase 16)
-  init      -- spawna disk/fs da embedded, il resto da /fat (Fase 21)
+  init      -- spawna disk/fs da embedded, il resto da ArcaFS (Fase 21/55)
   shell     -- usa civis wrappers per accedere ai file
 ```
+
+> **ADR-0058: il FAT e' fuori dal boot.** Il filesystem di sistema e' **ArcaFS**
+> (root su volume scelto per UUID dalla cmdline, `root=UUID=…`); il driver
+> FAT32 resta in cardo come provider **opzionale** (riferimento
+> prestazionale ArcaFS-vs-FAT e base per le chiavette USB) e la sua mount
+> statica e' *iniettiva*: senza il disco non si attiva e non tocca nulla.
 
 ## Trasferimento dati: ring SPSC per-processo (Fase 10.2)
 

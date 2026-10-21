@@ -45,9 +45,9 @@ fn console_write(data: &[u8]) {
     }
     let s = core::str::from_utf8(data).unwrap_or("");
     civis::print_str(s);
-    if data.ends_with(&[b'\n']) {
-        civis::flush();
-    }
+    // Flush SEMPRE: la console e' interattiva (un prompt senza newline
+    // resterebbe nel buffer seriale e nessuno lo vedrebbe).
+    civis::flush();
 }
 
 /// Entry: token di sessione, nome utente, password, richiesta a Identis.

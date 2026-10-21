@@ -144,7 +144,7 @@ velordo/
 
 ## Stato corrente
 
-Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 62/62` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12` + shell (10/10 fasi via `test-shell-all.sh`), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`).
+Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12` + shell (10/10 fasi via `test-shell-all.sh`), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0058): `scripts/run-fat-tests.sh`.
 
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-56, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
@@ -356,16 +356,16 @@ timeout 60 ./run.sh > /tmp/boot.log
 ./scripts/bench.sh > /tmp/bench.log
 rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 
-# Suite di regressione (boot): 7 righe PASS attese e ZERO FAIL/PANIC
+# Suite di regressione (boot): 6 righe PASS attese e ZERO FAIL/PANIC
+# (ADR-0058: la suite FAT32 e' fuori dal gate -> scripts/run-fat-tests.sh)
 #   [testfs] PASS 5/5
-#   [testfat] PASS 7/7
-#   [testsarca] PASS 62/62
+#   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
 #   [usertests] PASS 58/58
 #   [threadtest] PASS 12/12
 timeout 150 ./run-tests.sh > /tmp/boot.log
-rg '\[testfs\] PASS 5/5|\[testfat\] PASS 7/7|\[testsarca\] PASS 62/62|\[posixtests\] PASS 4/4|\[identistest\] PASS 11/11|\[usertests\] PASS 58/58|\[threadtest\] PASS 12/12' /tmp/boot.log
+rg '\[testfs\] PASS 5/5|\[testsarca\] PASS 64/64|\[posixtests\] PASS 4/4|\[identistest\] PASS 11/11|\[usertests\] PASS 58/58|\[threadtest\] PASS 12/12' /tmp/boot.log
 test "$(rg -c 'FAIL|PANIC|#.* FAULT' /tmp/boot.log)" = "0"
 ```
 

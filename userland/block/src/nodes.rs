@@ -17,6 +17,10 @@ pub(crate) struct Node {
     /// Seriale volume FAT (BPB sniff, Fase 16d): `UUID=` = hex maiuscolo
     /// 8 char. `None` = nodo senza identità stabile (non-FAT o senza firma).
     pub(crate) vol_uuid: Option<u32>,
+    /// UUID a 64 bit del volume **ArcaFS** (superblock v4, ADR-0058):
+    /// `UUID=` = 16 hex maiuscoli. `None` = il nodo non è un volume ArcaFS
+    /// (o il superblock non verifica).
+    pub(crate) vol_arca_uuid: Option<u64>,
     /// Label volume trimmata (BPB sniff, Fase 16d): `LABEL=`. `None` se
     /// vuota/assente. Mai con '/' (skippata in registrazione, difensivo).
     pub(crate) vol_label: Option<String>,
@@ -50,6 +54,37 @@ pub(crate) fn sniff_identity(disk: &block::AtaDisk, base: u64) -> (Option<u32>, 
     }
 }
 
+/// Sniffa l'identità **ArcaFS** di un nodo (superblock v4): magic + versione
+/// + block-size + checksum FNV-1a (gli stessi 4 check del mount, casa
+/// `arcafs`). Ritorna l'uuid a 64 bit del volume, o `None` se il nodo non è
+/// un volume ArcaFS (o il superblock non verifica: mai un uuid inventato).
+pub(crate) fn sniff_arca_uuid(disk: &block::AtaDisk, base: u64) -> Option<u64> {
+    let mut sec = [0u8; 512];
+    if !disk.read_sector(base, &mut sec) {
+        return None;
+    }
+    let sb = &sec[..civis::ARCA_SUPER_LEN];
+    if sb[civis::ARCA_OFF_MAGIC..civis::ARCA_OFF_MAGIC + 4] != *civis::ARCA_MAGIC {
+        return None;
+    }
+    let u32le = |o: usize| u32::from_le_bytes([sb[o], sb[o + 1], sb[o + 2], sb[o + 3]]);
+    let u64le = |o: usize| {
+        u64::from_le_bytes([
+            sb[o], sb[o + 1], sb[o + 2], sb[o + 3], sb[o + 4], sb[o + 5], sb[o + 6], sb[o + 7],
+        ])
+    };
+    if u32le(civis::ARCA_OFF_VERSION) != civis::ARCA_VERSION {
+        return None;
+    }
+    if u32le(civis::ARCA_OFF_BLOCK_SIZE) != civis::ARCA_BLOCK_SIZE {
+        return None;
+    }
+    if civis::image_hash(&sb[..civis::ARCA_OFF_CHECK]) != u64le(civis::ARCA_OFF_CHECK) {
+        return None;
+    }
+    Some(u64le(civis::ARCA_OFF_UUID))
+}
+
 /// Risolve una chiave (`"sda"`, UUID hex 8 char, label) in nodo (Fase 16d).
 /// Priorità: nome esatto → UUID → label. Mai ambigua in pratica (nomi `sd*`
 /// non sono hex-8 ne' label convenzionali maiuscole senza spazi... e a pari
@@ -61,6 +96,15 @@ pub(crate) fn resolve_node<'a>(nodes: &'a [Node], key: &str) -> Option<&'a Node>
     if key.len() == 8 && key.bytes().all(|b| b.is_ascii_hexdigit()) {
         if let Ok(v) = u32::from_str_radix(key, 16) {
             if let Some(n) = nodes.iter().find(|n| n.vol_uuid == Some(v)) {
+                return Some(n);
+            }
+        }
+    }
+    // ArcaFS (ADR-0058): uuid a 64 bit = 16 hex maiuscoli. Formato
+    // diverso dal seriale FAT (8 hex): nessuna ambiguità.
+    if key.len() == 16 && key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if let Ok(v) = u64::from_str_radix(key, 16) {
+            if let Some(n) = nodes.iter().find(|n| n.vol_arca_uuid == Some(v)) {
                 return Some(n);
             }
         }

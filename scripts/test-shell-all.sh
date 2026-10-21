@@ -26,24 +26,22 @@ while [ $# -gt 0 ]; do
 done
 [ ${#PHASES[@]} -eq 0 ] && PHASES=(base run redirect 41 42 source 43 43b 44 44b)
 
-echo "[all] preparo immagini FAT + seed ArcaFS (una volta sola)"
-python3 scripts/mkfat.py userland/fs/fat.img
-python3 scripts/mkfat.py userland/fs/fat2.img --serial C0FFEE01 \
-    --label SECOND --marker "second disk marker"
-bash scripts/inject-bins.sh
+# ADR-0058: il FAT esce — niente immagini FAT ne' iniettore: il seed
+# ArcaFS porta gia' i binari (i dischi FAT servono solo ai run dedicati:
+# suite FAT opt-in e confronto prestazionale).
+echo "[all] preparo il seed ArcaFS (una volta sola)"
 bash scripts/arca-tool.sh
 
 declare -A PID_OF
 FAILED=()
 PASS=()
 
-run_one() { # <fase> [overlay_fat overlay_fat2 overlay_arca]
-    local p="$1" ov1="${2:-}" ov2="${3:-}" ov3="${4:-}"
+run_one() { # <fase> [overlay_arca]
+    local p="$1" ov1="${2:-}"
     local log="/tmp/test-shell-$p.log"
     local cmd=(python3 "scripts/test-shell-$p.py" --no-prep)
     if [ -n "$ov1" ]; then
-        cmd+=(--fat "$ov1" --fat2 "$ov2" --fat-format qcow2
-             --arca "$ov3" --arca-format qcow2)
+        cmd+=(--arca "$ov1" --arca-format qcow2)
     fi
     echo "[all] fase $p..."
     "${cmd[@]}" > "$log" 2>&1
@@ -63,18 +61,14 @@ else
     # obbligatorio (E1): la root e' RW persistente, senza le fasi parallele
     # si pesterebbero su `/`.
     for p in "${PHASES[@]}"; do
-        qemu-img create -f qcow2 -F raw -b "$PWD/userland/fs/fat.img" \
-            "/tmp/velordo-$p-fat.qcow2" > /dev/null
-        qemu-img create -f qcow2 -F raw -b "$PWD/userland/fs/fat2.img" \
-            "/tmp/velordo-$p-fat2.qcow2" > /dev/null
         qemu-img create -f qcow2 -F raw -b "$PWD/userland/disk/arca.img" \
             "/tmp/velordo-$p-arca.qcow2" > /dev/null
-        run_one "$p" "/tmp/velordo-$p-fat.qcow2" "/tmp/velordo-$p-fat2.qcow2" "/tmp/velordo-$p-arca.qcow2" &
+        run_one "$p" "/tmp/velordo-$p-arca.qcow2" &
         PID_OF[$p]=$!
     done
     for p in "${PHASES[@]}"; do
         if wait "${PID_OF[$p]}"; then PASS+=("$p"); else FAILED+=("$p"); fi
-        rm -f "/tmp/velordo-$p-fat.qcow2" "/tmp/velordo-$p-fat2.qcow2" "/tmp/velordo-$p-arca.qcow2"
+        rm -f "/tmp/velordo-$p-arca.qcow2"
     done
 fi
 

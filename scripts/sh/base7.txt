@@ -1,9 +1,9 @@
-# base: da/verso /fat (shellw.txt resta su /fat: rm rifiutato, come prima).
-cp /fat/HELLO.TXT fatcopy.txt
+# base: da/verso la radice ArcaFS (scrivibile: sul FAT il rm era rifiutato).
+# NB: nessun rm del fixture seedato (hello.txt): il volume e' condiviso fra le
+# fasi della suite e la rimozione romperebbe i test successivi.
+cp hello.txt fatcopy.txt
 cat fatcopy.txt
 rm fatcopy.txt
-cp hello.txt /fat/shellw.txt
-cat /fat/shellw.txt
-rm /fat/shellw.txt
-rm /fat/HELLO.TXT
-cat /fat/HELLO.TXT
+cp hello.txt /bin/shellw.txt
+cat /bin/shellw.txt
+rm /bin/shellw.txt

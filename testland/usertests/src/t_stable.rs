@@ -55,33 +55,33 @@ pub fn t_detach() -> bool {
     true
 }
 
-/// t36 — identità stabile UUID/LABEL + discovery (Fase 16d).
-/// Mount per UUID e per LABEL del secondo disco (contenuto MARKER prova il
-/// disco giusto), open raw dei by-path (firma + seriale dal settore 0),
-/// listing sintetizzato (/dev ∋ disk+sda, by-uuid ∋ U2, by-label ∋ L2).
-/// Gira in entrambi gli ordini IDE (SWAP_DRIVES): le lettere possono
-/// cambiare, le chiavi stabili no.
+/// t36 — identità stabile del volume **ArcaFS** + discovery (ADR-0058).
+/// Il FAT esce dal boot: l'identità non è più quella del BPB (seriale +
+/// label), ma quella del superblock ArcaFS (uuid a 64 bit). Resta la
+/// dimensione UUID: mount per UUID, open raw del by-path, listing di
+/// /dev/disk/by-uuid. **La dimensione LABEL è rinviata** (è roba da USB:
+/// ADR-0058) e con lei il by-label.
 pub fn t_stable_id() -> bool {
     helpers::drain_stray();
     if civis::mkdir("/u2").is_err() {
         println!("[usertests] t36: mkdir /u2 FAILED");
         return false;
     }
-    // 1. Mount per UUID.
-    if civis::mount("UUID=C0FFEE01", "/u2").is_err() {
-        println!("[usertests] t36: mount UUID=C0FFEE01 FAILED");
+    // 1. Mount per UUID (16 hex, il formato del superblock ArcaFS).
+    if civis::mount("UUID=4152434100000001", "/u2").is_err() {
+        println!("[usertests] t36: mount UUID=4152434100000001 FAILED");
         return false;
     }
-    let Ok(fd) = civis::open("/u2/MARKER.TXT", 0) else {
-        println!("[usertests] t36: open MARKER via UUID FAILED");
+    let Ok(fd) = civis::open("/u2/hello.txt", 0) else {
+        println!("[usertests] t36: open hello.txt via UUID FAILED");
         let _ = civis::umount("/u2");
         return false;
     };
     let mut mb = [0u8; 32];
     let n = helpers::t33_read_all(fd, &mut mb);
     let _ = civis::close(fd);
-    if n != helpers::DISK2_MARKER.len() || mb[..n] != *helpers::DISK2_MARKER {
-        println!("[usertests] t36: MARKER via UUID corrotto (disco sbagliato?)");
+    if n != helpers::ARCA_HELLO.len() || mb[..helpers::ARCA_HELLO.len()] != *helpers::ARCA_HELLO {
+        println!("[usertests] t36: hello.txt via UUID corrotto (volume sbagliato?)");
         let _ = civis::umount("/u2");
         return false;
     }
@@ -89,44 +89,20 @@ pub fn t_stable_id() -> bool {
         println!("[usertests] t36: umount /u2 FAILED");
         return false;
     }
-    // 2. Mount per LABEL.
-    if civis::mount("LABEL=SECOND", "/u2").is_err() {
-        println!("[usertests] t36: mount LABEL=SECOND FAILED");
-        return false;
-    }
-    let Ok(fd) = civis::open("/u2/MARKER.TXT", 0) else {
-        println!("[usertests] t36: open MARKER via LABEL FAILED");
-        let _ = civis::umount("/u2");
+    // 2. Open raw del by-path: settore 0 col magic ACFS (l'identità misurata
+    //    del volume, non piu' la firma 0x55AA del BPB FAT).
+    let Ok(fd) = civis::open("/dev/disk/by-uuid/4152434100000001", 0) else {
+        println!("[usertests] t36: open raw by-uuid FAILED");
         return false;
     };
-    let mut mb = [0u8; 32];
-    let n = helpers::t33_read_all(fd, &mut mb);
+    let mut sec = [0u8; 512];
+    let r = civis::read_fs(fd, &mut sec, 512);
     let _ = civis::close(fd);
-    let _ = civis::umount("/u2");
-    if n != helpers::DISK2_MARKER.len() || mb[..n] != *helpers::DISK2_MARKER {
-        println!("[usertests] t36: MARKER via LABEL corrotto");
+    if r != Ok(512) || &sec[..4] != helpers::ACFS_MAGIC {
+        println!("[usertests] t36: settore 0 raw by-uuid non ArcaFS");
         return false;
     }
-    // 3. Open raw dei by-path: settore 0 con firma + seriale atteso.
-    for path in ["/dev/disk/by-uuid/C0FFEE01", "/dev/disk/by-label/SECOND"] {
-        let Ok(fd) = civis::open(path, 0) else {
-            println!("[usertests] t36: open raw {} FAILED", path);
-            return false;
-        };
-        let mut sec = [0u8; 512];
-        let r = civis::read_fs(fd, &mut sec, 512);
-        let _ = civis::close(fd);
-        if r != Ok(512) || sec[510] != 0x55 || sec[511] != 0xAA {
-            println!("[usertests] t36: settore 0 raw {} invalido", path);
-            return false;
-        }
-        let serial = u32::from_le_bytes([sec[67], sec[68], sec[69], sec[70]]);
-        if serial != 0xC0FFEE01 {
-            println!("[usertests] t36: seriale raw {} = {:08X} (atteso C0FFEE01)", path, serial);
-            return false;
-        }
-    }
-    // 4. Listing sintetizzato.
+    // 3. Listing sintetizzato.
     let mut eb = [0u8; 512];
     if civis::readdir("/dev", &mut eb, 512).is_err()
         || !helpers::readdir_contains(&eb, b"disk")
@@ -137,16 +113,9 @@ pub fn t_stable_id() -> bool {
     }
     let mut eb = [0u8; 256];
     if civis::readdir("/dev/disk/by-uuid", &mut eb, 256).is_err()
-        || !helpers::readdir_contains(&eb, helpers::DISK2_UUID.as_bytes())
+        || !helpers::readdir_contains(&eb, b"4152434100000001")
     {
-        println!("[usertests] t36: readdir by-uuid senza C0FFEE01");
-        return false;
-    }
-    let mut eb = [0u8; 256];
-    if civis::readdir("/dev/disk/by-label", &mut eb, 256).is_err()
-        || !helpers::readdir_contains(&eb, helpers::DISK2_LABEL.as_bytes())
-    {
-        println!("[usertests] t36: readdir by-label senza SECOND");
+        println!("[usertests] t36: readdir by-uuid senza 4152434100000001");
         return false;
     }
     true
@@ -155,7 +124,7 @@ pub fn t_stable_id() -> bool {
 /// t32 — disk driver in userspace (Fase 16).
 /// (A) Baseline: /dev/sda leggibile raw con firma boot. (B) Bounce via init
 /// (`init_bounce`, Fase 35) e attesa init-restart come t27/t28: sparizione dallo slot, ricomparsa, poi /dev/sda di nuovo
-/// operativo + smoke /fat/HELLO.TXT (riconnessione lazy di cardo al driver
+/// operativo + smoke della root ArcaFS (riconnessione lazy di cardo al driver
 /// rinato, senza rimontare: il mount sopravvive). Bound generosi (1000 tick
 /// ~ 10 s contro restart atteso ~50), mai hang; poll throttled Livello 1.
 pub fn t_disk() -> bool {
@@ -196,16 +165,17 @@ pub fn t_disk() -> bool {
         println!("[usertests] t32: /dev/sda mai tornato (timeout)");
         return false;
     }
-    // Smoke /fat via riconnessione (il driver e' nuovo, il mount e' quello di boot).
-    let Ok(fdf) = civis::open_wait("/fat/HELLO.TXT", 0, 1000, civis::POLL_PERIOD_TICKS) else {
-        println!("[usertests] t32: open /fat/HELLO.TXT post-restart FAILED");
+    // Smoke della root via riconnessione (il driver e' nuovo, il volume e'
+    // quello di boot).
+    let Ok(fdf) = civis::open_wait(helpers::ARCA_HELLO_PATH, 0, 1000, civis::POLL_PERIOD_TICKS) else {
+        println!("[usertests] t32: open /hello.txt post-restart FAILED");
         return false;
     };
     let mut fb = [0u8; 32];
     let n = civis::read_fs(fdf, &mut fb, 32).unwrap_or(0);
     let _ = civis::close(fdf);
-    if n != helpers::FAT_HELLO.len() || fb[..helpers::FAT_HELLO.len()] != *helpers::FAT_HELLO {
-        println!("[usertests] t32: /fat/HELLO.TXT post-restart corrotto");
+    if n != helpers::ARCA_HELLO.len() || fb[..helpers::ARCA_HELLO.len()] != *helpers::ARCA_HELLO {
+        println!("[usertests] t32: /hello.txt post-restart corrotto");
         return false;
     }
     // Fase 51 (P2 vocabolario disco): topologia via protocollo (relay R_
@@ -306,18 +276,14 @@ pub fn t_disk() -> bool {
         return false;
     }
     // Barriera Group riuscita sopra (primo disk_sync): i FLUSH sono
-    // atterrati senza Err. Sensore spazio: FAT con blocchi/libéri coerenti,
-    // root ArcaFS (Fase A: bsize 65536, illimitata MAX come la ramfs prima).
+    // atterrati senza Err. Sensore spazio: la root ArcaFS (Fase A: bsize
+    // 65536, illimitata MAX come la ramfs prima).
     let mut vfs = civis::StatVfs { bsize: 0, blocks: 0, bfree: 0, bavail: 0 };
-    if civis::statvfs("/fat", &mut vfs).is_err() || vfs.bsize == 0 || vfs.blocks == 0 || vfs.bfree > vfs.blocks {
-        println!("[usertests] t32: statvfs /fat assurdo ({}/{}/{})", vfs.bsize, vfs.blocks, vfs.bfree);
-        return false;
-    }
-    println!("[usertests] t32: statvfs /fat bsize={} blocks={} bfree={}", vfs.bsize, vfs.blocks, vfs.bfree);
     if civis::statvfs("/", &mut vfs).is_err() || vfs.bsize != 65536 || vfs.bfree != u64::MAX {
         println!("[usertests] t32: statvfs / assurdo ({}/{}/{})", vfs.bsize, vfs.blocks, vfs.bfree);
         return false;
     }
+    println!("[usertests] t32: statvfs / bsize={} blocks={} bfree={}", vfs.bsize, vfs.blocks, vfs.bfree);
     // Device/sintetici: nessuno spazio da contabilizzare.
     if civis::statvfs("/dev/null", &mut vfs).is_ok() {
         println!("[usertests] t32: statvfs /dev/null accettato?!");
@@ -562,16 +528,18 @@ pub fn t_identity() -> bool {
 /// blocchi; D1: driver in `vela`). Il test lega il motore in proprio (open +
 /// USEDISK: load o init + seed server-side), cosi' sopravvive a qualunque
 /// restart di cardo precedente (es. t28): senza volume skip adattivo, mai FAIL.
-/// Prova: (1) l'oggetto nativo e' byte-identico al file FAT; (2) il suo
+/// Prova: (1) l'oggetto nativo e' byte-identico al path ns; (2) il suo
 /// blake2s e' il manifest BLAKE (stesso predicato di `verify_image` in
 /// init); (3) un byte flippato cambia il digest (init lo rifiuterebbe);
 /// (4) la chiave assente da' errore (mai dati inventati); (5) gpu vive in
 /// `vela`, non piu' in `sys`.
 pub fn t_sys_native() -> bool {
-    let fat = match civis::load_file("/fat/bin/gpu.bin") {
+    // Il gemello su disco del bucket oggetti: la stessa immagine esposta
+    // come path della root (seed `ns:bin/gpu.bin` = `sys`/`vela` class).
+    let ns_file = match civis::load_file("/bin/gpu.bin") {
         Some(b) if !b.is_empty() => b,
         _ => {
-            println!("[usertests] t58: /fat/bin/gpu.bin illeggibile");
+            println!("[usertests] t58: /bin/gpu.bin illeggibile");
             return false;
         }
     };
@@ -601,8 +569,8 @@ pub fn t_sys_native() -> bool {
             return false;
         }
     };
-    if obj != fat {
-        println!("[usertests] t58: vela != FAT ({} vs {} B)", obj.len(), fat.len());
+    if obj != ns_file {
+        println!("[usertests] t58: vela != path ns ({} vs {} B)", obj.len(), ns_file.len());
         return false;
     }
     if blake2s::blake2s(&obj) != crate::BLAKE_GPU {

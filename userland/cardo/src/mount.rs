@@ -7,7 +7,7 @@ use alloc::boxed::Box;
 /// block-size + checksum FNV-1a self-verifying su [0..120] (stessa
 /// `image_hash` del manifest: single source). Ritorna (generation, uuid).
 /// Qualunque fallimento (IO, formato) = None (il chiamante prova vfat).
-fn probe_arca(handle: u32) -> Option<(u64, u64)> {
+pub fn probe_arca(handle: u32) -> Option<civis::Superblock> {
     let disk = IpcDisk::new(handle);
     let mut sec = [0u8; 512];
     if !disk.read_sector(0, &mut sec) {
@@ -34,7 +34,25 @@ fn probe_arca(handle: u32) -> Option<(u64, u64)> {
     if civis::image_hash(&sb[..civis::ARCA_OFF_CHECK]) != u64le(civis::ARCA_OFF_CHECK) {
         return None;
     }
-    Some((u64le(civis::ARCA_OFF_GEN), u64le(civis::ARCA_OFF_UUID)))
+    let label = read_nul(&sb[civis::ARCA_OFF_LABEL..civis::ARCA_OFF_LABEL + civis::ARCA_LABEL_MAX]);
+    let mount =
+        read_nul(&sb[civis::ARCA_OFF_MOUNT..civis::ARCA_OFF_MOUNT + civis::ARCA_MOUNT_MAX]);
+    let mut id = civis::Superblock {
+        generation: u64le(civis::ARCA_OFF_GEN),
+        uuid: u64le(civis::ARCA_OFF_UUID),
+        ..Default::default()
+    };
+    id.label[..label.len()].copy_from_slice(label);
+    id.label_len = label.len();
+    id.mountpoint[..mount.len()].copy_from_slice(mount);
+    id.mountpoint_len = mount.len();
+    Some(id)
+}
+
+/// Campo NUL-padded: byte fino al primo NUL.
+fn read_nul(field: &[u8]) -> &[u8] {
+    let n = field.iter().position(|&c| c == 0).unwrap_or(field.len());
+    &field[..n]
 }
 
 // ── Mount locali dinamici (Fase 16b) ─────────────────────────────────
@@ -78,8 +96,11 @@ pub fn negotiate(source: &Source) -> Option<(&'static str, MountedFs)> {
             // versione + block-size + checksum: un BPB FAT non puo'
             // collidere). Istanza stub (volume riconosciuto, non leggibile
             // fino ad A1) — il mount riesce, le op rifiutano tipizzate.
-            if let Some((generation, uuid)) = probe_arca(handle) {
-                return Some(("arcafs", MountedFs::Arca(crate::arca::ArcaFs::stub(generation, uuid, 0))));
+            if let Some(id) = probe_arca(handle) {
+                return Some((
+                    "arcafs",
+                    MountedFs::Arca(crate::arca::ArcaFs::stub(id.generation, id.uuid, 0)),
+                ));
             }
             Some(("vfat", MountedFs::Fat(Fat32::mount(IpcDisk::new(handle)))))
         }
@@ -113,6 +134,13 @@ pub struct FsMount {
 /// lettere `sdX`. Dinamici (R_MOUNT, 16b.2) si aggiungono alla tabella ma si
 /// perdono al restart (stato runtime, come fd e handshake: i client
 /// ristabiliscono).
+///
+/// **ADR-0058: il FAT esce dal boot.** Il sistema **non attacca** piu'
+/// dischi FAT: il boot usa solo ArcaFS. La voce FAT qui sotto resta pero'
+/// *iniettiva*: senza il disco il mount non si attiva (la spec e' lazy) e
+/// non tocca nulla — serve ai run opt-in (suite FAT, confronto
+/// prestazionale ArcaFS-vs-FAT) e tornerà con le chiavette USB (mount per
+/// LABEL, ADR-0058).
 pub const STATIC_MOUNTS: &[(&str, &str)] = &[
     ("UUID=4F4C4556", "fat"),
 ];
@@ -146,7 +174,9 @@ fn normalize_source(source: &str) -> Option<String> {
         return Some(alloc::format!("/dev/{}", name));
     }
     if let Some(hex) = s.strip_prefix("UUID=") {
-        if hex.len() != 8 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        // 8 hex = seriale FAT (32 bit); 16 hex = uuid ArcaFS (64 bit,
+        // ADR-0058). Formati distinti: nessuna ambiguità.
+        if (hex.len() != 8 && hex.len() != 16) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             return None;
         }
         return Some(String::from(s));

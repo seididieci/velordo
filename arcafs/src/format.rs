@@ -13,15 +13,19 @@ use syscall_numbers::image_hash;
 
 /// Magic superblock + versione formato.
 pub const ARCA_MAGIC: &[u8; 4] = b"ACFS";
-/// Versione formato (W2 extent: 2; W6 blocchi 64 KiB: 3; niente
-/// retrocompat: le immagini si rigenerano (tool host e guest condividono
-/// questo crate), un mount v1/v2 fallisce loud in `superblock_verify`).
-pub const ARCA_VERSION: u32 = 3;
+/// Versione formato (W2 extent: 2; W6 blocchi 64 KiB: 3; v4 identita' del
+/// volume: 4 — niente retrocompat: le immagini si rigenerano (tool host e
+/// guest condividono questo crate), un mount v1/v2/v3 fallisce loud in
+/// `superblock_verify`).
+pub const ARCA_VERSION: u32 = 4;
 /// Block size negoziato = 64 KiB (128 settori da 512 B): riduce metadata e
 /// I/O su file grandi (200 GB -> ~3M blocchi invece di ~56M con 3.5 KiB).
 pub const ARCA_BLOCK_SIZE: u32 = 65536;
-/// Superblock: 128 B a LBA0 (+ shadow LBA1); checksum FNV-1a di [0..120].
-pub const ARCA_SUPER_LEN: usize = 128;
+/// Superblock: 192 B a LBA0 (+ shadow LBA1); checksum FNV-1a di [0..184).
+/// v4: il superblock e' cresciuto dentro il settore (512 B) per fare spazio
+/// a `label` + `mountpoint` (l'header-extension resta a 1024: la geometria
+/// del blocco non cambia).
+pub const ARCA_SUPER_LEN: usize = 192;
 pub const ARCA_OFF_MAGIC: usize = 0;
 pub const ARCA_OFF_VERSION: usize = 4;
 pub const ARCA_OFF_BLOCK_SIZE: usize = 8;
@@ -30,10 +34,25 @@ pub const ARCA_OFF_GEN: usize = 20;
 pub const ARCA_OFF_ROOT: usize = 28;
 pub const ARCA_OFF_REFCOUNT: usize = 36;
 pub const ARCA_OFF_ALLOC: usize = 44;
-pub const ARCA_OFF_MOUNT: usize = 52;
-pub const ARCA_OFF_AUTO: usize = 116;
-pub const ARCA_OFF_FLAGS: usize = 117;
-pub const ARCA_OFF_CHECK: usize = 120;
+/// **Label** del volume (32 B, NUL-padded): il *nome* del volume ("TESTS").
+/// Non e' ancora usata per la discovery by-label (quella e' roba da USB,
+/// ADR-0058): oggi e' l'identita' leggibile e il nome che il log mostra.
+pub const ARCA_OFF_LABEL: usize = 52;
+/// Lunghezza massima del campo label (32 B: [52..84)).
+pub const ARCA_LABEL_MAX: usize = 32;
+/// **Mountpoint dichiarato** dal volume (56 B, NUL-padded): *dove* il volume
+/// vuole essere montato, path **relativo** alla root ("tests", "media/usb";
+/// la vista POSIX ci mette davanti la "/"). Vuoto = il volume non dichiara
+/// niente e non viene auto-montato (modello ZFS: un dataset senza
+/// `mountpoint` resta un dataset).
+pub const ARCA_OFF_MOUNT: usize = 84;
+/// Lunghezza massima del campo mountpoint (56 B: [84..140)).
+pub const ARCA_MOUNT_MAX: usize = 56;
+/// Offset del puntatore meta-root (56.2c): 8 B a [140..148).
+pub const ARCA_OFF_META: usize = 140;
+pub const ARCA_OFF_AUTO: usize = 148;
+pub const ARCA_OFF_FLAGS: usize = 149;
+pub const ARCA_OFF_CHECK: usize = 184;
 /// Settori per blocco (65536 / 512 = 128).
 pub const ARCA_BLOCK_SECTORS: usize = 128;
 /// Byte offset dell'header-estensione nel blocco 0 (salta LBA0+LBA1).
@@ -73,11 +92,7 @@ pub const ARCA_NODE_TYPE_DATA: u8 = 4;
 /// poi slice contigue append-only (1 oggetto = 1 slice, immutabile dopo
 /// la scrittura, condiviso tra oggetti dello stesso bucket).
 pub const ARCA_NODE_TYPE_PACKED: u8 = 5;
-/// Offset del puntatore meta-root nel superblock (56.2c): coda di
-/// `mountpoint[64]`, 8 B a [108..116].
-pub const ARCA_OFF_META: usize = 108;
-/// Lunghezza effettiva massima del mountpoint (56 B: [52..108]).
-pub const ARCA_MOUNT_MAX: usize = 56;
+/// Header di un nodo: 16 byte davanti al payload.
 pub const ARCA_NODE_PAYLOAD: usize = 16;
 pub const ARCA_NODE_PAYLOAD_LEN: usize = ARCA_BLOCK_SIZE as usize - ARCA_NODE_PAYLOAD - 8; // 65512
 pub const ARCA_NODE_CHECK: usize = ARCA_BLOCK_SIZE as usize - 8; // 65528
@@ -99,6 +114,62 @@ fn u64le(b: &[u8], o: usize) -> u64 {
 
 fn put64(b: &mut [u8], o: usize, v: u64) {
     b[o..o + 8].copy_from_slice(&v.to_le_bytes());
+}
+
+/// Identita' del volume (v4): generazione, uuid, label e mountpoint
+/// dichiarato. I due campi testuali sono NUL-padded nel superblock.
+#[derive(Clone, Copy, Debug)]
+pub struct Superblock {
+    pub generation: u64,
+    pub uuid: u64,
+    pub label: [u8; ARCA_LABEL_MAX],
+    pub label_len: usize,
+    pub mountpoint: [u8; ARCA_MOUNT_MAX],
+    pub mountpoint_len: usize,
+}
+
+/// Default manuale: `Default` non e' derivabile per array > 32 elementi.
+impl Default for Superblock {
+    fn default() -> Self {
+        Superblock {
+            generation: 0,
+            uuid: 0,
+            label: [0; ARCA_LABEL_MAX],
+            label_len: 0,
+            mountpoint: [0; ARCA_MOUNT_MAX],
+            mountpoint_len: 0,
+        }
+    }
+}
+
+impl Superblock {
+    /// Label come testo ("" se assente o non UTF-8).
+    pub fn label_str(&self) -> &str {
+        core::str::from_utf8(&self.label[..self.label_len]).unwrap_or("")
+    }
+
+    /// Mountpoint dichiarato come testo ("" = il volume non dichiara niente
+    /// e non viene auto-montato).
+    pub fn mountpoint_str(&self) -> &str {
+        core::str::from_utf8(&self.mountpoint[..self.mountpoint_len]).unwrap_or("")
+    }
+}
+
+/// Copia un testo in un campo NUL-padded (max `field.len()` byte) e
+/// ritorna la lunghezza scritta. Il campo viene **azzzerato** prima: un
+/// patch con un testo piu' corto non deve lasciare la coda del vecchio.
+fn put_text(field: &mut [u8], text: &str) -> usize {
+    field.fill(0);
+    let b = text.as_bytes();
+    let n = b.len().min(field.len());
+    field[..n].copy_from_slice(&b[..n]);
+    n
+}
+
+/// Legge un campo NUL-padded: ritorna i byte fino al primo NUL.
+fn get_text(field: &[u8]) -> &[u8] {
+    let n = field.iter().position(|&c| c == 0).unwrap_or(field.len());
+    &field[..n]
 }
 
 /// Verifica superblock (magic+versione+block-size+checksum): `(gen, uuid)`
@@ -123,11 +194,37 @@ pub fn superblock_verify(sec: &[u8]) -> Option<(u64, u64)> {
     Some((u64le(sb, ARCA_OFF_GEN), u64le(sb, ARCA_OFF_UUID)))
 }
 
-/// Costruisce 128 B di superblock (LE esplicito, checksum FNV-1a).
+/// Legge l'identita' completa del volume (stessi check di
+/// `superblock_verify` + label e mountpoint dichiarato). `None` se il
+/// superblock non verifica.
+pub fn superblock_identity(sec: &[u8]) -> Option<Superblock> {
+    let (generation, uuid) = superblock_verify(sec)?;
+    let sb = sec.get(..ARCA_SUPER_LEN)?;
+    let label = get_text(&sb[ARCA_OFF_LABEL..ARCA_OFF_LABEL + ARCA_LABEL_MAX]);
+    let mount = get_text(&sb[ARCA_OFF_MOUNT..ARCA_OFF_MOUNT + ARCA_MOUNT_MAX]);
+    let mut id = Superblock {
+        generation,
+        uuid,
+        ..Default::default()
+    };
+    id.label[..label.len()].copy_from_slice(label);
+    id.label_len = label.len();
+    id.mountpoint[..mount.len()].copy_from_slice(mount);
+    id.mountpoint_len = mount.len();
+    Some(id)
+}
+
+/// Costruisce 192 B di superblock (LE esplicito, checksum FNV-1a).
 /// Mossa dal tool host: stessa funzione per `create` e guest `format`.
-/// Mountpoint clippato a `ARCA_MOUNT_MAX` (56 B): la coda [108..116] ospita
-/// `meta_root` (56.2c) e non deve mai collidere col testo.
-pub fn superblock_build(uuid: u64, generation: u64, mountpoint: &str) -> [u8; ARCA_SUPER_LEN] {
+/// `label` e `mountpoint` sono clippati ai rispettivi bound (32 B / 56 B) e
+/// NUL-padded: i campi non si sovrappongono mai (`meta_root` sta a [140..148)
+/// e il checksum copre [0..184)).
+pub fn superblock_build(
+    uuid: u64,
+    generation: u64,
+    label: &str,
+    mountpoint: &str,
+) -> [u8; ARCA_SUPER_LEN] {
     let mut sb = [0u8; ARCA_SUPER_LEN];
     sb[ARCA_OFF_MAGIC..ARCA_OFF_MAGIC + 4].copy_from_slice(ARCA_MAGIC);
     sb[ARCA_OFF_VERSION..ARCA_OFF_VERSION + 4].copy_from_slice(&ARCA_VERSION.to_le_bytes());
@@ -135,9 +232,14 @@ pub fn superblock_build(uuid: u64, generation: u64, mountpoint: &str) -> [u8; AR
         .copy_from_slice(&ARCA_BLOCK_SIZE.to_le_bytes());
     sb[ARCA_OFF_UUID..ARCA_OFF_UUID + 8].copy_from_slice(&uuid.to_le_bytes());
     sb[ARCA_OFF_GEN..ARCA_OFF_GEN + 8].copy_from_slice(&generation.to_le_bytes());
-    let mp = mountpoint.as_bytes();
-    let n = mp.len().min(ARCA_MOUNT_MAX);
-    sb[ARCA_OFF_MOUNT..ARCA_OFF_MOUNT + n].copy_from_slice(&mp[..n]);
+    put_text(
+        &mut sb[ARCA_OFF_LABEL..ARCA_OFF_LABEL + ARCA_LABEL_MAX],
+        label,
+    );
+    put_text(
+        &mut sb[ARCA_OFF_MOUNT..ARCA_OFF_MOUNT + ARCA_MOUNT_MAX],
+        mountpoint,
+    );
     sb[ARCA_OFF_AUTO] = 0;
     sb[ARCA_OFF_FLAGS] = 0;
     let checksum = image_hash(&sb[..ARCA_OFF_CHECK]);
@@ -145,10 +247,28 @@ pub fn superblock_build(uuid: u64, generation: u64, mountpoint: &str) -> [u8; AR
     sb
 }
 
+/// Patch dei campi testuali del superblock (label e/o mountpoint),
+/// ricalcolando il checksum. `None` se il superblock non verifica.
+pub fn superblock_set_identity(
+    sec: &mut [u8; 512],
+    label: Option<&str>,
+    mountpoint: Option<&str>,
+) -> Option<()> {
+    superblock_verify(sec)?;
+    if let Some(l) = label {
+        put_text(&mut sec[ARCA_OFF_LABEL..ARCA_OFF_LABEL + ARCA_LABEL_MAX], l);
+    }
+    if let Some(m) = mountpoint {
+        put_text(&mut sec[ARCA_OFF_MOUNT..ARCA_OFF_MOUNT + ARCA_MOUNT_MAX], m);
+    }
+    let checksum = image_hash(&sec[..ARCA_OFF_CHECK]);
+    sec[ARCA_OFF_CHECK..ARCA_OFF_CHECK + 8].copy_from_slice(&checksum.to_le_bytes());
+    Some(())
+}
+
 /// Legge `meta_root` dal superblock (0 = nessuna tabella snapshot).
-/// Il mountpoint e' clampato a `ARCA_MOUNT_MAX` (56 B) da `superblock_build`:
-/// [108..116) e' riservato a meta, mai testo (era la guardia sbagliata a
-/// scambiare il campo meta per overflow e ritornare sempre 0).
+/// Il campo meta sta a [140..148) (v4), mai dentro il testo dei campi
+/// NUL-padded (label [52..84), mountpoint [84..140)).
 pub fn superblock_meta(sec: &[u8]) -> u64 {
     match sec.get(ARCA_OFF_META..ARCA_OFF_META + 8) {
         Some(w) => u64::from_le_bytes([w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]]),
