@@ -13,7 +13,7 @@ sonde in smoke41.py).
 import socket, subprocess, sys, time, os, re
 
 KERNEL_DFLT = "target/x86_64-unknown-none/release/velord"
-# ADR-0058: i dischi FAT non esistono piu' nel boot (FAT_DFLT/FAT2_DFLT
+# ADR-0059: i dischi FAT non esistono piu' nel boot (FAT_DFLT/FAT2_DFLT
 # rimossi: il boot e' solo ArcaFS).
 # Secondo disco (stessa fixture di run.sh: UUID C0FFEE01, label SECOND):
 # senza, t36 fallisce per ambiente (mount UUID impossibile).
@@ -65,7 +65,7 @@ T_DUMP = 0.3 if FAST else 0.6
 def parse_shell_args(mon_dflt, serial_dflt):
     """CLI minima dei file di fase: --mon/--serial/--arca/--kernel/
     --arca-format/--no-prep (il runner parallelo li passa per isolare le
-    istanze; in locale valgono i default). ADR-0058: i dischi FAT sono
+    istanze; in locale valgono i default). ADR-0059: i dischi FAT sono
     spariti (il boot e' solo ArcaFS)."""
     import argparse
     ap = argparse.ArgumentParser()
@@ -81,7 +81,7 @@ def parse_shell_args(mon_dflt, serial_dflt):
 
 
 def prep_images(arca=ARCA_DFLT):
-    """Seed fresco del volume ArcaFS (come run.sh). ADR-0058: niente piu'
+    """Seed fresco del volume ArcaFS (come run.sh). ADR-0059: niente piu'
     immagini FAT ne' iniettore — i binari vivono nel volume. La root e' sul
     volume: senza seed fresco la shell parte su dati stantii (E1:
     persistenza root tra fasi)."""
@@ -339,7 +339,7 @@ class Shell:
             "-no-reboot", "-kernel", self.kernel,
         ]
         # E1: il drive ArcaFS (root obbligatoria, come run.sh) + cmdline
-        # root=UUID. Senza, cardo va in panic loud e niente shell. ADR-0058:
+        # root=UUID. Senza, cardo va in panic loud e niente shell. ADR-0059:
         # i dischi FAT non vengono piu' attaccati.
         args.append("-drive")
         args.append("file=%s,format=%s,if=ide" % (self.arca_img, self.arca_format))

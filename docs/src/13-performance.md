@@ -1,6 +1,6 @@
 # Performance (Fasi 23–25 — baseline + ottimizzazioni; 38 — DMA/IRQ; A/B ArcaFS/FAT)
 
-> **ADR-0058**: il confronto A/B ArcaFS-vs-FAT resta valido (e' il motivo
+> **ADR-0059**: il confronto A/B ArcaFS-vs-FAT resta valido (e' il motivo
 > per cui il provider FAT32 e' ancora nel tree), ma il **FAT e' fuori dal
 > boot**: il bench lo attacca con `FAT_IMG=1` (run opt-in, non nel gate).
 
@@ -42,7 +42,7 @@
   `DONE ok=0`, timeout o uscita senza `DONE` sono fail-loud.
 - **Fixture grandi pre-seedate** (`RUN_BENCH=1`, solo full): `arca-tool.sh`
   scrive host-side SOLO i file `read-only` ArcaFS (4M hot/cold, 1M cold-read);
-  sul FAT (che ora richiede il run opt-in `FAT_IMG=1`, ADR-0058) i fixture
+  sul FAT (che ora richiede il run opt-in `FAT_IMG=1`, ADR-0059) i fixture
   1M cold-read e 4M li crea il bench stesso (`inject-bins.sh` non esiste
   piu': i binari sono nel volume ArcaFS). `ensure_fixture`
   nel bench salta la creazione se `stat` riporta la size attesa. Evita

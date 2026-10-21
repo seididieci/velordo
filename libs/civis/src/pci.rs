@@ -40,29 +40,133 @@ pub struct PciDev {
     pub func: u8,
 }
 
-/// Legge 32 bit del conf di `dev` a `offset` (deve essere allineato a 4).
-pub fn config_read(dev: PciDev, offset: u8) -> u32 {
-    let addr: u32 = 0x8000_0000
+/// Indirizzo CONFIG_ADDRESS per `(dev, offset)` (meccanismo 1).
+#[inline]
+fn conf_addr(dev: PciDev, offset: u8) -> u32 {
+    0x8000_0000
         | ((dev.bus as u32) << 16)
         | ((dev.dev as u32) << 11)
         | ((dev.func as u32) << 8)
-        | ((offset & 0xFC) as u32);
+        | ((offset & 0xFC) as u32)
+}
+
+/// Legge 32 bit del conf di `dev` a `offset` (deve essere allineato a 4).
+pub fn config_read(dev: PciDev, offset: u8) -> u32 {
     unsafe {
-        pio::outl(PCI_CONF_ADDR, addr);
+        pio::outl(PCI_CONF_ADDR, conf_addr(dev, offset));
         pio::inl(PCI_CONF_DATA)
     }
 }
 
 /// Scrive 32 bit del conf di `dev` a `offset` (deve essere allineato a 4).
 pub fn config_write(dev: PciDev, offset: u8, val: u32) {
-    let addr: u32 = 0x8000_0000
-        | ((dev.bus as u32) << 16)
-        | ((dev.dev as u32) << 11)
-        | ((dev.func as u32) << 8)
-        | ((offset & 0xFC) as u32);
     unsafe {
-        pio::outl(PCI_CONF_ADDR, addr);
+        pio::outl(PCI_CONF_ADDR, conf_addr(dev, offset));
         pio::outl(PCI_CONF_DATA, val);
+    }
+}
+
+/// Legge 8 bit del conf di `dev` a `offset`.
+pub fn config_read8(dev: PciDev, offset: u8) -> u8 {
+    unsafe {
+        pio::outl(PCI_CONF_ADDR, conf_addr(dev, offset));
+        pio::inb(PCI_CONF_DATA + (offset & 3) as u16)
+    }
+}
+
+/// Legge 16 bit del conf di `dev` a `offset` (allineato a 2).
+pub fn config_read16(dev: PciDev, offset: u8) -> u16 {
+    unsafe {
+        pio::outl(PCI_CONF_ADDR, conf_addr(dev, offset));
+        pio::inw(PCI_CONF_DATA + (offset & 2) as u16)
+    }
+}
+
+/// Scrive 8 bit del conf di `dev` a `offset`.
+pub fn config_write8(dev: PciDev, offset: u8, val: u8) {
+    unsafe {
+        pio::outl(PCI_CONF_ADDR, conf_addr(dev, offset));
+        pio::outb(PCI_CONF_DATA + (offset & 3) as u16, val);
+    }
+}
+
+/// Scrive 16 bit del conf di `dev` a `offset` (allineato a 2).
+pub fn config_write16(dev: PciDev, offset: u8, val: u16) {
+    unsafe {
+        pio::outl(PCI_CONF_ADDR, conf_addr(dev, offset));
+        pio::outw(PCI_CONF_DATA + (offset & 2) as u16, val);
+    }
+}
+
+/// Scan del bus 0 (tutte le function) per `vendor:device`.
+pub fn find_device(vendor: u16, device: u16) -> Option<PciDev> {
+    let want = ((device as u32) << 16) | vendor as u32;
+    for dev in 0..32u8 {
+        for func in 0..8u8 {
+            let d = PciDev { bus: 0, dev, func };
+            if config_read(d, 0x00) == want {
+                return Some(d);
+            }
+        }
+    }
+    None
+}
+
+/// Primo offset di capability (status bit 4), se presente.
+pub fn cap_first(dev: PciDev) -> Option<u8> {
+    let status = config_read16(dev, 0x06);
+    if status & 0x0010 == 0 {
+        return None;
+    }
+    let off = config_read8(dev, 0x34) & 0xFC;
+    if off == 0 || off < 0x40 {
+        None
+    } else {
+        Some(off)
+    }
+}
+
+/// Offset della capability successiva nella catena (0 = fine).
+pub fn cap_next(dev: PciDev, off: u8) -> Option<u8> {
+    let next = config_read8(dev, off + 1) & 0xFC;
+    if next == 0 || next < 0x40 {
+        None
+    } else {
+        Some(next)
+    }
+}
+
+/// Id della capability all'offset `off`.
+pub fn cap_id(dev: PciDev, off: u8) -> u8 {
+    config_read8(dev, off)
+}
+
+/// Cerca la prima capability con id `id` (es. 0x11 = MSI-X).
+pub fn find_cap(dev: PciDev, id: u8) -> Option<u8> {
+    let mut off = cap_first(dev)?;
+    for _ in 0..32 {
+        if cap_id(dev, off) == id {
+            return Some(off);
+        }
+        off = cap_next(dev, off)?;
+    }
+    None
+}
+
+/// Indirizzo della BAR `idx` (0..5): maschera i bit di flag e, per le BAR
+/// 64-bit, unisce la dword alta. `None` se la BAR e' I/O (non MMIO).
+pub fn bar_addr(dev: PciDev, idx: u8) -> Option<u64> {
+    let off = 0x10 + idx * 4;
+    let lo = config_read(dev, off);
+    if lo & 0x1 != 0 {
+        return None; // BAR di I/O
+    }
+    let base = (lo & !0xF) as u64;
+    if (lo & 0x6) == 0x4 {
+        let hi = config_read(dev, off + 4) as u64;
+        Some((hi << 32) | base)
+    } else {
+        Some(base)
     }
 }
 

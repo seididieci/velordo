@@ -153,7 +153,7 @@ fn spawn_child(name: &[u8]) -> Option<i64> {
 /// ADR-0039); `obj=Some((bucket, key))` = oggetto ArcaFS letto col
 /// filesystem e spawnato con `spawn_image` (Fase 55, N0).
 ///
-/// **Il FAT non e' piu' una sorgente** (ADR-0058): il boot non attacca piu'
+/// **Il FAT non e' piu' una sorgente** (ADR-0059): il boot non attacca piu'
 /// dischi FAT e i binari vivono tutti in ArcaFS (bucket di classe: `sys`
 /// per i servizi, `vela` per i driver, `tst` per la suite, `usr` per i
 /// programmi utente). `io`/`prio` valgono per il path da disco (l'embedded
@@ -167,7 +167,11 @@ struct SvcMeta {
 
 /// Porte I/O per i manifest da disco (copia dei range kernel in
 /// `user_binary.rs`: init e' TCB e li dichiara al kernel via SpawnMeta).
-const VGA_CURSOR_RANGES: &[(u16, u16)] = &[(0x3D4, 0x3D5)];
+/// `gpu` (L0b, ADR-0057): cursore VGA + spazio di configurazione PCI
+/// (`0xCF8-0xCFF`) per enumerare e programmare `virtio-gpu-pci`. Chi ha il
+/// conf PCI puo' riprogrammare qualunque device: contenimento scarso senza
+/// IOMMU (ADR-0026); il broker PCI arriva col secondo consumer PCI (audio).
+const GPU_IO_RANGES: &[(u16, u16)] = &[(0x3D4, 0x3D5), (0xCF8, 0xCFF)];
 const KBD_PS2_RANGES: &[(u16, u16)] = &[(0x60, 0x64)];
 /// CMOS/RTC per il fornitore di data/ora (Fase 50, P1 orologio): indice
 /// `0x70` + dati `0x71` (accessi a byte, una sola entry).
@@ -224,7 +228,7 @@ fn spawn_image_from_vec(img: &[u8], meta: &SvcMeta) -> Option<i64> {
 /// D1 (niente fallback): a oggetto assente/diverso ritorna None senza
 /// ripiegare su un'altra sorgente — a boot il chiamante fa panic loud, al
 /// restart ritenta con hold (vedi `restart_service`). **Il FAT non e' piu'
-/// una sorgente** (ADR-0058): il boot carica tutto da ArcaFS.
+/// una sorgente** (ADR-0059): il boot carica tutto da ArcaFS.
 fn spawn_entry(meta: &SvcMeta) -> Option<i64> {
     if let Some((bucket, key)) = meta.obj {
         print_str!("[init] load obj ");
@@ -465,7 +469,7 @@ const SVC_CONSOLE: SvcMeta = SvcMeta {
     bin: b"gpu",
     obj: Some((b"vela", b"bin/gpu.bin")),
     prio: 16,
-    io: VGA_CURSOR_RANGES,
+    io: GPU_IO_RANGES,
 };
 const SVC_UPTIME: SvcMeta = SvcMeta {
     bin: b"useruptime",
@@ -706,7 +710,7 @@ fn real_main(_sp: u64) -> ! {
     {
         println!("[init] avvio test suite");
         run_test(&TEST_FS, &mut supervised);
-        // ADR-0058: la suite FAT32 esce dal gate (il FAT non e' piu' il
+        // ADR-0059: la suite FAT32 esce dal gate (il FAT non e' piu' il
         // filesystem di sistema). Resta nel repo e gira solo con il feature
         // `fat_tests` (run dedicato con un disco FAT attaccato).
         #[cfg(feature = "fat_tests")]

@@ -14,6 +14,9 @@
 extern crate alloc;
 use civis;
 
+mod virtio;
+mod virtio_gpu;
+
 /// Costante copiata da `vmm_user.rs` (il crate kernel non e' linkato qui).
 const USER_VGA: u64 = 0x4000_0010_0000;
 
@@ -227,6 +230,21 @@ fn real_main(_sp: u64) -> ! {
         let _ = civis::print_string(b"[gpu] registered as service Gpu\n");
     }
 
+    // 4b-bis. Trasporto virtio-gpu modern (L0b, ADR-0057): la registrazione
+    // qui sopra e' il grant per SYS_MAP_MMIO. Ogni fallimento = si resta su
+    // VGA, il loop IPC e /dev/console non dipendono dal device.
+    let mut virtio = match virtio::init() {
+        Ok(dev) => Some(dev),
+        Err("assente") => {
+            let _ = civis::print_string(b"[gpu] virtio-gpu assente: resto su VGA\n");
+            None
+        }
+        Err(cause) => {
+            civis::println!("[gpu] virtio-gpu init fallito: {}", cause);
+            None
+        }
+    };
+
     // 4c. Avvisa il parent (init) di essere pronto (SVC_READY fire-and-forget):
     // serve al supervisore init-restart (Fase 14). SUBITO dopo la registrazione
     // del servizio (non dopo /dev/console, che richiede cardo non ancora nato:
@@ -280,6 +298,14 @@ fn real_main(_sp: u64) -> ! {
 
                     DEV_CLOSE => {
                         let _ = civis::reply(msg.tag, 0, 0);
+                    }
+
+                    civis::IRQ_NOTIFY_GPU => {
+                        // MSI-X del config change (L0b): ISR -> events_read ->
+                        // events_clear -> nuova risoluzione. Nessuna reply.
+                        if let Some(dev) = virtio.as_mut() {
+                            dev.handle_irq();
+                        }
                     }
 
                     civis::EXIT_NOTIFY => {

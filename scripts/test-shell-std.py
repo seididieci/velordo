@@ -16,7 +16,7 @@ def main():
         prep_images()
     # Binario assente = SKIP (non FAIL): la PAL si compila a parte.
     import subprocess
-    # ADR-0058: il binario vive nel volume ArcaFS (seed "ns:test/stdhello.bin"),
+    # ADR-0059: il binario vive nel volume ArcaFS (seed "ns:test/stdhello.bin"),
     # non piu' in un FAT: la presenza si verifica sull'host.
     has = os.path.exists(os.path.join(os.getcwd(), "pal/build/hello-std.bin"))
     if not has:

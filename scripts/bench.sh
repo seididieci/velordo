@@ -84,7 +84,7 @@ for i in $(seq 1 "$RUNS"); do
     # timeout (QEMU resta sulla shell dopo il bench). `timeout` resta la rete
     # di sicurezza per build/boot bloccati.
     # FAT_IMG=1: il confronto A/B ArcaFS-vs-FAT ha bisogno del disco FAT
-    # (ADR-0058: il boot di per se non lo usa, il bench sì).
+    # (ADR-0059: il boot di per se non lo usa, il bench sì).
     FAT_IMG=1 RUN_BENCH=1 setsid timeout "$TIMEOUT_S" ./run.sh "${ACCEL[@]}" >"$log" 2>&1 &
     pid=$!
     deadline=$((SECONDS + TIMEOUT_S))

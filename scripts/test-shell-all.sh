@@ -26,7 +26,7 @@ while [ $# -gt 0 ]; do
 done
 [ ${#PHASES[@]} -eq 0 ] && PHASES=(base run redirect 41 42 source 43 43b 44 44b)
 
-# ADR-0058: il FAT esce — niente immagini FAT ne' iniettore: il seed
+# ADR-0059: il FAT esce — niente immagini FAT ne' iniettore: il seed
 # ArcaFS porta gia' i binari (i dischi FAT servono solo ai run dedicati:
 # suite FAT opt-in e confronto prestazionale).
 echo "[all] preparo il seed ArcaFS (una volta sola)"

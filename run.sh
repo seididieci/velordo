@@ -21,7 +21,7 @@ else
     cargo build --release
 fi
 
-# ADR-0058: **il FAT esce dal boot**. I dischi FAT non vengono piu'
+# ADR-0059: **il FAT esce dal boot**. I dischi FAT non vengono piu'
 # generati ne' attaccati: il boot usa solo ArcaFS (root su arca.img + le
 # derivate opzionali). `scripts/mkfat.py` resta solo per la suite FAT
 # opt-in e per il confronto prestazionale ArcaFS-vs-FAT (run dedicati, fuori
@@ -52,7 +52,7 @@ if [ "${ARCA_IMG:-0}" = "1" ]; then
     ARCA_TOOL_BIN="${ARCA_TOOL_BIN:-$ROOT/build-meta/arca}"
     "$ARCA_TOOL_BIN" uuid userland/disk/arca-part.img 4152434100000002 --lba 63
     "$ARCA_TOOL_BIN" uuid userland/disk/arca-gpt.img 4152434100000003 --lba 64
-    # ADR-0058 (v4): i volumi derivati si presentano con una label (il loro
+    # ADR-0059 (v4): i volumi derivati si presentano con una label (il loro
     # nome: la discovery by-label arriva con la fase USB).
     "$ARCA_TOOL_BIN" set userland/disk/arca-part.img --label PART --lba 63
     "$ARCA_TOOL_BIN" set userland/disk/arca-gpt.img --label GPT --lba 64
@@ -79,7 +79,7 @@ fi
 if [ "${ARCA_IMG:-0}" = "1" ] && [ -f userland/disk/arca-gpt.img ]; then
     DRIVES="$DRIVES -drive file=userland/disk/arca-gpt.img,format=raw,if=ide"
 fi
-# FAT opzionale (ADR-0058): il boot NON usa il FAT, ma i run opt-in sì
+# FAT opzionale (ADR-0059): il boot NON usa il FAT, ma i run opt-in sì
 # (suite FAT `run-fat-tests.sh`, confronto prestazionale ArcaFS-vs-FAT in
 # scripts/bench.sh). Con FAT_IMG=1 le immagini FAT vengono create e
 # attaccate; senza, il sistema parte solo con ArcaFS.
@@ -118,6 +118,15 @@ fi
 if [ -n "$APPEND" ]; then
     set -- "$@" -append "$APPEND"
 fi
+
+# L0b (ADR-0057): virtio-gpu-pci in modalita' modern (MSI-X). NON sostituisce
+# la VGA: il driver legge la risoluzione dal device ma continua a usare la
+# console VGA. VIRTIO_GPU=0 = path di fallback (device assente, gpu su VGA).
+GPU_DEV=""
+if [ "${VIRTIO_GPU:-1}" = "1" ]; then
+    GPU_DEV="-device virtio-gpu-pci,disable-legacy=on"
+fi
+# shellcheck disable=SC2086
 exec qemu-system-x86_64 \
     -m ${RUN_MEM:-256M} \
     -cpu qemu64,+fsgsbase,+rdrand,+rdseed \
@@ -126,4 +135,5 @@ exec qemu-system-x86_64 \
     -no-reboot \
     -kernel "$KERNEL" \
     $DRIVES \
+    $GPU_DEV \
     "$@"

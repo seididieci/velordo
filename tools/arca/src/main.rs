@@ -751,7 +751,7 @@ fn cmd_create(args: &[String]) {
     // `--uuid` resta solo come override esplicito (test deterministici).
     let mut uuid: u64 = auto_uuid();
     let mut size_mib: u64 = 1;
-    // v4 (ADR-0058): il volume si presenta — `label` (il nome) e
+    // v4 (ADR-0059): il volume si presenta — `label` (il nome) e
     // `mountpoint` (dove vuole essere montato, path RELATIVO alla root).
     // Default: il mountpoint segue la label ("TESTS" -> "tests"); vuoto =
     // il volume non dichiara niente e non viene auto-montato.

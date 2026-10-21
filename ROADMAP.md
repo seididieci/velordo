@@ -15,7 +15,7 @@ nulla da solo.
 
 Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
 `[identistest] PASS 11/11` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12`,
-zero FAIL/PANIC/FAULT. La suite FAT32 e' **fuori dal gate** (ADR-0058:
+zero FAIL/PANIC/FAULT. La suite FAT32 e' **fuori dal gate** (ADR-0059:
 `scripts/run-fat-tests.sh`).
 
 | Fase | Descrizione | Stato |
@@ -73,8 +73,8 @@ zero FAIL/PANIC/FAULT. La suite FAT32 e' **fuori dal gate** (ADR-0058:
 | 53 | Misura bulk P4 (audit CAP, sweep 4K/16K/64K ramfs+FAT hot/cold in userbench, tabella costo-vs-dimensione); estensione A/B ArcaFS vs FAT + nativo `R_OBJ_*` vs POSIX, file fino a 4M, cold ArcaFS via `ARCA_SUB_CACHE_FLUSH`, profili `reduced/full`, early-stop, pre-seed fixture 1M/4M su ArcaFS+FAT e modalita' per-size `bench-split.sh` (gruppi con timeout proprio) (2026-10, `13-performance.md`) | ✅ Completata |
 | 54 | Integrita' + attrezzi P5 (crate `blake2s`, `R_GET_HASH`, superblock ArcaFS, `negotiate()`→arcafs stub, `arca create` host, `arca list/stat` guest, testsarca 8/8) | ✅ Completata |
 | 55 | ArcaFS A1+N0 (`R_OBJ_PUT/GET` + store in-memory, parser GPT per spec, mount MBR/GPT in partizione, `sys` seedato, init dual-mode + doppio pinning FNV/BLAKE2s, fallback FAT provato, testsarca 13/13, t58) | ✅ Completata |
-| 56 | Gestione utenti — Fase 3.1: protocollo Identis (`libs/identis-proto`: framing, magic, codici), **token di sessione** emesso da Identis al login, `IDENTIS_ADD_USER` (0x71) con validazione server-side del nome, `IDENTIS_LIST` (0x72), transazione **legata al canale** (BUSY + retry: il secondo client non corrompe piu' il buffer), client `create-user` (hash in locale, token da env `VELORDO_SESSION`), gate `identistest` 11/11 (ADR-0057) | ✅ Completata |
-| 57 | **FAT fuori dal boot e dalla suite** (ADR-0058): ArcaFS unico filesystem di sistema (init carica **tutto** da ArcaFS: `SvcMeta.path` sparisce, `inject-bins.sh` cancellato, `identis`/`login` ora pinnati come gli altri), suite FAT32 **fuori dal gate** (run dedicato `scripts/run-fat-tests.sh`), test migrati su ArcaFS con device **scoperti** per magic/UUID (mai per lettera), superblock **v4** (192 B: `label` + `mountpoint` dichiarato, il campo mountpoint era morto), tool host `arca create --label/--mountpoint` + `arca set`, uuid ArcaFS esposto dal driver disco (by-uuid 16 hex), gate 6 righe + shell 10/10 | ✅ Completata |
+| 56 | Gestione utenti — Fase 3.1: protocollo Identis (`libs/identis-proto`: framing, magic, codici), **token di sessione** emesso da Identis al login, `IDENTIS_ADD_USER` (0x71) con validazione server-side del nome, `IDENTIS_LIST` (0x72), transazione **legata al canale** (BUSY + retry: il secondo client non corrompe piu' il buffer), client `create-user` (hash in locale, token da env `VELORDO_SESSION`), gate `identistest` 11/11 (ADR-0058) | ✅ Completata |
+| 57 | **FAT fuori dal boot e dalla suite** (ADR-0059): ArcaFS unico filesystem di sistema (init carica **tutto** da ArcaFS: `SvcMeta.path` sparisce, `inject-bins.sh` cancellato, `identis`/`login` ora pinnati come gli altri), suite FAT32 **fuori dal gate** (run dedicato `scripts/run-fat-tests.sh`), test migrati su ArcaFS con device **scoperti** per magic/UUID (mai per lettera), superblock **v4** (192 B: `label` + `mountpoint` dichiarato, il campo mountpoint era morto), tool host `arca create --label/--mountpoint` + `arca set`, uuid ArcaFS esposto dal driver disco (by-uuid 16 hex), gate 6 righe + shell 10/10 | ✅ Completata |
 
 ## Pianificate
 
@@ -87,9 +87,23 @@ Voci con scope e vittoria dichiarati (non date).
       spurious `0xFF`, tag `IRQ_NOTIFY_GPU` (0x44). Vittoria conseguita:
       gate PIC/PIT/tastiera/disco invariato + marker
       `[lapic] base=0xfee00000 id=0 svr=0x1ff` + selftest `int 0x50`.
-      Segue **L0b** (MSI-X dentro il trasporto virtio-gpu: entry 0 in BAR1,
-      `addr=0xFEE00000`, `data=0x50`, virtqueue in polling; poi console/
-      font/modeset).
+- [x] **L0b — trasporto virtio-gpu modern + MSI-X + `GET_DISPLAY_INFO`**
+      (completata, ADR-0057; segue L0a): `SYS_MAP_MMIO=61` (finestra device
+      `0xFE00_0000` → `FS_BLOCK+0x270_000`, UC e non-owned, **solo owner di
+      `Service::Gpu`**); `gpu` riceve il conf PCI `0xCF8-0xCFF` via `rector`;
+      enumerazione `1af4:1050`, BAR1 4K (MSI-X) e BAR4 16K (modern, 64-bit),
+      `VIRTIO_F_VERSION_1`, controlq split-ring in polling su una pagina
+      `SYS_DMA_ALLOC(1)`, MSI-X con entry 0 = config change
+      (`addr=0xFEE00000`, `data=0x50`, `msix_config=0`,
+      `queue_msix_vector=0xFFFF`), ramo `IRQ_NOTIFY_GPU` (ISR →
+      `events_read`/`events_clear`), primo comando reale
+      `GET_DISPLAY_INFO`, fallback VGA totale (`VIRTIO_GPU=0`). Vittoria
+      conseguita: marker `[gpu] virtio-gpu 1af4:1050 @00:04.0`,
+      `[gpu] display info: 1280x800 enabled=1`, gate invariato, login
+      `root/root` SUCCESS; config change MSI-X validato a mano con GTK.
+      **Prossimo: D3** (console/font su framebuffer; precondizione
+      `SYS_DMA_ALLOC` multi-slot e bound > 4 pagine), poi D4 (modeset e
+      host-sync).
 - [ ] **S3.2 — Shell nativa** (dopo la Fase 3.1): programma interattivo
       **nativo** (meccanismo, niente POSIX) che prende il posto dello
       spin-loop del login: dispatcher di comandi su `/dev/input/keyboard` +
@@ -99,7 +113,7 @@ Voci con scope e vittoria dichiarati (non date).
       `create-user` (oggi creato ma non lanciato da nessuno) diventa un
       comando. Vittoria: dalla console si crea un utente e l'utente nuovo si
       autentica con la sua password.
-- [ ] **Multi-engine + auto-mount dichiarativo** (ADR-0058 §6): oggi un
+- [ ] **Multi-engine + auto-mount dichiarativo** (ADR-0059 §6): oggi un
       solo `DiskEngine` globale e' legato al volume root, quindi un **secondo
       volume ArcaFS si monta ma e' uno stub non leggibile** (la directory
       vuota che sembrerebbe montata e' una promessa non mantenuta). Serve:
@@ -110,7 +124,7 @@ Voci con scope e vittoria dichiarati (non date).
       collisione, la root mai, la policy esplicita vince), (c) la
       **discovery by-label** (USB: una chiavetta con la sua etichetta). E'
       il prerequisito del supporto USB.
-- [ ] **S3.3 — Hardening utenti** (debiti dichiarati in ADR-0057): (a)
+- [ ] **S3.3 — Hardening utenti** (debiti dichiarati in ADR-0058): (a)
       **proteggere il bucket `identis:config`** in cardo (path protetto ->
       solo il canale del servizio Identis: i channel id sono simmetrici,
       basta `service_lookup(Service::Identis)` + confronto `m.channel`);

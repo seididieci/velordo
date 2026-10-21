@@ -269,7 +269,7 @@ Il kernel embedda via `include_bytes!` solo lo storage-TCB (Fase 21):
 init/disk/fs, caricati prima che il filesystem esista. Tutto il resto vive
 **in ArcaFS** — nel namespace (`/bin`, `/test`, ...) e nei bucket di classe
 (`sys`, `vela`, `usr`, `tst`) — e parte via `spawn_image` (38).
-**ADR-0058: niente piu' `/fat`**: il boot non attacca piu' dischi FAT e
+**ADR-0059: niente piu' `/fat`**: il boot non attacca piu' dischi FAT e
 `init` non ha piu' due modi di caricare un servizio (l'oggetto ArcaFS o
 l'embedded).
 

@@ -20,6 +20,18 @@ pub fn get_ticks() -> i64 {
     unsafe { syscall4(SYS_GET_TICKS, 0, 0, 0, 0) }
 }
 
+/// `map_mmio(phys, virt, count)`: mappa `count` pagine di MMIO device (BAR)
+/// UC nel VA del chiamante (L0b, virtio-gpu). Grant ristretto all'owner di
+/// `Service::Gpu` e alla finestra `DEV_MMIO_BASE`/`USER_MMIO_VA` (ADR-0057).
+#[inline]
+pub fn map_mmio(phys: u64, virt: u64, count: usize) -> Result<(), Error> {
+    let r = unsafe { syscall4(SYS_MAP_MMIO, phys, virt, count as u64, 0) };
+    if r < 0 {
+        return Err(Error::Denied);
+    }
+    Ok(())
+}
+
 /// Attende `n` tick con batch di spin puri tra due `get_ticks` (pattern
 /// robusto scheduler, A4: prima identico in init/usertests). Una `get_ticks`
 /// per iterazione maschera IF=0 a ogni syscall e brucia quanti che rallentano

@@ -1,6 +1,6 @@
 use super::*;
 
-/// t33 — mount/umount espliciti (Fase 16b; ADR-0058: il FAT esce, il
+/// t33 — mount/umount espliciti (Fase 16b; ADR-0059: il FAT esce, il
 /// mount e' sul volume **ArcaFS** root — scoperto dal magic, mai per lettera).
 /// mkdir /mnt (ramfs) → mount <dev ArcaFS> /mnt → /mnt/hello.txt col
 /// contenuto del fixture → umount busy rifiutato con fd aperto → close →
@@ -490,7 +490,7 @@ pub fn t_stat() -> bool {
     true
 }
 
-/// t39 — servizi da disco (Fase 21; ADR-0058: i binari vivono in ArcaFS,
+/// t39 — servizi da disco (Fase 21; ADR-0059: i binari vivono in ArcaFS,
 /// non piu' iniettati in un FAT): i binari in `/bin` e `/test` esistono e
 /// sono non vuoti, e tutti i servizi sono up per nome (= il boot da disco ha
 /// funzionato: gpu/kbd/porta/shell non sono piu' embedded ma girano).

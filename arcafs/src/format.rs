@@ -36,7 +36,7 @@ pub const ARCA_OFF_REFCOUNT: usize = 36;
 pub const ARCA_OFF_ALLOC: usize = 44;
 /// **Label** del volume (32 B, NUL-padded): il *nome* del volume ("TESTS").
 /// Non e' ancora usata per la discovery by-label (quella e' roba da USB,
-/// ADR-0058): oggi e' l'identita' leggibile e il nome che il log mostra.
+/// ADR-0059): oggi e' l'identita' leggibile e il nome che il log mostra.
 pub const ARCA_OFF_LABEL: usize = 52;
 /// Lunghezza massima del campo label (32 B: [52..84)).
 pub const ARCA_LABEL_MAX: usize = 32;

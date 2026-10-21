@@ -144,7 +144,7 @@ velordo/
 
 ## Stato corrente
 
-Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12` + shell (10/10 fasi via `test-shell-all.sh`), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0058): `scripts/run-fat-tests.sh`.
+Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12` + shell (10/10 fasi via `test-shell-all.sh`), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-56, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
@@ -153,7 +153,7 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `flavours/posix/{server,shell,cli}` → `flavours/posix/build`, suite test in
   `flavours/posix/tests` → `flavours/posix/tests/build`. Servizi nativi in
   `userland/` (bins in `userland/build`).
-- **Gestione utenti (ADR-0055/0057, Fase 3.1)**: il servizio `Identis`
+- **Gestione utenti (ADR-0055/0058, Fase 3.1)**: il servizio `Identis`
   (`userland/identis`, `Service::Identis = 11`) detiene **da solo** il bucket
   `identis:config` (`nome:hash_hex` per riga) e parla col protocollo
   condiviso `libs/identis-proto` (framing chunked, magic `ACLI`/`ACUS`,
@@ -357,7 +357,7 @@ timeout 60 ./run.sh > /tmp/boot.log
 rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 
 # Suite di regressione (boot): 6 righe PASS attese e ZERO FAIL/PANIC
-# (ADR-0058: la suite FAT32 e' fuori dal gate -> scripts/run-fat-tests.sh)
+# (ADR-0059: la suite FAT32 e' fuori dal gate -> scripts/run-fat-tests.sh)
 #   [testfs] PASS 5/5
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4

@@ -35,5 +35,5 @@ pub use dma::alloc_dma_pages;
 pub(crate) use dma::free_dma_pages;
 pub use spawn_copy::spawn_copy_share;
 pub use shm::{shm_create, shm_region, shm_ref};
-pub use paging::{active_cr3, flush_page, init, kernel_cr3, new_address_space, map_user_region, map_user_region_owned, map_user_region_owned_ro, map_user_region_shared, map_user_region_cow, map_user_leaf, map_user_leaf_shared, setup_user_stack, cow_fault, remap_shared_holes, range_has_cow, is_mapped_page};
+pub use paging::{active_cr3, flush_page, init, kernel_cr3, new_address_space, map_user_region, map_user_region_owned, map_user_region_owned_ro, map_user_region_uc, map_user_region_shared, map_user_region_cow, map_user_leaf, map_user_leaf_shared, setup_user_stack, cow_fault, remap_shared_holes, range_has_cow, is_mapped_page};
 pub use teardown::teardown_user_space;

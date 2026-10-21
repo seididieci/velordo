@@ -182,7 +182,7 @@ fn real_main(_sp: u64) -> ! {
     // IpcDisk riconnette da solo a ogni restart di block, quindi i mount
     // sopravvivono alla morte del driver — t32). Spec inattive (disco
     // assente) restano in tabella e ritentano lazy al primo accesso.
-    // ADR-0058: la tabella e' vuota (il FAT esce dal boot: i volumi ArcaFS
+    // ADR-0059: la tabella e' vuota (il FAT esce dal boot: i volumi ArcaFS
     // si montano da soli, la root per UUID dalla cmdline).
     let mut fat_mounts: Vec<mount::FsMount> = Vec::new();
     // Identita' stabili dei mount (Fase 49, F2): monotoniche, mai riusate.
@@ -334,7 +334,7 @@ fn real_main(_sp: u64) -> ! {
     next_mount_id = next_mount_id.wrapping_add(1);
     fat_mounts.push(mount::FsMount::root_arca(root_gen, root_uuid_v, root_id));
     fat_gen = fat_gen.wrapping_add(1);
-    // ADR-0058 (v4): il volume si presenta — uuid + label (il nome).
+    // ADR-0059 (v4): il volume si presenta — uuid + label (il nome).
     let root_label = {
         let mut sec = [0u8; 512];
         match mount::probe_arca(root_handle) {

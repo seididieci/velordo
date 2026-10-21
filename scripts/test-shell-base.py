@@ -37,7 +37,7 @@ def main():
 
         # ls + cat + mkdir (script base1). E1 (root ArcaFS): in / ci sono
         # anche bin, test (/bin, /test), usr, tool e tmp (ramfs su /tmp).
-        # ADR-0058: niente piu' "fat" (il FAT e' uscito dal boot).
+        # ADR-0059: niente piu' "fat" (il FAT e' uscito dal boot).
         out = sh.run_source(SH + "/base1.txt")
         found = (b"hello.txt" in out and b"test.txt" in out
                  and b"dev" in out

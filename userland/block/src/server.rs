@@ -64,12 +64,40 @@ fn wait_dma(
     }
 }
 
+/// Tentativi di rilevamento ATA al boot (il device puo' non essere pronto:
+/// "assente" e "non ancora pronto" sono indistinguibili al primo giro).
+const DETECT_ATTEMPTS: u32 = 5;
+/// Attesa fra due tentativi (tick PIT = 10 ms): 20 tick = 200 ms.
+const DETECT_RETRY_TICKS: i64 = 20;
+
 fn real_main(_sp: u64) -> ! {
     println!("[block] starting, pid={}", civis::getpid());
 
     // 1. Rilevamento (solo HW, niente FS coinvolto).
+    //
+    // **Un device ATA puo' non essere pronto al boot**: l'emulazione IDE
+    // di QEMU si espone poco dopo il reset, e un singolo IDENTIFY a t=0
+    // risponde "assente" (status 0x00) indistinguibile da "non ancora
+    // pronto". Dichiarare l'assenza su quel primo giro faceva fallire il
+    // boot: cardo scansionava zero device e andava in panic loud ("volume
+    // root non trovato") — un boot fatto fragile da un device che stava
+    // solo aspettando. Si ritenta qualche volta (prima della
+    // registrazione del servizio: nessun client vede uno stato mezzo).
     let mut infos = Vec::new();
-    let atapi = detect::detect(&mut infos);
+    let mut atapi = 0;
+    for attempt in 0..DETECT_ATTEMPTS {
+        infos.clear();
+        atapi = detect::detect(&mut infos);
+        if !infos.is_empty() || attempt + 1 == DETECT_ATTEMPTS {
+            break;
+        }
+        println!(
+            "[block] nessun disco al tentativo {}/{}: ritento",
+            attempt + 1,
+            DETECT_ATTEMPTS
+        );
+        civis::spin_ticks(DETECT_RETRY_TICKS);
+    }
     let mut disks = Vec::new();
     for (i, info) in infos.iter().enumerate() {
         let letter = (b'a' + i as u8) as char;
@@ -247,7 +275,7 @@ fn real_main(_sp: u64) -> ! {
         if let Some(u) = n.vol_uuid {
             reg_prefixes.push(alloc::format!("/dev/disk/by-uuid/{:08X}", u));
         }
-        // ArcaFS (ADR-0058): uuid a 64 bit = 16 hex (formato distinto dal
+        // ArcaFS (ADR-0059): uuid a 64 bit = 16 hex (formato distinto dal
         // seriale FAT a 8 hex: nessuna ambiguità fra i due).
         if let Some(u) = n.vol_arca_uuid {
             reg_prefixes.push(alloc::format!("/dev/disk/by-uuid/{:016X}", u));

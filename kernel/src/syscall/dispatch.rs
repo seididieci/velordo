@@ -7,7 +7,7 @@ use super::spawn::{sys_spawn, sys_spawn_image, sys_spawn_copy};
 use super::exec::sys_exec;
 use super::cwd::{sys_chdir, sys_getcwd};
 use super::thread::{sys_thread_create, sys_thread_exit, sys_thread_set_fs};
-use super::mem::{sys_mmap, sys_munmap, sys_mprotect, sys_shm_create, sys_shm_map, sys_map_physical, sys_sbrk, sys_ring_alloc, sys_map_in, sys_dma_alloc};
+use super::mem::{sys_mmap, sys_munmap, sys_mprotect, sys_shm_create, sys_shm_map, sys_map_physical, sys_map_mmio, sys_sbrk, sys_ring_alloc, sys_map_in, sys_dma_alloc};
 use super::misc::{sys_exit, sys_write, sys_getpid, sys_kill, sys_suspend, sys_resume, sys_get_ticks, sys_cbs_create, sys_cbs_attach, sys_cbs_get_info, sys_ps_info, sys_text_stats, sys_meminfo, sys_boot_cmdline};
 
 /// Handler di dispatch: legge gli argomenti riempiti dall'entry e chiama la
@@ -34,6 +34,8 @@ pub(super) extern "C" fn syscall_handler() -> i64 {
             syscall_numbers::SYS_SERVICE_LOOKUP => sys_service_lookup((*p).arg1),
             syscall_numbers::SYS_SPAWN => sys_spawn((*p).arg1, (*p).arg2 as usize),
             syscall_numbers::SYS_MAP_PHYSICAL => sys_map_physical((*p).arg1, (*p).arg2, (*p).arg3 as usize),
+            // L0b (ADR-0057): BAR MMIO device UC, solo owner di Service::Gpu.
+            syscall_numbers::SYS_MAP_MMIO => sys_map_mmio((*p).arg1, (*p).arg2, (*p).arg3 as usize),
             syscall_numbers::SYS_GET_TICKS => sys_get_ticks(),
             syscall_numbers::SYS_SBRK => sys_sbrk((*p).arg1),
             // Ring buffer SPSC per-processo (Fase 10.2).

@@ -145,10 +145,13 @@ L'handler 0x50 è routing puro: `lapic::eoi()` **prima** di
 contesto (wakeup-preemption). Il driver `gpu` legge l'ISR virtio e fa
 `events_clear`; il kernel non tocca il device.
 
-L0b (fase virtio-gpu) programma la tabella MSI-X nella BAR1: una entry per
-il config change (`addr=0xFEE0_0000`, `data=0x50`, `msix_config=0`), virtqueue
-in polling sincrono (`queue_msix_vector=0xFFFF`). Il config change può anche
-essere pollato come fallback.
+L0b (ADR-0057) programma la tabella MSI-X nella BAR1 di `virtio-gpu-pci`:
+una entry per il config change (`addr=0xFEE0_0000`, `data=0x50`,
+`msix_config=0`), virtqueue in polling sincrono
+(`queue_msix_vector=0xFFFF`). Le altre entry della tabella restano
+mascherate. Il driver legge l'ISR di virtio (read-to-clear), poi
+`events_read`, scrive `events_clear` e rilegge `GET_DISPLAY_INFO`: il kernel
+non tocca il device.
 
 ## Ordine di inizializzazione
 

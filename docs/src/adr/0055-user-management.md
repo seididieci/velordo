@@ -24,7 +24,7 @@ chiarito tre punti, corretti qui (le ADR non si riscrivono: si annotano).
    servizio emette un token di sessione (w1 della reply), con TTL; la
    creazione utente richiede una sessione **root**. I dettagli (canale
    legato alla transazione, codici, LIST) sono in
-   [ADR-0057](0057-creazione-utenti-token-sessione.md).
+   [ADR-0058](0058-creazione-utenti-token-sessione.md).
 
 Due punti restano **rinviati** (era previsto, ora e' esplicito):
 

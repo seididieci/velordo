@@ -2,8 +2,9 @@
 
 ## Status
 
-Accepted. **L0a implementata** (LAPIC + convivenza PIC); **L0b** (MSI-X nel
-trasporto virtio) si implementa con la fase virtio-gpu, che usa questa base.
+Accepted. **L0a implementata** (LAPIC + convivenza PIC, 21 ottobre 2026);
+**L0b implementata** (MSI-X nel trasporto virtio-gpu + `GET_DISPLAY_INFO`,
+ADR-0057).
 
 ## Context
 
@@ -53,7 +54,7 @@ Servono quindi due passi separati:
   Nessun interrupt è abilitato fino a `sti`, quindi abilitare il LAPIC prima
   del PIC non espone a IRQ prematuri.
 
-### L0b — MSI-X nel trasporto virtio (rinviata alla fase video)
+### L0b — MSI-X nel trasporto virtio (implementata, ADR-0057)
 
 - La tabella MSI-X vive nella BAR1 del device (`virtio-gpu-pci` modern-only,
   4 KiB); il driver userspace la mappa e la programma.
@@ -66,6 +67,7 @@ Servono quindi due passi separati:
 - Il config change può anche essere pollato (timeout o thread dedicato) come
   fallback: non è un requisito assoluto per il primo driver, ma MSI-X è il
   percorso event-driven scelto.
+- Dettagli del grant MMIO, del trasporto e del primo comando in **ADR-0057**.
 
 ### Perché non altre strade
 
@@ -115,8 +117,8 @@ Servono quindi due passi separati:
   `civis`.
 
 Validazione: gate esistente (PIC/PIT/IRQ1/IRQ14/15) + marker `[lapic]` +
-selftest `int 0x50` (solo build `selftest`). Il vettore 0x50 reale arriva
-con L0b.
+selftest `int 0x50` (solo build `selftest`). Il vettore 0x50 reale è
+validato da L0b (ADR-0057).
 
 ---
 *Registro delle modifiche: primo redatto il 21 ottobre 2026 per L0a

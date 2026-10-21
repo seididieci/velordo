@@ -1,4 +1,4 @@
-# ADR-0058: Il FAT esce dal boot e dalla suite — ArcaFS unico filesystem di sistema
+# ADR-0059: Il FAT esce dal boot e dalla suite — ArcaFS unico filesystem di sistema
 
 ## Status
 
@@ -152,7 +152,7 @@ opt-in (suite FAT, confronto prestazionale) e tornerà con le chiavette USB.
 - **La discovery by-label** (e il mount per LABEL): è roba da USB (una
   chiavetta con la sua etichetta). Per ora il campo label c'è ed è letto,
   ma la by-label non esiste ancora.
-- **Il bucket `usr:<nome>`** come volume: vedi ADR-0057 §7 (rinviato a
+- **Il bucket `usr:<nome>`** come volume: vedi ADR-0058 §7 (rinviato a
   S3.2/3.3 insieme all'ACL per utente).
 
 ## Consequences
@@ -243,7 +243,7 @@ opt-in (suite FAT, confronto prestazionale) e tornerà con le chiavette USB.
 
 - **ADR-0054** (blocchi 64 KiB): il superblock v4 vive nello stesso
   blocco da 64 KiB, la cui geometria non cambia.
-- **ADR-0055** (gestione utenti) e **ADR-0057** (token di sessione):
+- **ADR-0055** (gestione utenti) e **ADR-0058** (token di sessione):
   `identis` e `login` passano da `/fat` ad ArcaFS; il bucket
   `identis:config` è una chiave del namespace del volume root (le sue
   ACL per utente restano il debito S3.3).

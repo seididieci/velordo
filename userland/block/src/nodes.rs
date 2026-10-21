@@ -17,7 +17,7 @@ pub(crate) struct Node {
     /// Seriale volume FAT (BPB sniff, Fase 16d): `UUID=` = hex maiuscolo
     /// 8 char. `None` = nodo senza identità stabile (non-FAT o senza firma).
     pub(crate) vol_uuid: Option<u32>,
-    /// UUID a 64 bit del volume **ArcaFS** (superblock v4, ADR-0058):
+    /// UUID a 64 bit del volume **ArcaFS** (superblock v4, ADR-0059):
     /// `UUID=` = 16 hex maiuscoli. `None` = il nodo non è un volume ArcaFS
     /// (o il superblock non verifica).
     pub(crate) vol_arca_uuid: Option<u64>,
@@ -100,7 +100,7 @@ pub(crate) fn resolve_node<'a>(nodes: &'a [Node], key: &str) -> Option<&'a Node>
             }
         }
     }
-    // ArcaFS (ADR-0058): uuid a 64 bit = 16 hex maiuscoli. Formato
+    // ArcaFS (ADR-0059): uuid a 64 bit = 16 hex maiuscoli. Formato
     // diverso dal seriale FAT (8 hex): nessuna ambiguità.
     if key.len() == 16 && key.bytes().all(|b| b.is_ascii_hexdigit()) {
         if let Ok(v) = u64::from_str_radix(key, 16) {

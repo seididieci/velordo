@@ -106,7 +106,7 @@ fn is_arca_super(sec: &[u8; 512]) -> bool {
         && civis::image_hash(&sb[..civis::ARCA_OFF_CHECK]) == u64le(civis::ARCA_OFF_CHECK)
 }
 
-/// Label del volume dal superblock (campo NUL-padded, v4 ADR-0058): il
+/// Label del volume dal superblock (campo NUL-padded, v4 ADR-0059): il
 /// *nome* del volume ("SYSTEM", "PART", "GPT"). Stringa vuota = assente.
 fn superblock_label(sec: &[u8; 512]) -> &str {
     let sb = &sec[..civis::ARCA_SUPER_LEN];
@@ -189,7 +189,7 @@ fn find_arca() -> Option<[u8; 4]> {
 const ROOT_UUID: u64 = 0x4152434100000001;
 
 /// Device del volume **root**: il whole-disk il cui superblock e' un
-/// ArcaFS valido **con l'uuid della root** (ADR-0058: mai per lettera — con
+/// ArcaFS valido **con l'uuid della root** (ADR-0059: mai per lettera — con
 /// il FAT fuori dal boot le lettere sdX cambiano; il volume si riconosce
 /// dal contenuto). Ritorna "/dev/<nome>".
 fn root_dev() -> Option<String> {
@@ -332,7 +332,7 @@ fn real_main(_sp: u64) -> ! {
     // backend blocchi — stessi assert 56.1, backend diverso (specifica §19).
     // Vedi sotto, sezione 22-32.
 
-    // ADR-0058 (v4): il volume si presenta — la label (il nome) e il
+    // ADR-0059 (v4): il volume si presenta — la label (il nome) e il
     // mountpoint dichiarato si leggono dal superblock. La root non
     // dichiara un mountpoint (la sceglie la cmdline `root=UUID=`).
     let root_sec = root_dev().as_deref().and_then(read_sector);

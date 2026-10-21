@@ -4,14 +4,17 @@
 # `./run.sh` di default e' produzione (init salta i test, shell subito).
 # Questo wrapper imposta RUN_TESTS=1 (init compilato con --no-default-features
 # ed esegue usertestfs/usertestfat/usertests/testsarca in sequenza prima della
-# shell) e rimanda a run.sh. Righe attese + zero FAIL/PANIC/FAULT:
+# shell) e rimanda a run.sh. Righe attese + zero FAIL/PANIC/FAULT (ADR-0059:
+# il FAT e' fuori dal gate — la suite FAT32 sta in scripts/run-fat-tests.sh,
+# run dedicato con un disco FAT attaccato):
 #   [testfs] PASS 5/5
-#   [testfat] PASS 7/7
-#   [testsarca] PASS 62/62
+#   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
 #   [usertests] PASS 58/58
 #   [threadtest] PASS 12/12
+# L0b (virtio-gpu + MSI-X, ADR-0057): nessuna riga nuova; il boot verifica i
+# marker `[gpu] virtio-gpu ...` / `[gpu] display info: 1280x800 enabled=1`.
 set -euo pipefail
 cd "$(dirname "$0")"
 # Diagnostica scheduler/IRQ attiva nei run di test (feature `sched_debug`).

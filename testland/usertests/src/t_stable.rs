@@ -55,12 +55,12 @@ pub fn t_detach() -> bool {
     true
 }
 
-/// t36 — identità stabile del volume **ArcaFS** + discovery (ADR-0058).
+/// t36 — identità stabile del volume **ArcaFS** + discovery (ADR-0059).
 /// Il FAT esce dal boot: l'identità non è più quella del BPB (seriale +
 /// label), ma quella del superblock ArcaFS (uuid a 64 bit). Resta la
 /// dimensione UUID: mount per UUID, open raw del by-path, listing di
 /// /dev/disk/by-uuid. **La dimensione LABEL è rinviata** (è roba da USB:
-/// ADR-0058) e con lei il by-label.
+/// ADR-0059) e con lei il by-label.
 pub fn t_stable_id() -> bool {
     helpers::drain_stray();
     if civis::mkdir("/u2").is_err() {

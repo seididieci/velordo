@@ -38,7 +38,7 @@ if [ "${RUN_BENCH:-0}" = "1" ]; then
     RECTOR_FEATURES="$RECTOR_FEATURES --features bench"
     echo "[build] rector CON bench (RUN_BENCH=1)"
 fi
-# ADR-0058: la suite FAT32 esce dal gate — gira solo nel run dedicato con
+# ADR-0059: la suite FAT32 esce dal gate — gira solo nel run dedicato con
 # un disco FAT (scripts/run-fat-tests.sh).
 if [ "${RUN_FAT_TESTS:-0}" = "1" ]; then
     RECTOR_FEATURES="$RECTOR_FEATURES --features fat_tests"

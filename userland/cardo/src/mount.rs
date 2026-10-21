@@ -135,12 +135,12 @@ pub struct FsMount {
 /// perdono al restart (stato runtime, come fd e handshake: i client
 /// ristabiliscono).
 ///
-/// **ADR-0058: il FAT esce dal boot.** Il sistema **non attacca** piu'
+/// **ADR-0059: il FAT esce dal boot.** Il sistema **non attacca** piu'
 /// dischi FAT: il boot usa solo ArcaFS. La voce FAT qui sotto resta pero'
 /// *iniettiva*: senza il disco il mount non si attiva (la spec e' lazy) e
 /// non tocca nulla — serve ai run opt-in (suite FAT, confronto
 /// prestazionale ArcaFS-vs-FAT) e tornerà con le chiavette USB (mount per
-/// LABEL, ADR-0058).
+/// LABEL, ADR-0059).
 pub const STATIC_MOUNTS: &[(&str, &str)] = &[
     ("UUID=4F4C4556", "fat"),
 ];
@@ -175,7 +175,7 @@ fn normalize_source(source: &str) -> Option<String> {
     }
     if let Some(hex) = s.strip_prefix("UUID=") {
         // 8 hex = seriale FAT (32 bit); 16 hex = uuid ArcaFS (64 bit,
-        // ADR-0058). Formati distinti: nessuna ambiguità.
+        // ADR-0059). Formati distinti: nessuna ambiguità.
         if (hex.len() != 8 && hex.len() != 16) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             return None;
         }

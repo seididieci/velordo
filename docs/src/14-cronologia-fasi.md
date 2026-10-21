@@ -2565,8 +2565,37 @@
       testsarca 61/62 per il noto bound `append 512KiB` (dt=9036 tick su
       TCG/host lento; bound 6000 invariato, non una regressione L0a). Zero
       PANIC/FAULT. Prossimo: L0b (MSI-X nel trasporto virtio-gpu).
+- [x] L0b — trasporto virtio-gpu modern + MSI-X + `GET_DISPLAY_INFO`
+      (2026-10-21, ADR-0057): il driver `gpu` parla col device in userspace
+      senza toccare PIC/PIT/scheduler. Nuova `SYS_MAP_MMIO=61` (finestra
+      `DEV_MMIO_BASE=0xFE00_0000` → `USER_MMIO_VA=FS_BLOCK+0x270_000`, UC
+      `PCD|PWT`, non-owned, **solo owner di `Service::Gpu`**; la finestra
+      non entra in `phys_mem`). `rector` da' a `gpu` `GPU_IO_RANGES`
+      (cursore VGA + conf PCI `0xCF8-0xCFF`); primitive generiche in
+      `civis::pci`, trasporto in `userland/gpu/src/{virtio,virtio_gpu}.rs`,
+      costanti in `vela::gpu`. BAR1 4K (MSI-X) e BAR4 16K (modern 64-bit)
+      programmate a `0xFE000000`/`0xFE004000` e mappate UC; features
+      `VIRTIO_F_VERSION_1`, controlq split-ring su una pagina
+      `SYS_DMA_ALLOC(1)` in polling (timeout 100 tick), MSI-X con 3 vettori:
+      maschere tutte, entry 0 = config change (`0xFEE00000`/`0x50`,
+      `msix_config=0`), `queue_msix_vector=0xFFFF`. Ramo `IRQ_NOTIFY_GPU`:
+      ISR → `events_read` → `events_clear` → rilegge la risoluzione. Fallback
+      VGA su ogni errore; `run.sh` aggiunge
+      `-device virtio-gpu-pci,disable-legacy=on`, `VIRTIO_GPU=0` per il path
+      di fallback. File: `syscall-numbers`, `kernel/src/syscall/{mem,dispatch}.rs`,
+      `arc/vmm_user/{paging,vmm_user}.rs`, `civis::{pci,sys,lib}`, `vela/gpu`,
+      `userland/gpu/*`, `rector`, `run.sh`; docs ADR-0057 + 0056, `03/04/06/11`,
+      `SUMMARY.md`. Validazione: gate invariato (testfs 5/5, testfat 7/7,
+      posixtests 4/4, usertests 58/58, threadtest 12/12; testsarca 61/62 per
+      il noto bound `append 512KiB`, dt≈9036 su TCG/host lento), marker
+      `[gpu] virtio-gpu 1af4:1050 @00:04.0`, `BAR1=0xfe000000
+      BAR4=0xfe004000`, `MSI-X: 3 vect ...`, `display info: 1280x800
+      enabled=1`; fallback `VIRTIO_GPU=0` pulito; login `root/root` SUCCESS.
+      Config change MSI-X: validazione manuale GTK (host senza xvfb/xdotool).
+      Prossimo: D3 (console/font su framebuffer), che richiede
+      `SYS_DMA_ALLOC` multi-slot e bound maggiore.
 - [x] Fase 3.1 — Gestione utenti: token di sessione e creazione utente
-      (2026-10-21, ADR-0057): chiuso il backend di ADR-0055 e preparato il
+      (2026-10-21, ADR-0058): chiuso il backend di ADR-0055 e preparato il
       terreno per la shell nativa (Fase 3.2). Il servizio `Identis`
       (`userland/identis`, `Service::Identis = 11`) detiene **da solo** il
       bucket `identis:config` (`nome:hash_hex` per riga) e parla con i
@@ -2605,7 +2634,7 @@
       timer); (3) il bucket `identis:config` **non era protetto**: la policy
       per hash di cardo (Fase 45) assegna il default ignoto `0x19F`, che
       **include OPEN/READ/WRITE** → chiunque poteva aprire e scrivere le
-      credenziali (debito dichiarato in ADR-0057 §6, chiusura S3.3: la
+      credenziali (debito dichiarato in ADR-0058 §6, chiusura S3.3: la
       protezione per path va con il token → capability, non prima); (4) il
       login **echoava la password in chiaro** sul seriale (bug preesistente,
       ora mascherata) e stampava il prefisso dell'hash; (5) init avviava
@@ -2627,10 +2656,10 @@
       (nuovo), `userland/identis/`, `userland/identis-login/`,
       `userland/create-user/` (nuovo), `testland/identistest/` (nuovo),
       `userland/rector/` (ordine di boot), `scripts/{build-userland,build-tests,inject-bins,arca-tool}.sh`;
-      docs ADR-0057 (nuovo), revisione di ADR-0055, `11-testing.md`,
+      docs ADR-0058 (nuovo), revisione di ADR-0055, `11-testing.md`,
       `SUMMARY.md`, `ROADMAP.md`, `AGENTS.md`.
 - [x] Fase 3.2 — **Il FAT esce dal boot e dalla suite** (2026-10-21,
-      ADR-0058): ArcaFS diventa l'unico filesystem di sistema; il provider
+      ADR-0059): ArcaFS diventa l'unico filesystem di sistema; il provider
       FAT32 resta in cardo come riferimento prestazionale e base per l'USB,
       ma non e' piu' media di boot ne' piano di prova. Fuori dal boot:
       `SvcMeta.path` sparisce (init carica **tutto** da ArcaFS: oggetti
@@ -2684,3 +2713,38 @@
       e i test che lo assumevano saltavano gruppi interi senza dire nulla;
       (3) un campo nel formato che nessuno legge e' un campo che sparisce:
       il `mountpoint` era morto da tre fasi e nessuno se n'era accorto.
+- [x] Merge `origin/master` (L0b) + FAT fuori dal boot — conflitti, rinumerazione
+      ADR e race del probe ATA (2026-10-21): il merge del ramo remoto
+      (L0b: virtio-gpu modern + MSI-X, ADR-0057) con il ramo locale (FAT
+      fuori dal boot, ADR-0059) ha prodotto tre conflitti — `ROADMAP.md`,
+      `14-cronologia-fasi.md`, `SUMMARY.md` — risolti **tenendo entrambe le
+      parti** (L0b sta accanto a L0a, che lo dichiarava come "prossimo"; le
+      voci S3.2/multi-engine/S3.3 restano in coda). Il caso serio era un
+      altro: **entrambi i rami avevano un ADR-0057** (qui "creazione utenti",
+      sul remoto "grant MMIO + virtio-gpu", gia' pubblicato). Regola
+      applicata: **il numero gia' pubblicato resta al suo proprietario**, i
+      miei due ADR (non pubblicati) si spostano — creazione utenti 0057 ->
+      0058, FAT fuori dal boot 0058 -> 0059 — con tutti i riferimenti
+      aggiornati (i due file ADR, il link in ADR-0055, `SUMMARY.md`,
+      `ROADMAP.md`, cronologia, `07-ipc`, `08-userspace`, `09-filesystem`,
+      `11-testing`, `13-performance`, `AGENTS.md` e i commenti nel codice:
+      `civis`, `cardo`, `block`, `rector`, `arca`, `arcafs`, gli script).
+      Il merge ha anche scoperto una **race preesistente** del driver disco:
+      la rilevazione ATA era una singola prova a t=0 e "nessun disco" (lo
+      status 0x00 di un device non ancora pronto) e' indistinguibile da
+      "assente" — con l'extra device PCI di L0b la finestra e' diventata
+      visibile e una fase della suite shell (la 43) ha fatto fallire il boot
+      ("volume root non trovato" -> panic). Fix: il driver ritenta la
+      rilevazione (5 tentativi, 200 ms fra uno e l'altro) **prima** di
+      registrarsi (nessun client vede uno stato mezzo); nel gate il retry non
+      scatta mai (il device e' pronto) e la suite shell torna 10/10. Infine
+      il contratto del gate in `run-tests.sh` era rimasto indietro (annunciava
+      ancora testfat 7/7 e testsarca 62/62): le righe attese sono 6 e
+      testsarca 64/64. Lezioni: (1) la numerazione degli ADR e' uno spazio
+      condiviso: due rami paralleli la occupano senza saperlo — chi
+      pubblica tiene il numero, chi no si sposta; (2) i conflitti che
+      *non* esplodono sono i piu' pericolosi: `run-tests.sh` e' stato
+      fusionato "pulito" ma con un contratto di gate sbagliato (l'unico
+      file che il gate legge per sapere cosa aspettare); (3) un singolo
+      probe a t=0 non distingue "assente" da "non ancora pronto" — e il
+      costo di sbagliare li' e' un boot che non parte.

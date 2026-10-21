@@ -4,7 +4,7 @@
 > **snapshot all'epoca** di ciascuna fase (es. 17/17, 21/21, 32/32). Il gate
 > corrente e' quello qui sotto (5/5 + 64/64 + 4/4 + 11/11 + 58/58 + 12/12 +
 > shell) e in `AGENTS.md`. La suite **FAT32** e' **fuori dal gate**
-> (ADR-0058: il FAT non e' piu' il filesystem di sistema): vive in
+> (ADR-0059: il FAT non e' piu' il filesystem di sistema): vive in
 > `scripts/run-fat-tests.sh`, un run dedicato con un disco FAT attaccato.
 
 La regressione automatica del sistema gira **dentro QEMU** a ogni boot: i
@@ -24,9 +24,9 @@ flavours/posix/
 testland/   test suite meccanismo + repro + demo storiche
   testfs        usertestfs   — ramfs (read/write/mkdir/errori)   → PASS 5/5
   testfat       usertestfat  — FAT32 scrivibile (Fase 20) + /dev/null, /dev/zero → PASS 7/7
-  testsarca     usertestsarca — ArcaFS P5+A1+56.1+56.2a+56.2b+56.2c (B+tree COW + commit, recovery/GC + sys-dal-volume) + logging L1 Fase 57 (gateway `Log` RAM-first, bucket per identita', seal, stats, bounce) + namespace POSIX 56.3 (dir emergenti + set RAM, ADR-0042) + quota per bucket A3 (budget, ERR_NOSPC, persistenza, ADR-0044) + rename/symlink S1.1 (file/dir, link+follow, ERR tipizzati) + range read 2 MiB S2.5f/F0 + prefix-overwrite W1 (merge esplicito `ns_write`) + extent dinamici S2.5w/W2 (ADR-0050: COW a blocchi, liveness, XSTATS) + append 512K bound (test59) + cache write-through S2.5w/W3 (ADR-0051: fasce R0/R1/R2, sizing meminfo, hit/reads in XSTATS) + epoche minime S2.5w/W4 (ADR-0052: fd-write a epoca, crash kill-mid recovery, test60) + packing sub-blocco stesso-bucket S2.5w/W5 (ADR-0053: tipo nodo PACKED, bump per bucket, refcount eager + rebuild al bind, test61) + blocchi 64 KiB e rimozione cap 16 MiB S2.5w/W6 (ADR-0054: ARCA_VERSION 3, nessun cap oggetto, walk streaming, test62) + identita' del volume v4 (ADR-0058: superblock 192 B, label + mountpoint dichiarato, test63-64) → PASS 64/64
+  testsarca     usertestsarca — ArcaFS P5+A1+56.1+56.2a+56.2b+56.2c (B+tree COW + commit, recovery/GC + sys-dal-volume) + logging L1 Fase 57 (gateway `Log` RAM-first, bucket per identita', seal, stats, bounce) + namespace POSIX 56.3 (dir emergenti + set RAM, ADR-0042) + quota per bucket A3 (budget, ERR_NOSPC, persistenza, ADR-0044) + rename/symlink S1.1 (file/dir, link+follow, ERR tipizzati) + range read 2 MiB S2.5f/F0 + prefix-overwrite W1 (merge esplicito `ns_write`) + extent dinamici S2.5w/W2 (ADR-0050: COW a blocchi, liveness, XSTATS) + append 512K bound (test59) + cache write-through S2.5w/W3 (ADR-0051: fasce R0/R1/R2, sizing meminfo, hit/reads in XSTATS) + epoche minime S2.5w/W4 (ADR-0052: fd-write a epoca, crash kill-mid recovery, test60) + packing sub-blocco stesso-bucket S2.5w/W5 (ADR-0053: tipo nodo PACKED, bump per bucket, refcount eager + rebuild al bind, test61) + blocchi 64 KiB e rimozione cap 16 MiB S2.5w/W6 (ADR-0054: ARCA_VERSION 3, nessun cap oggetto, walk streaming, test62) + identita' del volume v4 (ADR-0059: superblock 192 B, label + mountpoint dichiarato, test63-64) → PASS 64/64
   usertests     usertests    — suite meccanismo (58 test, +t59 rename/+t60 symlink/+t61 chdir/+t62 chmod S1.1) → PASS 58/58
-  identistest   identistest  — protocollo Identis (ADR-0057): sessione/token, verifica credenziali, creazione utente, duplicati, nomi non conformi, elenco utenti, formato del bucket `identis:config` → PASS 11/11
+  identistest   identistest  — protocollo Identis (ADR-0058): sessione/token, verifica credenziali, creazione utente, duplicati, nomi non conformi, elenco utenti, formato del bucket `identis:config` → PASS 11/11
   threadtest    userthreadtest — thread 1:1 (S-T, ADR-0046: create/stack/TLS/futex/IPC/fd/stress-32/FPU-S2.5b) → PASS 12/12
   usertest-client usertestcli  — helper a modalita' (ECHO/ZEROREAD/NULLW/SRV/CHURN/KILLME/SRVDIE/SYNCWAIT/MNTDIE/OPENDIE/MAPHAMMER/FLOOD/NEST/FAULT_*/SHMDEMO/COWDEMO/FORKDEMO/ORPHAN/HARDEN/REG51/EXECDEMO/DUPCLAIM/DUPGRANT/DUPSIBCLAIM/SEEKDENY/SUSPENDENY/SIGCATCH/GRANTDENY)
   usertest-spin  usertestspin  — busy-loop a budget di tick (batch 512 spin puri, priorita' via SpawnMeta) + ramo SQUAT (sonda di squat FS_REGISTER, t51)
@@ -65,7 +65,7 @@ usertests, threadtest (posixtests PRIMA di usertests cosi' t54 precede i drop
 di diritti di t34; identistest dopo posixtests e prima di usertests: parla
 con Identis e scrive nel bucket delle credenziali, ma non tocca i diritti FS
 che t34 verifica; threadtest ultimo: non dipende dai diritti e stressa lo
-scheduler a servizi caldi). **La suite FAT32 non c'e' piu'** (ADR-0058: il FAT
+scheduler a servizi caldi). **La suite FAT32 non c'e' piu'** (ADR-0059: il FAT
 e' fuori dal boot): `scripts/run-fat-tests.sh` la esegue in un run dedicato
 con un disco FAT attaccato (feature `fat_tests` di init).
 
@@ -87,9 +87,20 @@ Righe di gate:
 >
 > L0a (LAPIC + convivenza PIC, ADR-0056): nessuna nuova riga di suite. Il
 > gate esistente valida PIC/PIT/IRQ1/IRQ14/15; il marker di boot e'
-> `[lapic] base=0xfee00000 id=... svr=0x1ff LINT0=ExtINT`. Il vettore 0x50
-> reale arriva con L0b (MSI-X virtio-gpu); la build `selftest` include
-> `int 0x50` (IDT + EOI LAPIC) prima del NULL-#PF.
+> `[lapic] base=0xfee00000 id=... svr=0x1ff LINT0=ExtINT`. La build
+> `selftest` include `int 0x50` (IDT + EOI LAPIC) prima del NULL-#PF.
+>
+> L0b (virtio-gpu modern + MSI-X, ADR-0057): nessuna nuova riga di suite.
+> Marker deterministici nel boot con il device (default di `run.sh`):
+> `[gpu] virtio-gpu 1af4:1050 @00:04.0`,
+> `[gpu] BAR1=0xfe000000 BAR4=0xfe004000`,
+> `[gpu] MSI-X: 3 vect, config=0 -> 0x50, queue=0xffff`,
+> `[gpu] display info: 1280x800 enabled=1`. Fallback con `VIRTIO_GPU=0`:
+> `[gpu] virtio-gpu assente: resto su VGA`, zero PANIC/FAULT. Il config
+> change MSI-X (resize della finestra host) e' **validazione manuale** con
+> `RUN_DISPLAY=gtk`: su questo host non ci sono xvfb/xdotool/client VNC e il
+> monitor QEMU non ha comandi display; atteso
+> `[gpu] config change: events=0x1` seguito dalla nuova risoluzione.
 
 ## Test shell interattivi (QEMU + sendkey, fuori dal gate kernel)
 

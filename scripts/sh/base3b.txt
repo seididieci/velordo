@@ -1,2 +1,2 @@
-# base: ls -l / (la radice ArcaFS, scrivibile: niente piu' /fat, ADR-0058).
+# base: ls -l / (la radice ArcaFS, scrivibile: niente piu' /fat, ADR-0059).
 ls -l /

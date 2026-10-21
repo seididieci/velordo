@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run dedicato della suite FAT32 (ADR-0058).
+# Run dedicato della suite FAT32 (ADR-0059).
 #
 # Il FAT **non e' piu' il filesystem di sistema**: il boot e' solo ArcaFS e la
 # suite FAT32 e' fuori dal gate (il gate e' 6 righe, vedi 11-testing.md).
