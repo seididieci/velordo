@@ -1,18 +1,26 @@
-//! Servizio Identis (ADR-0055): identita' e autenticazione utenti.
+//! Servizio Identis (ADR-0055, Fase 3.1): identita' e autenticazione utenti.
 //!
-//! Detiene il bucket ArcaFS `identis:config` (nome utente -> hash
-//! BLAKE2s-256 della password). Espone il tag IPC `IDENTIS_VERIFY`
-//! (0x70) per la verifica delle credenziali.
+//! Detiene il bucket ArcaFS `identis:config` (una riga per utente:
+//! `nome:hash_hex_bLAKE2s256`). Espone tre operazioni IPC:
 //!
-//! Protocollo IPC (messaggi sincroni su canale di nascita):
-//!   1° msg: IDENTIS_VERIFY, w0=total_len, w1=0          (annuncia dimensione)
-//!   2°..N°: IDENTIS_VERIFY, w0=offset,  w1=chunk_4B     (payload a pezzi)
-//!   Ultimo: IDENTIS_VERIFY, w0=0xFFFFFFFF (EOF), w1=0   (fine trasmissione)
-//!   Reply:  IDENTIS_VERIFY, w0=0 (SUCCESS) o 1 (FAIL)
+//! - `IDENTIS_VERIFY` (0x70): verifica le credenziali; se tornano giuste
+//!   **emette un token di sessione** (w1 della reply) legato all'utente.
+//! - `IDENTIS_ADD_USER` (0x71): crea un utente. Richiede un token di
+//!   sessione **root** nel payload (la password non transita mai in chiaro:
+//!   il client calcola l'hash BLAKE2s-256 in locale).
+//! - `IDENTIS_LIST` (0x72): numero utenti registrati (w1 della reply).
 //!
-//! Anti-wait-infinito: Identis non fa recv bloccante durante la ricezione.
-//! Usa recv_poll + get_ticks con timeout (5 s di inattivita'). Al timeout
-//! o alla morte del client (EXIT_NOTIFY) scatta la transazione e torna in IDLE.
+//! Il framing dei payload e' condiviso (`libs/identis-proto`): qui il
+//! framing e' lato server (stato, validazione, scrittura del bucket).
+//!
+//! # Anti-interferenza
+//!
+//! Una sola transazione attiva per volta: la transazione e' **legata al
+//! canale** che l'ha aperta. Un altro client che bussa durante una
+//! trasmissione riceve `R_BUSY` e il suo messaggio **non** viene consumato
+//! come chunk (bug chiuso in Fase 3.1: prima il secondo client corrompeva il
+//! buffer del primo). Timeout di inattivita' (5 s) e `EXIT_NOTIFY` (morte
+//! del client) scattano la transazione e tornano in idle.
 
 #![no_std]
 #![no_main]
@@ -21,58 +29,61 @@
 extern crate alloc;
 use alloc::format;
 use alloc::string::String;
-use alloc::string::ToString;
-use alloc::vec::Vec;
 
 use civis;
-use civis::ipc;
+use identis_proto as proto;
 
 civis::entry!(real_main);
 
+/// Bucket ArcaFS con le credenziali (nome -> hash hex).
 const BUCKET_PATH: &str = "identis:config";
+/// Utente di default, creato col bucket se assente.
 const DEFAULT_USER: &str = "root";
+/// BLAKE2s-256("root") — l'utente di default ha la password "root".
 const DEFAULT_HASH_HEX: &str = "0cb8a879dc5d94ed67eb49cc7a4d3052d6a346f2e28fcd9e10e5822aba92eb39";
 
-/// Tag IPC per Identis.
-const IDENTIS_VERIFY: u64 = 0x70;
-/// Marker EOF per fine trasmissione.
-const MSG_EOF: u64 = 0xFFFFFFFF;
-/// Timeout inattivita' (tick PIT, 100 Hz = 5 s).
-const TIMEOUT_TICKS: u64 = 500;
-/// Dimensione massima payload accettata.
+/// Dimensione massima del payload accettata (4 KiB).
 const MAX_PAYLOAD: usize = 4096;
+/// Timeout di inattivita' durante una trasmissione (tick PIT 100 Hz = 5 s).
+const TIMEOUT_TICKS: u64 = 500;
+/// Slot di sessione contemporanee.
+const MAX_SESSIONS: usize = 8;
+/// TTL della sessione (300 s = 30.000 tick a 100 Hz).
+const SESSION_TTL_TICKS: u64 = 30_000;
 
-/// Stati della macchina a stati di ricezione.
-const STATE_IDLE: u8 = 0;
-const STATE_RECEIVING: u8 = 1;
-const STATE_COMPLETE: u8 = 2;
-const STATE_RESPONDING: u8 = 3;
+// ── Stato della transazione in corso ───────────────────────────────────────
 
-/// Stato globale della transazione (campi statici mutabili).
-static mut TXN_STATE: u8 = STATE_IDLE;
-static mut TXN_TOTAL_LEN: u64 = 0;
-static mut TXN_RECEIVED: u64 = 0;
-static mut TXN_BUF: [u8; MAX_PAYLOAD] = [0; MAX_PAYLOAD];
-static mut TXN_BUF_LEN: usize = 0;
-static mut TXN_LAST_TICK: u64 = 0;
-static mut TXN_CLIENT_CHAN: u64 = 0;
 static mut TXN_ACTIVE: bool = false;
+static mut TXN_TAG: u64 = 0;
+static mut TXN_CHAN: u64 = 0;
+static mut TXN_TOTAL: u64 = 0;
+static mut TXN_BUF: [u8; MAX_PAYLOAD] = [0; MAX_PAYLOAD];
+static mut TXN_LEN: usize = 0;
+static mut TXN_TICK: u64 = 0;
 
-/// Resetta lo stato della transazione corrente.
-fn reset_txn() {
-    unsafe {
-        TXN_STATE = STATE_IDLE;
-        TXN_TOTAL_LEN = 0;
-        TXN_RECEIVED = 0;
-        TXN_BUF_LEN = 0;
-        TXN_LAST_TICK = 0;
-        TXN_CLIENT_CHAN = 0;
-        TXN_ACTIVE = false;
-    }
+// ── Tabella delle sessioni ─────────────────────────────────────────────────
+
+/// Una sessione attiva: token -> utente. Bearer token (chi lo possiede agisce
+/// come l'utente): la capability per-canale e' Fase 3.3 (debito dichiarato
+/// in ADR-0056).
+#[derive(Clone, Copy)]
+struct Session {
+    token: u64,
+    name: [u8; proto::MAX_NAME],
+    name_len: usize,
+    issued: u64,
 }
 
-/// Entry: registra il servizio Identis, carica/crea il bucket, entra nel loop
-/// di ricevimento richieste IPC.
+static mut SESSIONS: [Session; MAX_SESSIONS] = [Session {
+    token: 0,
+    name: [0; proto::MAX_NAME],
+    name_len: 0,
+    issued: 0,
+}; MAX_SESSIONS];
+
+// ── Entry ──────────────────────────────────────────────────────────────────
+
+/// Entry: registra il servizio, prepara il bucket, entra nel loop.
 fn real_main(_sp: u64) -> ! {
     civis::println!("[identis] avvio servizio Identis, pid={}", civis::getpid());
 
@@ -82,222 +93,330 @@ fn real_main(_sp: u64) -> ! {
     }
     civis::println!("[identis] registrato come servizio Identis");
 
-    if let Err(e) = ensure_bucket() {
-        civis::println!("[identis] FAILED: ensure_bucket err={:?}", e);
+    if ensure_bucket().is_err() {
+        civis::println!("[identis] FAILED: bucket non disponibile");
         civis::exit(1);
     }
 
     civis::signal_ready(1);
     civis::println!("[identis] pronto");
 
+    // Loop bloccante: `recv` mette in sonno il processo finche' non arriva
+    // un messaggio. Niente busy-loop su syscall (maschera gli interrupt e
+    // affama il timer: un servizio che gira a vuoto ruba tempo a tutti gli
+    // altri, e in TCG il path syscall e' costoso).
     loop {
-        tick();
-    }
-}
-
-/// Un tick del loop principale: prova a ricevere un messaggio (non bloccante)
-/// ed eventualmente avanza la transazione.
-fn tick() {
-    // Prova a ricevere un messaggio (non blocca).
-    match civis::ipc::recv_poll() {
-        Some(m) => handle_msg(m),
-        None => {} // nessun messaggio in attesa
-    }
-
-    // Gestione timeout se siamo in Receiving.
-    unsafe {
-        if TXN_ACTIVE && TXN_STATE == STATE_RECEIVING {
-            let now = civis::get_ticks() as u64;
-            if now.saturating_sub(TXN_LAST_TICK) > TIMEOUT_TICKS {
-                civis::println!(
-                    "[identis] timeout ricezione da chan {} ({} byte attesi, {} ricevuti)",
-                    TXN_CLIENT_CHAN, TXN_TOTAL_LEN, TXN_RECEIVED
-                );
-                reset_txn();
-            }
+        match civis::ipc::recv() {
+            Ok(m) => handle_msg(m),
+            Err(_) => civis::exit(0), // canale morto: il servizio esce
         }
     }
 }
 
-/// Gestisce un messaggio IPC ricevuto.
+/// Smista il messaggio ricevuto.
 fn handle_msg(m: civis::IpcMsg) {
+    // Transazione troppo ferma? (client vivo che ha smesso di parlare): la
+    // si scatta qui, all'arrivo di un messaggio qualsiasi — cosi' un client
+    // nuovo non resta bloccato su R_BUSY per sempre. Il controllo e' fatto
+    // all'ingresso e non in un timer: il servizio dorme tra un messaggio e
+    // l'altro.
+    unsafe {
+        if TXN_ACTIVE && now_tick().saturating_sub(TXN_TICK) > TIMEOUT_TICKS {
+            civis::println!(
+                "[identis] timeout ricezione ({} byte attesi, {} ricevuti)",
+                TXN_TOTAL, TXN_LEN
+            );
+            reset_txn();
+        }
+    }
+
     match m.tag {
-        IDENTIS_VERIFY => handle_verify_msg(m),
+        civis::IDENTIS_VERIFY | civis::IDENTIS_ADD_USER => handle_chunked(m),
+        civis::IDENTIS_LIST => handle_list(m),
         civis::EXIT_NOTIFY => {
-            // Morte di un peer: scatta la transazione se era il nostro client.
+            // Morte di un peer: se era il client della transazione, scatta.
             unsafe {
-                if TXN_ACTIVE && TXN_CLIENT_CHAN == m.channel {
-                    civis::println!(
-                        "[identis] client {} morto, scatto transazione",
-                        TXN_CLIENT_CHAN
-                    );
+                if TXN_ACTIVE && TXN_CHAN == m.channel {
+                    civis::println!("[identis] client morto, scatto transazione");
                     reset_txn();
                 }
             }
         }
-        _ => {
-            // Tag ignoto: ignora.
-        }
+        _ => {}
     }
 }
 
-/// Gestisce un messaggio IDENTIS_VERIFY.
-fn handle_verify_msg(m: civis::IpcMsg) {
+// ── Operazioni chunked (VERIFY / ADD_USER) ────────────────────────────────
+
+/// Gestisce header, chunk ed EOF delle operazioni con payload.
+fn handle_chunked(m: civis::IpcMsg) {
     unsafe {
         if !TXN_ACTIVE {
-            // Nessuna transazione in corso: questo e' il primo messaggio.
-            if m.w1 != 0 {
-                reply_error(m.channel, 1);
+            // Header: w0 = dimensione totale, w1 = 0.
+            if m.w1 != 0 || m.w0 < 8 || m.w0 > MAX_PAYLOAD as u64 {
+                reply(m.tag, proto::R_PROTOCOL, 0);
                 return;
             }
-            if m.w0 > MAX_PAYLOAD as u64 {
-                civis::println!(
-                    "[identis] payload troppo grande: {} byte",
-                    m.w0
-                );
-                reply_error(m.channel, 1);
-                return;
-            }
-            TXN_STATE = STATE_RECEIVING;
-            TXN_TOTAL_LEN = m.w0;
-            TXN_RECEIVED = 0;
-            TXN_BUF_LEN = 0;
-            TXN_LAST_TICK = civis::get_ticks() as u64;
-            TXN_CLIENT_CHAN = m.channel;
             TXN_ACTIVE = true;
-            reply_ok(m.channel);
+            TXN_TAG = m.tag;
+            TXN_CHAN = m.channel;
+            TXN_TOTAL = m.w0;
+            TXN_LEN = 0;
+            TXN_TICK = now_tick();
+            reply(m.tag, proto::R_OK, 0);
             return;
         }
 
-        // Transazione in corso.
-        if TXN_STATE == STATE_RECEIVING {
-            if m.w0 == MSG_EOF {
-                // Fine trasmissione: elabora.
-                complete_transaction();
-            } else {
-                // Chunk di 4 byte in w1 (little-endian).
-                let offset = m.w0 as usize;
-                let chunk = m.w1 as u32;
-                if offset + 4 > TXN_TOTAL_LEN as usize {
-                    // Ultimo chunk potrebbe essere < 4 byte.
-                    let remaining = TXN_TOTAL_LEN as usize - offset;
-                    if remaining == 0 || remaining > 4 {
-                        reply_error(m.channel, 1);
-                        return;
-                    }
-                    // Accetta solo i byte effettivi (gli altri sono 0).
-                    for i in 0..remaining {
-                        TXN_BUF[TXN_BUF_LEN + i] = ((chunk >> (8 * i)) & 0xFF) as u8;
-                    }
-                    TXN_BUF_LEN += remaining;
-                } else {
-                    for i in 0..4 {
-                        TXN_BUF[TXN_BUF_LEN + i] = ((chunk >> (8 * i)) & 0xFF) as u8;
-                    }
-                    TXN_BUF_LEN += 4;
-                }
-                TXN_RECEIVED = TXN_BUF_LEN as u64;
-                TXN_LAST_TICK = civis::get_ticks() as u64;
-                reply_ok(m.channel);
-            }
-            // Stati COMPLETE, RESPONDING, IDLE: ignora.
-            // Qualsiasi altro valore di stato: reset.
-            let st = TXN_STATE;
-            if st != STATE_IDLE && st != STATE_RECEIVING && st != STATE_COMPLETE && st != STATE_RESPONDING {
-                reset_txn();
-            }
+        // Transazione in corso: il canale decide chi e' il cliente.
+        if m.channel != TXN_CHAN {
+            // Altro client: R_BUSY e il messaggio NON viene consumato.
+            reply(m.tag, proto::R_BUSY, 0);
+            return;
         }
+        if m.tag != TXN_TAG {
+            reply(m.tag, proto::R_PROTOCOL, 0);
+            reset_txn();
+            return;
+        }
+
+        if m.w0 == proto::MSG_EOF {
+            // Fine trasmissione: elabora e risponde.
+            let tag = TXN_TAG;
+            let len = TXN_LEN;
+            let (code, extra) = dispatch_payload(tag, &TXN_BUF[..len]);
+            reset_txn();
+            reply(tag, code, extra);
+            return;
+        }
+
+        // Chunk: w0 = offset, w1 = 4 byte little-endian. L'offset deve
+        // combaciare con i byte gia' ricevuti: il protocollo e' sequenziale
+        // (niente riordine/sovrapposizioni: un chunk fuori posto e' un bug
+        // del client, non qualcosa da interpretare).
+        let offset = m.w0 as usize;
+        let packed = m.w1 as u32;
+        if offset != TXN_LEN {
+            reply(m.tag, proto::R_PROTOCOL, 0);
+            reset_txn();
+            return;
+        }
+        let remaining = TXN_TOTAL as usize - offset;
+        let n = remaining.min(proto::CHUNK);
+        for i in 0..n {
+            TXN_BUF[TXN_LEN + i] = ((packed >> (8 * i)) & 0xFF) as u8;
+        }
+        TXN_LEN += n;
+        TXN_TICK = now_tick();
+        reply(m.tag, proto::R_OK, 0);
     }
 }
 
-/// Completa la transazione: parsa il payload e confronta con il bucket.
-fn complete_transaction() {
-    unsafe {
-        // Verifica magic "ACLI" + versione.
-        if TXN_BUF_LEN < 8 {
-            reply_error(TXN_CLIENT_CHAN, 1);
-            reset_txn();
-            return;
-        }
-        if TXN_BUF[0] != b'A' || TXN_BUF[1] != b'C' || TXN_BUF[2] != b'L' || TXN_BUF[3] != b'I' {
-            reply_error(TXN_CLIENT_CHAN, 1);
-            reset_txn();
-            return;
-        }
-        let _version = u32::from_le_bytes([TXN_BUF[4], TXN_BUF[5], TXN_BUF[6], TXN_BUF[7]]);
+/// Elabora il payload completo e restituisce (codice, w1 della reply).
+fn dispatch_payload(tag: u64, buf: &[u8]) -> (u64, u64) {
+    match tag {
+        civis::IDENTIS_VERIFY => do_verify(buf),
+        civis::IDENTIS_ADD_USER => do_add_user(buf),
+        _ => (proto::R_PROTOCOL, 0),
+    }
+}
 
-        let mut offset = 8;
-        if TXN_BUF_LEN < offset + 4 {
-            reply_error(TXN_CLIENT_CHAN, 1);
-            reset_txn();
-            return;
-        }
-        let name_len = u32::from_le_bytes([
-            TXN_BUF[offset], TXN_BUF[offset + 1], TXN_BUF[offset + 2], TXN_BUF[offset + 3],
-        ]) as usize;
-        offset += 4;
+/// Verifica le credenziali e, se tornano giuste, emette un token di sessione.
+fn do_verify(buf: &[u8]) -> (u64, u64) {
+    let (name, hash) = match proto::parse_verify(buf) {
+        Ok(v) => v,
+        Err(_) => return (proto::R_PROTOCOL, 0),
+    };
 
-        if TXN_BUF_LEN < offset + name_len {
-            reply_error(TXN_CLIENT_CHAN, 1);
-            reset_txn();
-            return;
-        }
-        let name = core::str::from_utf8(&TXN_BUF[offset..offset + name_len]).unwrap_or("");
-        offset += name_len;
+    let ok = match load_bucket_entry(&name) {
+        Some(stored) => stored == hex_encode(&hash),
+        None => false,
+    };
 
-        if TXN_BUF_LEN < offset + 4 {
-            reply_error(TXN_CLIENT_CHAN, 1);
-            reset_txn();
-            return;
-        }
-        let hash_len = u32::from_le_bytes([
-            TXN_BUF[offset], TXN_BUF[offset + 1], TXN_BUF[offset + 2], TXN_BUF[offset + 3],
-        ]) as usize;
-        offset += 4;
+    if !ok {
+        // NB: niente la parola "FAIL" nel log (il gate grepa FAIL/PANIC e
+        // questa riga e' un caso NEGATIVO atteso, non un errore).
+        civis::println!("[identis] verifica utente '{}': credenziali non valide", name);
+        return (proto::R_FAIL, 0);
+    }
 
-        if hash_len != 32 || TXN_BUF_LEN < offset + 32 {
-            reply_error(TXN_CLIENT_CHAN, 1);
-            reset_txn();
-            return;
-        }
-        let mut provided_hash = [0u8; 32];
-        for i in 0..32 {
-            provided_hash[i] = TXN_BUF[offset + i];
-        }
+    let token = session_issue(&name);
+    civis::println!("[identis] verifica utente '{}': SUCCESS", name);
+    (proto::R_OK, token)
+}
 
-        // Carica il bucket e confronta.
-        let ok = match load_bucket_entry(&name) {
-            Some(stored_hash) => hex_encode(&provided_hash) == stored_hash,
-            None => false,
-        };
+/// Crea un utente: token di sessione root + nome valido + nome non gia' preso.
+fn do_add_user(buf: &[u8]) -> (u64, u64) {
+    let (token, name, hash) = match proto::parse_add_user(buf) {
+        Ok(v) => v,
+        Err(_) => return (proto::R_PROTOCOL, 0),
+    };
 
+    // 1. Token di sessione valido?
+    let user = match session_lookup(token) {
+        Some(u) => u,
+        None => {
+            civis::println!("[identis] add_user '{}': token non valido", name);
+            return (proto::R_TOKEN_INVALID, 0);
+        }
+    };
+
+    // 2. La sessione deve essere di root (un utente normale non crea utenti).
+    if user != DEFAULT_USER {
         civis::println!(
-            "[identis] verifica utente '{}': {}",
-            name,
-            if ok { "SUCCESS" } else { "FAIL" }
+            "[identis] add_user '{}': sessione di '{}' non autorizzata",
+            name, user
         );
+        return (proto::R_UNAUTHORIZED, 0);
+    }
 
-        // Risponde.
-        let reply_w0 = if ok { 0 } else { 1 };
-        let _ = civis::reply(IDENTIS_VERIFY, reply_w0, 0);
+    // 3. Nome conforme?
+    if !proto::valid_name(&name) {
+        civis::println!("[identis] add_user: nome '{}' non valido", name);
+        return (proto::R_NAME_INVALID, 0);
+    }
 
-        // Pronto per la prossima transazione.
-        TXN_STATE = STATE_RESPONDING;
-        reset_txn();
+    // 4. Utente gia' esistente?
+    if load_bucket_entry(&name).is_some() {
+        civis::println!("[identis] add_user '{}': gia' esistente", name);
+        return (proto::R_EXISTS, 0);
+    }
+
+    // 5. Scrittura nel bucket (solo Identis scrive qui).
+    match append_bucket_entry(&name, &hex_encode(&hash)) {
+        Ok(()) => {
+            civis::println!("[identis] utente '{}' creato", name);
+            (proto::R_OK, 0)
+        }
+        Err(()) => {
+            civis::println!("[identis] add_user '{}': scrittura bucket fallita", name);
+            (proto::R_FS_ERROR, 0)
+        }
     }
 }
 
-/// Risponde OK (w0=0) al client.
-fn reply_ok(chan: u64) {
-    let _ = civis::reply(IDENTIS_VERIFY, 0, 0);
+// ── Operazione LIST ───────────────────────────────────────────────────────
+
+/// LIST: numero utenti registrati. Richiede un token di sessione valido (w1).
+fn handle_list(m: civis::IpcMsg) {
+    unsafe {
+        if TXN_ACTIVE {
+            reply(m.tag, proto::R_BUSY, 0);
+            return;
+        }
+    }
+    if session_lookup(m.w1).is_none() {
+        reply(m.tag, proto::R_TOKEN_INVALID, 0);
+        return;
+    }
+    let n = count_users();
+    reply(m.tag, proto::R_OK, n as u64);
 }
 
-/// Risponde errore (w0=1) al client.
-fn reply_error(chan: u64, code: u64) {
-    let _ = civis::reply(IDENTIS_VERIFY, code, 0);
+// ── Sessioni ───────────────────────────────────────────────────────────────
+
+/// Emette un token di sessione per `name` (slot libero, o il piu' vecchio).
+fn session_issue(name: &str) -> u64 {
+    let token = rand_token();
+    let now = now_tick();
+    let bytes = name.as_bytes();
+    let n = bytes.len().min(proto::MAX_NAME);
+
+    unsafe {
+        let mut target = usize::MAX;
+        for i in 0..MAX_SESSIONS {
+            if SESSIONS[i].token == 0 {
+                target = i;
+                break;
+            }
+        }
+        if target == usize::MAX {
+            // Nessuno slot libero: si sostituisce la sessione piu' vecchia.
+            target = 0;
+            for i in 1..MAX_SESSIONS {
+                if SESSIONS[i].issued < SESSIONS[target].issued {
+                    target = i;
+                }
+            }
+        }
+        SESSIONS[target].token = token;
+        SESSIONS[target].name_len = n;
+        SESSIONS[target].name[..n].copy_from_slice(&bytes[..n]);
+        SESSIONS[target].issued = now;
+    }
+    token
 }
 
-/// Carica l'hash associato a un nome utente dal bucket.
+/// Cerca la sessione di un token: `Some(utente)` se valida e non scaduta.
+fn session_lookup(token: u64) -> Option<String> {
+    if token == 0 {
+        return None;
+    }
+    let now = now_tick();
+    unsafe {
+        for i in 0..MAX_SESSIONS {
+            let s = SESSIONS[i];
+            if s.token != token {
+                continue;
+            }
+            if now.saturating_sub(s.issued) > SESSION_TTL_TICKS {
+                return None;
+            }
+            return core::str::from_utf8(&s.name[..s.name_len])
+                .ok()
+                .map(String::from);
+        }
+    }
+    None
+}
+
+// ── Casualita' del token ──────────────────────────────────────────────────
+
+/// Token casuale a 64 bit. RDRAND quando la CPU lo espone e funziona,
+/// altrimenti fallback xorshift64* seminato da rdtsc+ticks+pid (NON e'
+/// crypto-grade: sotto TCG l'istruzione RDRAND non funziona mai — vedi la
+/// nota nel PAL, S2.5d). Il token 0 e' riservato (mai emesso).
+fn rand_token() -> u64 {
+    for _ in 0..10 {
+        unsafe {
+            let mut v = 0u64;
+            if core::arch::x86_64::_rdrand64_step(&mut v) == 1 && v != 0 {
+                return v;
+            }
+        }
+    }
+    let mut s = seed_value();
+    s ^= s >> 12;
+    s ^= s << 25;
+    s ^= s >> 27;
+    let v = s.wrapping_mul(0x2545F4914F6CDD1D);
+    if v == 0 { 1 } else { v }
+}
+
+/// Seme del fallback: rdtsc ^ ticks ^ pid.
+fn seed_value() -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        core::arch::asm!(
+            "rdtsc",
+            out("eax") lo,
+            out("edx") hi,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    let tsc = ((hi as u64) << 32) | lo as u64;
+    let ticks = now_tick();
+    let pid = civis::getpid() as u64;
+    let mut s = tsc ^ ticks.rotate_left(17) ^ pid.wrapping_mul(0x9E3779B97F4A7C15);
+    if s == 0 {
+        s = 0x243F6A8885A308D3;
+    }
+    s
+}
+
+// ── Bucket `identis:config` ───────────────────────────────────────────────
+
+/// Legge l'hash (hex) associato a un nome utente.
 fn load_bucket_entry(name: &str) -> Option<String> {
     let all = read_bucket_all().ok()?;
     for line in all.lines() {
@@ -305,13 +424,21 @@ fn load_bucket_entry(name: &str) -> Option<String> {
         let stored_name = parts.next()?;
         let stored_hash = parts.next()?;
         if stored_name == name {
-            return Some(stored_hash.to_string());
+            return Some(String::from(stored_hash));
         }
     }
     None
 }
 
-/// Legge l'intero bucket `identis:config` in una String.
+/// Conta le righe del bucket (utenti registrati).
+fn count_users() -> usize {
+    match read_bucket_all() {
+        Ok(all) => all.lines().filter(|l| !l.trim().is_empty()).count(),
+        Err(_) => 0,
+    }
+}
+
+/// Legge l'intero bucket in una String.
 fn read_bucket_all() -> Result<String, civis::Error> {
     let fd = civis::open(BUCKET_PATH, 0)?;
     let mut buf = [0u8; 4096];
@@ -328,7 +455,19 @@ fn read_bucket_all() -> Result<String, civis::Error> {
     Ok(out)
 }
 
-/// Assicura che il bucket esista e contenga almeno l'utente root.
+/// Appende una riga `nome:hash` al bucket.
+fn append_bucket_entry(name: &str, hash_hex: &str) -> Result<(), ()> {
+    let fd = civis::open(BUCKET_PATH, civis::OPEN_APPEND).map_err(|_| ())?;
+    let line = format!("{}:{}\n", name, hash_hex);
+    let n = civis::write_fs(fd, line.as_bytes(), line.len()).map_err(|_| ())?;
+    let _ = civis::close(fd);
+    if n != line.len() {
+        return Err(());
+    }
+    Ok(())
+}
+
+/// Assicura che il bucket esista e contenga almeno l'utente `root`.
 fn ensure_bucket() -> Result<(), civis::Error> {
     let fd = match civis::open(BUCKET_PATH, 0) {
         Ok(f) => f,
@@ -355,15 +494,43 @@ fn ensure_bucket() -> Result<(), civis::Error> {
     Ok(())
 }
 
+// ── Utility ────────────────────────────────────────────────────────────────
+
+/// Reset della transazione corrente.
+fn reset_txn() {
+    unsafe {
+        TXN_ACTIVE = false;
+        TXN_TAG = 0;
+        TXN_CHAN = 0;
+        TXN_TOTAL = 0;
+        TXN_LEN = 0;
+        TXN_TICK = 0;
+    }
+}
+
+/// Reply al mittente del messaggio corrente (reply implicito, ADR-0008).
+fn reply(tag: u64, w0: u64, w1: u64) {
+    let _ = civis::reply(tag, w0, w1);
+}
+
+/// Tick monotoni (PIT 100 Hz).
+fn now_tick() -> u64 {
+    let t = civis::get_ticks();
+    if t < 0 { 0 } else { t as u64 }
+}
+
 /// Codifica un array di byte in stringa esadecimale (minuscole).
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = [0u8; 64];
     for (i, &b) in bytes.iter().enumerate() {
+        if i * 2 + 1 >= out.len() {
+            break;
+        }
         out[i * 2] = HEX[(b >> 4) as usize];
         out[i * 2 + 1] = HEX[(b & 0xF) as usize];
     }
-    String::from(core::str::from_utf8(&out).unwrap())
+    String::from(core::str::from_utf8(&out).unwrap_or(""))
 }
 
 #[panic_handler]

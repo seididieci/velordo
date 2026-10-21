@@ -2565,3 +2565,67 @@
       testsarca 61/62 per il noto bound `append 512KiB` (dt=9036 tick su
       TCG/host lento; bound 6000 invariato, non una regressione L0a). Zero
       PANIC/FAULT. Prossimo: L0b (MSI-X nel trasporto virtio-gpu).
+- [x] Fase 3.1 — Gestione utenti: token di sessione e creazione utente
+      (2026-10-21, ADR-0057): chiuso il backend di ADR-0055 e preparato il
+      terreno per la shell nativa (Fase 3.2). Il servizio `Identis`
+      (`userland/identis`, `Service::Identis = 11`) detiene **da solo** il
+      bucket `identis:config` (`nome:hash_hex` per riga) e parla con i
+      client via un protocollo **condiviso** (`libs/identis-proto`: framing
+      chunked, magic `ACLI`/`ACUS`/`ACLS`, codici `R_*`, costruzione e
+      parsing dei payload, client con retry) — una sola copia del framing
+      per servizio, login, `create-user` e test. Operazioni: `VERIFY`
+      (0x70), `ADD_USER` (0x71), `LIST` (0x72). Al login riuscito Identis
+      emette un **token di sessione** (bearer, 8 slot, TTL 300 s, RDRAND o
+      fallback xorshift64* — sotto TCG il fallback e' l'unico path: RDRAND
+      non funziona mai, vedi la nota del PAL S2.5d) e lo restituisce in
+      `w1`; `ADD_USER` lo richiede nel payload e **solo una sessione root**
+      crea utenti. La **password non transita mai in chiaro**: il client
+      hasha in locale (BLAKE2s-256) e manda solo l'hash; il server confronta
+      hash con hash e valida da solo il nome (`[a-z0-9_-]`, 1..32 byte,
+      niente duplicati). Nuovo client `create-user` (`userland/create-user`,
+      binario nativo): prende il token dall'ambiente (`VELORDO_SESSION`),
+      il nome da argv (la password e' **sempre** digitata), e parla con
+      Identis. Gate nuovo `testland/identistest` → `[identistest] PASS
+      11/11` (lookup, verify ok/ko, add_user senza token/ok/duplicato/nome
+      non valido/nome vuoto, login del nuovo utente, LIST, formato della
+      riga nel bucket): il gate passa a **7 righe** (testfs 5/5, testfat
+      7/7, testsarca 62/62, posixtests 4/4, identistest 11/11, usertests
+      58/58, threadtest 12/12), zero FAIL/PANIC/FAULT. Bug trovati e
+      chiusi: (1) `IDENTIS_ADD_USER`/`IDENTIS_LIST` erano **dichiarati ma non
+      gestiti** — il server cadeva nel ramo `_ => {}` e **non rispondeva**:
+      `civis::send` e' bloccante, quindi un client che li avesse inviato
+      sarebbe restato appeso per sempre (appendere un tag senza
+      implementarlo blocca, non fallisce); (2) la macchina a stati di
+      ricezione aveva **una sola transazione globale** e non legava la
+      transazione al **canale**: un secondo client che bussava a meta'
+      trasmissione veniva consumato come chunk del primo → buffer
+      corrotto; ora la transazione e' legata a (tag, canale), il secondo
+      client riceve `R_BUSY` e **ritenta** l'intera operazione (spin puro,
+      mai busy-loop su syscall: mascherebbe gli interrupt e affamerebbe il
+      timer); (3) il bucket `identis:config` **non era protetto**: la policy
+      per hash di cardo (Fase 45) assegna il default ignoto `0x19F`, che
+      **include OPEN/READ/WRITE** → chiunque poteva aprire e scrivere le
+      credenziali (debito dichiarato in ADR-0057 §6, chiusura S3.3: la
+      protezione per path va con il token → capability, non prima); (4) il
+      login **echoava la password in chiaro** sul seriale (bug preesistente,
+      ora mascherata) e stampava il prefisso dell'hash; (5) init avviava
+      Identis **dopo** la suite di test → il test nuovo non trovava il
+      servizio (il servizio e' di sistema: ora parte prima della suite, il
+      login interattivo resta ultimo); (6) il test che muore senza
+      `TEST_DONE` blocca init per sempre (il gate pendeva): ora chiude
+      sempre la sequenza, anche in panic. Lezioni: un tag IPC va
+      implementato **insieme** al suo codice di risposta (o va rimosso
+      dalla dichiarazione); un servizio single-transazione con client
+      concorrenti deve avere un BUSY **esplicito** e il client deve
+      ritentare; l'ordine di boot e' parte del contratto fra servizi e
+      suite. Debiti dichiarati (S3.2/S3.3 in `ROADMAP.md`): il bucket non e'
+      ancora protetto, il token e' un bearer in ambiente, il bucket home
+      `usr:<nome>` non esiste (`mkdir` in ArcaFS e' in RAM, `open(CREATE)`
+      crea una chiave file: la scelta del layout ha senso solo con il
+      modello di sessione e l'ACL per utente) e `create-user` non e'
+      lanciato da nessuno (manca la shell nativa). File: `libs/identis-proto/`
+      (nuovo), `userland/identis/`, `userland/identis-login/`,
+      `userland/create-user/` (nuovo), `testland/identistest/` (nuovo),
+      `userland/rector/` (ordine di boot), `scripts/{build-userland,build-tests,inject-bins,arca-tool}.sh`;
+      docs ADR-0057 (nuovo), revisione di ADR-0055, `11-testing.md`,
+      `SUMMARY.md`, `ROADMAP.md`, `AGENTS.md`.

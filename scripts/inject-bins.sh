@@ -25,6 +25,8 @@ mcopy -i "$IMG" flavours/posix/build/userposix.bin   ::/bin/posix.bin   || exit 
 mcopy -i "$IMG" userland/build/identis.bin    ::/bin/identis.bin    || exit 1
 # Programma login (ADR-0055): sostituisce la shell al primo boot.
 mcopy -i "$IMG" userland/build/login.bin      ::/bin/login.bin      || exit 1
+# create-user (ADR-0055): crea un utente (nome 8.3 per il FAT).
+mcopy -i "$IMG" userland/build/create-user.bin ::/bin/cuuser.bin   || exit 1
 # Fornitore di data/ora (Fase 50, P1 orologio).
 mcopy -i "$IMG" userland/build/usertime.bin    ::/bin/time.bin    || exit 1
 # Gateway centrale di logging L1 (Fase 57, ADR-0039).
@@ -40,6 +42,8 @@ mcopy -i "$IMG" testland/build/threadtest.bin   ::/test/thread.bin   || exit 1
 mcopy -i "$IMG" testland/build/usertestcli.bin  ::/test/testcli.bin  || exit 1
 mcopy -i "$IMG" testland/build/usertestspin.bin ::/test/testspin.bin || exit 1
 mcopy -i "$IMG" testland/build/utcbstest.bin    ::/test/cbstest.bin  || exit 1
+# identistest (ADR-0055): protocollo auth + creazione utenti.
+mcopy -i "$IMG" testland/build/identistest.bin ::/test/idtest.bin  || exit 1
 mcopy -i "$IMG" testland/build/userhogheap.bin  ::/test/hogheap.bin  || exit 1
 mcopy -i "$IMG" testland/build/userdevreader.bin ::/test/devreadr.bin || exit 1
 mcopy -i "$IMG" testland/build/userdemo.bin     ::/test/demo.bin     || exit 1

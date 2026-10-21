@@ -9,6 +9,7 @@
 #   [testfat] PASS 7/7
 #   [testsarca] PASS 62/62
 #   [posixtests] PASS 4/4
+#   [identistest] PASS 11/11
 #   [usertests] PASS 58/58
 #   [threadtest] PASS 12/12
 set -euo pipefail

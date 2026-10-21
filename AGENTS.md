@@ -144,15 +144,28 @@ velordo/
 
 ## Stato corrente
 
-Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 62/62` + `[posixtests] PASS 4/4` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12` + shell (10/10 fasi via `test-shell-all.sh`), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`).
+Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 62/62` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12` + shell (10/10 fasi via `test-shell-all.sh`), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`).
 
-- **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-55, Pianificate, Parcheggiate).
+- **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-56, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
   `libs/civis` (ex `libs/libr`), personalità `flavours/posix/libr`; binari in
   `flavours/posix/{server,shell,cli}` → `flavours/posix/build`, suite test in
   `flavours/posix/tests` → `flavours/posix/tests/build`. Servizi nativi in
   `userland/` (bins in `userland/build`).
+- **Gestione utenti (ADR-0055/0057, Fase 3.1)**: il servizio `Identis`
+  (`userland/identis`, `Service::Identis = 11`) detiene **da solo** il bucket
+  `identis:config` (`nome:hash_hex` per riga) e parla col protocollo
+  condiviso `libs/identis-proto` (framing chunked, magic `ACLI`/`ACUS`,
+  codici `R_*`). Al login riuscito emette un **token di sessione** (bearer,
+  TTL 300 s): `IDENTIS_ADD_USER` (0x71) lo richiede nel payload e **solo una
+  sessione root** crea utenti. La **password non transita mai in chiaro**: il
+  client hasha in locale (BLAKE2s-256) e manda solo l'hash. La transazione
+  IPC e' **legata al canale**: un secondo client riceve `R_BUSY` e ritenta
+  (non corrompe il buffer altrui). **Debiti dichiarati** (chiusura S3.3): il
+  bucket `identis:config` non e' ancora protetto in cardo, il token e' un
+  bearer in env (`VELORDO_SESSION`), il bucket home `usr:<nome>` non esiste
+  ancora, e `create-user` non e' lanciato da nessuno (manca la shell nativa).
 
 ## Important Notes
 
@@ -343,15 +356,16 @@ timeout 60 ./run.sh > /tmp/boot.log
 ./scripts/bench.sh > /tmp/bench.log
 rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 
-# Suite di regressione (boot): 6 righe PASS attese e ZERO FAIL/PANIC
+# Suite di regressione (boot): 7 righe PASS attese e ZERO FAIL/PANIC
 #   [testfs] PASS 5/5
 #   [testfat] PASS 7/7
 #   [testsarca] PASS 62/62
 #   [posixtests] PASS 4/4
+#   [identistest] PASS 11/11
 #   [usertests] PASS 58/58
 #   [threadtest] PASS 12/12
 timeout 150 ./run-tests.sh > /tmp/boot.log
-rg '\[testfs\] PASS 5/5|\[testfat\] PASS 7/7|\[testsarca\] PASS 62/62|\[posixtests\] PASS 4/4|\[usertests\] PASS 58/58|\[threadtest\] PASS 12/12' /tmp/boot.log
+rg '\[testfs\] PASS 5/5|\[testfat\] PASS 7/7|\[testsarca\] PASS 62/62|\[posixtests\] PASS 4/4|\[identistest\] PASS 11/11|\[usertests\] PASS 58/58|\[threadtest\] PASS 12/12' /tmp/boot.log
 test "$(rg -c 'FAIL|PANIC|#.* FAULT' /tmp/boot.log)" = "0"
 ```
 

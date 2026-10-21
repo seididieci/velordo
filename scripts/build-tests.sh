@@ -42,6 +42,9 @@ build_one testland/threadtest testland/threadtest/src/threadtest.ld threadtest.b
 build_one testland/usertest-client testland/usertest-client/src/client.ld usertestcli.bin usertestcli
 build_one testland/usertest-spin testland/usertest-spin/src/spin.ld usertestspin.bin usertestspin
 build_one testland/utcbstest testland/utcbstest/src/utcbstest.ld utcbstest.bin utcbstest
+# identistest (ADR-0055, Fase 3.1): protocollo di autenticazione e creazione
+# utenti (sessione/token, add_user, duplicati, nomi non conformi, elenco).
+build_one testland/identistest testland/identistest/src/identistest.ld identistest.bin identistest
 # Bench: BENCH_REDUCED=1 compila il profilo ridotto (feature `reduced`), per
 # la validazione rapida su host lenti. Mai nel gate.
 BENCH_FEATURES=""

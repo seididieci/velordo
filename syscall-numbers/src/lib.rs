@@ -381,10 +381,16 @@ pub const LOG_RAM_TAIL: usize = 128;
 /// (Fase 14, ADR-0010). Non e' una richiesta: il parent non deve rispondere.
 pub const EXIT_NOTIFY: u64 = 0x7C;
 
-/// Tag IPC del servizio `Identis` (ADR-0055, gestione utenti).
-pub const IDENTIS_VERIFY: u64 = 0x70;   // w0=nome_ptr, w1=pwd_ptr -> w0=0 SUCCESS / 1 FAIL
-pub const IDENTIS_ADD_USER: u64 = 0x71; // w0=nome_ptr, w1=hash_ptr -> w0=0 OK / 1 ESISTENTE
-pub const IDENTIS_LIST: u64 = 0x72;     // w0=0 -> w1=numero utenti (risposta multi-frame, semplificato)
+/// Tag IPC del servizio `Identis` (ADR-0055, Fase 3.1/ADR-0057).
+///
+/// Il payload di `VERIFY` e `ADD_USER` e' **chunked** (framing condiviso in
+/// `libs/identis-proto`): header `w0=total_len`/`w1=0`, chunk
+/// `w0=offset`/`w1=4 byte`, EOF `w0=0xFFFFFFFF`. Il reply porta il codice in
+/// `w0` (vedi `identis_proto::R_*`); per `VERIFY` ok, `w1` = **token di
+/// sessione** (bearer, TTL 300 s).
+pub const IDENTIS_VERIFY: u64 = 0x70;   // verify credenziali -> w0=0 OK (w1=token) / 1 FAIL
+pub const IDENTIS_ADD_USER: u64 = 0x71; // crea utente (token root nel payload) -> w0=0 OK / 2..8 errore
+pub const IDENTIS_LIST: u64 = 0x72;     // w1=token -> w1=numero utenti (elenco dei nomi: multi-frame, Fase 3.2)
 
 // ── Protocollo DISK_* (data-plane cardo→block, Fase 16) ───────────────
 // Single source of truth dei tag (Fase 16c): prima duplicati in

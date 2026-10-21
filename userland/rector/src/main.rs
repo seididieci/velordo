@@ -596,6 +596,9 @@ const TEST_ARCA: SvcMeta = SvcMeta { bin: b"usertestsarca", path: Some("/fat/tes
 // Suite della personalita' POSIX (Fase 58.5, ADR-0041): gira PRIMA di
 // usertests (t54 deve precedere i drop di diritti di t34 in usertests).
 const TEST_POSIX: SvcMeta = SvcMeta { bin: b"userposixtests", path: Some("/fat/test/posixtst.bin"), obj: Some((b"tst", b"test/posixtst.bin")), prio: 16, io: &[] };
+// Protocollo di autenticazione/creazione utenti (ADR-0055, Fase 3.1):
+// sessione con token, add_user, duplicati, nomi non conformi, elenco.
+const TEST_IDENTIS: SvcMeta = SvcMeta { bin: b"identistest", path: Some("/fat/test/idtest.bin"), obj: Some((b"tst", b"test/idtest.bin")), prio: 16, io: &[] };
 const TESTS: SvcMeta = SvcMeta { bin: b"usertests", path: Some("/fat/test/tests.bin"), obj: Some((b"tst", b"test/tests.bin")), prio: 16, io: &[] };
 // Thread 1:1 (S-T, ADR-0046): dopo usertests (nessuna dipendenza dai diritti),
 // prima della shell interattiva.
@@ -712,6 +715,15 @@ fn real_main(_sp: u64) -> ! {
     }
     let _ = civis::vestigia::log(b"init", b"posix ready");
 
+    // Identis (servizio identita'): servizio di SISTEMA come gli altri —
+    // parte PRIMA della suite (il test `identistest` parla con lui) e
+    // prima di login.
+    if boot_svc(&SVC_IDENTIS, true).is_none() {
+        println!("[init] boot FAILED (identis), panic");
+        civis::exit(1);
+    }
+    let _ = civis::vestigia::log(b"init", b"identis ready");
+
     // Tabella supervisione (Fase 14, init-restart): gpu/fs/vela/kbd/tty/
     // disk/posix/time/log vengono riavviati alla morte (dalla loro sorgente: embedded per
     // disk/fs, disco per gli altri — Fase 21); gli altri figli solo loggati.
@@ -752,6 +764,7 @@ fn real_main(_sp: u64) -> ! {
         run_test(&TEST_FAT, &mut supervised);
         run_test(&TEST_ARCA, &mut supervised);
         run_test(&TEST_POSIX, &mut supervised);
+        run_test(&TEST_IDENTIS, &mut supervised);
         run_test(&TESTS, &mut supervised);
         run_test(&TEST_THREADS, &mut supervised);
     }
@@ -772,13 +785,9 @@ fn real_main(_sp: u64) -> ! {
         run_test(&TEST_S25, &mut supervised);
     }
 
-    // Identis (servizio identita'): deve partire prima di login.
-    if boot_svc(&SVC_IDENTIS, true).is_none() {
-        println!("[init] boot FAILED (identis), panic");
-        civis::exit(1);
-    }
-    let _ = civis::vestigia::log(b"init", b"identis ready");
     // Login al posto della shell: chiede utente/password, stampa SUCCESS/FAIL.
+    // Resta ULTIMO: e' il programma interattivo (legge la tastiera: dopo la
+    // suite, non in concorrenza con essa).
     if boot_svc(&SVC_LOGIN, false).is_none() {
         println!("[init] boot FAILED (login), panic");
         civis::exit(1);

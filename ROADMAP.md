@@ -11,10 +11,11 @@ ricompilare se stesso. Ordina le priorita' (storage veloce prima, servizi
 fuori dal kernel poi, personalita' per software reale dopo) senza pianificare
 nulla da solo.
 
-## Stato (completate 1-55)
+## Stato (completate 1-56)
 
 Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 62/62` +
-`[posixtests] PASS 4/4` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12`, zero FAIL/PANIC/FAULT.
+`[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 58/58` +
+`[threadtest] PASS 12/12`, zero FAIL/PANIC/FAULT.
 
 | Fase | Descrizione | Stato |
 |------|-------------|-------|
@@ -71,6 +72,7 @@ Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 62/62` +
 | 53 | Misura bulk P4 (audit CAP, sweep 4K/16K/64K ramfs+FAT hot/cold in userbench, tabella costo-vs-dimensione); estensione A/B ArcaFS vs FAT + nativo `R_OBJ_*` vs POSIX, file fino a 4M, cold ArcaFS via `ARCA_SUB_CACHE_FLUSH`, profili `reduced/full`, early-stop, pre-seed fixture 1M/4M su ArcaFS+FAT e modalita' per-size `bench-split.sh` (gruppi con timeout proprio) (2026-10, `13-performance.md`) | ✅ Completata |
 | 54 | Integrita' + attrezzi P5 (crate `blake2s`, `R_GET_HASH`, superblock ArcaFS, `negotiate()`→arcafs stub, `arca create` host, `arca list/stat` guest, testsarca 8/8) | ✅ Completata |
 | 55 | ArcaFS A1+N0 (`R_OBJ_PUT/GET` + store in-memory, parser GPT per spec, mount MBR/GPT in partizione, `sys` seedato, init dual-mode + doppio pinning FNV/BLAKE2s, fallback FAT provato, testsarca 13/13, t58) | ✅ Completata |
+| 56 | Gestione utenti — Fase 3.1: protocollo Identis (`libs/identis-proto`: framing, magic, codici), **token di sessione** emesso da Identis al login, `IDENTIS_ADD_USER` (0x71) con validazione server-side del nome, `IDENTIS_LIST` (0x72), transazione **legata al canale** (BUSY + retry: il secondo client non corrompe piu' il buffer), client `create-user` (hash in locale, token da env `VELORDO_SESSION`), gate `identistest` 11/11 (ADR-0057) | ✅ Completata |
 
 ## Pianificate
 
@@ -86,6 +88,25 @@ Voci con scope e vittoria dichiarati (non date).
       Segue **L0b** (MSI-X dentro il trasporto virtio-gpu: entry 0 in BAR1,
       `addr=0xFEE00000`, `data=0x50`, virtqueue in polling; poi console/
       font/modeset).
+- [ ] **S3.2 — Shell nativa** (dopo la Fase 3.1): programma interattivo
+      **nativo** (meccanismo, niente POSIX) che prende il posto dello
+      spin-loop del login: dispatcher di comandi su `/dev/input/keyboard` +
+      `/dev/console` (`help`, `users`, `create-user <nome>`, `logout`,
+      `exit`). Il token di sessione passa dal login alla shell via env
+      (`VELORDO_SESSION`) e da li' ai programmi che lo chiedono: cosi'
+      `create-user` (oggi creato ma non lanciato da nessuno) diventa un
+      comando. Vittoria: dalla console si crea un utente e l'utente nuovo si
+      autentica con la sua password.
+- [ ] **S3.3 — Hardening utenti** (debiti dichiarati in ADR-0057): (a)
+      **proteggere il bucket `identis:config`** in cardo (path protetto ->
+      solo il canale del servizio Identis: i channel id sono simmetrici,
+      basta `service_lookup(Service::Identis)` + confronto `m.channel`);
+      (b) ACL per utente sul bucket home `usr:<nome>` (grant runtime
+      Identis -> cardo: "il canale Y e' la sessione di alice"); (c) token
+      bearer -> **capability per-canale** (il token non viaggia piu' in env);
+      (d) bucket home `usr:<nome>` (layout: chiave file vs dir emergente);
+      (e) cifratura del bucket utente (rinviata). Vittoria: nessun processo
+      fuori da Identis puo' aprire o scrivere le credenziali.
 - [ ] **ArcaFS/object-store** (dopo T0/Fase 49): filesystem avanzato stile
       btrfs/zfs — snapshot, niente partizionamento, layout adattivo per tipo
       di device (hdd/ssd/emmc), raid avanzato, monitoring (SMART), COW su

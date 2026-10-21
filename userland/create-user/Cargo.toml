@@ -1,0 +1,19 @@
+[package]
+name = "create-user"
+version = "0.1.0"
+edition = "2024"
+
+# Crate fuori dal workspace del kernel: build freestanding separata.
+[workspace]
+
+[dependencies]
+civis = { path = "../../libs/civis" }
+blake2s = { path = "../../blake2s" }
+identis-proto = { path = "../../libs/identis-proto" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"

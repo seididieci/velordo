@@ -82,4 +82,6 @@
 - [ADR-0052: Epoche transazionali minime in cardo (W4)](./adr/0052-cardo-epoche-minime.md)
 - [ADR-0053: Packing sub-blocco stesso-bucket in ArcaFS (W5)](./adr/0053-packing-subblocco-stesso-bucket.md)
 - [ADR-0054: Blocchi 64 KiB e rimozione cap 16 MiB in ArcaFS (W6)](./adr/0054-blocchi-64kiB-limite-16MiB.md)
+- [ADR-0055: User and Authentication Management (S3.x)](./adr/0055-user-management.md)
 - [ADR-0056: LAPIC minimale e MSI-X per virtio-gpu (L0a/L0b)](./adr/0056-lapic-msix-minimi.md)
+- [ADR-0057: Creazione utenti, token di sessione e protocollo Identis (Fase 3.1)](./adr/0057-creazione-utenti-token-sessione.md)

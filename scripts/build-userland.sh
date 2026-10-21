@@ -50,6 +50,10 @@ build_one userland/uptime  userland/uptime/src/uptime.ld   useruptime.bin  useru
 # programma interattivo al posto della shell (chiede utente/password, stampa SUCCESS/FAIL).
 build_one userland/identis  userland/identis/src/identis.ld identis.bin   identis
 build_one userland/identis-login userland/identis-login/src/login.ld login.bin   identis-login
+# create-user (ADR-0055): client che chiede a Identis di creare un utente
+# (token di sessione + nome + hash BLAKE2s-256). Non e' ancora lanciato da
+# nessuno: la shell nativa (Fase 3.2) lo invocera' come comando.
+build_one userland/create-user userland/create-user/src/create-user.ld create-user.bin create-user
 # Fornitore di data/ora (Fase 50, P1 orologio): prima di gen-service-hashes
 # cosi' il manifest Strato 2 lo copre (HASH_USERTIME).
 build_one userland/time     userland/time/src/time.ld       usertime.bin    usertime

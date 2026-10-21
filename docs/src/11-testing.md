@@ -2,8 +2,8 @@
 
 > I conteggi di suite citati negli ADR e nelle sotto-fasi del libro sono
 > **snapshot all'epoca** di ciascuna fase (es. 17/17, 21/21, 32/32). Il gate
-> corrente e' quello qui sotto (5/5 + 7/7 + 62/62 + 4/4 + 58/58 + 12/12 + shell) e in
-> `AGENTS.md`.
+> corrente e' quello qui sotto (5/5 + 7/7 + 62/62 + 4/4 + 11/11 + 58/58 +
+> 12/12 + shell) e in `AGENTS.md`.
 
 La regressione automatica del sistema gira **dentro QEMU** a ogni boot: i
 binari di test sono processi user reali, spawnati da `init` in sequenza prima
@@ -24,6 +24,7 @@ testland/   test suite meccanismo + repro + demo storiche
   testfat       usertestfat  — FAT32 scrivibile (Fase 20) + /dev/null, /dev/zero → PASS 7/7
   testsarca     usertestsarca — ArcaFS P5+A1+56.1+56.2a+56.2b+56.2c (B+tree COW + commit, recovery/GC + sys-dal-volume) + logging L1 Fase 57 (gateway `Log` RAM-first, bucket per identita', seal, stats, bounce) + namespace POSIX 56.3 (dir emergenti + set RAM, ADR-0042) + quota per bucket A3 (budget, ERR_NOSPC, persistenza, ADR-0044) + rename/symlink S1.1 (file/dir, link+follow, ERR tipizzati) + range read 2 MiB S2.5f/F0 + prefix-overwrite W1 (merge esplicito `ns_write`) + extent dinamici S2.5w/W2 (ADR-0050: COW a blocchi, liveness, XSTATS) + append 512K bound (test59) + cache write-through S2.5w/W3 (ADR-0051: fasce R0/R1/R2, sizing meminfo, hit/reads in XSTATS) + epoche minime S2.5w/W4 (ADR-0052: fd-write a epoca, crash kill-mid recovery, test60) + packing sub-blocco stesso-bucket S2.5w/W5 (ADR-0053: tipo nodo PACKED, bump per bucket, refcount eager + rebuild al bind, test61) + blocchi 64 KiB e rimozione cap 16 MiB S2.5w/W6 (ADR-0054: ARCA_VERSION 3, nessun cap oggetto, walk streaming, test62) → PASS 62/62
   usertests     usertests    — suite meccanismo (58 test, +t59 rename/+t60 symlink/+t61 chdir/+t62 chmod S1.1) → PASS 58/58
+  identistest   identistest  — protocollo Identis (ADR-0057): sessione/token, verifica credenziali, creazione utente, duplicati, nomi non conformi, elenco utenti, formato del bucket `identis:config` → PASS 11/11
   threadtest    userthreadtest — thread 1:1 (S-T, ADR-0046: create/stack/TLS/futex/IPC/fd/stress-32/FPU-S2.5b) → PASS 12/12
   usertest-client usertestcli  — helper a modalita' (ECHO/ZEROREAD/NULLW/SRV/CHURN/KILLME/SRVDIE/SYNCWAIT/MNTDIE/OPENDIE/MAPHAMMER/FLOOD/NEST/FAULT_*/SHMDEMO/COWDEMO/FORKDEMO/ORPHAN/HARDEN/REG51/EXECDEMO/DUPCLAIM/DUPGRANT/DUPSIBCLAIM/SEEKDENY/SUSPENDENY/SIGCATCH/GRANTDENY)
   usertest-spin  usertestspin  — busy-loop a budget di tick (batch 512 spin puri, priorita' via SpawnMeta) + ramo SQUAT (sonda di squat FS_REGISTER, t51)
@@ -57,10 +58,12 @@ isolati, 41-50 su mount root esplicito, 51-54 quota A3 in bucket `q5*`,
 55-62 namespace/rename/range/W1-W6; senza quarto drive salta 12-13, resta
 PASS adattivo).
 
-Ordine di suite: testfs, testfat, testsarca, **posixtests**, usertests,
-threadtest (posixtests PRIMA di usertests cosi' t54 precede i drop di diritti
-di t34; threadtest ultimo: non dipende dai diritti e stressa lo scheduler a
-servizi caldi).
+Ordine di suite: testfs, testfat, testsarca, **posixtests**, **identistest**,
+usertests, threadtest (posixtests PRIMA di usertests cosi' t54 precede i drop
+di diritti di t34; identistest dopo posixtests e prima di usertests: parla
+con Identis e scrive nel bucket delle credenziali, ma non tocca i diritti FS
+che t34 verifica; threadtest ultimo: non dipende dai diritti e stressa lo
+scheduler a servizi caldi).
 
 Righe di gate:
 
@@ -68,7 +71,8 @@ Righe di gate:
 [testfs] PASS 5/5
 [testfat] PASS 7/7
 [testsarca] PASS 62/62
-[Posixtests] PASS 4/4
+[posixtests] PASS 4/4
+[identistest] PASS 11/11
 [usertests] PASS 58/58
 [threadtest] PASS 12/12
 ```

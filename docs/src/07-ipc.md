@@ -319,6 +319,7 @@ nei test).
 | `DISK_*` | 0x50-0x58 | data-plane cardo↔block (`HELLO/OPEN/READ/CLOSE/RESOLVE/WRITE`, `LIST/INFO` Fase 51: topologia dischi, `FLUSH` Fase 52: barriera write-cache) |
 | `TIME_NOW` | 0x60 | data/ora (client→usertime: reply `w0` = sec epoch, `w1` = centesimi, Fase 50) |
 | `LOG_*` | 0x61-0x66 | logging L1 (client→vestigia, Fase 57/ADR-0039: `REG` handshake ring + hash-bucket, `APPEND` sync-su-RAM, `READ` own-bucket, `SEAL` snapshot, `STATS` contatori, `FLUSH` solo parent) |
+| `IDENTIS_*` | 0x70-0x72 | servizio Identis (client→Identis, Fase 3.1/ADR-0057: `VERIFY`/`ADD_USER` con **payload chunked** (magic `ACLI`/`ACUS`, header `w0=total_len`, chunk `w0=offset`/`w1=4 byte`, EOF `w0=0xFFFFFFFF`), `LIST` in una richiesta; `w1` della reply di `VERIFY` = **token di sessione**) |
 | `DEV_*` | 0x20-0x24 | op cardo↔driver (`OPEN/READ/WRITE/CLOSE/READDIR`; DocsD: prima duplicati in 6 file) |
 | `DEV_*` type (`w0` di `DEV_OPEN`) | 0-4 | `NULL/ZERO` (devfs), `KEYBOARD` (tty), `CONSOLE` (console), `KBD` (kbd) |
 | `EXIT_NOTIFY` | 0x7C | morte peer (kernel→tutti i peer, `w0` = code, `w1` = pid) |

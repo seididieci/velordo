@@ -76,6 +76,9 @@ seed_bin flavours/posix/build/userposix.bin bin/posix/posix.bin sys bin/posix/po
 # Programmi utente in `/usr/bin` (D1: MOVE da /bin, solo ArcaFS; obj reserved).
 seed_bin flavours/posix/build/userrunhello.bin usr/bin/runhello.bin usr usr/bin/runhello.bin
 seed_bin userland/build/userarca.bin usr/bin/arca.bin usr usr/bin/arca.bin
+# create-user (ADR-0055): programma utente (la shell nativa lo invoca come
+# comando, Fase 3.2).
+seed_bin userland/build/create-user.bin usr/bin/cuuser.bin usr usr/bin/cuuser.bin
 # Test suite /test (stessi dest 8.3 di inject-bins.sh). D2: le 6 suite che
 # init carica per object_id hanno anche l'oggetto in `tst`; gli helper
 # (testcli, testspin, …) vivono solo come path (dogfood VFS, D2.4).
@@ -91,6 +94,7 @@ seed_bin testland/build/userhogheap.bin test/hogheap.bin
 seed_bin testland/build/userdevreader.bin test/devreadr.bin
 seed_bin testland/build/userdemo.bin test/demo.bin
 seed_bin testland/build/userbench.bin test/bench.bin tst test/bench.bin
+seed_bin testland/build/identistest.bin test/idtest.bin tst test/idtest.bin
 seed_bin testland/build/userforeign.bin test/foreign.bin
 seed_bin flavours/posix/tests/build/userposixtests.bin test/posixtst.bin tst test/posixtst.bin
 # Hello std nativo (S1.3): solo se compilato via scripts/build-pal.sh (fuori

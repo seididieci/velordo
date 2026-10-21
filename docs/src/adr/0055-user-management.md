@@ -4,6 +4,38 @@
 
 Proposed
 
+## Revisione 1 (Fase 3.1, 21 ottobre 2026)
+
+Il testo originale resta valido come **disegno**; la realizzazione ne ha
+chiarito tre punti, corretti qui (le ADR non si riscrivono: si annotano).
+
+1. **Il servizio si chiama `Identis`, non `auth`.** Il bucket e'
+   `identis:config` (non `auth:config`). Il nome `auth` era un segnaposto: il
+   servizio copre identita' *e* autenticazione, e "auth" si prestava a
+   confusione con il meccanismo di autenticazione del canale IPC (che e'
+   altro: capability per canale, ADR-0008).
+2. **La password NON transita in chiaro.** Il testo originale diceva che il
+   servizio ricevesse la password in chiaro e la hashasse. La realizzazione
+   fa il contrario: e' il **client** a calcolare l'hash BLAKE2s-256 in locale
+   e a mandare **solo l'hash** (32 byte). Motivo: la password non deve
+   attraversare l'IPC (ne' la RAM del servizio, ne' un log). Il server
+   confronta hash con hash.
+3. **Il modello di sessione e' un token bearer.** Al login riuscito il
+   servizio emette un token di sessione (w1 della reply), con TTL; la
+   creazione utente richiede una sessione **root**. I dettagli (canale
+   legato alla transazione, codici, LIST) sono in
+   [ADR-0057](0057-creazione-utenti-token-sessione.md).
+
+Due punti restano **rinviati** (era previsto, ora e' esplicito):
+
+- il **bucket home `usr:<nome>`** non e' creato in 3.1 (`mkdir` in ArcaFS e'
+  in RAM, `open(CREATE)` crea una chiave file: la scelta del layout ha senso
+  solo con il modello di sessione e l'ACL per utente → Fase 3.2/3.3);
+- le **ACL in userspace** sul bucket home (proprietario vs altri) e la
+  **protezione del bucket `identis:config`** (solo il canale di Identis puo'
+  aprirlo) sono debiti dichiarati, con chiusura in Fase 3.3 insieme al
+  passaggio da token bearer a capability per-canale.
+
 ## Context
 
 Velordo is a microkernel x86_64 written in Rust (ADR-0005). Architettura microkernel: il kernel contiene scheduling, IPC, gestione della memoria e routing degli interrupt; driver e servizi (console, file system, devfs, shell) sono processi userspace che comunicano via IPC per nome con reply implicita, supporto async e trasferimento dati zero-copy su ring SPSC per-processo. Lo scheduler è unico RT a 32 priorità con Constant Bandwidth Server (CBS) per la bandwidth reservation.
