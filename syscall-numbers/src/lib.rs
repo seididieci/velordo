@@ -395,10 +395,19 @@ pub const DEV_ZERO: u64 = 1;
 pub const DEV_KEYBOARD: u64 = 2;
 pub const DEV_CONSOLE: u64 = 3;
 pub const DEV_KBD: u64 = 4;
-/// Device virtuale del display (D3, ADR-0060): lo pubblica il driver `gpu`
-/// come `/dev/display` (protocollo in `libs/term::disp`: descrittore +
-/// `PRESENT`). Non e' un device fisico: e' il "canvas" del driver.
-pub const DEV_DISPLAY: u64 = 5;
+// ── Protocollo display (D3, ADR-0060) ─────────────────────────────────
+// Il driver `gpu` e' raggiunto **in diretta** (IPC per nome, `Service::Gpu`),
+// non via un device FS: il cardo e' single-threaded e un driver che lo
+// blocca mentre serve un cliente (per fare una scrittura) si deadlocka.
+// I tag stanno qui (single source, come gli altri protocolli).
+/// Chiedi al driver che display ha: reply `w0` = backend, `w1` = geometria
+/// impacchettata (vedi `term::disp`).
+pub const GPU_DISPLAY_QUERY: u64 = 0x75;
+/// Presenta un buffer: `w0` = fisico, `w1` = geometria impacchettata.
+pub const GPU_DISPLAY_PRESENT: u64 = 0x76;
+/// Refresh della superficie (copia i pixel dal buffer del client): senza,
+/// lo schermo resta nero (path non-virgl: il flush non copia i pixel).
+pub const GPU_DISPLAY_FLUSH: u64 = 0x77;
 // ── Protocollo TIME_* (client→usertime, Fase 50/P1) ─────────────────────
 // Single source of truth dei tag. Il server `Time` e' il fornitore di
 // data/ora del sistema (CMOS all'avvio + monotono PIT): serve il FS (mtime)

@@ -384,8 +384,26 @@ impl Device {
         self.submit(&req, &mut resp) == Some(vela::gpu::VIRTIO_GPU_RESP_OK_NODATA)
     }
 
-    /// `RESOURCE_FLUSH`: il path non-virgl lo ignora (il device mappa la RAM
-    /// del guest): si manda lo stesso, e un errore non e' fatale.
+    /// `TRANSFER_TO_HOST_2D`: copia il buffer del guest nella risorsa (e' il
+    /// comando che *trasferisce* i pixel nel path non-virgl: senza, la
+    /// superficie resta quella vuota della creazione della risorsa).
+    pub fn transfer_to_host_2d(&mut self, resource_id: u32, width: u32, height: u32) -> bool {
+        let mut req = [0u8; 56];
+        req[0..4].copy_from_slice(&vela::gpu::VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D.to_le_bytes());
+        // rect x, y, w, h
+        req[24..28].copy_from_slice(&0u32.to_le_bytes());
+        req[28..32].copy_from_slice(&0u32.to_le_bytes());
+        req[32..36].copy_from_slice(&width.to_le_bytes());
+        req[36..40].copy_from_slice(&height.to_le_bytes());
+        // offset nel buffer del guest
+        req[40..48].copy_from_slice(&0u64.to_le_bytes());
+        req[48..52].copy_from_slice(&resource_id.to_le_bytes());
+        let mut resp = [0u8; 24];
+        self.submit(&req, &mut resp) == Some(vela::gpu::VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    /// `RESOURCE_FLUSH`: dice al device di rinfrescare la superficie (non
+    /// copia i pixel: quello e' `TRANSFER_TO_HOST_2D`).
     pub fn flush(&mut self, resource_id: u32, width: u32, height: u32) -> bool {
         let mut req = [0u8; 48];
         req[0..4].copy_from_slice(&vela::gpu::VIRTIO_GPU_CMD_RESOURCE_FLUSH.to_le_bytes());

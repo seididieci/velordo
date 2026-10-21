@@ -38,13 +38,6 @@ mod virtio_gpu;
 
 // ── Entry point ──────────────────────────────────────────────────────
 
-/// Assicura il mount "/dev/display" presso cardo (stessa via di
-/// `/dev/console`): un tentativo, idempotente grazie al
-/// replace-on-register in cardo. Va rifatto se cardo muore (EXIT_NOTIFY).
-fn ensure_display_registered() {
-    civis::ensure_fs_mount(|| civis::fs_register(b"/dev/display"));
-}
-
 civis::entry!(real_main);
 fn real_main(_sp: u64) -> ! {
     // 1. Registra il servizio: serve al grant MMIO (ADR-0057) e al routing
@@ -72,51 +65,43 @@ fn real_main(_sp: u64) -> ! {
     //    init-restart lo usa (Fase 14).
     civis::signal_ready(1);
 
-    // 4. Pubblica il device del display.
-    ensure_display_registered();
-    let _ = civis::print_string(b"[gpu] registered /dev/display with cardo\n");
+    // 4. Il driver e' raggiunto in diretta (IPC per nome): niente device FS
+    //    (il cardo e' single-threaded: un driver che lo blocca mentre serve
+    //    un cliente si deadlocka — vedi ADR-0060).
 
     // 5. Loop IPC: il device /dev/display (Open/Read/Write) + le notify.
+    // `presented` = l'ultima geometria presentata (per il flush).
+    let mut presented: Option<(u32, u32, u32)> = None;
     loop {
         match civis::recv() {
             Ok(msg) => {
                 match msg.tag {
+                    // ── Protocollo display (IPC diretto dalla console) ──
+                    civis::syscall_numbers::GPU_DISPLAY_QUERY => {
+                        let (backend, geom) = descriptor(&mut dev);
+                        let _ = civis::reply(msg.tag, backend as u64, geom.pack());
+                    }
+
+                    civis::syscall_numbers::GPU_DISPLAY_PRESENT => {
+                        // w0 = fisico del buffer, w1 = geometria impacchettata.
+                        let geom = term::disp::Geometry::unpack(msg.w1);
+                        let ok = handle_present(&mut dev, msg.w0, geom, &mut presented);
+                        let _ = civis::reply(msg.tag, if ok { 0 } else { ERR }, 0);
+                    }
+
+                    civis::syscall_numbers::GPU_DISPLAY_FLUSH => {
+                        let ok = handle_flush(&mut dev, &mut presented);
+                        let _ = civis::reply(msg.tag, if ok { 0 } else { ERR }, 0);
+                    }
+
                     DEV_OPEN => {
-                        // Il solo device del driver: il display.
-                        if msg.w0 == civis::DEV_DISPLAY {
-                            let _ = civis::reply(msg.tag, 0, 0);
-                        } else {
-                            let _ = civis::reply(msg.tag, ERR, 0);
-                        }
+                        // Il driver non serve piu' device FS (il display e' in
+                        // diretta): qualunque altra richiesta e' un errore.
+                        let _ = civis::reply(msg.tag, ERR, 0);
                     }
 
-                    DEV_READ => {
-                        // Il descrittore del display (formato `term::disp`).
-                        let d = descriptor(&mut dev);
-                        unsafe { resp_frame_write(RESP_RING_VA, &d); }
-                        let _ = civis::reply(msg.tag, 0, 0);
-                    }
-
-                    DEV_WRITE => {
-                        // msg.w0 = fd, msg.w1 = count. Il comando (Present)
-                        // e' nel request ring del client.
-                        let count = msg.w1 as usize;
-                        let mut ok = false;
-                        if count > 0 {
-                            let mut data = alloc::vec::Vec::with_capacity(count);
-                            data.resize(count, 0);
-                            unsafe { req_frame_read(REQ_RING_VA, &mut data, count); }
-                            ok = handle_present(&mut dev, &data);
-                        }
-                        if ok {
-                            let _ = civis::reply(msg.tag, msg.w1, 0);
-                        } else {
-                            let _ = civis::reply(msg.tag, ERR, 0);
-                        }
-                    }
-
-                    DEV_CLOSE => {
-                        let _ = civis::reply(msg.tag, 0, 0);
+                    DEV_READ | DEV_WRITE | DEV_CLOSE => {
+                        let _ = civis::reply(msg.tag, ERR, 0);
                     }
 
                     civis::IRQ_NOTIFY_GPU => {
@@ -128,8 +113,8 @@ fn real_main(_sp: u64) -> ! {
                     }
 
                     civis::EXIT_NOTIFY => {
-                        // cardo morto e rinato: re-registra il display.
-                        ensure_display_registered();
+                        // cardo morto e rinato: il driver non serve piu' nessun
+                        // device FS (il display e' in diretta) — niente da fare.
                     }
 
                     _ => {
@@ -142,10 +127,8 @@ fn real_main(_sp: u64) -> ! {
     }
 }
 
-/// Il descrittore del display (formato `term::disp`): backend, geometria,
-/// stride, formato.
-fn descriptor(dev: &mut Option<virtio::Device>) -> [u8; term::disp::DESCRIPTOR_LEN] {
-    let mut d = term::disp::Descriptor::default();
+/// Il descrittore del display: backend + geometria del device.
+fn descriptor(dev: &mut Option<virtio::Device>) -> (u8, term::disp::Geometry) {
     match dev.as_mut() {
         Some(dev) => {
             // La risoluzione corrente del device (il guest non sceglie ancora
@@ -155,47 +138,72 @@ fn descriptor(dev: &mut Option<virtio::Device>) -> [u8; term::disp::DESCRIPTOR_L
                 Some(i) => (i.width, i.height),
                 None => (0, 0),
             };
-            d.backend = term::disp::BACKEND_VIRTIO_GPU;
-            d.width = w;
-            d.height = h;
-            d.stride = w * 4;
-            d.format = term::disp::FORMAT_B8G8R8A8;
+            (
+                term::disp::BACKEND_VIRTIO_GPU,
+                term::disp::Geometry {
+                    width: w,
+                    height: h,
+                    stride: w * 4,
+                    format: term::disp::FORMAT_B8G8R8A8,
+                },
+            )
         }
-        None => {
-            d.backend = term::disp::BACKEND_VGA_TEXT;
-        }
+        None => (term::disp::BACKEND_VGA_TEXT, term::disp::Geometry::default()),
     }
-    term::disp::descriptor_bytes(&d)
 }
 
-/// `PRESENT`: crea la risorsa 2D, le aggancia al buffer del client e la
-/// imposta come scanout.
-fn handle_present(dev: &mut Option<virtio::Device>, data: &[u8]) -> bool {
+/// `FLUSH`: il device copia la risorsa nella superficie (path non-virgl:
+/// senza flush lo schermo resta nero). La console lo manda dopo ogni render.
+fn handle_flush(dev: &mut Option<virtio::Device>, presented: &mut Option<(u32, u32, u32)>) -> bool {
     let dev = match dev.as_mut() {
         Some(d) => d,
         None => return false,
     };
-    let p = match term::disp::parse_present(data) {
-        Some(p) => p,
+    let (w, h, stride) = match presented {
+        Some(p) => *p,
         None => return false,
     };
+    let _ = stride;
+    // Prima i pixel (transfer), poi il refresh della superficie (flush).
+    if !dev.transfer_to_host_2d(1, w, h) {
+        return false;
+    }
+    dev.flush(1, w, h)
+}
+
+/// `PRESENT`: crea la risorsa 2D, le aggancia al buffer del client e la
+/// imposta come scanout.
+fn handle_present(
+    dev: &mut Option<virtio::Device>,
+    phys: u64,
+    geom: term::disp::Geometry,
+    presented: &mut Option<(u32, u32, u32)>,
+) -> bool {
+    let dev = match dev.as_mut() {
+        Some(d) => d,
+        None => return false,
+    };
+    if !geom.valid() || phys & 0xFFF != 0 {
+        return false;
+    }
     const RESOURCE_ID: u32 = 1;
-    if !dev.create_2d(RESOURCE_ID, p.format, p.width, p.height) {
+    if !dev.create_2d(RESOURCE_ID, geom.format, geom.width, geom.height) {
         return false;
     }
-    let len = p.stride * p.height;
-    if !dev.attach_backing(RESOURCE_ID, p.phys, len) {
+    let len = geom.stride * geom.height;
+    if !dev.attach_backing(RESOURCE_ID, phys, len) {
         return false;
     }
-    if !dev.set_scanout(0, RESOURCE_ID, p.width, p.height) {
+    if !dev.set_scanout(0, RESOURCE_ID, geom.width, geom.height) {
         return false;
     }
-    let _ = dev.flush(RESOURCE_ID, p.width, p.height);
+    *presented = Some((geom.width, geom.height, geom.stride));
+    let _ = dev.flush(RESOURCE_ID, geom.width, geom.height);
     civis::println!(
         "[gpu] scanout: {}x{} stride={} (resource {})",
-        p.width,
-        p.height,
-        p.stride,
+        geom.width,
+        geom.height,
+        geom.stride,
         RESOURCE_ID
     );
     true

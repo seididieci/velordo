@@ -43,10 +43,11 @@ User mode (ring 3) e entry syscall sono sviluppati nelle sotto-fasi della Fase 6
   virtio-gpu). Da Fase 15 e' solo rendering; tastiera in `kbd`/`porta`
   (sotto). `sys_write(fd=1)` stampa solo su seriale.
 - **D3 (ADR-0060) — due servizi, due ruoli**: `gpu` e' il **driver** del
-  display (virtio-gpu: BAR, MSI-X, risorsa 2D, scanout; pubblica
-  `/dev/display`), `console` e' il **console server** (modello a celle,
-  UTF-8, font TrueType rasterizzato a runtime, surface pixel o VGA
-  testuale; pubblica `/dev/console` e possiede i pixel del framebuffer).
+  display (virtio-gpu: BAR, MSI-X, risorsa 2D, scanout; parla con la console
+  in **diretta** via IPC per nome: `GPU_DISPLAY_QUERY/PRESENT/FLUSH`),
+  `console` e' il **console server** (modello a celle, UTF-8, font TrueType
+  rasterizzato a runtime, surface pixel o VGA testuale; pubblica
+  `/dev/console` e possiede i pixel del framebuffer).
   Il layering `gpu` (driver) → `console` (UI) → `shell` (testo) e' quello
   che regge un futuro desktop: il livello intermedio cresce qui, il driver
   resta un device. Nel path pixel la finestra VGA resta vuota: il terminale

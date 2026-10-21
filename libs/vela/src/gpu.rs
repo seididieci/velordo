@@ -42,8 +42,12 @@ pub const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
 pub const VIRTIO_GPU_CMD_RESOURCE_UNREF: u32 = 0x0102;
 /// Imposta lo scanout su una risorsa.
 pub const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
-/// Flush della risorsa (il path non-virgl la ignora: il device mappa la RAM).
+/// Flush della risorsa: dice al device di rinfrescare la superficie.
 pub const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
+/// Trasferisce i pixel dal buffer del guest alla risorsa (path non-virgl: e'
+/// il comando che *copia* i pixel, il flush da' solo refresh). Obbligatorio
+/// dopo ogni render, altrimenti lo schermo resta nero.
+pub const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 /// Aggancia il backing fisico alla risorsa (indirizzo fisico + lunghezza).
 pub const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
 /// Risposta "nessun dato" (ok generico dei comandi).

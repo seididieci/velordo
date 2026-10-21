@@ -97,17 +97,27 @@ Righe di gate:
 > `[console] surface: pixel 1280x800 grid=128x36` (o `640x480 grid=64x21` se
 > la finestra host e' piccola) e `[gpu] scanout: 1280x800 stride=5120`.
 > Il rendering e' **verificabile**: la console logga il BLAKE2s-256
-> dell'ultima riga della griglia (dove sta il banner) e il valore coincide
-> con quello calcolato sul host con lo stesso codice (`libs/term`) — il
-> rasterizer nel guest e' bit-identico a quello di riferimento. Valore di
-> riferimento (Maple Mono NF 16 px, banner "Velordo console server",
-> 1280x800): `5247eed63006ace623e4c0e0ac3e637122f800a4bd73597093b4f1c5f274b919`
+> dell'**intero framebuffer** (`[console] fb blake2s=...`, deterministico:
+> il rasterizer e' in punto fisso). Il confronto col host (stesso crate,
+> stessa sequenza) dà la stessa immagine **pixel per pixel** (la cella del
+> banner combacia riga per riga). Valore di riferimento (Maple Mono NF
+> 16 px, banner "Velordo console server", 1280x800):
+> `5a0bd570b3e21205842c8d340447a515d264eb5abd5442a90ffa1618341a6a3c`
 > (cambia se cambiano font, dimensione o banner: va aggiornato qui).
+> Prova *automatiche* dello schermo (headless, senza X): il monitor QEMU
+> sa scaricare la superficie di un device —
+> `screendump /tmp/shot.ppm <device-id>` (serve `-device
+> virtio-gpu-pci,disable-legacy=on,id=virtg0`): il PPM contiene il
+> terminale disegnato (1280x800).
 > Fallback: `VIRTIO_GPU=0` → `[console] surface: vga-text 80x25` (zero
 > FAIL/PANIC). Attenzione: nel path pixel la **finestra VGA resta vuota**
-> ("Booting from ROM"): il terminale e' nella finestra del device
-> virtio-gpu. La prova grafica (resize della finestra → config change) resta
-> **manuale** con `RUN_DISPLAY=gtk` (l'host non ha xvfb/xdotool).
+> ("Booting from ROM"): il terminale e' nella console del device virtio-gpu.
+> Con il UI GTK di QEMU quella console **non ha una finestra propria** (il
+> UI mostra solo la console predefinita): per vederla usare
+> `RUN_DISPLAY=gtk FB_WINDOW=1 ./run.sh` (toglie la VGA standard, cosi'
+> l'unica finestra e' quella del framebuffer) oppure il dump del monitor
+> (`screendump`). La prova grafica (resize della finestra → config change)
+> resta **manuale** (l'host non ha xvfb/xdotool).
 >
 > L0b (virtio-gpu modern + MSI-X, ADR-0057): nessuna nuova riga di suite.
 > Marker deterministici nel boot con il device (default di `run.sh`):

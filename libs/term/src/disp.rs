@@ -1,14 +1,13 @@
-//! Protocollo del device `/dev/display` (D3, ADR-0060).
+//! Protocollo display (D3, ADR-0060): come la console parla col driver
+//! `gpu`.
 //!
-//! Il driver `gpu` pubblica `/dev/display` e parla questo protocollo; la
-//! console lo usa per sapere **cosa** puo' mostrare e per **presentare** un
-//! buffer. La proprieta' dei pixel e' della **console**: il driver non
-//! alloca e non scrive nel buffer, programma solo il device (virtio-gpu:
-//! risorsa 2D + scanout).
+//! Il canale e' un **IPC diretto** col servizio `Gpu` (per nome), non un
+//! device FS: il cardo e' single-threaded, e un driver che lo blocca (per
+//! fare una scrittura) mentre serve un cliente si deadlocka — la console
+//! serve `/dev/console` *e* parla col driver.
 //!
-//! I viaggi sono i frame del device (FS): la console scrive un
-//! [`Present`] con `write_fs`, il driver risponde con il [`Descriptor`] in
-//! `read_fs`. Nessun tag IPC nuovo: il device riusa il protocollo `DEV_*`.
+//! I tag vivono in `syscall-numbers` (single source); qui solo l'impacchettamento
+//! della geometria (che deve stare in un registro).
 //!
 //! Byte order: little-endian (x86-64, come tutto il resto).
 
@@ -21,120 +20,60 @@ pub const BACKEND_VIRTIO_GPU: u8 = 1;
 /// `u32` little-endian = `A<<24 | R<<16 | G<<8 | B`).
 pub const FORMAT_B8G8R8A8: u32 = 1;
 
-/// Operazione "presenta questo buffer" (unica per ora).
-pub const OP_PRESENT: u8 = 1;
+/// Impacchetta la geometria in un registro 64 bit:
+/// `[format:8][stride:16][height:16][width:16]`.
+pub fn pack_geometry(width: u32, height: u32, stride: u32, format: u32) -> u64 {
+    ((width as u64) & 0xFFFF)
+        | (((height as u64) & 0xFFFF) << 16)
+        | (((stride as u64) & 0xFFFF) << 32)
+        | (((format as u64) & 0xFF) << 48)
+}
 
-/// Cosa il driver puo' mostrare (frame da 24 byte, restituito in `read_fs`).
-#[repr(C)]
+/// L'inverso di [`pack_geometry`]: `(width, height, stride, format)`.
+pub fn unpack_geometry(v: u64) -> (u32, u32, u32, u32) {
+    (
+        (v & 0xFFFF) as u32,
+        ((v >> 16) & 0xFFFF) as u32,
+        ((v >> 32) & 0xFFFF) as u32,
+        ((v >> 48) & 0xFF) as u32,
+    )
+}
+
+/// La geometria che la console ha ricevuto dal driver.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Descriptor {
-    /// `BACKEND_*`.
-    pub backend: u8,
-    pub _pad0: [u8; 3],
-    /// Larghezza in pixel (0 se il backend e' VGA testuale).
+pub struct Geometry {
+    /// Larghezza in pixel.
     pub width: u32,
-    /// Altezza in pixel (0 se il backend e' VGA testuale).
+    /// Altezza in pixel.
     pub height: u32,
-    /// Byte per riga del framebuffer (0 se VGA testuale).
+    /// Byte per riga.
     pub stride: u32,
-    /// `FORMAT_*` (0 se VGA testuale).
+    /// Formato pixel (`FORMAT_*`).
     pub format: u32,
-    /// Flag riservati (0 per ora).
-    pub flags: u32,
 }
 
-/// Richiesta del client al driver (frame da 32 byte, scritto con `write_fs`).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Present {
-    /// `OP_PRESENT`.
-    pub op: u8,
-    pub _pad0: [u8; 3],
-    /// Indirizzo **fisico** del buffer (il device lo scrive: serve il phys,
-    /// non la VA).
-    pub phys: u64,
-    pub width: u32,
-    pub height: u32,
-    pub stride: u32,
-    pub format: u32,
-    pub _reserved: u32,
-}
+impl Geometry {
+    /// Impacchetta per il wire.
+    pub fn pack(&self) -> u64 {
+        pack_geometry(self.width, self.height, self.stride, self.format)
+    }
 
-/// Byte del frame del descrittore.
-pub const DESCRIPTOR_LEN: usize = 24;
-/// Byte del frame della richiesta.
-pub const PRESENT_LEN: usize = 32;
+    /// Dall'impacchettatura.
+    pub fn unpack(v: u64) -> Geometry {
+        let (width, height, stride, format) = unpack_geometry(v);
+        Geometry {
+            width,
+            height,
+            stride,
+            format,
+        }
+    }
 
-/// Allinea/valida un frame `Present` letto dal client: ritorna `None` se la
-/// richiesta non e' sensata (op sconosciuta, dimensioni zero, formato
-/// sconosciuto, phys non allineato a pagina).
-pub fn parse_present(buf: &[u8]) -> Option<Present> {
-    if buf.len() < PRESENT_LEN {
-        return None;
+    /// La geometria e' usabile (dimensioni e formato sensati)?
+    pub fn valid(&self) -> bool {
+        self.width > 0
+            && self.height > 0
+            && self.format == FORMAT_B8G8R8A8
+            && self.stride >= self.width * 4
     }
-    let op = buf[0];
-    if op != OP_PRESENT {
-        return None;
-    }
-    let mut p = Present {
-        op,
-        _pad0: [0; 3],
-        phys: u64::from_le_bytes(buf[4..12].try_into().ok()?),
-        width: u32::from_le_bytes(buf[12..16].try_into().ok()?),
-        height: u32::from_le_bytes(buf[16..20].try_into().ok()?),
-        stride: u32::from_le_bytes(buf[20..24].try_into().ok()?),
-        format: u32::from_le_bytes(buf[24..28].try_into().ok()?),
-        _reserved: 0,
-    };
-    if p.width == 0 || p.height == 0 || p.format != FORMAT_B8G8R8A8 {
-        return None;
-    }
-    if p.stride < p.width * 4 {
-        return None;
-    }
-    if p.phys & 0xFFF != 0 {
-        return None;
-    }
-    p._reserved = 0;
-    Some(p)
-}
-
-/// Serializza un descrittore nel frame da `read_fs`.
-pub fn descriptor_bytes(d: &Descriptor) -> [u8; DESCRIPTOR_LEN] {
-    let mut out = [0u8; DESCRIPTOR_LEN];
-    out[0] = d.backend;
-    out[4..8].copy_from_slice(&d.width.to_le_bytes());
-    out[8..12].copy_from_slice(&d.height.to_le_bytes());
-    out[12..16].copy_from_slice(&d.stride.to_le_bytes());
-    out[16..20].copy_from_slice(&d.format.to_le_bytes());
-    out[20..24].copy_from_slice(&d.flags.to_le_bytes());
-    out
-}
-
-/// Serializza una richiesta `Present` nel frame da `write_fs`.
-pub fn present_bytes(p: &Present) -> [u8; PRESENT_LEN] {
-    let mut out = [0u8; PRESENT_LEN];
-    out[0] = p.op;
-    out[4..12].copy_from_slice(&p.phys.to_le_bytes());
-    out[12..16].copy_from_slice(&p.width.to_le_bytes());
-    out[16..20].copy_from_slice(&p.height.to_le_bytes());
-    out[20..24].copy_from_slice(&p.stride.to_le_bytes());
-    out[24..28].copy_from_slice(&p.format.to_le_bytes());
-    out
-}
-
-/// Legge un descrittore dal frame di `read_fs`.
-pub fn parse_descriptor(buf: &[u8]) -> Option<Descriptor> {
-    if buf.len() < DESCRIPTOR_LEN {
-        return None;
-    }
-    Some(Descriptor {
-        backend: buf[0],
-        _pad0: [0; 3],
-        width: u32::from_le_bytes(buf[4..8].try_into().ok()?),
-        height: u32::from_le_bytes(buf[8..12].try_into().ok()?),
-        stride: u32::from_le_bytes(buf[12..16].try_into().ok()?),
-        format: u32::from_le_bytes(buf[16..20].try_into().ok()?),
-        flags: u32::from_le_bytes(buf[20..24].try_into().ok()?),
-    })
 }

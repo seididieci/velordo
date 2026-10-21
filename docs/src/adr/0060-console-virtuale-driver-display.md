@@ -52,21 +52,36 @@ Shell (POSIX/nativa) ──testo──► /dev/console ──► console (serviz
   binario. `term` non conosce il FS: l'I/O del font è un trait `Source`
   fornito da chi lo usa.
 
-### 2. `/dev/display`: il device del driver
+### 2. Il protocollo display: IPC diretto col driver
 
-Protocollo minimo, riuso del `DEV_*` esistente (nessun tag IPC nuovo):
+Il driver e la console **si parlano in diretta** (IPC per nome, `Service::Gpu`),
+non via un device FS. La prima stesura prevedeva `/dev/display` (un device
+come `/dev/console`): e' stata abbandonata perche' il cardo e' single-threaded
+e un driver che lo blocca (per fare una scrittura) mentre serve un cliente si
+**deadlocka` — e la console serve `/dev/console` *e* parla col driver. I ring
+client e server vivono inoltre nella stessa finestra `CLI_*`: un processo che
+e' client e server insieme li sovrascrive. Il canale diretto evita entrambi i
+problemi.
 
-| Operazione | Frame | Contenuto |
+| Tag | Richiesta | Reply |
 |---|---|---|
-| `DEV_OPEN` | reply | descrittore: `[backend: u8][w: u32][h: u32][stride: u32][format: u32][flags: u32]` |
-| `DEV_WRITE` | request | `PRESENT(phys, w, h, stride, format)` (32 B) |
-| `DEV_READ` | reply | il descrittore |
+| `GPU_DISPLAY_QUERY` (0x75) | — | `w0` = backend, `w1` = geometria impacchettata |
+| `GPU_DISPLAY_PRESENT` (0x76) | `w0` = fisico del buffer, `w1` = geometria | `w0` = 0/-1 |
+| `GPU_DISPLAY_FLUSH` (0x77) | — | `w0` = 0/-1 |
 
 - `backend`: `VgaText` (nessun device pixel) o `VirtioGpu`.
+- La geometria sta in un registro 64 bit (`width | height<<16 | stride<<32 |
+  format<<48`): i registri IPC sono quattro, i payload passerebbero per i
+  ring (che sono condivisi).
 - `PRESENT`: il driver crea la risorsa 2D (BGRA), le aggancia al buffer
   **del client** e la imposta come scanout. In QEMU `SET_SCANOUT` fa
   `qemu_console_resize`: **il guest sceglie la risoluzione** e la finestra
   host la segue.
+- `FLUSH`: nel path non-virgl di QEMU il `RESOURCE_FLUSH` **non copia i
+  pixel**: la copia la fa `RESOURCE_TRANSFER_TO_HOST_2D` (dal buffer del
+  guest alla risorsa) e il flush dice solo alla superficie di rinfrescarsi.
+  Il driver fa quindi `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH`, in quest'ordine,
+  a ogni refresh: senza, lo schermo resta nero.
 
 ### 3. I pixel sono della console
 
@@ -107,6 +122,12 @@ dma_alloc(pages, slot) -> rax = phys | rdi = pagine | rsi = VA dello slot
 - Il file sta nel volume root come oggetto (`ns:font.ttf` per le letture a
   range dalla console, `sys:font.ttf` per l'oggetto) — non nel binario, non
   nel FAT (che non esiste più).
+- **Il font e' letto tutto in RAM all'avvio** (2.4 MiB), non a pezzi durante
+  il servizio: la console non puo' fare I/O sul FS mentre serve
+  `/dev/console` (il cardo la aspetta: una lettura FS li' dentro
+  deadlockerebbe — console e cardo si bloccherebbero a vicenda). Con il font
+  in RAM il rasterizer non tocca piu' il FS e le icone Nerd (fuori dal range
+  ASCII) restano disponibili.
 - **`libs/term::ttf`**: parser sfnt (`head`, `maxp`, `hhea`/`hmtx`, `cmap`
   4/12, `loca`, `glyf` semplici e composti).
 - **`libs/term::raster`**: rasterizzazione con antialiasing in **punto
@@ -168,10 +189,10 @@ serve solo quando virtio-gpu non c'è.
 - **Il grant del device buffer** è chiuso (owner `Service::Console`): un
   processo qualsiasi non può monopolizzare 4 MiB contigui.
 - **Il rendering è verificabile**: la console logga il BLAKE2s-256
-  dell'ultima riga della griglia (dove sta il banner). Il valore è
-  deterministico e **identico a quello calcolato sul host** con lo stesso
-  codice (`libs/term`): il rendering nel guest è bit-identico a quello del
-  rasterizer di riferimento.
+  dell'**intero framebuffer** (deterministico: il rasterizer è in punto
+  fisso). Il confronto col host (stesso crate, stessa sequenza) dà la stessa
+  immagine **pixel per pixel** (verifica cellula per cellula: la cella del
+  banner combacia riga per riga).
 - Il font è **ridistribuito** nel repo (`third_party/`, OFL 1.1):
   l'attribuzione è dovuta e va mantenuta.
 
@@ -201,10 +222,9 @@ serve solo quando virtio-gpu non c'è.
   `surface`.
 - `libs/vela/src/gpu.rs`: i comandi virtio-gpu delle risorse (`CREATE_2D`,
   `ATTACH_BACKING`, `SET_SCANOUT`, `FLUSH`, `UNREF`) e i formati.
-- `userland/gpu`: il driver (solo `/dev/display`), `virtio.rs` con
-  `submit()` a lunghezze variabili.
+- `userland/gpu`: il driver (solo il protocollo display), `virtio.rs` con
+  `submit()` a lunghezze variabili e `transfer_to_host_2d()`.
 - `userland/console` (nuovo): il console server.
-- `userland/cardo`: `dev_type("display")`.
 - `userland/rector`: i manifest (`SVC_GPU`, `SVC_CONSOLE`), l'ordine di
   boot (driver → console), la supervisione, i pinning del manifest.
 - `scripts/build-userland.sh`, `scripts/arca-tool.sh` (seed del console e
@@ -215,8 +235,23 @@ di `append 512KiB`, posixtests 4/4, identistest 11/11, usertests 58/58,
 threadtest 12/12), `scripts/test-shell-all.sh` 10/10, marker
 `[console] font: MapleMono-NF 16px cell=10x22`,
 `[console] surface: pixel 1280x800 grid=128x36`, `[gpu] scanout: 1280x800`,
-fallback `VIRTIO_GPU=0` → `[console] surface: vga-text 80x25`, e il BLAKE2s
-della riga del banner **identico** al valore calcolato sul host.
+fallback `VIRTIO_GPU=0` → `[console] surface: vga-text 80x25`, e il
+**dump dello schermo del device** (monitor QEMU: `screendump ... <device>`)
+mostra il terminale letibile.
+
+## Appendice: due deadlock evitati (le trappole del percorso)
+
+1. **Il cardo single-threaded**: un servizio che serve `/dev/console` e
+   vuole *anche* scrivere su un device FS (o fare I/O) si blocca: il cardo
+   lo aspetta per la reply, il servizio aspetta il cardo. Da qui la scelta
+   del canale IPC diretto col driver e del font letto tutto in RAM.
+2. **Le finestre ring `CLI_*` sono una per processo**: chi è client e
+   server insieme (la console) le sovrascrive. Il canale diretto non usa i
+   ring.
+
+E una lezione del device: nel path non-virgl di QEMU il `RESOURCE_FLUSH`
+**non copia i pixel** (li copia il `TRANSFER_TO_HOST_2D`): senza il
+transfer, lo schermo resta nero anche se il rendering è corretto.
 
 ---
 *Registro delle modifiche: primo redatto il 21 ottobre 2026 per D3 (console

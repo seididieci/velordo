@@ -2625,12 +2625,24 @@
       `test-shell-all.sh` 10/10, marker `[console] surface: pixel 1280x800
       grid=128x36` + `[gpu] scanout: 1280x800`, fallback `VIRTIO_GPU=0` →
       `[console] surface: vga-text 80x25`, 6/6 boot stabili. Il rendering e'
-      **provato bit-identico**: il BLAKE2s-256 della riga del banner calcolato
-      nel guest coincide con quello calcolato sul host con lo stesso crate.
-      Nota: nel path pixel la finestra VGA resta a "Booting from ROM" (il
-      terminale e' nella finestra virtio-gpu). Prossimo: **D4** (modeset e
-      host-sync), piu' console server con mirror seriale e routing POSIX
-      stdout→device.
+      **provato pixel per pixel** (la cella del banner combacia riga per
+      riga col rendering calcolato sul host con lo stesso crate; il
+      BLAKE2s-256 dell'intero framebuffer e' il marker deterministico).
+      Tre trappole incontrate e risolte: (1) il **cardo e' single-threaded**:
+      un servizio che serve `/dev/console` e fa I/O sul FS dentro l'handler
+      si deadlocka con il cardo → il display si parla con il driver in
+      **diretta** (IPC per nome: `GPU_DISPLAY_QUERY/PRESENT/FLUSH`), niente
+      device FS; (2) i **ring client e server condividono la finestra
+      `CLI_*`** → il canale diretto li evita; (3) il path non-virgl di QEMU
+      **non copia i pixel nel `RESOURCE_FLUSH`** (lo fa il
+      `TRANSFER_TO_HOST_2D`) → senza il transfer lo schermo resta nero. Il
+      font e' letto **tutto in RAM** all'avvio (2.4 MiB) per lo stesso
+      motivo del deadlock col cardo. Nota: nel path pixel la finestra VGA
+      resta a "Booting from ROM" (il terminale e' nella console del device
+      virtio-gpu: con il UI GTK non ha finestra propria → `FB_WINDOW=1` per
+      togliere la VGA, o il dump `screendump` del monitor per la prova
+      headless). Prossimo: **D4** (modeset e host-sync), piu' console server
+      con mirror seriale e routing POSIX stdout→device.
 - [x] Fase 3.1 — Gestione utenti: token di sessione e creazione utente
       (2026-10-21, ADR-0058): chiuso il backend di ADR-0055 e preparato il
       terreno per la shell nativa (Fase 3.2). Il servizio `Identis`

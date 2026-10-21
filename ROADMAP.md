@@ -120,6 +120,11 @@ Voci con scope e vittoria dichiarati (non date).
       `[gpu] scanout: 1280x800`, rendering **bit-identico** al host
       (BLAKE2s della riga del banner), gate invariato, `test-shell-all.sh`
       10/10, fallback `VIRTIO_GPU=0` pulito, 6/6 boot stabili.
+      Il display si parla in **diretta** (IPC per nome col driver, niente
+      device FS): il cardo e' single-threaded e un driver che lo blocca
+      mentre serve un cliente si deadlocka (idem i ring `CLI_*`, una per
+      processo). Il font e' letto tutto in RAM (niente I/O FS mentre la
+      console serve `/dev/console`).
       **Prossimo: D4** (modeset e host-sync), poi console server con mirror
       seriale e routing POSIX stdout→device (l'hook `persona`).
 - [ ] **S3.2 — Shell nativa** (dopo la Fase 3.1): programma interattivo

@@ -76,8 +76,7 @@ use civis::{
 use civis::{ERR_NOTFOUND, ERR_ISDIR, ERR_NOTDIR, ERR_EXISTS, ERR_READONLY, ERR_BUSY, ERR_INVALID, ERR_EMPTY, ERR_CLOSED, ERR_NOSPC};
 // Tag DEV_* op + device types (DocsD: single source in `syscall-numbers`).
 use civis::{
-    DEV_CLOSE, DEV_CONSOLE, DEV_DISPLAY, DEV_KBD, DEV_KEYBOARD, DEV_NULL, DEV_OPEN,
-    DEV_READ,
+    DEV_CLOSE, DEV_CONSOLE, DEV_KBD, DEV_KEYBOARD, DEV_NULL, DEV_OPEN, DEV_READ,
     DEV_READDIR, DEV_WRITE, DEV_ZERO,
 };
 // Tag IPC FS/boot (DocsB): single source in `syscall-numbers`, via `civis`.

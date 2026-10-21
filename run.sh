@@ -126,6 +126,15 @@ GPU_DEV=""
 if [ "${VIRTIO_GPU:-1}" = "1" ]; then
     GPU_DEV="-device virtio-gpu-pci,disable-legacy=on"
 fi
+# FB_WINDOW=1: toglie la VGA standard, cosi' l'unica finestra del UI GTK
+# mostra il display virtio-gpu (il terminale). Con la VGA presente il UI
+# mostra solo la console predefinita e il framebuffer resta in una seconda
+# console senza finestra. Attenzione: senza il device VGA il fallback
+# "VGA testuale" non ha dove scrivere (il device e' assente, non e' solo
+# vuoto) — va usato solo con il device virtio-gpu presente.
+if [ "${FB_WINDOW:-0}" = "1" ]; then
+    GPU_DEV="$GPU_DEV -vga none"
+fi
 # shellcheck disable=SC2086
 exec qemu-system-x86_64 \
     -m ${RUN_MEM:-256M} \

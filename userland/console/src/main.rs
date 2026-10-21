@@ -75,6 +75,8 @@ struct Term {
     fg: u8,
     /// Colore background corrente.
     bg: u8,
+    /// Canale del driver `gpu` (0 = nessun driver raggiungibile).
+    driver_chan: u64,
 }
 
 impl Term {
@@ -90,6 +92,26 @@ impl Term {
         }
         self.pending = cps;
         self.render();
+        // Il path non-virgl di QEMU copia la risorsa nella superficie del
+        // display **solo al flush**: senza, lo schermo resta nero.
+        self.flush_display();
+    }
+
+    /// Chiede al driver il refresh della superficie (solo nel path pixel).
+    ///
+    /// IPC **diretto** col driver: il cardo e' single-threaded e la console
+    /// lo sta bloccando mentre serve `/dev/console` (una scrittura FS qui
+    /// dentro si deadlockerebbe). Inoltre i ring client e server condividono
+    /// la stessa finestra `CLI_*`: il canale diretto evita anche la
+    /// sovrapposizione.
+    fn flush_display(&mut self) {
+        if self.driver_chan == 0 {
+            return;
+        }
+        if !matches!(self.surface, Surface::Pixel(_)) {
+            return;
+        }
+        let _ = civis::send(self.driver_chan, civis::syscall_numbers::GPU_DISPLAY_FLUSH, 0, 0);
     }
 
     /// Un codepoint nel modello (movimento del cursore, scroll, editing).
@@ -235,21 +257,27 @@ impl Term {
 
 // ── Il font: lettura dal volume ────────────────────────────────────
 
-/// Fonte di byte per il file del font: il FS (il crate `term` non sa cosa
-/// sia un file).
-struct FsSource {
-    fd: i64,
+/// Fonte di byte per il file del font: **la RAM**.
+///
+/// Il font e' letto tutto (2.4 MiB) all'avvio, non a pezzi durante il
+/// servizio: la console non puo' fare I/O sul FS mentre serve `/dev/console`
+/// (il cardo e' single-threaded e la aspetta: un letture FS li' dentro
+/// deadlockerebbe — console e cardo si bloccherebbero a vicenda). Con il
+/// font in RAM il rasterizer non tocca piu' il FS, e le icone Nerd (che
+/// stanno fuori dal range ASCII) restano disponibili.
+struct MemSource {
+    data: alloc::vec::Vec<u8>,
 }
 
-impl term::font::Source for FsSource {
+impl term::font::Source for MemSource {
     fn read_at(&mut self, off: u64, buf: &mut [u8]) -> Option<usize> {
-        if civis::lseek(self.fd, off as i64, civis::SEEK_START).is_err() {
-            return None;
+        let start = off as usize;
+        if start >= self.data.len() {
+            return Some(0);
         }
-        match civis::read_fs(self.fd, buf, buf.len()) {
-            Ok(n) => Some(n),
-            Err(_) => None,
-        }
+        let n = buf.len().min(self.data.len() - start);
+        buf[..n].copy_from_slice(&self.data[start..start + n]);
+        Some(n)
     }
 }
 
@@ -287,13 +315,17 @@ fn real_main(_sp: u64) -> ! {
         let _ = civis::print_string(b"[console] registered as service Console\n");
     }
 
-    // 2. Apre il display (il driver `gpu` lo pubblica come /dev/display).
-    let display_fd = civis::open("/dev/display/display", 0).unwrap_or(-1);
+    // 2. Risolve il driver `gpu` (per nome): e' lui che sa cosa puo'
+    //    mostrare (device pixel o fallback VGA).
+    let driver_chan = match civis::service_lookup(civis::Service::Gpu) {
+        Ok(c) if c > 0 => c as u64,
+        _ => 0,
+    };
 
     // 3. Costruisce la surface: pixel (virtio-gpu) o VGA testuale.
     let mut font: Option<Font> = None;
-    let surface = if display_fd >= 0 {
-        setup_pixel(display_fd, &mut font)
+    let surface = if driver_chan != 0 {
+        setup_pixel(driver_chan, &mut font)
     } else {
         None
     };
@@ -321,6 +353,7 @@ fn real_main(_sp: u64) -> ! {
         cursor_drawn: (0, 0),
         fg: 0x0F,
         bg: 0x00,
+        driver_chan,
     };
 
     // 5. Banner sul terminale (il framebuffer o la VGA) + il seriale (sink
@@ -387,13 +420,14 @@ fn real_main(_sp: u64) -> ! {
 
 /// Prepara la surface pixel: legge il descrittore, alloca il buffer device,
 /// carica il font e presenta il buffer al driver.
-fn setup_pixel(display_fd: i64, font: &mut Option<Font>) -> Option<Surface> {
-    // Descrittore del display.
-    let mut buf = [0u8; term::disp::DESCRIPTOR_LEN];
-    let len = buf.len();
-    civis::read_fs(display_fd, &mut buf, len).ok()?;
-    let d = term::disp::parse_descriptor(&buf)?;
-    if d.backend != term::disp::BACKEND_VIRTIO_GPU || d.width == 0 || d.height == 0 {
+fn setup_pixel(driver_chan: u64, font: &mut Option<Font>) -> Option<Surface> {
+    // Cosa sa fare il driver? (backend + geometria)
+    let reply = civis::send(driver_chan, civis::syscall_numbers::GPU_DISPLAY_QUERY, 0, 0).ok()?;
+    if reply.w0 != term::disp::BACKEND_VIRTIO_GPU as u64 {
+        return None;
+    }
+    let geom = term::disp::Geometry::unpack(reply.w1);
+    if !geom.valid() {
         return None;
     }
 
@@ -409,15 +443,15 @@ fn setup_pixel(display_fd: i64, font: &mut Option<Font>) -> Option<Surface> {
     *font = Some(f);
 
     // Il buffer device: contiguo, nelle mani della console.
-    let bytes = (d.width as u64) * (d.height as u64) * 4;
+    let bytes = (geom.width as u64) * (geom.height as u64) * 4;
     let pages = ((bytes + 4095) / 4096) as usize;
     let (phys, va) = civis::dma_alloc_slot(pages, civis::DMA_SLOT_DEVICE).ok()?;
     let _ = civis::print_string(b"[console] buffer device allocato\n");
 
     // La griglia: dalla risoluzione e dalla cella del font.
-    let cols = (d.width as usize) / m.cell_w.max(1);
-    let rows = (d.height as usize) / m.cell_h.max(1);
-    let geom = Geom {
+    let cols = (geom.width as usize) / m.cell_w.max(1);
+    let rows = (geom.height as usize) / m.cell_h.max(1);
+    let cells = Geom {
         cols: cols.max(1),
         rows: rows.max(1),
         cell_w: m.cell_w as u32,
@@ -432,35 +466,31 @@ fn setup_pixel(display_fd: i64, font: &mut Option<Font>) -> Option<Surface> {
     );
 
     // Presenta il buffer al driver (il device lo mappa sullo scanout).
-    let p = term::disp::Present {
-        op: term::disp::OP_PRESENT,
-        _pad0: [0; 3],
+    let reply = civis::send(
+        driver_chan,
+        civis::syscall_numbers::GPU_DISPLAY_PRESENT,
         phys,
-        width: d.width,
-        height: d.height,
-        stride: d.stride,
-        format: d.format,
-        _reserved: 0,
-    };
-    let bytes = term::disp::present_bytes(&p);
-    if civis::write_fs(display_fd, &bytes, bytes.len()).is_err() {
+        geom.pack(),
+    )
+    .ok()?;
+    if reply.w0 != 0 {
         let _ = civis::print_string(b"[console] PRESENT fallito\n");
         return None;
     }
 
     let _ = civis::println!(
         "[console] surface: pixel {}x{} grid={}x{}",
-        d.width,
-        d.height,
-        geom.cols,
-        geom.rows
+        geom.width,
+        geom.height,
+        cells.cols,
+        cells.rows
     );
     Some(Surface::Pixel(Pixel {
         ptr: va as *mut u8,
-        width: d.width,
-        height: d.height,
-        stride: d.stride,
-        geom,
+        width: geom.width,
+        height: geom.height,
+        stride: geom.stride,
+        geom: cells,
     }))
 }
 
@@ -469,22 +499,20 @@ fn setup_pixel(display_fd: i64, font: &mut Option<Font>) -> Option<Surface> {
 /// punto fisso): serve da prova di regressione del rendering.
 fn log_render_marker(term: &Term) {
     if let Surface::Pixel(p) = &term.surface {
-        let stride = p.stride as usize;
-        // L'ultima riga della GRIGLIA (dove sta il banner), non l'ultima
-        // riga di pixel (le ultime righe del framebuffer sono il resto).
-        let y = ((p.geom.rows.saturating_sub(1)) * p.geom.cell_h as usize) as usize;
-        if y * stride + stride > stride * p.height as usize {
-            return;
-        }
-        let row = unsafe { core::slice::from_raw_parts(p.ptr.add(y * stride), stride) };
-        let digest = blake2s::blake2s(row);
+        // Hash dell'**intero** framebuffer: deterministico (il rasterizer e'
+        // in punto fisso) e copre ogni pixel disegnato — il marker di
+        // regressione del rendering. Stessa opera sul host (stesso crate)
+        // per il confronto bit-a-bit.
+        let total = p.stride as usize * p.height as usize;
+        let buf = unsafe { core::slice::from_raw_parts(p.ptr, total) };
+        let digest = blake2s::blake2s(buf);
         let mut hex = [0u8; 64];
         for i in 0..32 {
             hex[i * 2] = hex_digit(digest[i] >> 4);
             hex[i * 2 + 1] = hex_digit(digest[i] & 0x0F);
         }
         let s = core::str::from_utf8(&hex).unwrap_or("?");
-        civis::println!("[console] fb row{} blake2s={}", y, s);
+        civis::println!("[console] fb blake2s={}", s);
     }
 }
 
@@ -504,12 +532,35 @@ fn setup_vga_text() -> Surface {
     })
 }
 
-/// Carica il font TrueType dal volume root.
+/// Carica il font TrueType dal volume root (tutto in RAM: vedi `MemSource`).
 fn load_font() -> Option<Font> {
-    let fd = civis::open(FONT_PATH, 0).ok()?;
-    let f = Font::load(Box::new(FsSource { fd }), FONT_PX).ok()?;
+    let data = read_whole_file(FONT_PATH)?;
+    Font::load(Box::new(MemSource { data }), FONT_PX).ok()
+}
+
+/// Legge un file per intero (il FS risponde a chunk: si itera).
+fn read_whole_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
+    let fd = civis::open(path, 0).ok()?;
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    // Il buffer e' sull'heap: lo stack utente e' piccolo (4 frame).
+    let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(16 * 1024);
+    let cap = buf.capacity();
+    buf.resize(cap, 0);
+    loop {
+        let n = match civis::read_fs(fd, &mut buf, cap) {
+            Ok(n) => n,
+            Err(_) => {
+                let _ = civis::close(fd);
+                return None;
+            }
+        };
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
     let _ = civis::close(fd);
-    Some(f)
+    Some(out)
 }
 
 #[panic_handler]

@@ -160,9 +160,16 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   fisso; font fisso 16 px, cella 10x22, griglia dalla risoluzione (128x36 a
   1280x800). `SYS_DMA_ALLOC` prende lo **slot** (0 = staging invariato;
   >= 1 = device buffer contiguo <= 4 MiB, **grant chiuso** all'owner di
-  `Service::Console` = 12). Fallback: VGA testuale (`VIRTIO_GPU=0`). Nel
-  path pixel la finestra VGA resta vuota: il terminale e' nella finestra
-  virtio-gpu. Prossimo: **D4** (modeset/host-sync).
+  `Service::Console` = 12). Fallback: VGA testuale (`VIRTIO_GPU=0`). Il
+  display si parla in **diretta** (IPC per nome col driver: niente device
+  FS — il cardo e' single-threaded: un driver che lo blocca mentre serve un
+  cliente si deadlocka, e i ring `CLI_*` sono una finestra per processo). Il
+  font e' letto tutto in RAM all'avvio (niente I/O FS durante il servizio).
+  Nel path pixel la finestra VGA resta vuota ("Booting from ROM"): il
+  terminale e' nella console del device virtio-gpu — con il UI GTK non ha
+  una finestra propria (`RUN_DISPLAY=gtk FB_WINDOW=1` per togliere la VGA,
+  oppure il dump `screendump` del monitor per la prova headless).
+  Prossimo: **D4** (modeset/host-sync).
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-56, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
