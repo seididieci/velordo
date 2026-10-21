@@ -190,6 +190,24 @@ pub unsafe fn map_user_region_owned_ro(cr3: u64, vaddr: u64, phys: u64, count: u
     unsafe { map_user_region_flags(cr3, vaddr, phys, count, super::layout::USER_LEAF_RO | super::layout::USER_OWNED) }
 }
 
+/// Mappa regione MMIO device (L0b): UC (PCD|PWT) e **non-owned** (i frame
+/// device non appartengono al processo, il teardown non li libera). Usata da
+/// `SYS_MAP_MMIO` per le BAR virtio-gpu.
+///
+/// # Safety
+/// Come `map_user_region`.
+pub unsafe fn map_user_region_uc(cr3: u64, vaddr: u64, phys: u64, count: usize) {
+    unsafe {
+        map_user_region_flags(
+            cr3,
+            vaddr,
+            phys,
+            count,
+            super::layout::USER_LEAF_RW | crate::boot_tables::PAGE_UC,
+        )
+    }
+}
+
 unsafe fn map_user_region_flags(cr3: u64, vaddr: u64, phys: u64, count: usize, flags: u64) {
     let cur = cr3;
     let mut addr = vaddr;

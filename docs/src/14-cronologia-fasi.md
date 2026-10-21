@@ -2565,3 +2565,32 @@
       testsarca 61/62 per il noto bound `append 512KiB` (dt=9036 tick su
       TCG/host lento; bound 6000 invariato, non una regressione L0a). Zero
       PANIC/FAULT. Prossimo: L0b (MSI-X nel trasporto virtio-gpu).
+- [x] L0b — trasporto virtio-gpu modern + MSI-X + `GET_DISPLAY_INFO`
+      (2026-10-21, ADR-0057): il driver `gpu` parla col device in userspace
+      senza toccare PIC/PIT/scheduler. Nuova `SYS_MAP_MMIO=61` (finestra
+      `DEV_MMIO_BASE=0xFE00_0000` → `USER_MMIO_VA=FS_BLOCK+0x270_000`, UC
+      `PCD|PWT`, non-owned, **solo owner di `Service::Gpu`**; la finestra
+      non entra in `phys_mem`). `rector` da' a `gpu` `GPU_IO_RANGES`
+      (cursore VGA + conf PCI `0xCF8-0xCFF`); primitive generiche in
+      `civis::pci`, trasporto in `userland/gpu/src/{virtio,virtio_gpu}.rs`,
+      costanti in `vela::gpu`. BAR1 4K (MSI-X) e BAR4 16K (modern 64-bit)
+      programmate a `0xFE000000`/`0xFE004000` e mappate UC; features
+      `VIRTIO_F_VERSION_1`, controlq split-ring su una pagina
+      `SYS_DMA_ALLOC(1)` in polling (timeout 100 tick), MSI-X con 3 vettori:
+      maschere tutte, entry 0 = config change (`0xFEE00000`/`0x50`,
+      `msix_config=0`), `queue_msix_vector=0xFFFF`. Ramo `IRQ_NOTIFY_GPU`:
+      ISR → `events_read` → `events_clear` → rilegge la risoluzione. Fallback
+      VGA su ogni errore; `run.sh` aggiunge
+      `-device virtio-gpu-pci,disable-legacy=on`, `VIRTIO_GPU=0` per il path
+      di fallback. File: `syscall-numbers`, `kernel/src/syscall/{mem,dispatch}.rs`,
+      `arc/vmm_user/{paging,vmm_user}.rs`, `civis::{pci,sys,lib}`, `vela/gpu`,
+      `userland/gpu/*`, `rector`, `run.sh`; docs ADR-0057 + 0056, `03/04/06/11`,
+      `SUMMARY.md`. Validazione: gate invariato (testfs 5/5, testfat 7/7,
+      posixtests 4/4, usertests 58/58, threadtest 12/12; testsarca 61/62 per
+      il noto bound `append 512KiB`, dt≈9036 su TCG/host lento), marker
+      `[gpu] virtio-gpu 1af4:1050 @00:04.0`, `BAR1=0xfe000000
+      BAR4=0xfe004000`, `MSI-X: 3 vect ...`, `display info: 1280x800
+      enabled=1`; fallback `VIRTIO_GPU=0` pulito; login `root/root` SUCCESS.
+      Config change MSI-X: validazione manuale GTK (host senza xvfb/xdotool).
+      Prossimo: D3 (console/font su framebuffer), che richiede
+      `SYS_DMA_ALLOC` multi-slot e bound maggiore.

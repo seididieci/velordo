@@ -34,6 +34,11 @@ pub use syscall_numbers::USER_DMA_VA;
 /// Finestre ring/relay (request/response/proprie/relay): single source in
 /// `syscall-numbers` (S2.2).
 pub use syscall_numbers::{USER_FS_BUFFER, USER_RESP_RING, CLI_REQ_VA, CLI_RESP_VA};
+/// Finestra MMIO device (L0b, ADR-0057): `SYS_MAP_MMIO` mappa qui le BAR
+/// (UC, non-owned) dell'owner di `Service::Gpu`.
+pub use syscall_numbers::{
+    DEV_MMIO_BASE, DEV_MMIO_SIZE, MSI_ADDR_BASE, USER_MMIO_SIZE, USER_MMIO_VA,
+};
 /// Servizi di sistema raggiungibili per nome (ADR-0008).
 pub use syscall_numbers::Service;
 /// Tag della notifica kernel→parent della morte di un figlio (Fase 14).

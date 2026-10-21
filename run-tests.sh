@@ -11,6 +11,8 @@
 #   [posixtests] PASS 4/4
 #   [usertests] PASS 58/58
 #   [threadtest] PASS 12/12
+# L0b (virtio-gpu + MSI-X, ADR-0057): nessuna riga nuova; il boot verifica i
+# marker `[gpu] virtio-gpu ...` / `[gpu] display info: 1280x800 enabled=1`.
 set -euo pipefail
 cd "$(dirname "$0")"
 # Diagnostica scheduler/IRQ attiva nei run di test (feature `sched_debug`).

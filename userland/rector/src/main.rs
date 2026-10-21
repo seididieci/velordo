@@ -159,7 +159,11 @@ struct SvcMeta {
 
 /// Porte I/O per i manifest da disco (copia dei range kernel in
 /// `user_binary.rs`: init e' TCB e li dichiara al kernel via SpawnMeta).
-const VGA_CURSOR_RANGES: &[(u16, u16)] = &[(0x3D4, 0x3D5)];
+/// `gpu` (L0b, ADR-0057): cursore VGA + spazio di configurazione PCI
+/// (`0xCF8-0xCFF`) per enumerare e programmare `virtio-gpu-pci`. Chi ha il
+/// conf PCI puo' riprogrammare qualunque device: contenimento scarso senza
+/// IOMMU (ADR-0026); il broker PCI arriva col secondo consumer PCI (audio).
+const GPU_IO_RANGES: &[(u16, u16)] = &[(0x3D4, 0x3D5), (0xCF8, 0xCFF)];
 const KBD_PS2_RANGES: &[(u16, u16)] = &[(0x60, 0x64)];
 /// CMOS/RTC per il fornitore di data/ora (Fase 50, P1 orologio): indice
 /// `0x70` + dati `0x71` (accessi a byte, una sola entry).
@@ -510,7 +514,7 @@ const SVC_CONSOLE: SvcMeta = SvcMeta {
     path: Some("/fat/bin/gpu.bin"),
     obj: Some((b"vela", b"bin/gpu.bin")),
     prio: 16,
-    io: VGA_CURSOR_RANGES,
+    io: GPU_IO_RANGES,
 };
 const SVC_UPTIME: SvcMeta = SvcMeta {
     bin: b"useruptime",

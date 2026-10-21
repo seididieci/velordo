@@ -83,9 +83,23 @@ Voci con scope e vittoria dichiarati (non date).
       spurious `0xFF`, tag `IRQ_NOTIFY_GPU` (0x44). Vittoria conseguita:
       gate PIC/PIT/tastiera/disco invariato + marker
       `[lapic] base=0xfee00000 id=0 svr=0x1ff` + selftest `int 0x50`.
-      Segue **L0b** (MSI-X dentro il trasporto virtio-gpu: entry 0 in BAR1,
-      `addr=0xFEE00000`, `data=0x50`, virtqueue in polling; poi console/
-      font/modeset).
+- [x] **L0b — trasporto virtio-gpu modern + MSI-X + `GET_DISPLAY_INFO`**
+      (completata, ADR-0057; segue L0a): `SYS_MAP_MMIO=61` (finestra device
+      `0xFE00_0000` → `FS_BLOCK+0x270_000`, UC e non-owned, **solo owner di
+      `Service::Gpu`**); `gpu` riceve il conf PCI `0xCF8-0xCFF` via `rector`;
+      enumerazione `1af4:1050`, BAR1 4K (MSI-X) e BAR4 16K (modern, 64-bit),
+      `VIRTIO_F_VERSION_1`, controlq split-ring in polling su una pagina
+      `SYS_DMA_ALLOC(1)`, MSI-X con entry 0 = config change
+      (`addr=0xFEE00000`, `data=0x50`, `msix_config=0`,
+      `queue_msix_vector=0xFFFF`), ramo `IRQ_NOTIFY_GPU` (ISR →
+      `events_read`/`events_clear`), primo comando reale
+      `GET_DISPLAY_INFO`, fallback VGA totale (`VIRTIO_GPU=0`). Vittoria
+      conseguita: marker `[gpu] virtio-gpu 1af4:1050 @00:04.0`,
+      `[gpu] display info: 1280x800 enabled=1`, gate invariato, login
+      `root/root` SUCCESS; config change MSI-X validato a mano con GTK.
+      **Prossimo: D3** (console/font su framebuffer; precondizione
+      `SYS_DMA_ALLOC` multi-slot e bound > 4 pagine), poi D4 (modeset e
+      host-sync).
 - [ ] **ArcaFS/object-store** (dopo T0/Fase 49): filesystem avanzato stile
       btrfs/zfs — snapshot, niente partizionamento, layout adattivo per tipo
       di device (hdd/ssd/emmc), raid avanzato, monitoring (SMART), COW su

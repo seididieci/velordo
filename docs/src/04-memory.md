@@ -245,6 +245,31 @@ con zero-fill lazy (stesso contratto di `sbrk`: VA subito, frame al fault).
 - Test t49: isolamento bidirezionale su globale COW + report sul canale di
   nascita + exit 0; nessun leak (`heap_out` piatto).
 
+## Grant MMIO device (L0b, ADR-0057)
+
+`SYS_MAP_MMIO = 61` (`map_mmio(phys, virt, count)`) mappa BAR di device nel
+VA del chiamante:
+
+- fisico nella finestra **`DEV_MMIO_BASE = 0xFE00_0000`** (32 KiB: buco PCI
+  di QEMU, sopra la RAM in ogni configurazione);
+- virtuale nella finestra **`USER_MMIO_VA = FS_BLOCK + 0x270_000`** (dopo
+  DMA), 32 KiB;
+- mapping **UC** (`PCD|PWT`) e **non-owned**: le PTE non hanno
+  `USER_OWNED`, quindi `teardown_user_space` non libera frame di device;
+- grant ristretto all'**owner di `Service::Gpu`** (il driver video
+  registra il servizio prima di mappare).
+
+Perché non `map_physical`: mappa in write-back e accetta solo frame di
+sistema (VGA, scratch, ring). Perché una finestra fissa: il kernel non ha
+un allocatore di VA device e un solo consumer MMIO non lo giustifica; il
+broker arriverà col secondo device (audio). La finestra fisica non si
+riserva in `phys_mem` (la bitmap copre solo la RAM; `0xFE00_0000` è fuori).
+Fuori QEMU la finestra dovrà arrivare dal firmware.
+
+La finestra DMA (`SYS_DMA_ALLOC`, single-slot, max 4 pagine) resta separata:
+la controlq virtio-gpu usa **una** pagina per descrittori + avail/used +
+request/response.
+
 ## Riferimenti
 
 - [Writing an OS in Rust - Heap Allocation](https://os.phil-opp.com/heap-allocation/)

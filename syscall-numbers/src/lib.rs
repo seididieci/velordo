@@ -189,7 +189,24 @@ pub const SYS_THREAD_SET_FS: u64 = 58;
 // il chiamante rialloca come boot_cmdline). CWD_MAX 256 = MAX_PATH cardo.
 pub const SYS_CHDIR: u64 = 59;
 pub const SYS_GETCWD: u64 = 60;
+/// Mappa `count` pagine di MMIO device (BAR) a `virt_addr` nello spazio del
+/// chiamante (L0b, virtio-gpu): `(phys, virt, count)`. Solo MMIO device
+/// nella finestra fissa `DEV_MMIO_BASE` e nel VA `USER_MMIO_VA`; mapping UC
+/// (PCD|PWT) e non-owned (il teardown non libera frame device). Ristretta
+/// all'owner di `Service::Gpu`. Ritorna 0 o -1.
+pub const SYS_MAP_MMIO: u64 = 61;
 pub const CWD_MAX: usize = 256;
+
+/// Base fisica della finestra MMIO device (L0b, QEMU-scoped): buco PCI sopra
+/// la RAM in ogni configurazione. BAR1 (MSI-X) @+0x0000, BAR4 (modern)
+/// @+0x4000. Fuori QEMU la finestra deve arrivare dal firmware.
+pub const DEV_MMIO_BASE: u64 = 0xFE00_0000;
+/// Dimensione della finestra MMIO device (32 KiB).
+pub const DEV_MMIO_SIZE: u64 = 0x8000;
+/// Indirizzo MSI xAPIC del LAPIC di QEMU (UP, dest 0): L0b lo scrive nella
+/// entry MSI-X del config change. `SYS_LAPIC_INFO` (base/id reali) e'
+/// rimandata al lavoro IOAPIC.
+pub const MSI_ADDR_BASE: u64 = 0xFEE0_0000;
 /// Bound command line salvata dal kernel (stesso del parser PVH, mai oltre).
 pub const BOOT_CMDLINE_MAX: usize = 512;
 /// Cap pagine di `SYS_DMA_ALLOC` (38.1: 1 pagina = PRD + 7 settori bastano).
@@ -257,6 +274,11 @@ const FS_BLOCK: u64 = 0x0000_4100_0000_0000;
 /// (PRD + dati). Dopo CLI_RESP (`+0x230_000`) e DISK_RESP (`+0x250_000`):
 /// prima VA libera.
 pub const USER_DMA_VA: u64 = FS_BLOCK + 0x260_000;
+/// Finestra MMIO device del processo corrente (L0b, virtio-gpu):
+/// `SYS_MAP_MMIO` mappa qui le BAR (UC, non-owned). Dopo DMA (`+0x260_000`).
+pub const USER_MMIO_VA: u64 = FS_BLOCK + 0x270_000;
+/// Dimensione della finestra MMIO user (32 KiB: BAR1 4K + BAR4 16K).
+pub const USER_MMIO_SIZE: u64 = 0x8000;
 /// Finestre ring del processo corrente (single source S2.2: prima letterali
 /// duplicati in `layout.rs` del kernel, `civis/src/fs/ring.rs` e
 /// `cardo/src/rings.rs` con commenti "coincide con..."). `SYS_RING_ALLOC`

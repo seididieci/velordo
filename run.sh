@@ -112,6 +112,15 @@ fi
 if [ -n "$APPEND" ]; then
     set -- "$@" -append "$APPEND"
 fi
+
+# L0b (ADR-0057): virtio-gpu-pci in modalita' modern (MSI-X). NON sostituisce
+# la VGA: il driver legge la risoluzione dal device ma continua a usare la
+# console VGA. VIRTIO_GPU=0 = path di fallback (device assente, gpu su VGA).
+GPU_DEV=""
+if [ "${VIRTIO_GPU:-1}" = "1" ]; then
+    GPU_DEV="-device virtio-gpu-pci,disable-legacy=on"
+fi
+# shellcheck disable=SC2086
 exec qemu-system-x86_64 \
     -m ${RUN_MEM:-256M} \
     -cpu qemu64,+fsgsbase,+rdrand,+rdseed \
@@ -120,4 +129,5 @@ exec qemu-system-x86_64 \
     -no-reboot \
     -kernel "$KERNEL" \
     $DRIVES \
+    $GPU_DEV \
     "$@"

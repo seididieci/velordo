@@ -80,9 +80,20 @@ Righe di gate:
 >
 > L0a (LAPIC + convivenza PIC, ADR-0056): nessuna nuova riga di suite. Il
 > gate esistente valida PIC/PIT/IRQ1/IRQ14/15; il marker di boot e'
-> `[lapic] base=0xfee00000 id=... svr=0x1ff LINT0=ExtINT`. Il vettore 0x50
-> reale arriva con L0b (MSI-X virtio-gpu); la build `selftest` include
-> `int 0x50` (IDT + EOI LAPIC) prima del NULL-#PF.
+> `[lapic] base=0xfee00000 id=... svr=0x1ff LINT0=ExtINT`. La build
+> `selftest` include `int 0x50` (IDT + EOI LAPIC) prima del NULL-#PF.
+>
+> L0b (virtio-gpu modern + MSI-X, ADR-0057): nessuna nuova riga di suite.
+> Marker deterministici nel boot con il device (default di `run.sh`):
+> `[gpu] virtio-gpu 1af4:1050 @00:04.0`,
+> `[gpu] BAR1=0xfe000000 BAR4=0xfe004000`,
+> `[gpu] MSI-X: 3 vect, config=0 -> 0x50, queue=0xffff`,
+> `[gpu] display info: 1280x800 enabled=1`. Fallback con `VIRTIO_GPU=0`:
+> `[gpu] virtio-gpu assente: resto su VGA`, zero PANIC/FAULT. Il config
+> change MSI-X (resize della finestra host) e' **validazione manuale** con
+> `RUN_DISPLAY=gtk`: su questo host non ci sono xvfb/xdotool/client VNC e il
+> monitor QEMU non ha comandi display; atteso
+> `[gpu] config change: events=0x1` seguito dalla nuova risoluzione.
 
 ## Test shell interattivi (QEMU + sendkey, fuori dal gate kernel)
 

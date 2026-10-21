@@ -225,6 +225,7 @@ extern "C" fn syscall_handler() -> i64 {
 | `thread_set_fs` | 58 | base TLS (FS) del thread corrente (S-T T2, FSGSBASE da ring 3 se presente) |
 | `chdir` | 59 | imposta la cwd del gruppo (S1.1, solo assoluti ≤256B; il client unisce i relativi) |
 | `getcwd` | 60 | copia cwd + NUL, ritorna len (cap corta = -1, pattern boot_cmdline) |
+| `map_mmio` | 61 | mappa `count` pagine di BAR device (UC, non-owned) nella finestra `DEV_MMIO_BASE`/`USER_MMIO_VA`; solo owner di `Service::Gpu` (L0b, ADR-0057) |
 | `JOB_CANCEL` | — | tag cancel cooperativo parent→figlio sul canale di nascita (44b, w0=2/SIGINT informativo): il figlio puo' gestirlo o ignorarlo (escalation a kill) |
 | `EXIT_SIGINT` | — | causa di morte 130 = 128+SIGINT per Ctrl-C su job non cooperante (44b, convenzione al bordo come `FAULT_EXIT_CODE`) |
 | `spawn` | 20 | Crea un processo dal binario embedded `name` e ritorna il **canale di nascita** verso il figlio |
@@ -247,6 +248,7 @@ extern "C" fn syscall_handler() -> i64 {
 | `env_from_stack` / `Env` | — | Vista envp dallo stack iniziale: `count/get_raw/get(NAME)` (43a) |
 | `exec` | 48 | `exec(path, argv)` = load_file + serialize + exec_args (Fase 37.1; il kernel non tocca il FS) |
 | `dma_alloc` | 49 | Alloca frame contigui per DMA (Fase 38.1, single-slot) → fisico base |
+| `map_mmio` | 61 | Mappa BAR device UC, non-owned, nella finestra MMIO; solo owner di `Service::Gpu` (L0b, ADR-0057) |
 | `text_stats` | 44 | Contatori shared text (Fase 32): hits/misses/live (+ Fase 33: fault COW in rdx) |
 
 `spawn(name_ptr, name_len)` (Fase 8.1 + 13) crea un nuovo processo a partire dal
@@ -486,7 +488,8 @@ implementa: `0=exit`, `2=write`, `8=getpid`, `16=send`, `17=recv`, `18=reply`,
 `49=dma_alloc`, `50=suspend`, `51=resume` (Fase 44a, job control),
 `52=meminfo` (Fase 52, P3), `54=thread_create`, `55=thread_exit`,
 `56=futex_wait`, `57=futex_wake`, `58=thread_set_fs` (S-T, ADR-0046),
-`59=chdir`, `60=getcwd` (S1.1, cwd nel PCB).
+`59=chdir`, `60=getcwd` (S1.1, cwd nel PCB), `61=map_mmio` (L0b,
+ADR-0057: grant UC delle BAR all'owner di `Gpu`).
 
 Le vecchie syscall 3-7/23-24 (FS relay) sono state rimosse con la Fase 9.6:
 le operazioni FS sono ora IPC dirette client→cardo.
