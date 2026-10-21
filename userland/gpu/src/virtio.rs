@@ -60,6 +60,10 @@ const DMA_AVAIL_OFF: usize = 0x0400;
 const DMA_USED_OFF: usize = 0x0500;
 const DMA_REQUEST_OFF: usize = 0x0800;
 const DMA_RESPONSE_OFF: usize = 0x0900;
+/// Byte utilizzabili nel buffer di richiesta (0x800..0x900).
+const DMA_REQUEST_MAX: usize = 0x100;
+/// Byte utilizzabili nel buffer di risposta (0x900..fine pagina).
+const DMA_RESPONSE_MAX: usize = 0x700;
 
 const QUEUE_MAX: usize = 64;
 const DESC_NEXT: u16 = 1;
@@ -322,31 +326,110 @@ impl Device {
 
     /// Esegue `GET_DISPLAY_INFO` (request a 24 byte, response 408 byte).
     pub fn display_info(&mut self) -> Option<DisplayInfo> {
-        let req = self.dma as usize + DMA_REQUEST_OFF;
-        let resp = self.dma as usize + DMA_RESPONSE_OFF;
-        unsafe {
-            core::ptr::write_bytes(req as *mut u8, 0, 24);
-            core::ptr::write_bytes(resp as *mut u8, 0, 408);
-            write_volatile(
-                req as *mut u32,
-                vela::gpu::VIRTIO_GPU_CMD_GET_DISPLAY_INFO,
-            );
-        }
-        if !self.submit(24, 408) {
+        let mut req = [0u8; 24];
+        req[0..4].copy_from_slice(&vela::gpu::VIRTIO_GPU_CMD_GET_DISPLAY_INFO.to_le_bytes());
+        let mut resp = [0u8; 408];
+        let kind = self.submit(&req, &mut resp)?;
+        if kind != vela::gpu::VIRTIO_GPU_RESP_OK_DISPLAY_INFO {
             return None;
         }
-        if !crate::virtio_gpu::response_ok(resp, 408) {
-            return None;
-        }
-        crate::virtio_gpu::parse_display_info(resp, 408)
+        crate::virtio_gpu::parse_display_info(&resp)
     }
 
-    fn submit(&mut self, req_len: usize, resp_len: usize) -> bool {
+    /// `RESOURCE_CREATE_2D`: crea la risorsa pixel (formato BGRA).
+    pub fn create_2d(&mut self, resource_id: u32, format: u32, width: u32, height: u32) -> bool {
+        let mut req = [0u8; 40];
+        req[0..4].copy_from_slice(&vela::gpu::VIRTIO_GPU_CMD_RESOURCE_CREATE_2D.to_le_bytes());
+        req[24..28].copy_from_slice(&resource_id.to_le_bytes());
+        req[28..32].copy_from_slice(&format.to_le_bytes());
+        req[32..36].copy_from_slice(&width.to_le_bytes());
+        req[36..40].copy_from_slice(&height.to_le_bytes());
+        let mut resp = [0u8; 24];
+        self.submit(&req, &mut resp) == Some(vela::gpu::VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    /// `RESOURCE_ATTACH_BACKING`: aggancia il buffer fisico del client.
+    pub fn attach_backing(&mut self, resource_id: u32, phys: u64, length: u32) -> bool {
+        let mut req = [0u8; 48];
+        req[0..4].copy_from_slice(
+            &vela::gpu::VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING.to_le_bytes(),
+        );
+        req[24..28].copy_from_slice(&resource_id.to_le_bytes());
+        req[28..32].copy_from_slice(&1u32.to_le_bytes());
+        req[32..40].copy_from_slice(&phys.to_le_bytes());
+        req[40..44].copy_from_slice(&length.to_le_bytes());
+        let mut resp = [0u8; 24];
+        self.submit(&req, &mut resp) == Some(vela::gpu::VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    /// `SET_SCANOUT`: mostra la risorsa sullo scanout (il guest sceglie la
+    /// risoluzione: in QEMU la finestra host segue).
+    pub fn set_scanout(
+        &mut self,
+        scanout_id: u32,
+        resource_id: u32,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        let mut req = [0u8; 48];
+        req[0..4].copy_from_slice(&vela::gpu::VIRTIO_GPU_CMD_SET_SCANOUT.to_le_bytes());
+        // rect x, y, w, h
+        req[24..28].copy_from_slice(&0u32.to_le_bytes());
+        req[28..32].copy_from_slice(&0u32.to_le_bytes());
+        req[32..36].copy_from_slice(&width.to_le_bytes());
+        req[36..40].copy_from_slice(&height.to_le_bytes());
+        req[40..44].copy_from_slice(&scanout_id.to_le_bytes());
+        req[44..48].copy_from_slice(&resource_id.to_le_bytes());
+        let mut resp = [0u8; 24];
+        self.submit(&req, &mut resp) == Some(vela::gpu::VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    /// `RESOURCE_FLUSH`: il path non-virgl lo ignora (il device mappa la RAM
+    /// del guest): si manda lo stesso, e un errore non e' fatale.
+    pub fn flush(&mut self, resource_id: u32, width: u32, height: u32) -> bool {
+        let mut req = [0u8; 48];
+        req[0..4].copy_from_slice(&vela::gpu::VIRTIO_GPU_CMD_RESOURCE_FLUSH.to_le_bytes());
+        req[24..28].copy_from_slice(&0u32.to_le_bytes());
+        req[28..32].copy_from_slice(&0u32.to_le_bytes());
+        req[32..36].copy_from_slice(&width.to_le_bytes());
+        req[36..40].copy_from_slice(&height.to_le_bytes());
+        req[40..44].copy_from_slice(&resource_id.to_le_bytes());
+        let mut resp = [0u8; 24];
+        self.submit(&req, &mut resp) == Some(vela::gpu::VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    /// `RESOURCE_UNREF`: rilascia la risorsa (il device smette di puntarci).
+    pub fn unref(&mut self, resource_id: u32) -> bool {
+        let mut req = [0u8; 28];
+        req[0..4].copy_from_slice(&vela::gpu::VIRTIO_GPU_CMD_RESOURCE_UNREF.to_le_bytes());
+        req[24..28].copy_from_slice(&resource_id.to_le_bytes());
+        let mut resp = [0u8; 24];
+        self.submit(&req, &mut resp) == Some(vela::gpu::VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    /// Invia una richiesta e attendi la risposta. Ritorna il **tipo** della
+    /// risposta (`VIRTIO_GPU_RESP_*`) o `None` (timeout/errore).
+    ///
+    /// La richiesta e la risposta vivono nei buffer DMA della pagina unica
+    /// (request a 0x800, response a 0x900): la copia e' fatta qui, cosi' il
+    /// chiamante lavora con slice normali.
+    pub fn submit(&mut self, req: &[u8], resp: &mut [u8]) -> Option<u32> {
+        if req.len() > DMA_REQUEST_MAX || resp.len() > DMA_RESPONSE_MAX {
+            return None;
+        }
         let desc = self.dma as usize + DMA_DESC_OFF;
         let avail = self.dma as usize + DMA_AVAIL_OFF;
         let used = self.dma as usize + DMA_USED_OFF;
+        let req_len = req.len();
+        let resp_len = resp.len();
 
         unsafe {
+            // Copia la richiesta nel buffer DMA e azzera la risposta.
+            let dst = (self.dma as usize + DMA_REQUEST_OFF) as *mut u8;
+            core::ptr::copy_nonoverlapping(req.as_ptr(), dst, req_len);
+            let rdst = (self.dma as usize + DMA_RESPONSE_OFF) as *mut u8;
+            core::ptr::write_bytes(rdst, 0, resp_len);
+
             // desc[0] = request (device-read), desc[1] = response (device-write).
             write_volatile(desc as *mut u64, self.dma_phys + DMA_REQUEST_OFF as u64);
             write_volatile((desc + 8) as *mut u32, req_len as u32);
@@ -377,13 +460,23 @@ impl Device {
             let idx = unsafe { read_volatile((used + 2) as *const u16) };
             if idx != self.used_idx {
                 self.used_idx = idx;
-                return true;
+                // Copia la risposta e restituiscne il tipo.
+                unsafe {
+                    let src = (self.dma as usize + DMA_RESPONSE_OFF) as *const u8;
+                    core::ptr::copy_nonoverlapping(src, resp.as_mut_ptr(), resp_len);
+                }
+                if resp_len < 4 {
+                    return None;
+                }
+                return Some(u32::from_le_bytes([
+                    resp[0], resp[1], resp[2], resp[3],
+                ]));
             }
             for _ in 0..256 {
                 core::hint::spin_loop();
             }
             if civis::get_ticks() - start > 100 {
-                return false;
+                return None;
             }
         }
     }

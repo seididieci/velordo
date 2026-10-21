@@ -67,6 +67,8 @@ seed_bin() {
 }
 # Servizi /bin: driver in `vela`, resto in `sys` (D1).
 seed_bin userland/build/gpu.bin bin/gpu.bin vela bin/gpu.bin
+# Console server (D3, ADR-0060): servizio di sistema (bucket `sys`).
+seed_bin userland/build/console.bin bin/console.bin sys bin/console.bin
 seed_bin userland/build/useruptime.bin bin/uptime.bin sys bin/uptime.bin
 seed_bin userland/build/vela.bin bin/vela.bin sys bin/vela.bin
 seed_bin userland/build/kbd.bin bin/kbd.bin vela bin/kbd.bin
@@ -212,6 +214,18 @@ if [ -n "${BENCH_GROUP:-}" ]; then
     SEED_NS+=( "ns:test/bench-group.txt=$BENCH_GROUP_FILE" )
     echo "[arca] + bench group $BENCH_GROUP"
 fi
+# Font TrueType per la console grafica (D3, ADR-0060): Maple Mono NF
+# (SIL OFL 1.1, attribuzione in third_party/LICENSE.txt). Va nel bucket `ns`
+# (path VFS `/font.ttf`: la console lo legge a pezzi con seek) e nel bucket
+# `sys` (oggetto: chi lo cerca per id).
+if [ -f "$ROOT/third_party/MapleMono-NF-Regular.ttf" ]; then
+    SEED_NS+=( "ns:font.ttf=$ROOT/third_party/MapleMono-NF-Regular.ttf" )
+    SEED_NS+=( "sys:font.ttf=$ROOT/third_party/MapleMono-NF-Regular.ttf" )
+    echo "[arca] + font.ttf (Maple Mono NF)"
+else
+    echo "[arca] ATTENZIONE: third_party/MapleMono-NF-Regular.ttf mancante (console senza font: fallback VGA)" >&2
+fi
+
 # Seed bucket Identis (ADR-0055): utente root con hash BLAKE2s-256 di "root".
 # Seedato sempre (gate inclusi): il volume parte con un utente valido.
 IDENTIS_CFG="$(mktemp)"

@@ -34,6 +34,9 @@ pub use syscall_numbers::USER_DMA_VA;
 /// Finestre ring/relay (request/response/proprie/relay): single source in
 /// `syscall-numbers` (S2.2).
 pub use syscall_numbers::{USER_FS_BUFFER, USER_RESP_RING, CLI_REQ_VA, CLI_RESP_VA};
+/// Slot DMA (D3): `ANY` = primo libero; `USER_DMA_BASE` = base dell'arena
+/// degli slot (lo slot 0 resta a `USER_DMA_VA`).
+pub use syscall_numbers::{DMA_SLOT_ANY, DMA_SLOT_DEVICE, USER_DMA_BASE};
 /// Finestra MMIO device (L0b, ADR-0057): `SYS_MAP_MMIO` mappa qui le BAR
 /// (UC, non-owned) dell'owner di `Service::Gpu`.
 pub use syscall_numbers::{
@@ -142,8 +145,8 @@ pub use syscall_numbers::{
 /// Tag DEV_* op + device type (DocsD): stesso pattern, prima duplicati in
 /// cardo/block/vela/gpu/kbd/tty.
 pub use syscall_numbers::{
-    DEV_CLOSE, DEV_KBD, DEV_KEYBOARD, DEV_CONSOLE, DEV_NULL, DEV_OPEN, DEV_READ,
-    DEV_READDIR, DEV_WRITE, DEV_ZERO,
+    DEV_CLOSE, DEV_DISPLAY, DEV_KBD, DEV_KEYBOARD, DEV_CONSOLE, DEV_NULL, DEV_OPEN,
+    DEV_READ, DEV_READDIR, DEV_WRITE, DEV_ZERO,
 };
 /// Tag TIME_* (Fase 50, P1 orologio): client→usertime, data/ora di sistema.
 /// Reply `TIME_NOW`: `w0` = secondi epoch (UTC), `w1` = centesimi di secondo.

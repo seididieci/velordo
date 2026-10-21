@@ -1,0 +1,20 @@
+[package]
+name = "console"
+version = "0.1.0"
+edition = "2024"
+
+# Crate fuori dal workspace del kernel: build freestanding separata.
+[workspace]
+
+[dependencies]
+civis = { path = "../../libs/civis" }
+term = { path = "../../libs/term" }
+# BLAKE2s-256: il marker deterministico del rendering (stesso hash del repo).
+blake2s = { path = "../../blake2s" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"

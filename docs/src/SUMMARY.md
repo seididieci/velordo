@@ -85,5 +85,6 @@
 - [ADR-0055: User and Authentication Management (S3.x)](./adr/0055-user-management.md)
 - [ADR-0056: LAPIC minimale e MSI-X per virtio-gpu (L0a/L0b)](./adr/0056-lapic-msix-minimi.md)
 - [ADR-0057: Grant MMIO device e trasporto virtio-gpu (L0b)](./adr/0057-mmio-device-grant-virtio.md)
+- [ADR-0060: Console virtuale — il driver `gpu` e il servizio `console` (D3)](./adr/0060-console-virtuale-driver-display.md)
 - [ADR-0058: Creazione utenti, token di sessione e protocollo Identis (Fase 3.1)](./adr/0058-creazione-utenti-token-sessione.md)
 - [ADR-0059: Il FAT esce dal boot e dalla suite — ArcaFS unico filesystem di sistema](./adr/0059-fat-fuori-boot-arcafs-unico.md)

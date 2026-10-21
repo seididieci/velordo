@@ -115,7 +115,7 @@ La numerazione e' definita nel dispatch di `syscall_handler` in `kernel/src/sysc
 | 46 | `peer_pid(chan)` | pid del peer del canale `chan` (0 = nascita), o -1 (Fase 35, hardening: i server attribuiscono le richieste; abilita la policy `FS_REGISTER`) |
 | 47 | `peer_info(chan)` | hash dell'immagine del peer del canale `chan` (0 = nascita): 0 + hash in rdi, o -1 (Fase 36, identita' misurata: policy su identita' in init/cardo) |
 | 48 | `exec_image(img, len, args, argslen)` | sostituisce l'immagine del chiamante (Fase 37, exec in-place): stesso PID/canali, nuovo address space + stack argv+env stile Linux (`args` = blocco `[argc:8][envc:8][argv][magic?][env]` entro `ARGS_MAX`, 0/0 = argc=0; env = byte opachi, kernel neutro — ADR-0033), hash rimisurato; mai ritorno (salta all'entry), -1 a validazione fallita (processo intatto) |
-| 49 | `dma_alloc(pages)` | alloca `pages` (1..=`DMA_PAGES_MAX`) frame contigui azzerati per DMA Bus-Master (Fase 38.1): mappa RW/NX a `USER_DMA_VA`, ritorna il fisico base (il device vuole phys per PRD/BMIBA); single-slot (seconda alloc = -1), free a teardown/exec, mai ereditata dal figlio-copia |
+| 49 | `dma_alloc(pages, slot)` | alloca `pages` frame contigui azzerati per DMA Bus-Master (Fase 38.1): mappa RW/NX nella finestra dello slot, ritorna `rax` = fisico base (il device vuole phys per PRD/BMIBA), `rdi` = pagine, `rsi` = VA dello slot. **Slot 0** = staging (≤ `DMA_PAGES_MAX` = 4, VA `USER_DMA_VA`, come prima); **slot ≥ 1** = device buffer (≤ `DMA_DEVICE_PAGES_MAX` = 1024 = 4 MiB, grant riservato all'owner di `Service::Console`, D3/ADR-0060); `DMA_SLOT_ANY` = primo libero. Free a teardown/exec, mai ereditata dal figlio-copia |
 | 50 | `suspend(pid)` | congela un processo user (Fase 44a, job control, ADR-0035): fuori dalle ready queue finche' resume (i wake lo saltano, i messaggi restano in coda); meccanismo neutro. 0 se sospeso (idempotente), -1 se non sospendibile (init/kernel/se'/non-figlio/terminato) |
 | 51 | `resume(pid)` | rimette in schedulazione un sospeso (Fase 44a): no-op ok se running; un bloccato con coda non vuota si sveglia subito. Stessi gate di `suspend` |
 
@@ -247,7 +247,8 @@ extern "C" fn syscall_handler() -> i64 {
 | `serialize_argv_redir_env` | — | Blocco `[argc][envc][argv][magic?][env NAME=val]` (43a; wrapper `serialize_argv[_redir]` a env vuoto) |
 | `env_from_stack` / `Env` | — | Vista envp dallo stack iniziale: `count/get_raw/get(NAME)` (43a) |
 | `exec` | 48 | `exec(path, argv)` = load_file + serialize + exec_args (Fase 37.1; il kernel non tocca il FS) |
-| `dma_alloc` | 49 | Alloca frame contigui per DMA (Fase 38.1, single-slot) → fisico base |
+| `dma_alloc` | 49 | Alloca frame contigui per DMA (Fase 38.1, slot 0) → fisico base |
+| `dma_alloc_slot` | 49 | Come sopra ma con lo slot (0 = staging, ANY = primo libero, ≥ 1 = device buffer con grant) → (fisico, VA) |
 | `map_mmio` | 61 | Mappa BAR device UC, non-owned, nella finestra MMIO; solo owner di `Service::Gpu` (L0b, ADR-0057) |
 | `text_stats` | 44 | Contatori shared text (Fase 32): hits/misses/live (+ Fase 33: fault COW in rdx) |
 
@@ -485,7 +486,7 @@ implementa: `0=exit`, `2=write`, `8=getpid`, `16=send`, `17=recv`, `18=reply`,
 `35=kill`, `36=service_pid`, `37=ps_info`, `38=spawn_image` (Fase 21),
 `39=mmap`, `40=munmap`, `41=mprotect`, `42=shm_create`, `43=shm_map`,
 `44=text_stats`, `45=spawn_copy`, `46=peer_pid`, `47=peer_info`, `48=exec`,
-`49=dma_alloc`, `50=suspend`, `51=resume` (Fase 44a, job control),
+`49=dma_alloc` (arg2 = slot, D3/ADR-0060), `50=suspend`, `51=resume` (Fase 44a, job control),
 `52=meminfo` (Fase 52, P3), `54=thread_create`, `55=thread_exit`,
 `56=futex_wait`, `57=futex_wake`, `58=thread_set_fs` (S-T, ADR-0046),
 `59=chdir`, `60=getcwd` (S1.1, cwd nel PCB), `61=map_mmio` (L0b,

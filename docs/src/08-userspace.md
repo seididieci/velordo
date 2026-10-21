@@ -37,11 +37,20 @@ User mode (ring 3) e entry syscall sono sviluppati nelle sotto-fasi della Fase 6
   via la syscall `spawn` (20), registrandoli come figli (campo `parent` nel PCB).
   La process tree e' radicata in init. (Da Fase 12 spawn ritorna un canale di
   nascita e i servizi si registrano per nome.)
-- **Fase 8.2 — Console server**: `gpu` e' un processo user
-  che mappa il frame buffer VGA (`0xB8000`) a `USER_VGA` (`0x4000_0010_0000`)
-  tramite la syscall `map_physical` (21). Da Fase 15 e' solo rendering:
-  pubblica `/dev/console` (DEV_WRITE disegna); tastiera in `kbd`/`porta`
+- **Fase 8.2 — Console server**: un processo user che pubblica
+  `/dev/console` (DEV_WRITE disegna) e mappa il frame buffer
+  (`0xB8000` via `map_physical`, syscall 21; dal D3 anche il framebuffer
+  virtio-gpu). Da Fase 15 e' solo rendering; tastiera in `kbd`/`porta`
   (sotto). `sys_write(fd=1)` stampa solo su seriale.
+- **D3 (ADR-0060) — due servizi, due ruoli**: `gpu` e' il **driver** del
+  display (virtio-gpu: BAR, MSI-X, risorsa 2D, scanout; pubblica
+  `/dev/display`), `console` e' il **console server** (modello a celle,
+  UTF-8, font TrueType rasterizzato a runtime, surface pixel o VGA
+  testuale; pubblica `/dev/console` e possiede i pixel del framebuffer).
+  Il layering `gpu` (driver) → `console` (UI) → `shell` (testo) e' quello
+  che regge un futuro desktop: il livello intermedio cresce qui, il driver
+  resta un device. Nel path pixel la finestra VGA resta vuota: il terminale
+  e' nella finestra del device virtio-gpu.
 
 **Completate** le sotto-fasi **6.1** (infrastruttura: segmenti GDT user, TSS `RSP0`
 dinamica aggiornata a ogni context switch, page table per-processo, `CR3` nel
@@ -278,7 +287,7 @@ l'embedded).
 (ADR-0008) `spawn` crea il **canale di nascita** tra init e il figlio (il figlio
 lo usa come canale 0 = parent) e ritorna il channel id. Dalla **Fase 21** i
 servizi non-TCB partono da disco via `spawn_image` (38) da manifest
-(path/prio/porte). L'ordine di boot resta importante (Fase 57/R1-R9): `vestigia`+`block` in parallelo (+ `wait_any` sui READY), poi `cardo` embedded (+ attesa READY), poi `time`, FLUSH a vestigia, `gpu` da disco (+ attesa READY), uptime, `vela` (+ attesa READY), `kbd` (+ attesa READY, Fase 15), `porta` (+ attesa READY), i test in sequenza e la shell
+(path/prio/porte). L'ordine di boot resta importante (Fase 57/R1-R9): `vestigia`+`block` in parallelo (+ `wait_any` sui READY), poi `cardo` embedded (+ attesa READY), poi `time`, FLUSH a vestigia, `gpu` da disco (+ attesa READY), `console` da disco (+ attesa READY, D3), uptime, `vela` (+ attesa READY), `kbd` (+ attesa READY, Fase 15), `porta` (+ attesa READY), i test in sequenza e la shell
 per ultima. I READY sono fire-and-forget via `send_async` (consumati senza
 reply): una `send` sync resterebbe bloccata perché a boot init non aspetta
 gpu/vela (e porta registra `/dev/input` solo dopo cardo: attendere

@@ -90,6 +90,25 @@ Righe di gate:
 > `[lapic] base=0xfee00000 id=... svr=0x1ff LINT0=ExtINT`. La build
 > `selftest` include `int 0x50` (IDT + EOI LAPIC) prima del NULL-#PF.
 >
+> D3 (console virtuale: driver `gpu` + servizio `console`, ADR-0060):
+> nessuna nuova riga di suite. Il boot (con il device, default di `run.sh`)
+> mostra i marker
+> `[console] font: MapleMono-NF 16px cell=10x22`,
+> `[console] surface: pixel 1280x800 grid=128x36` (o `640x480 grid=64x21` se
+> la finestra host e' piccola) e `[gpu] scanout: 1280x800 stride=5120`.
+> Il rendering e' **verificabile**: la console logga il BLAKE2s-256
+> dell'ultima riga della griglia (dove sta il banner) e il valore coincide
+> con quello calcolato sul host con lo stesso codice (`libs/term`) — il
+> rasterizer nel guest e' bit-identico a quello di riferimento. Valore di
+> riferimento (Maple Mono NF 16 px, banner "Velordo console server",
+> 1280x800): `5247eed63006ace623e4c0e0ac3e637122f800a4bd73597093b4f1c5f274b919`
+> (cambia se cambiano font, dimensione o banner: va aggiornato qui).
+> Fallback: `VIRTIO_GPU=0` → `[console] surface: vga-text 80x25` (zero
+> FAIL/PANIC). Attenzione: nel path pixel la **finestra VGA resta vuota**
+> ("Booting from ROM"): il terminale e' nella finestra del device
+> virtio-gpu. La prova grafica (resize della finestra → config change) resta
+> **manuale** con `RUN_DISPLAY=gtk` (l'host non ha xvfb/xdotool).
+>
 > L0b (virtio-gpu modern + MSI-X, ADR-0057): nessuna nuova riga di suite.
 > Marker deterministici nel boot con il device (default di `run.sh`):
 > `[gpu] virtio-gpu 1af4:1050 @00:04.0`,

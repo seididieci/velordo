@@ -119,9 +119,13 @@ velordo/
 │   └── putc16.inc
 ├── run.sh              # build userland + testland + kernel + QEMU (PVH)
 ├── userland/           # servizi NATIVI: init, block, cardo, gpu, kbd, vela,
-│   │                   #   porta, vestigia, time, uptime; tools/arca (nativo,
-│   │                   #   linka `libr` solo per l'entry/redirect)
+│   │                   #   porta, vestigia, time, uptime, console (console
+│   │                   #   server D3); tools/arca (nativo, linka `libr`
+│   │                   #   solo per l'entry/redirect)
 │   └── build/          # output .bin dei servizi nativi
+├── libs/term/          # terminale (D3, ADR-0060): protocollo display (`disp`)
+│                       #   + modello a celle/UTF-8/font TTF rasterizzato/
+│                       #   surface pixel|VGA testuale (no_std)
 ├── blake2s/            # BLAKE2s-256 proprio (RFC 7693, no_std) — P5
 ├── arcafs/             # casa ArcaFS (56.2a): tag/wire/formato condivisi guest/host — P5/A1/A2
 ├── tools/arca/         # tool host `arca create` (std, P5)
@@ -146,6 +150,19 @@ velordo/
 
 Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12` + shell (10/10 fasi via `test-shell-all.sh`), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
+- **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
+  BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
+  **console server** (modello a celle, UTF-8, font TTF rasterizzato a
+  runtime, surface pixel|VGA testuale; serve `/dev/console` e possiede i
+  pixel), `shell` = testo. Il codice di testo vive in `libs/term` (no_std);
+  il driver linka solo `term::disp`. Font **Maple Mono NF** (OFL 1.1, in
+  `third_party/`) letto dal volume root come oggetto, rasterizzato in punto
+  fisso; font fisso 16 px, cella 10x22, griglia dalla risoluzione (128x36 a
+  1280x800). `SYS_DMA_ALLOC` prende lo **slot** (0 = staging invariato;
+  >= 1 = device buffer contiguo <= 4 MiB, **grant chiuso** all'owner di
+  `Service::Console` = 12). Fallback: VGA testuale (`VIRTIO_GPU=0`). Nel
+  path pixel la finestra VGA resta vuota: il terminale e' nella finestra
+  virtio-gpu. Prossimo: **D4** (modeset/host-sync).
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-56, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo

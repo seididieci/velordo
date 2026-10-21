@@ -101,9 +101,27 @@ Voci con scope e vittoria dichiarati (non date).
       conseguita: marker `[gpu] virtio-gpu 1af4:1050 @00:04.0`,
       `[gpu] display info: 1280x800 enabled=1`, gate invariato, login
       `root/root` SUCCESS; config change MSI-X validato a mano con GTK.
-      **Prossimo: D3** (console/font su framebuffer; precondizione
-      `SYS_DMA_ALLOC` multi-slot e bound > 4 pagine), poi D4 (modeset e
-      host-sync).
+      Prossimo: D3 (console/font su framebuffer).
+- [x] **D3 — console virtuale: driver `gpu` + servizio `console` + font TTF**
+      (completata, ADR-0060): tre ruoli separati — `gpu` = **driver**
+      (virtio-gpu, pubblica `/dev/display`), `console` = **console server**
+      (modello a celle, UTF-8, font TTF rasterizzato a runtime, surface
+      pixel|VGA testuale; serve `/dev/console` e possiede i pixel), `shell`
+      = testo. Il codice di testo e' **estratto** in `libs/term` (no_std), non
+      spostato nel driver. `SYS_DMA_ALLOC` prende lo **slot** (0 = staging
+      invariato; >= 1 = device buffer <= 4 MiB, **grant chiuso** all'owner
+      di `Service::Console` = 12): il device vuole la memoria **contigua**.
+      Font **Maple Mono NF** (OFL 1.1, in `third_party/`) letto dal volume
+      root come oggetto, rasterizzato in **punto fisso** (`cmap` formato 4 e
+      12 → le icone Nerd), font fisso 16 px, cella 10x22, griglia dalla
+      risoluzione (128x36 a 1280x800). Fallback: **VGA testuale** (80x25);
+      il VGA *grafico* (VBE/real-mode) e' rinviato. Vittoria conseguita:
+      marker `[console] surface: pixel 1280x800 grid=128x36` +
+      `[gpu] scanout: 1280x800`, rendering **bit-identico** al host
+      (BLAKE2s della riga del banner), gate invariato, `test-shell-all.sh`
+      10/10, fallback `VIRTIO_GPU=0` pulito, 6/6 boot stabili.
+      **Prossimo: D4** (modeset e host-sync), poi console server con mirror
+      seriale e routing POSIX stdout→device (l'hook `persona`).
 - [ ] **S3.2 — Shell nativa** (dopo la Fase 3.1): programma interattivo
       **nativo** (meccanismo, niente POSIX) che prende il posto dello
       spin-loop del login: dispatcher di comandi su `/dev/input/keyboard` +

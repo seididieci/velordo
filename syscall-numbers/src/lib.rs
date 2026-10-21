@@ -135,13 +135,20 @@ pub const SYS_PEER_INFO: u64 = 47;
 /// (salta all'entry nuova); -1 = validazione fallita, processo intatto.
 /// Stesso bound di `spawn_image` (256 KiB).
 pub const SYS_EXEC: u64 = 48;
-/// Alloca `pages` (1..=DMA_PAGES_MAX) frame fisici CONTIGUI azzerati per DMA
-/// Bus-Master (Fase 38.1, ATA DMA): li mappa RW/NX a `USER_DMA_VA` e ritorna
-/// il fisico base (il chiamante programma PRD e BMIBA con phys reali — VA
-/// non bastano al device). Single-slot per processo (seconda alloc = -1);
-/// free a teardown/exec, mai ereditata dal figlio-copia. Precedente: `SYS_RING_ALLOC`
-/// (26) ritorna gia' phys alle ring — stessa neutralita' (ADR-0005: il kernel
-/// non tocca il disco, alloca solo frame).
+/// Alloca `pages` frame fisici CONTIGUI azzerati per DMA Bus-Master
+/// (Fase 38.1, ATA DMA) e li mappa RW/NX nella finestra dello slot.
+/// Argomenti: `arg1 = pages`, `arg2 = slot` (0 = staging, `DMA_SLOT_ANY` =
+/// primo libero, >= 1 = device buffer). Ritorna `rax` = fisico base (il
+/// chiamante programma PRD e BMIBA con phys reali — VA non bastano al
+/// device), `rdi` = pagine, `rsi` = VA dello slot.
+///
+/// Slot 0 = staging (Fase 38.1, single-slot per processo, <= `DMA_PAGES_MAX`
+/// pagine, VA `USER_DMA_VA` invariato); slot >= 1 = device buffer (D3:
+/// framebuffer, <= `DMA_DEVICE_PAGES_MAX` pagine) **riservato all'owner di
+/// `Service::Console`** (grant chiuso, ADR-0026). Free a teardown/exec, mai
+/// ereditata dal figlio-copia. Precedente: `SYS_RING_ALLOC` (26) ritorna gia'
+/// phys alle ring — stessa neutralita' (ADR-0005: il kernel non tocca il
+/// disco, alloca solo frame).
 pub const SYS_DMA_ALLOC: u64 = 49;
 /// Sospende un processo user `pid` (Fase 44a, job control): fuori dalle ready
 /// queue finche' `SYS_RESUME` (i wake lo saltano, i messaggi restano in coda).
@@ -210,7 +217,25 @@ pub const MSI_ADDR_BASE: u64 = 0xFEE0_0000;
 /// Bound command line salvata dal kernel (stesso del parser PVH, mai oltre).
 pub const BOOT_CMDLINE_MAX: usize = 512;
 /// Cap pagine di `SYS_DMA_ALLOC` (38.1: 1 pagina = PRD + 7 settori bastano).
+/// Vale per lo **slot 0** (staging); gli slot device (>= 1) hanno il bound
+/// `DMA_DEVICE_PAGES_MAX`.
 pub const DMA_PAGES_MAX: usize = 4;
+/// Slot "any": `SYS_DMA_ALLOC` prende il primo slot libero del processo.
+pub const DMA_SLOT_ANY: u64 = 0xFFFF;
+/// Slot del device buffer (D3): il framebuffer della console. Lo slot 0 e'
+/// lo staging (path storico), questo e' il primo slot "device" (bound
+/// `DMA_DEVICE_PAGES_MAX`, grant owner `Service::Console`).
+pub const DMA_SLOT_DEVICE: u64 = 1;
+/// Bound pagine degli slot "device buffer" (D3): 1024 pagine = 4 MiB, la
+/// dimensione di un framebuffer 1280x800x4. Lo slot 0 (staging) resta
+/// limitato a `DMA_PAGES_MAX`: alzare il bound per tutti sarebbe una
+/// regressione di hardening (ADR-0026) — il device buffer e' un grant
+/// riservato all'owner di `Service::Console`.
+pub const DMA_DEVICE_PAGES_MAX: usize = 1024;
+/// Slot DMA per processo (D3): 0 = staging, 1.. = device buffer.
+pub const DMA_SLOTS: usize = 8;
+/// Span VA per slot DMA (4 MiB): ogni slot ha la sua finestra.
+pub const DMA_SLOT_SPAN: u64 = 0x40_0000;
 /// Bound del payload argv+env serializzato (Fase 37.1, esteso in 43a):
 /// blocco `[argc:8][envc:8][argv NUL-separated][env NUL-separated
 /// "NAME=val"]` oltre cui `exec` rifiuta fail-loud. Single source
@@ -274,6 +299,22 @@ const FS_BLOCK: u64 = 0x0000_4100_0000_0000;
 /// (PRD + dati). Dopo CLI_RESP (`+0x230_000`) e DISK_RESP (`+0x250_000`):
 /// prima VA libera.
 pub const USER_DMA_VA: u64 = FS_BLOCK + 0x260_000;
+/// Base dell'arena degli slot DMA (D3): lo slot 0 (staging) e' a
+/// `USER_DMA_VA` (invariato, `block` non cambia), gli slot device (>= 1)
+/// hanno finestre da `DMA_SLOT_SPAN` dopo questa base. L'arena sta DOPO le
+/// finestre piccole (0x200000-0x280000) e dopo la finestra MMIO.
+pub const USER_DMA_BASE: u64 = FS_BLOCK + 0x300_000;
+/// VA dello slot DMA `idx` (D3): lo slot 0 (staging) resta a
+/// `USER_DMA_VA` (invariato: `block` non cambia), gli slot device (>= 1)
+/// hanno finestre da `DMA_SLOT_SPAN` dopo `USER_DMA_BASE`. Single source
+/// kernel+user (come le altre finestre).
+pub const fn dma_slot_va(idx: usize) -> u64 {
+    if idx == 0 {
+        USER_DMA_VA
+    } else {
+        USER_DMA_BASE + (idx as u64 - 1) * DMA_SLOT_SPAN
+    }
+}
 /// Finestra MMIO device del processo corrente (L0b, virtio-gpu):
 /// `SYS_MAP_MMIO` mappa qui le BAR (UC, non-owned). Dopo DMA (`+0x260_000`).
 pub const USER_MMIO_VA: u64 = FS_BLOCK + 0x270_000;
@@ -354,6 +395,10 @@ pub const DEV_ZERO: u64 = 1;
 pub const DEV_KEYBOARD: u64 = 2;
 pub const DEV_CONSOLE: u64 = 3;
 pub const DEV_KBD: u64 = 4;
+/// Device virtuale del display (D3, ADR-0060): lo pubblica il driver `gpu`
+/// come `/dev/display` (protocollo in `libs/term::disp`: descrittore +
+/// `PRESENT`). Non e' un device fisico: e' il "canvas" del driver.
+pub const DEV_DISPLAY: u64 = 5;
 // ── Protocollo TIME_* (client→usertime, Fase 50/P1) ─────────────────────
 // Single source of truth dei tag. Il server `Time` e' il fornitore di
 // data/ora del sistema (CMOS all'avvio + monotono PIT): serve il FS (mtime)
@@ -757,6 +802,10 @@ pub enum Service {
     /// `identis:config` (nome -> hash BLAKE2s-256 della password), verifica
     /// login e crea nuovi utenti. Supervisionato da init.
     Identis = 11,
+    /// Console server (D3, ADR-0060): serve `/dev/console` (testo) e
+    /// possiede i pixel del display (surface framebuffer o VGA testuale).
+    /// Owner del grant "device buffer" (slot DMA >= 1, ADR-0057-style).
+    Console = 12,
 }
 
 /// Massimo numero di servizi conosciuti = dimensione del registro kernel.

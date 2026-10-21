@@ -153,6 +153,12 @@ mascherate. Il driver legge l'ISR di virtio (read-to-clear), poi
 `events_read`, scrive `events_clear` e rilegge `GET_DISPLAY_INFO`: il kernel
 non tocca il device.
 
+Dal **D3** (ADR-0060) il vettore e' esercitato davvero: il config change
+scatta quando l'host ridimensiona la finestra del device (con
+`RUN_DISPLAY=gtk`), il kernel fa EOI + `notify_irq` e il driver `gpu` lo
+osserva e lo logga. Il **re-sync** (ricreare la risorsa alla nuova
+risoluzione) e' D4: per ora il framebuffer resta a 1280×800.
+
 ## Ordine di inizializzazione
 
 ```

@@ -2594,6 +2594,43 @@
       Config change MSI-X: validazione manuale GTK (host senza xvfb/xdotool).
       Prossimo: D3 (console/font su framebuffer), che richiede
       `SYS_DMA_ALLOC` multi-slot e bound maggiore.
+- [x] D3 — console virtuale: driver `gpu` + servizio `console` + font TTF
+      (2026-10-21, ADR-0060): il video esce dal livello "il driver parla col
+      device" e diventa un **terminale grafico**. Tre pezzi, tre ruoli:
+      `gpu` = **driver** (virtio-gpu: BAR/MSI-X/risorsa 2D/scanout; pubblica
+      `/dev/display`), `console` = **console server** (modello a celle, UTF-8,
+      font rasterizzato a runtime, surface pixel|VGA testuale; pubblica
+      `/dev/console` e possiede i pixel), `shell` = testo. Il codice di testo
+      non e' stato "spostato": e' stato **estratto** in `libs/term` (no_std:
+      `disp` = protocollo display, `grid`/`utf8`/`font`/`ttf`/`raster`/
+      `surface` = il terminale); il driver linka solo `term::disp`.
+      Memoria: `SYS_DMA_ALLOC` prende lo **slot** (0 = staging invariato per
+      `block`; >= 1 = device buffer, <= 1024 pagine = 4 MiB, **grant chiuso**
+      all'owner di `Service::Console` = 12, come ADR-0057): la finestra
+      virtio-gpu richiede un buffer **fisicamente contiguo**
+      (`virtio_gpu_create_mapping_iov()` assume la contiguita'). Font:
+      **Maple Mono NF** (OFL 1.1, in `third_party/`) letto dal volume root
+      come oggetto (`ns:font.ttf`/`sys:font.ttf`; il FAT non esiste piu',
+      ADR-0059), rasterizzato a runtime in **punto fisso** (16.16, nessun
+      float): parser sfnt con `cmap` **formato 4 e 12** (le icone Nerd di
+      Maple stanno solo nel 12), 4 sub-scanline per riga. Font fisso a 16 px:
+      cella 10x22, griglia dalla risoluzione (128x36 a 1280x800, 64x21 a
+      640x480) → il resize dell'host ricalcola la griglia da solo. Il
+      fallback resta il **VGA testuale** (80x25, font hardware): il VGA
+      *grafico* (VBE/real-mode) e' rinviato. Documenti: ADR-0060, `03/04/06/
+      08/11`, `SUMMARY.md`.
+      Validazione: gate invariato (testfs 5/5, testsarca 63/64 per il noto
+      flake `append 512KiB` dt=7210 — **migliorato** vs 9036 pre-D3,
+      posixtests 4/4, identistest 11/11, usertests 58/58, threadtest 12/12),
+      `test-shell-all.sh` 10/10, marker `[console] surface: pixel 1280x800
+      grid=128x36` + `[gpu] scanout: 1280x800`, fallback `VIRTIO_GPU=0` →
+      `[console] surface: vga-text 80x25`, 6/6 boot stabili. Il rendering e'
+      **provato bit-identico**: il BLAKE2s-256 della riga del banner calcolato
+      nel guest coincide con quello calcolato sul host con lo stesso crate.
+      Nota: nel path pixel la finestra VGA resta a "Booting from ROM" (il
+      terminale e' nella finestra virtio-gpu). Prossimo: **D4** (modeset e
+      host-sync), piu' console server con mirror seriale e routing POSIX
+      stdout→device.
 - [x] Fase 3.1 — Gestione utenti: token di sessione e creazione utente
       (2026-10-21, ADR-0058): chiuso il backend di ADR-0055 e preparato il
       terreno per la shell nativa (Fase 3.2). Il servizio `Identis`

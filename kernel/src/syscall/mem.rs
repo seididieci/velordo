@@ -346,26 +346,40 @@ pub(super) fn sys_ring_alloc() -> i64 {
 /// azzerati al processo corrente, li mappa RW/NX a `USER_DMA_VA` e ritorna il
 /// fisico base in rax (VA fissa e nota, niente da ritornare) e `pages` in
 /// rdi. Single-slot: seconda alloc = -1. -1 anche su OOM/range invalido.
-pub(super) fn sys_dma_alloc(pages: usize) -> i64 {
+/// dma_alloc(pages, slot): alloca `pages` frame fisici CONTIGUI azzerati e li
+/// mappa RW/NX nella finestra dello slot. `slot = 0` = staging (path
+/// storico, <= `DMA_PAGES_MAX` pagine, VA `USER_DMA_VA`), `slot =
+/// DMA_SLOT_ANY` = primo libero, `slot >= 1` = device buffer (D3: grant
+/// riservato all'owner di `Service::Console`, <= `DMA_DEVICE_PAGES_MAX`).
+/// Ritorna `rax` = fisico base, `rdi` = pagine, `rsi` = VA dello slot.
+pub(super) fn sys_dma_alloc(pages: usize, slot: u64) -> i64 {
     let cur = current_mm();
     let cr3 = unsafe { (*(addr_of!(PERCPU))).current_cr3 };
     if cr3 == 0 {
         return -1; // cr3 non impostata (prima di allocare: mai record orfani)
     }
-    let (phys, n) = match crate::arc::vmm_user::alloc_dma_pages(cur, pages) {
+    let pid = current_id() as usize;
+    let (phys, n, idx) = match crate::arc::vmm_user::alloc_dma_pages(cur, pid, pages, slot) {
         Some(p) => p,
         None => {
-            crate::serial_println!("[syscall] dma_alloc: oom/busy/range");
+            crate::serial_println!("[syscall] dma_alloc: oom/busy/range/grant");
             return -1;
         }
     };
+    let va = syscall_numbers::dma_slot_va(idx);
     unsafe {
-        crate::arc::vmm_user::map_user_region(cr3, crate::arc::vmm_user::USER_DMA_VA, phys, n);
+        crate::arc::vmm_user::map_user_region(cr3, va, phys, n);
     }
     for i in 0..n {
-        crate::arc::vmm_user::flush_page(crate::arc::vmm_user::USER_DMA_VA + (i as u64) * 4096);
+        crate::arc::vmm_user::flush_page(va + (i as u64) * 4096);
     }
-    apply_ipc(crate::ordo::sched::IpcResult { rax: phys as i64, rdi: n as u64, rsi: 0, rdx: 0, r10: 0 })
+    apply_ipc(crate::ordo::sched::IpcResult {
+        rax: phys as i64,
+        rdi: n as u64,
+        rsi: va,
+        rdx: 0,
+        r10: 0,
+    })
 }
 
 /// map_in(chan, phys, virt, count): mappa `count` pagine fisiche a partire da

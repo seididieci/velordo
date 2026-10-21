@@ -237,6 +237,7 @@ pub fn dev_type(name: &str) -> Option<u64> {
         "keyboard" => Some(DEV_KEYBOARD),
         "console" => Some(DEV_CONSOLE),
         "kbd" => Some(DEV_KBD),
+        "display" => Some(DEV_DISPLAY),
         _ => None,
     }
 }

@@ -30,6 +30,7 @@ include!(env!("VELORDO_SERVICE_HASHES"));
 fn expected_hash(bin: &[u8]) -> Option<u64> {
     match bin {
         b"gpu" => Some(HASH_GPU),
+        b"console" => Some(HASH_CONSOLE),
         b"useruptime" => Some(HASH_USERUPTIME),
         b"vela" => Some(HASH_VELA),
         b"kbd" => Some(HASH_KBD),
@@ -51,6 +52,7 @@ fn expected_hash(bin: &[u8]) -> Option<u64> {
 fn expected_blake(bin: &[u8]) -> Option<[u8; 32]> {
     match bin {
         b"gpu" => Some(BLAKE_GPU),
+        b"console" => Some(BLAKE_CONSOLE),
         b"useruptime" => Some(BLAKE_USERUPTIME),
         b"vela" => Some(BLAKE_VELA),
         b"kbd" => Some(BLAKE_KBD),
@@ -167,11 +169,15 @@ struct SvcMeta {
 
 /// Porte I/O per i manifest da disco (copia dei range kernel in
 /// `user_binary.rs`: init e' TCB e li dichiara al kernel via SpawnMeta).
-/// `gpu` (L0b, ADR-0057): cursore VGA + spazio di configurazione PCI
-/// (`0xCF8-0xCFF`) per enumerare e programmare `virtio-gpu-pci`. Chi ha il
-/// conf PCI puo' riprogrammare qualunque device: contenimento scarso senza
-/// IOMMU (ADR-0026); il broker PCI arriva col secondo consumer PCI (audio).
-const GPU_IO_RANGES: &[(u16, u16)] = &[(0x3D4, 0x3D5), (0xCF8, 0xCFF)];
+/// `gpu` (L0b, ADR-0057): spazio di configurazione PCI (`0xCF8-0xCFF`) per
+/// enumerare e programmare `virtio-gpu-pci`. Chi ha il conf PCI puo'
+/// riprogrammare qualunque device: contenimento scarso senza IOMMU
+/// (ADR-0026); il broker PCI arriva col secondo consumer PCI (audio).
+/// D3: il cursore VGA non e' piu' suo (vive nella console).
+const GPU_IO_RANGES: &[(u16, u16)] = &[(0xCF8, 0xCFF)];
+/// `console` (D3, ADR-0060): cursore hardware del fallback VGA (CRTC). Il
+/// path pixel non usa porte (cursore software).
+const CONSOLE_IO_RANGES: &[(u16, u16)] = &[(0x3D4, 0x3D5)];
 const KBD_PS2_RANGES: &[(u16, u16)] = &[(0x60, 0x64)];
 /// CMOS/RTC per il fornitore di data/ora (Fase 50, P1 orologio): indice
 /// `0x70` + dati `0x71` (accessi a byte, una sola entry).
@@ -465,11 +471,19 @@ fn restart_service(e: &mut Supervised) {
 /// Solo disk/fs restano embedded (storage-TCB: init li spawna per nome prima
 /// che il FS esista); tutto il resto vive in `/bin` su /fat (iniettati a
 /// build via mcopy) e parte via `spawn_image`. Priorita': 16 Normal, 1 Low.
-const SVC_CONSOLE: SvcMeta = SvcMeta {
+/// Driver del display (D3, ADR-0060): virtio-gpu, pubblica `/dev/display`.
+const SVC_GPU: SvcMeta = SvcMeta {
     bin: b"gpu",
     obj: Some((b"vela", b"bin/gpu.bin")),
     prio: 16,
     io: GPU_IO_RANGES,
+};
+/// Console server (D3): modello a celle, font, surface; serve `/dev/console`.
+const SVC_CONSOLE: SvcMeta = SvcMeta {
+    bin: b"console",
+    obj: Some((b"sys", b"bin/console.bin")),
+    prio: 16,
+    io: CONSOLE_IO_RANGES,
 };
 const SVC_UPTIME: SvcMeta = SvcMeta {
     bin: b"useruptime",
@@ -625,7 +639,16 @@ fn real_main(_sp: u64) -> ! {
         println!("[init] boot FAILED (log flush), panic");
         civis::exit(1);
     }
-    // Console da disco (Fase 21): registra Console + ack subito dopo la
+    // Driver del display (D3, ADR-0060): `gpu` enumera virtio-gpu e
+    // pubblica `/dev/display`. Deve partire PRIMA della console (che lo
+    // apre come client).
+    let Some(gpu_chan) = boot_svc(&SVC_GPU, true) else {
+        println!("[init] boot FAILED (gpu), panic");
+        civis::exit(1);
+    };
+    let _ = gpu_chan;
+    let _ = civis::vestigia::log(b"init", b"gpu ready");
+    // Console server (D3): registra `Console` + ack subito dopo la
     // registrazione (prima del mount /dev/input che richiede cardo, gia'
     // pronto qui). kbd la risolve per nome al passo 4.
     let Some(console_chan) = boot_svc(&SVC_CONSOLE, true) else {
@@ -686,7 +709,8 @@ fn real_main(_sp: u64) -> ! {
     const META_DISK: SvcMeta = SvcMeta { bin: b"block", obj: None, prio: 16, io: &[] };
     const META_FS: SvcMeta = SvcMeta { bin: b"cardo", obj: None, prio: 16, io: &[] };
     let mut supervised = [
-        Supervised { meta: &SVC_CONSOLE, svc: civis::Service::Gpu, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
+        Supervised { meta: &SVC_GPU, svc: civis::Service::Gpu, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
+        Supervised { meta: &SVC_CONSOLE, svc: civis::Service::Console, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
         Supervised { meta: &META_DISK, svc: civis::Service::Block, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
         Supervised { meta: &META_FS, svc: civis::Service::Cardo, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
         Supervised { meta: &SVC_VELA, svc: civis::Service::Vela, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },

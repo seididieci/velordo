@@ -34,3 +34,21 @@ pub const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 pub const VIRTIO_GPU_EVENT_DISPLAY: u32 = 0x01;
 /// Numero massimo di scanout nella risposta `GET_DISPLAY_INFO`.
 pub const VIRTIO_GPU_MAX_SCANOUTS: usize = 16;
+
+// ── virtio-gpu: risorse e scanout (D3) ───────────────────────────────
+/// Crea una risorsa 2D (formato, larghezza, altezza).
+pub const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
+/// Rilascia una risorsa.
+pub const VIRTIO_GPU_CMD_RESOURCE_UNREF: u32 = 0x0102;
+/// Imposta lo scanout su una risorsa.
+pub const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
+/// Flush della risorsa (il path non-virgl la ignora: il device mappa la RAM).
+pub const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
+/// Aggancia il backing fisico alla risorsa (indirizzo fisico + lunghezza).
+pub const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+/// Risposta "nessun dato" (ok generico dei comandi).
+pub const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
+/// Prima risposta di errore (0x1200 = ERR_UNSPEC): da li' in poi e' errore.
+pub const VIRTIO_GPU_RESP_ERR_BASE: u32 = 0x1200;
+/// Formato pixel B8G8R8A8 (byte in memoria: B, G, R, A).
+pub const VIRTIO_GPU_FORMAT_B8G8R8A8: u32 = 1;

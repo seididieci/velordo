@@ -9,6 +9,8 @@ edition = "2024"
 [dependencies]
 civis = { path = "../../libs/civis" }
 vela = { path = "../../libs/vela" }
+# Protocollo display (descrittore + PRESENT): D3, il driver non sa disegnare.
+term = { path = "../../libs/term" }
 
 [profile.dev]
 panic = "abort"

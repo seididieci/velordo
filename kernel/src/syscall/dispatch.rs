@@ -41,7 +41,7 @@ pub(super) extern "C" fn syscall_handler() -> i64 {
             // Ring buffer SPSC per-processo (Fase 10.2).
             syscall_numbers::SYS_RING_ALLOC => sys_ring_alloc(),
             // Fase 38.1: staging DMA (frame contigui + phys al chiamante).
-            syscall_numbers::SYS_DMA_ALLOC => sys_dma_alloc((*p).arg1 as usize),
+            syscall_numbers::SYS_DMA_ALLOC => sys_dma_alloc((*p).arg1 as usize, (*p).arg2),
             syscall_numbers::SYS_MAP_IN => sys_map_in((*p).arg1 as usize, (*p).arg2, (*p).arg3, (*p).arg4 as usize),
             // CBS bandwidth reservation (Fase 11.4).
             syscall_numbers::SYS_CBS_CREATE => sys_cbs_create((*p).arg1, (*p).arg2),

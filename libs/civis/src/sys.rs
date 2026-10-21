@@ -186,6 +186,25 @@ pub fn dma_alloc(pages: usize) -> Result<u64, Error> {
     }
 }
 
+/// D3 — `dma_alloc_slot(pages, slot)`: come `dma_alloc` ma con lo **slot**
+/// scelto: `0` = staging (path storico), `DMA_SLOT_ANY` = primo libero,
+/// `>= 1` = device buffer (grant riservato all'owner di `Service::Console`).
+/// Ritorna `(phys, va)`: il device vuole il fisico, il processo scrive nella
+/// VA.
+#[inline]
+pub fn dma_alloc_slot(pages: usize, slot: u64) -> Result<(u64, u64), Error> {
+    if pages == 0 {
+        return Err(Error::Invalid);
+    }
+    let r = unsafe {
+        syscall4_out(SYS_DMA_ALLOC, pages as u64, slot, 0, 0)
+    };
+    if r.0 < 0 {
+        return Err(Error::NoMemory);
+    }
+    Ok((r.0 as u64, r.2))
+}
+
 /// Termina il processo corrente con il codice `code`. Non ritorna.
 #[inline]
 pub fn exit(code: i64) -> ! {
