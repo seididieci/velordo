@@ -64,3 +64,32 @@ pub fn unmap_low() {
         core::arch::asm!("mov cr3, {cr3}", cr3 = in(reg) cr3);
     }
 }
+
+/// L0a/L0b: marca UC (PCD|PWT) la pagina 2M della direct map che contiene
+/// `phys` (LAPIC, BAR MMIO). Solo PDE large: lo split VGA 4K non si tocca.
+///
+/// Va chiamata PRIMA del primo accesso MMIO e puo' girare prima di
+/// `vmm::init` (le PD statiche sono gia' raggiungibili via direct map).
+pub fn mark_direct_uncached(phys: u64) {
+    use crate::addr::phys_to_virt;
+    use crate::boot_tables::{DIRECT_STATIC_PDS, LARGE_PAGE, PAGE_UC, PD_DIRECT_ADDR};
+
+    let idx = (phys >> 21) as usize;
+    if idx >= DIRECT_STATIC_PDS * 512 {
+        return;
+    }
+
+    let pd = phys_to_virt(PD_DIRECT_ADDR) as *mut u64;
+    unsafe {
+        let e = pd.add(idx);
+        let v = core::ptr::read_volatile(e);
+        if v & LARGE_PAGE != 0 {
+            core::ptr::write_volatile(e, v | PAGE_UC);
+        }
+        core::arch::asm!(
+            "invlpg [{}]",
+            in(reg) DIRECT_MAP_BASE + ((idx as u64) << 21),
+            options(nostack, preserves_flags)
+        );
+    }
+}

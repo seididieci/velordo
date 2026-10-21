@@ -758,3 +758,12 @@ pub const IRQ_NOTIFY_KBD: u64 = 0x41;
 /// giro, anche su wake spurio o notify persa per coda piena). Fire-and-forget,
 /// MAI risposta: canale 0, nessun peer.
 pub const IRQ_NOTIFY_DISK: u64 = 0x42;
+/// Tag del messaggio con cui il kernel sveglia `gpu` sul config change MSI-X
+/// di virtio-gpu (L0a/L0b): bridge interrupt→IPC, fire-and-forget, MAI
+/// risposta: canale 0, nessun peer. Il driver legge l'ISR virtio e fa
+/// `events_clear`; il kernel non tocca il device.
+pub const IRQ_NOTIFY_GPU: u64 = 0x44;
+
+/// Vettore IDT/LAPIC dedicato a `Gpu` (MSI-X config change, L0b).
+/// In L0a e' solo installato in IDT: nessun device lo genera ancora.
+pub const MSI_VECTOR_GPU: u8 = 0x50;

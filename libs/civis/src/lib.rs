@@ -47,6 +47,10 @@ pub use syscall_numbers::IRQ_NOTIFY_KBD;
 /// Tag della notify kernel→block su IRQ14/15 (Fase 38, ATA DMA: stesso
 /// bridge interrupt→IPC — block drena lo status Bus-Master ad ogni giro).
 pub use syscall_numbers::IRQ_NOTIFY_DISK;
+/// Tag della notify kernel→gpu sul config change virtio-gpu (L0a/L0b).
+pub use syscall_numbers::IRQ_NOTIFY_GPU;
+/// Vettore MSI-X dedicato a gpu (0x50): il driver lo scrive in `data` (L0b).
+pub use syscall_numbers::MSI_VECTOR_GPU;
 /// Bound di scansione PID per `ps` (Fase 19.1, = MAX_PIDS del kernel).
 pub use syscall_numbers::PS_SCAN_MAX;
 /// Identita' misurata di un'immagine ELF (Fase 36, Strato 2 di ADR-0026):

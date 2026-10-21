@@ -41,12 +41,18 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
         idt[i].set_handler_fn(unhandled_irq_handler);
     }
 
+    // L0a: vettore MSI-X dedicato a Gpu (config change) + spurious LAPIC.
+    idt[syscall_numbers::MSI_VECTOR_GPU].set_handler_fn(gpu_msi_handler);
+    idt[0xFF].set_handler_fn(spurious_interrupt_handler);
+
     idt
 });
 
 pub fn init() {
     IDT.load();
-    crate::serial_println!("[idt ] installata (16 IRQ hardware abilitate)");
+    crate::serial_println!(
+        "[idt ] installata (16 IRQ PIC + MSI GPU 0x50 + spurious 0xFF)"
+    );
 }
 
 // ── Eccezioni CPU ───────────────────────────────────────────────────
@@ -322,6 +328,23 @@ fn disk_irq(vector: u8) {
         crate::ordo::sched::notify_irq(owner, syscall_numbers::IRQ_NOTIFY_DISK);
     }
 }
+
+/// L0a: vettore MSI-X di `Gpu` (config change virtio-gpu). Routing puro,
+/// come IRQ1→kbd: EOI LAPIC PRIMA della notify (puo' cambiare contesto), poi
+/// `notify_irq`. Il driver legge l'ISR virtio e fa `events_clear`; qui non si
+/// tocca il device. In L0a nessun device ha MSI-X abilitato: il vettore e'
+/// esercitato solo dal selftest `int 0x50`.
+extern "x86-interrupt" fn gpu_msi_handler(_stack_frame: InterruptStackFrame) {
+    crate::lapic::eoi();
+    if let Some(owner) = crate::relay::channels::lookup(syscall_numbers::Service::Gpu) {
+        #[cfg(feature = "sched_debug")]
+        crate::serial_println!("[msi] wake gpu pid={}", owner);
+        crate::ordo::sched::notify_irq(owner, syscall_numbers::IRQ_NOTIFY_GPU);
+    }
+}
+
+/// Spurious LAPIC (SVR[7:0] = 0xFF): nessun EOI, non c'e' vettore in servizio.
+extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStackFrame) {}
 
 extern "x86-interrupt" fn unhandled_irq_handler(_stack_frame: InterruptStackFrame) {
     crate::serial_println!("[int ] IRQ non gestito");

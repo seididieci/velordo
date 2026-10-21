@@ -9,6 +9,7 @@ o software. Velordo gestisce tre categorie:
 |------|-------|--------|
 | CPU Exceptions | 0-31 | page fault, breakpoint, double fault |
 | Hardware IRQ | 32-47 | PIT timer (IRQ 0), tastiera PS/2 (IRQ 1) |
+| MSI/MSI-X (L0a) | 0x50, 0xFF | config change virtio-gpu, spurious LAPIC |
 | Software | futuri | syscall (SYSCALL instruction) |
 
 ## IDT (Interrupt Descriptor Table)
@@ -113,11 +114,52 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
 `/dev/input/keyboard` (v. ADR-0011). Se i servizi non sono pronti, lo scancode
 va perso (fire-and-forget a coda piena: il drain successivo recupera).
 
+## LAPIC e MSI-X (L0a/L0b)
+
+Il PIC resta la sorgente degli IRQ legacy, ma dal L0a esiste anche il Local
+APIC. `LINT0` è configurato in delivery mode **ExtINT** (`0x700`): il segnale
+`INTR` del PIC viene inoltrato alla CPU e i vettori restano `0x20-0x2F`.
+L'EOI del PIC è invariato; non si manda EOI LAPIC per ExtINT.
+
+Il LAPIC serve alle **MSI/MSI-X**, che sono interrupt locali e non passano dal
+PIC. L0a lo abilita da `IA32_APIC_BASE` (MSR `0x1B`), forza xAPIC MMIO,
+marca UC la pagina 2M della direct map e configura `SVR` (enable + spurious
+`0xFF`), `TPR=0`, LINT0 ExtINT, LINT1 NMI, LVT timer/error mascherati. Il PIT
+resta il timer: niente LAPIC timer, niente IOAPIC, niente SMP.
+
+```
+PIC (IRQ0/1/14/15) ── INTR ──► LAPIC LINT0 (ExtINT) ──► CPU (0x20-0x2F)
+virtio-gpu MSI-X ── addr=0xFEE00000, data=0x50 ──────► CPU (0x50)
+LAPIC spurious ─────────────────────────────────────► CPU (0xFF)
+```
+
+Vettori dedicati:
+
+| Vettore | Uso | EOI |
+|---------|-----|-----|
+| `0x50` | config change MSI-X di `Gpu` (L0b) | LAPIC EOI, poi `notify_irq` |
+| `0xFF` | spurious LAPIC | nessuna (non c'è vettore in servizio) |
+
+L'handler 0x50 è routing puro: `lapic::eoi()` **prima** di
+`notify_irq(Service::Gpu, IRQ_NOTIFY_GPU)`, perché la notify può cambiare
+contesto (wakeup-preemption). Il driver `gpu` legge l'ISR virtio e fa
+`events_clear`; il kernel non tocca il device.
+
+L0b (fase virtio-gpu) programma la tabella MSI-X nella BAR1: una entry per
+il config change (`addr=0xFEE0_0000`, `data=0x50`, `msix_config=0`), virtqueue
+in polling sincrono (`queue_msix_vector=0xFFFF`). Il config change può anche
+essere pollato come fallback.
+
 ## Ordine di inizializzazione
 
 ```
-GDT → IDT → PIC (remap + maschera) → PIT (~100 Hz) → syscall → ... → STI
+GDT → IDT → LAPIC (enable + LINT0 ExtINT) → PIC (remap + maschera)
+    → PIT (~100 Hz) → syscall → ... → STI
 ```
+
+`lapic::init()` gira dopo `interrupts::init()` (entry 0x50/0xFF già in IDT)
+e prima di `pic::init()`. Nessun interrupt è abilitato fino a `sti`, quindi
+l'ordine non espone a IRQ prematuri.
 
 `sti` (enable interrupts) viene molto dopo aver configurato tutto (dopo
 `sched::init`, spawn di idle/init, `BOOT_OK`): se lo chiamassimo prima, un

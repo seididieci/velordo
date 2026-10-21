@@ -2546,3 +2546,22 @@
       tick (bound invariato) e il gate resta 6/6 (62/62 testsarca). Restano
       W7 (DMA multi-pagina / payload piu' grandi) e il write-back a epoche;
       dettagli e caveat in `13-performance.md`.
+- [x] L0a — LAPIC minimale + convivenza PIC (2026-10-21, ADR-0056):
+      prerequisito per virtio-gpu/MSI-X. `IA32_APIC_BASE` (MSR 0x1B) con
+      xAPIC MMIO forzato, pagina 2M della direct map in UC (PCD|PWT +
+      `invlpg`), `SVR=0x1ff` (enable + spurious 0xFF), `TPR=0`, `LINT0=0x700`
+      (ExtINT: il PIC resta la sorgente di IRQ0/1/14/15), `LINT1=0x400` (NMI),
+      LVT timer/error mascherati (PIT invariato). IDT: vettore `0x50` per il
+      config change MSI-X di `Gpu` (`lapic::eoi()` prima di
+      `notify_irq(Service::Gpu, IRQ_NOTIFY_GPU)`), spurious `0xFF` senza EOI.
+      Costanti `MSI_VECTOR_GPU=0x50` e `IRQ_NOTIFY_GPU=0x44` in
+      `syscall-numbers` + re-export `civis`; nessuna nuova syscall.
+      File: `kernel/src/lapic.rs` (nuovo), `main.rs`, `interrupts.rs`,
+      `arc/vmm.rs` (`mark_direct_uncached`), `boot_tables.rs`; docs ADR-0056,
+      `03-interrupts.md`, `07-ipc.md`, `SUMMARY.md`, `11-testing.md`.
+      Validazione: build release; marker `[lapic] base=0xfee00000 id=0
+      svr=0x1ff`; selftest `int 0x50 ok` + NULL-#PF; gate con testfs 5/5,
+      testfat 7/7, posixtests 4/4, usertests 58/58, threadtest 12/12 e
+      testsarca 61/62 per il noto bound `append 512KiB` (dt=9036 tick su
+      TCG/host lento; bound 6000 invariato, non una regressione L0a). Zero
+      PANIC/FAULT. Prossimo: L0b (MSI-X nel trasporto virtio-gpu).

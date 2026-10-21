@@ -325,6 +325,7 @@ nei test).
 | `KBD_NOTIFY` | 0x40 | scancode pronti (kbd→porta) |
 | `IRQ_NOTIFY_KBD` | 0x41 | bridge interrupt→IPC (kernel→kbd) |
 | `IRQ_NOTIFY_DISK` | 0x42 | bridge interrupt→IPC (kernel→block, Fase 38 ATA DMA) |
+| `IRQ_NOTIFY_GPU` | 0x44 | bridge interrupt→IPC (kernel→gpu, L0a/L0b: config change virtio-gpu via MSI-X) |
 | `SVC_READY` | 0x7D | servizio pronto (fire-and-forget a init sul canale di nascita) |
 | `TEST_DONE` | 0x7E | fine test (sul canale di nascita verso init) |
 | `CHANNEL_PARENT` | 0 | alias canale di nascita verso il parent |

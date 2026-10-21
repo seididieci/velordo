@@ -77,6 +77,12 @@ Righe di gate:
 > tornato sotto il bound dopo free a un settore + header-ext differita
 > (`dt=5697` su KVM, limite `6000`; prima `6571`). Il bound non e' stato
 > toccato e `testsarca` resta `62/62`.
+>
+> L0a (LAPIC + convivenza PIC, ADR-0056): nessuna nuova riga di suite. Il
+> gate esistente valida PIC/PIT/IRQ1/IRQ14/15; il marker di boot e'
+> `[lapic] base=0xfee00000 id=... svr=0x1ff LINT0=ExtINT`. Il vettore 0x50
+> reale arriva con L0b (MSI-X virtio-gpu); la build `selftest` include
+> `int 0x50` (IDT + EOI LAPIC) prima del NULL-#PF.
 
 ## Test shell interattivi (QEMU + sendkey, fuori dal gate kernel)
 

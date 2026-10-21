@@ -14,6 +14,7 @@ mod elf;
 mod gdt;
 mod idle;
 mod interrupts;
+mod lapic;
 mod ordo;
 mod pic;
 mod pit;
@@ -87,6 +88,7 @@ pub extern "C" fn rust_main(boot_info_phys: u64) -> ! {
 
     gdt::init();
     interrupts::init();
+    lapic::init();
     pic::init();
     pit::init();
     syscall::init();
@@ -98,6 +100,8 @@ pub extern "C" fn rust_main(boot_info_phys: u64) -> ! {
     // rust_main — Welcome, selftests(), halt loop — non esegue mai; vedi
     // ADR-0020), quindi la prova regina vive qui, single-thread garantito:
     // IDT installata (riga sopra) + unmap gia' fatto = fault pulito.
+    #[cfg(feature = "selftest")]
+    selftest_lapic_vector();
     #[cfg(feature = "selftest")]
     selftest_low_unmap();
 
@@ -232,6 +236,20 @@ fn selftests() {
     arc::phys_mem::free(f2);
     serial_println!("[test] frame liberati, liberi di nuovo = {}", arc::phys_mem::free_frames());
     serial_println!("[test] frame alloc ok");
+}
+
+/// L0a, solo build `selftest`: la entry IDT 0x50 e l'EOI LAPIC sono
+/// raggiungibili anche senza un device MSI-X. `int 0x50` passa dall'handler
+/// (`lapic::eoi()` + lookup `Gpu`); qui non c'e' ancora un owner, quindi
+/// `notify_irq` non viene chiamato. Va PRIMA di `selftest_low_unmap`, che
+/// termina in `halt()`. Non prova la consegna MSI-X reale (L0b).
+#[cfg(feature = "selftest")]
+fn selftest_lapic_vector() {
+    serial_println!("[test] int 0x50 -> handler MSI (LAPIC EOI)");
+    unsafe {
+        core::arch::asm!("int 0x50", clobber_abi("C"), options(nostack));
+    }
+    serial_println!("[test] int 0x50 ok");
 }
 
 /// 27.3, solo build `selftest`: prova regina del basso libero, eseguita qui

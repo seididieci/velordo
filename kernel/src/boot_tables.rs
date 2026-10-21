@@ -57,11 +57,11 @@ pub const DIRECT_STATIC_PDS: usize = 32;
 /// Indice 4K della pagina VGA dentro PT_VGA (0xB8000 / 4K).
 const VGA_PT_IDX: usize = 0xB8;
 /// Bit UC per PTE 4K con PAT di reset (PCD|PWT = indice PAT 3 = UC).
-const PAGE_UC: u64 = 0x018;
+pub(crate) const PAGE_UC: u64 = 0x018;
 
 const PRESENT_WRITABLE: u64 = 0x003;
 /// Bit PS: large page (2M nel PD, 1G nel PDPT).
-const LARGE_PAGE: u64 = 0x080;
+pub(crate) const LARGE_PAGE: u64 = 0x080;
 
 /// Indice PML4 della VMA kernel (= 511 per KERN_VIRT_BASE -2G).
 const PML4_KERN: usize = ((KERN_VIRT_BASE >> 39) & 0x1FF) as usize;

@@ -76,6 +76,16 @@ Gate: `[testfs] PASS 5/5` + `[testfat] PASS 7/7` + `[testsarca] PASS 62/62` +
 
 Voci con scope e vittoria dichiarati (non date).
 
+- [x] **L0a — LAPIC minimale + convivenza PIC** (completata, ADR-0056;
+      prerequisito video/MSI-X): enable LAPIC da MSR `0x1B` (xAPIC MMIO),
+      pagina 2M UC, LINT0 ExtINT (PIC invariato per IRQ0/1/14/15), TPR 0,
+      LINT1 NMI, LVT timer/error mascherati, vettore MSI `0x50` per `Gpu`,
+      spurious `0xFF`, tag `IRQ_NOTIFY_GPU` (0x44). Vittoria conseguita:
+      gate PIC/PIT/tastiera/disco invariato + marker
+      `[lapic] base=0xfee00000 id=0 svr=0x1ff` + selftest `int 0x50`.
+      Segue **L0b** (MSI-X dentro il trasporto virtio-gpu: entry 0 in BAR1,
+      `addr=0xFEE00000`, `data=0x50`, virtqueue in polling; poi console/
+      font/modeset).
 - [ ] **ArcaFS/object-store** (dopo T0/Fase 49): filesystem avanzato stile
       btrfs/zfs — snapshot, niente partizionamento, layout adattivo per tipo
       di device (hdd/ssd/emmc), raid avanzato, monitoring (SMART), COW su
