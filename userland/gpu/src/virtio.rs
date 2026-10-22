@@ -116,6 +116,11 @@ impl Device {
         }
         true
     }
+
+    /// La misura corrente che il device riporta (cioe' quella dell'host).
+    pub fn host_size(&mut self) -> Option<(u32, u32)> {
+        self.display_info().map(|i| (i.width, i.height))
+    }
 }
 
 /// Risoluzione riportata da `GET_DISPLAY_INFO`.
@@ -417,8 +422,10 @@ impl Device {
     }
 
     /// `RESOURCE_UNREF`: rilascia la risorsa (il device smette di puntarci).
+    /// La struct uapi e' hdr(24) + resource_id(4) + padding(4) = 32 byte: la
+    /// padding conta (il device legge la struct intera).
     pub fn unref(&mut self, resource_id: u32) -> bool {
-        let mut req = [0u8; 28];
+        let mut req = [0u8; 32];
         req[0..4].copy_from_slice(&vela::gpu::VIRTIO_GPU_CMD_RESOURCE_UNREF.to_le_bytes());
         req[24..28].copy_from_slice(&resource_id.to_le_bytes());
         let mut resp = [0u8; 24];

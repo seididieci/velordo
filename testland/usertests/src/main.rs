@@ -29,6 +29,7 @@ include!(env!("VELORDO_SERVICE_HASHES"));
 mod helpers;
 mod t_async;
 mod t_basic;
+mod t_display;
 mod t_fs;
 mod t_ipc_sched;
 mod t_lifecycle;
@@ -104,6 +105,7 @@ fn real_main(_sp: u64) -> ! {
     helpers::report(&mut total, &mut ok, "t60 symlink ramfs (follow/loop/rename)", t_fs::t_symlink());
     helpers::report(&mut total, &mut ok, "t61 chdir/getcwd (relativi/errori)", t_fs::t_chdir());
     helpers::report(&mut total, &mut ok, "t62 chmod projection (accept/enforce-mai)", t_fs::t_chmod());
+    helpers::report(&mut total, &mut ok, "t63 modeset + re-adattamento (D4)", t_display::t_display_modeset());
     // t34 per ULTIMO: i drop sono irrevocabili sul canale di usertests.
     helpers::report(&mut total, &mut ok, "t34 diritti per-canale lato server", t_fs::t_rights());
 

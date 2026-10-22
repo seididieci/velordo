@@ -2643,6 +2643,35 @@
       togliere la VGA, o il dump `screendump` del monitor per la prova
       headless). Prossimo: **D4** (modeset e host-sync), piu' console server
       con mirror seriale e routing POSIX stdout→device.
+- [x] D4 — modeset e host-sync: chi comanda la risoluzione (2026-10-22,
+      ADR-0061): la risoluzione del display diventa una **decisione**. Il
+      **guest comanda** (`CONSOLE_SET_MODE`: la console presenta una risorsa
+      di quella misura e la finestra dell'host la segue) e **l'host insiste**
+      (config change MSI-X → il driver notifica `GPU_DISPLAY_CHANGED` →
+      la console cede e si riadatta alla misura dell'host). Tre cose che
+      mancavano e che D4 aggiunge: (1) la **DMA API puo' liberare**
+      (`SYS_DMA_FREE=62`: libera le pagine contigue e smonta il mapping
+      della finestra dello slot — il buffer device si rialloca, serve per
+      una risorsa con dimensione/stride nuovi); (2) il **modello conserva
+      il testo** (scrollback bounded + `Grid::resize` con riflow da
+      terminale: le righe troppo lunghe si spezzano, le piu' vecchie che non
+      stanno si perdono); (3) il **layout e' centrato** (celle intere, il
+      resto della risoluzione diviso a meta' sopra/sotto e ai lati: a
+      1280x800 4 px sopra e sotto, a 1024x768 2 px ai lati e 10 px sopra e
+      sotto). Il ri-adattamento e' **transazionale** (il buffer nuovo va
+      nello slot alternato, il vecchio si libera solo dopo il `PRESENT`:
+      un fallimento non lascia la surface su un buffer liberato).
+      Tre lezioni del device: la risorsa ha dimensione fissa (va staccata
+      dallo scanout prima dell'`UNREF`), le struct uapi contano i padding
+      (`virtio_gpu_resource_unref` = 32 byte: senza il padding il device
+      leggeva un id spazzatura) e `GET_DISPLAY_INFO` riporta la misura
+      **dell'host**, non quella del guest. Validazione: gate invariato +
+      il **nuovo test t63** (modeset → griglia ricalcolata, testo
+      conservato, risoluzione ripristinata; usertests 59/59),
+      `test-shell-all.sh` 10/10. La prova del config change vero (resize
+      della finestra) resta manuale con GTK: in headless l'UI non si muove e
+      l'evento non scatta. Prossimo: console server con mirror seriale e
+      routing POSIX stdout→device (l'hook `persona`), poi il DE.
 - [x] Fase 3.1 — Gestione utenti: token di sessione e creazione utente
       (2026-10-21, ADR-0058): chiuso il backend di ADR-0055 e preparato il
       terreno per la shell nativa (Fase 3.2). Il servizio `Identis`

@@ -100,6 +100,35 @@ pub fn alloc_dma_pages(mm: usize, pid: usize, pages: usize, slot: u64) -> Option
     Some((phys, pages, idx))
 }
 
+/// Pagine attualmente occupate nello slot `idx` dell'address space `mm`
+/// (0 = slot libero). Serve al free per smontare il mapping prima di
+/// restituire i frame.
+pub fn dma_slot_pages(mm: usize, idx: usize) -> usize {
+    if mm >= DMA_MAX_PROCS || idx >= syscall_numbers::DMA_SLOTS {
+        return 0;
+    }
+    let (_, count) = unsafe { *core::ptr::addr_of!(DMA_PHYS[mm * syscall_numbers::DMA_SLOTS + idx]) };
+    count as usize
+}
+
+/// Libera lo slot `idx` dell'address space `mm` (D4: il buffer device si
+/// puo' riallocare quando la risoluzione cambia). Ritorna le pagine
+/// liberate (0 = slot gia' libero).
+pub fn free_dma_slot(mm: usize, idx: usize) -> usize {
+    if mm >= DMA_MAX_PROCS || idx >= syscall_numbers::DMA_SLOTS {
+        return 0;
+    }
+    let (base, count) = unsafe { *core::ptr::addr_of!(DMA_PHYS[mm * syscall_numbers::DMA_SLOTS + idx]) };
+    if base == 0 {
+        return 0;
+    }
+    unsafe {
+        *core::ptr::addr_of_mut!(DMA_PHYS[mm * syscall_numbers::DMA_SLOTS + idx]) = (0, 0);
+    }
+    crate::arc::phys_mem::free_contiguous(base, count as usize);
+    count as usize
+}
+
 /// Libera tutti gli slot DMA dell'address space `mm` e azzera i record
 /// (teardown e exec: single path col walk owned, che salta il mapping
 /// NON-owned). `pub(crate)` per exec (la nuova immagine rialloca se serve).

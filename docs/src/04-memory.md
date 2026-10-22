@@ -271,6 +271,14 @@ dma_alloc(pages, slot) -> rax = phys | rdi = pagine | rsi = VA dello slot
 l'indirizzo passato in `ATTACH_BACKING` nello address space PCI del device e
 lo assume contiguo → un framebuffer "a pezzi" non funzionerebbe.
 
+**Free (`SYS_DMA_FREE` = 62, D4)**: il buffer device si **rialloca** quando
+la risoluzione del display cambia (la risorsa virtio ha dimensione fissa e
+lo stride deve combaciare con i dati) → la DMA API deve poter *liberare* uno
+slot: `dma_free(slot)` libera le pagine contigue e **smonta il mapping**
+della finestra dello slot (la VA non deve restare mappata su pagine
+rusate). Gli slot ≥ 1 restano dell'owner di `Service::Console` (stesso
+grant dell'alloc).
+
 ## Grant MMIO device (L0b, ADR-0057)
 
 `SYS_MAP_MMIO = 61` (`map_mmio(phys, virt, count)`) mappa BAR di device nel

@@ -186,6 +186,19 @@ pub fn dma_alloc(pages: usize) -> Result<u64, Error> {
     }
 }
 
+/// D4 — `dma_free_slot(slot)`: libera lo slot DMA del chiamante (il buffer
+/// device si rialloca quando la risoluzione del display cambia). Gli slot
+/// >= 1 (device buffer) sono dell'owner di `Service::Console`.
+#[inline]
+pub fn dma_free_slot(slot: u64) -> Result<(), Error> {
+    let r = unsafe { syscall4(SYS_DMA_FREE, slot, 0, 0, 0) };
+    if r < 0 {
+        Err(Error::Invalid)
+    } else {
+        Ok(())
+    }
+}
+
 /// D3 — `dma_alloc_slot(pages, slot)`: come `dma_alloc` ma con lo **slot**
 /// scelto: `0` = staging (path storico), `DMA_SLOT_ANY` = primo libero,
 /// `>= 1` = device buffer (grant riservato all'owner di `Service::Console`).

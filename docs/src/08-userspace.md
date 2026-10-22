@@ -44,7 +44,10 @@ User mode (ring 3) e entry syscall sono sviluppati nelle sotto-fasi della Fase 6
   (sotto). `sys_write(fd=1)` stampa solo su seriale.
 - **D3 (ADR-0060) — due servizi, due ruoli**: `gpu` e' il **driver** del
   display (virtio-gpu: BAR, MSI-X, risorsa 2D, scanout; parla con la console
-  in **diretta** via IPC per nome: `GPU_DISPLAY_QUERY/PRESENT/FLUSH`),
+  in **diretta** via IPC per nome: `GPU_DISPLAY_QUERY/PRESENT/FLUSH`, e
+  notifica `GPU_DISPLAY_CHANGED` quando l'host cambia la finestra — D4:
+  la risoluzione e' una decisione (il guest sceglie con
+  `CONSOLE_SET_MODE`, l'host insiste col config change e la console cede)),
   `console` e' il **console server** (modello a celle, UTF-8, font TrueType
   rasterizzato a runtime, surface pixel o VGA testuale; pubblica
   `/dev/console` e possiede i pixel del framebuffer).

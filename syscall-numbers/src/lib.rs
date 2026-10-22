@@ -395,6 +395,12 @@ pub const DEV_ZERO: u64 = 1;
 pub const DEV_KEYBOARD: u64 = 2;
 pub const DEV_CONSOLE: u64 = 3;
 pub const DEV_KBD: u64 = 4;
+/// Libera uno slot DMA del chiamante (D4): `dma_free(slot)`. Gli slot >= 1
+/// (device buffer) sono dell'owner di `Service::Console`; lo slot 0 (staging)
+/// resta liberabile da chi lo ha allocato. Smonta anche il mapping della
+/// finestra dello slot. Ritorna 0 o -1.
+pub const SYS_DMA_FREE: u64 = 62;
+
 // ── Protocollo display (D3, ADR-0060) ─────────────────────────────────
 // Il driver `gpu` e' raggiunto **in diretta** (IPC per nome, `Service::Gpu`),
 // non via un device FS: il cardo e' single-threaded e un driver che lo
@@ -408,6 +414,17 @@ pub const GPU_DISPLAY_PRESENT: u64 = 0x76;
 /// Refresh della superficie (copia i pixel dal buffer del client): senza,
 /// lo schermo resta nero (path non-virgl: il flush non copia i pixel).
 pub const GPU_DISPLAY_FLUSH: u64 = 0x77;
+/// Notifica del driver alla console (D4): la misura del display e' cambiata
+/// (config change MSI-X, o resize dell'host). `w1` = geometria impacchettata.
+pub const GPU_DISPLAY_CHANGED: u64 = 0x78;
+/// Stato del terminale (D4): `w0` = colonne, `w1` = righe della griglia.
+pub const CONSOLE_QUERY: u64 = 0x79;
+/// Il terminale sceglie la risoluzione (D4): `w0` = larghezza, `w1` =
+/// altezza (0 = "segui l'host"). Risponde 0/-1.
+pub const CONSOLE_SET_MODE: u64 = 0x7A;
+/// Riepilogo del contenuto del terminale (D4, per i test): `w0` = celle non
+/// vuote, `w1` = CRC32 del testo.
+pub const CONSOLE_STATE: u64 = 0x7B;
 // ── Protocollo TIME_* (client→usertime, Fase 50/P1) ─────────────────────
 // Single source of truth dei tag. Il server `Time` e' il fornitore di
 // data/ora del sistema (CMOS all'avvio + monotono PIT): serve il FS (mtime)

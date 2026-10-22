@@ -125,8 +125,22 @@ Voci con scope e vittoria dichiarati (non date).
       mentre serve un cliente si deadlocka (idem i ring `CLI_*`, una per
       processo). Il font e' letto tutto in RAM (niente I/O FS mentre la
       console serve `/dev/console`).
-      **Prossimo: D4** (modeset e host-sync), poi console server con mirror
-      seriale e routing POSIX stdout→device (l'hook `persona`).
+- [x] **D4 — modeset e host-sync: chi comanda la risoluzione** (completata,
+      ADR-0061): il **guest comanda** (`CONSOLE_SET_MODE`: la finestra
+      dell'host segue la risoluzione scelta) e **l'host insiste** (config
+      change MSI-X → `GPU_DISPLAY_CHANGED` → la console cede e si riadatta).
+      Aggiunti: `SYS_DMA_FREE=62` (la DMA API puo' liberare: il buffer
+      device si rialloca), scrollback + `Grid::resize` con riflow (il testo
+      **sopravvive** al ri-adattamento), layout **centrato** (celle intere,
+      resto diviso a meta': 1280x800 → 4 px sopra/sotto). Il ri-adattamento
+      e' transazionale (buffer nuovo nello slot alternato, il vecchio si
+      libera dopo il `PRESENT`). Vittoria conseguita: il **nuovo test t63**
+      nella suite (usertests 59/59: modeset → griglia ricalcolata, testo
+      conservato, risoluzione ripristinata), gate invariato,
+      `test-shell-all.sh` 10/10. Il config change vero (resize della
+      finestra) resta una prova **manuale** con GTK.
+      **Prossimo**: console server con mirror seriale e routing POSIX
+      stdout→device (l'hook `persona`), poi il desktop environment.
 - [ ] **S3.2 — Shell nativa** (dopo la Fase 3.1): programma interattivo
       **nativo** (meccanismo, niente POSIX) che prende il posto dello
       spin-loop del login: dispatcher di comandi su `/dev/input/keyboard` +

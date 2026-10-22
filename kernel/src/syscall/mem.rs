@@ -346,6 +346,43 @@ pub(super) fn sys_ring_alloc() -> i64 {
 /// azzerati al processo corrente, li mappa RW/NX a `USER_DMA_VA` e ritorna il
 /// fisico base in rax (VA fissa e nota, niente da ritornare) e `pages` in
 /// rdi. Single-slot: seconda alloc = -1. -1 anche su OOM/range invalido.
+/// dma_free(slot): libera lo slot DMA `slot` del chiamante (D4: il buffer
+/// device si rialloca quando la risoluzione del display cambia). Smonta
+/// anche il mapping della finestra dello slot, cosi' la VA non resta
+/// mappata su pagine riusate. Gli slot >= 1 (device buffer) sono
+/// dell'owner di `Service::Console` (come l'alloc). Ritorna 0 o -1.
+pub(super) fn sys_dma_free(slot: u64) -> i64 {
+    let cur = current_mm();
+    let cr3 = unsafe { (*(addr_of!(PERCPU))).current_cr3 };
+    if cr3 == 0 {
+        return -1;
+    }
+    let idx = slot as usize;
+    if idx >= syscall_numbers::DMA_SLOTS {
+        return -1;
+    }
+    // Grant: gli slot device sono dell'owner di `Service::Console`.
+    if idx >= 1 {
+        let pid = current_id() as usize;
+        if crate::relay::channels::lookup(syscall_numbers::Service::Console) != Some(pid) {
+            crate::serial_println!("[syscall] dma_free: pid={} non owner di Console", pid);
+            return -1;
+        }
+    }
+    let pages = crate::arc::vmm_user::dma_slot_pages(cur, idx);
+    if pages == 0 {
+        return -1; // slot gia' libero
+    }
+    let va = syscall_numbers::dma_slot_va(idx);
+    unsafe {
+        crate::arc::vmm_user::unmap_user_range(cr3, va, pages);
+    }
+    if crate::arc::vmm_user::free_dma_slot(cur, idx) == 0 {
+        return -1;
+    }
+    0
+}
+
 /// dma_alloc(pages, slot): alloca `pages` frame fisici CONTIGUI azzerati e li
 /// mappa RW/NX nella finestra dello slot. `slot = 0` = staging (path
 /// storico, <= `DMA_PAGES_MAX` pagine, VA `USER_DMA_VA`), `slot =

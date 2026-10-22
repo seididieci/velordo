@@ -225,6 +225,7 @@ extern "C" fn syscall_handler() -> i64 {
 | `thread_set_fs` | 58 | base TLS (FS) del thread corrente (S-T T2, FSGSBASE da ring 3 se presente) |
 | `chdir` | 59 | imposta la cwd del gruppo (S1.1, solo assoluti ≤256B; il client unisce i relativi) |
 | `getcwd` | 60 | copia cwd + NUL, ritorna len (cap corta = -1, pattern boot_cmdline) |
+| `dma_free` | 62 | libera uno slot DMA del chiamante (D4: il buffer device si rialloca al resize del display) e smonta il mapping della finestra dello slot; gli slot ≥ 1 sono dell'owner di `Service::Console` |
 | `map_mmio` | 61 | mappa `count` pagine di BAR device (UC, non-owned) nella finestra `DEV_MMIO_BASE`/`USER_MMIO_VA`; solo owner di `Service::Gpu` (L0b, ADR-0057) |
 | `JOB_CANCEL` | — | tag cancel cooperativo parent→figlio sul canale di nascita (44b, w0=2/SIGINT informativo): il figlio puo' gestirlo o ignorarlo (escalation a kill) |
 | `EXIT_SIGINT` | — | causa di morte 130 = 128+SIGINT per Ctrl-C su job non cooperante (44b, convenzione al bordo come `FAULT_EXIT_CODE`) |
@@ -490,7 +491,8 @@ implementa: `0=exit`, `2=write`, `8=getpid`, `16=send`, `17=recv`, `18=reply`,
 `52=meminfo` (Fase 52, P3), `54=thread_create`, `55=thread_exit`,
 `56=futex_wait`, `57=futex_wake`, `58=thread_set_fs` (S-T, ADR-0046),
 `59=chdir`, `60=getcwd` (S1.1, cwd nel PCB), `61=map_mmio` (L0b,
-ADR-0057: grant UC delle BAR all'owner di `Gpu`).
+ADR-0057: grant UC delle BAR all'owner di `Gpu`), `62=dma_free` (D4,
+ADR-0061: libera uno slot device).
 
 Le vecchie syscall 3-7/23-24 (FS relay) sono state rimosse con la Fase 9.6:
 le operazioni FS sono ora IPC dirette client→cardo.

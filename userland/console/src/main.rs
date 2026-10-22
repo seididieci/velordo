@@ -77,6 +77,15 @@ struct Term {
     bg: u8,
     /// Canale del driver `gpu` (0 = nessun driver raggiungibile).
     driver_chan: u64,
+    /// La risoluzione *desiderata* dal guest (D4): `None` = "segue l'host".
+    /// Quando l'host insiste (config change) la console cede e passa a
+    /// `None`.
+    desired: Option<(u32, u32)>,
+    /// Lo slot DMA del framebuffer corrente (D4: il riadattamento alloca
+    /// l'altro slot e libera questo solo dopo che il nuovo e' presentato —
+    /// un riadattamento fallito non deve lasciare la surface su un buffer
+    /// liberato).
+    fb_slot: u64,
 }
 
 impl Term {
@@ -95,6 +104,105 @@ impl Term {
         // Il path non-virgl di QEMU copia la risorsa nella superficie del
         // display **solo al flush**: senza, lo schermo resta nero.
         self.flush_display();
+    }
+
+    /// **Il terminale si riadatta** a una nuova misura del display (D4):
+    /// buffer device nuovo (contiguo), risorsa nuova, griglia ricalcolata —
+    /// il testo viene ricopiato dallo scrollback.
+    ///
+    /// Ritorna `true` se il riadattamento e' andato a buon fine.
+    fn resize_to(&mut self, w: u32, h: u32) -> bool {
+        if w == 0 || h == 0 || self.driver_chan == 0 {
+            return false;
+        }
+        let m = match self.font.as_ref() {
+            Some(f) => f.metrics(),
+            None => return false,
+        };
+        // 1) il buffer device NUOVO: lo slot alternato (il vecchio resta
+        //    valido finche' il nuovo non e' presentato — un riadattamento
+        //    fallito non deve lasciare la surface su un buffer liberato).
+        let bytes = (w as u64) * (h as u64) * 4;
+        let pages = ((bytes + 4095) / 4096) as usize;
+        let new_slot = if self.fb_slot == civis::DMA_SLOT_DEVICE {
+            civis::DMA_SLOT_DEVICE + 1
+        } else {
+            civis::DMA_SLOT_DEVICE
+        };
+        let (phys, va) = match civis::dma_alloc_slot(pages, new_slot) {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = civis::print_string(b"[console] display: alloc del nuovo buffer fallita\n");
+                return false;
+            }
+        };
+        // 2) le geometrie: la superficie (w×h) e la griglia (celle intere,
+        //    resto centrato).
+        let grid_geom = Geom::for_surface(
+            w,
+            h,
+            m.cell_w as u32,
+            m.cell_h as u32,
+            m.ascent_px,
+        );
+        let surface_geom = term::disp::Geometry {
+            width: w,
+            height: h,
+            stride: w * 4,
+            format: term::disp::FORMAT_B8G8R8A8,
+        };
+        // 3) il driver presenta il buffer nuovo (la risorsa vecchia viene
+        //    rilasciata e rifatta dal driver: una risorsa ha dimensione fissa).
+        let reply = match civis::send(
+            self.driver_chan,
+            civis::syscall_numbers::GPU_DISPLAY_PRESENT,
+            phys,
+            surface_geom.pack(),
+        ) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        if reply.w0 != 0 {
+            // Il driver non ha accettato il nuovo buffer: si libera e si
+            // resta con quello vecchio (la surface resta valida).
+            let _ = civis::dma_free_slot(new_slot);
+            let _ = civis::print_string(b"[console] display: PRESENT del nuovo buffer fallito\n");
+            return false;
+        }
+        // 4) la nuova superficie e la griglia (il testo ricopiato); il
+        //    vecchio buffer e' liberato solo ora.
+        let _ = civis::dma_free_slot(self.fb_slot);
+        self.fb_slot = new_slot;
+        self.surface = Surface::Pixel(Pixel {
+            ptr: va as *mut u8,
+            width: w,
+            height: h,
+            stride: surface_geom.stride,
+            geom: grid_geom,
+        });
+        self.grid.resize(grid_geom.cols, grid_geom.rows);
+        // 5) ridisegna tutto (il resize ha segnato la zona sporca intera).
+        self.render();
+        true
+    }
+
+    /// **Il guest sceglie la risoluzione** (D4, modeset): la finestra
+    /// dell'host la segue. `(0, 0)` = "segui l'host" (torna alla policy
+    /// dell'host). Nel fallback VGA non c'e' modeset: `-1`.
+    fn set_mode(&mut self, w: u32, h: u32) -> Result<(), ()> {
+        if !matches!(self.surface, Surface::Pixel(_)) {
+            return Err(());
+        }
+        if w == 0 || h == 0 {
+            self.desired = None;
+            return Ok(());
+        }
+        self.desired = Some((w, h));
+        if self.resize_to(w, h) {
+            Ok(())
+        } else {
+            Err(())
+        }
     }
 
     /// Chiede al driver il refresh della superficie (solo nel path pixel).
@@ -354,6 +462,8 @@ fn real_main(_sp: u64) -> ! {
         fg: 0x0F,
         bg: 0x00,
         driver_chan,
+        desired: None,
+        fb_slot: civis::DMA_SLOT_DEVICE,
     };
 
     // 5. Banner sul terminale (il framebuffer o la VGA) + il seriale (sink
@@ -403,13 +513,61 @@ fn real_main(_sp: u64) -> ! {
                         let _ = civis::reply(msg.tag, 0, 0);
                     }
 
+                    civis::syscall_numbers::GPU_DISPLAY_CHANGED => {
+                        // L'host ha cambiato la finestra (config change MSI-X):
+                        // la console cede (policy D1) e si riadatta — testo
+                        // conservato. NOTA: e' una notifica fire-and-forget:
+                        // NON si risponde (altrimenti driver e console
+                        // rimbalzano le risposte a vicenda).
+                        let g = term::disp::Geometry::unpack(msg.w1);
+                        if g.valid() {
+                            term.desired = None;
+                            if term.resize_to(g.width, g.height) {
+                                civis::println!(
+                                    "[console] display: {}x{} grid={}x{} (adattato, testo conservato)",
+                                    g.width,
+                                    g.height,
+                                    term.grid.cols(),
+                                    term.grid.rows()
+                                );
+                            } else {
+                                let _ = civis::print_string(b"[console] display: riadattamento fallito\n");
+                            }
+                        }
+                    }
+
+                    civis::syscall_numbers::CONSOLE_QUERY => {
+                        let _ = civis::reply(msg.tag, term.grid.cols() as u64, term.grid.rows() as u64);
+                    }
+
+                    civis::syscall_numbers::CONSOLE_SET_MODE => {
+                        // Il guest sceglie la risoluzione (modeset).
+                        let r = term.set_mode(msg.w0 as u32, msg.w1 as u32);
+                        let _ = civis::reply(msg.tag, if r.is_ok() { 0 } else { ERR }, 0);
+                    }
+
+                    civis::syscall_numbers::CONSOLE_STATE => {
+                        // Il contenuto del terminale: celle non vuote + CRC
+                        // del testo (la prova automatica che il testo ha
+                        // sopravvissuto a un re-adattamento).
+                        let _ = civis::reply(
+                            msg.tag,
+                            term.grid.non_empty() as u64,
+                            term.grid.text_crc() as u64,
+                        );
+                    }
+
                     civis::EXIT_NOTIFY => {
                         // cardo morto e rinato: re-registra il console.
                         ensure_console_registered();
                     }
 
                     _ => {
-                        let _ = civis::reply(msg.tag, 0, 0);
+                        // Solo le richieste (req_id == 0) vanno risposte: una
+                        // risposta async ricevuta qui non va rimbalzata.
+                        if msg.req_id == 0 {
+                            let _ = civis::reply(msg.tag, 0, 0);
+                        }
                     }
                 }
             }
@@ -448,16 +606,15 @@ fn setup_pixel(driver_chan: u64, font: &mut Option<Font>) -> Option<Surface> {
     let (phys, va) = civis::dma_alloc_slot(pages, civis::DMA_SLOT_DEVICE).ok()?;
     let _ = civis::print_string(b"[console] buffer device allocato\n");
 
-    // La griglia: dalla risoluzione e dalla cella del font.
-    let cols = (geom.width as usize) / m.cell_w.max(1);
-    let rows = (geom.height as usize) / m.cell_h.max(1);
-    let cells = Geom {
-        cols: cols.max(1),
-        rows: rows.max(1),
-        cell_w: m.cell_w as u32,
-        cell_h: m.cell_h as u32,
-        ascent_px: m.ascent_px,
-    };
+    // La griglia: dalla risoluzione e dalla cella del font. Celle intere,
+    // resto centrato (D4): il terminale resta centrato nella finestra.
+    let cells = Geom::for_surface(
+        geom.width,
+        geom.height,
+        m.cell_w as u32,
+        m.cell_h as u32,
+        m.ascent_px,
+    );
     let _ = civis::println!(
         "[console] font: MapleMono-NF {}px cell={}x{}",
         FONT_PX,

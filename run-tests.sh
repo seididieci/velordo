@@ -11,8 +11,9 @@
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 58/58
+#   [usertests] PASS 59/59
 #   [threadtest] PASS 12/12
+# (D4: la suite e' cresciuta di una riga: [usertests] 59/59 con t63)
 # L0b (virtio-gpu + MSI-X, ADR-0057): nessuna riga nuova; il boot verifica i
 # marker `[gpu] virtio-gpu ...` / `[gpu] display info: 1280x800 enabled=1`.
 # D3 (console virtuale, ADR-0060): nessuna riga nuova; i marker sono

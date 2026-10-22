@@ -148,7 +148,7 @@ velordo/
 
 ## Stato corrente
 
-Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12` + shell (10/10 fasi via `test-shell-all.sh`), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
+Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 59/59` + `[threadtest] PASS 12/12` + shell (10/10 fasi via `test-shell-all.sh`), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
 - **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
   BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
@@ -169,7 +169,14 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   terminale e' nella console del device virtio-gpu — con il UI GTK non ha
   una finestra propria (`RUN_DISPLAY=gtk FB_WINDOW=1` per togliere la VGA,
   oppure il dump `screendump` del monitor per la prova headless).
-  Prossimo: **D4** (modeset/host-sync).
+  **D4 (ADR-0061)**: la risoluzione e' una decisione — il guest comanda
+  (`CONSOLE_SET_MODE`) e l'host insiste (config change MSI-X →
+  `GPU_DISPLAY_CHANGED` → la console cede e si riadatta). `SYS_DMA_FREE=62`
+  (la DMA API puo' liberare: il buffer device si rialloca), scrollback +
+  `Grid::resize` (il testo sopravvive), layout centrato (celle intere,
+  resto diviso a meta'). Test: `t63` nella suite (usertests 59/59).
+  Prossimo: console server con mirror seriale e routing POSIX
+  stdout→device (l'hook `persona`), poi il DE.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-56, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
@@ -386,10 +393,10 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 58/58
+#   [usertests] PASS 59/59
 #   [threadtest] PASS 12/12
 timeout 150 ./run-tests.sh > /tmp/boot.log
-rg '\[testfs\] PASS 5/5|\[testsarca\] PASS 64/64|\[posixtests\] PASS 4/4|\[identistest\] PASS 11/11|\[usertests\] PASS 58/58|\[threadtest\] PASS 12/12' /tmp/boot.log
+rg '\[testfs\] PASS 5/5|\[testsarca\] PASS 64/64|\[posixtests\] PASS 4/4|\[identistest\] PASS 11/11|\[usertests\] PASS 59/59|\[threadtest\] PASS 12/12' /tmp/boot.log
 test "$(rg -c 'FAIL|PANIC|#.* FAULT' /tmp/boot.log)" = "0"
 ```
 

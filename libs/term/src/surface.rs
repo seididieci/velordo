@@ -40,7 +40,7 @@ pub fn bgra(idx: u8) -> u32 {
     u32::from_le_bytes([b, g, r, 0xFF])
 }
 
-/// Geometria della griglia (colonne/righe e dimensione della cella).
+/// Geometria della griglia (colonne/righe, cella e origine).
 #[derive(Clone, Copy, Debug)]
 pub struct Geom {
     /// Colonne.
@@ -53,6 +53,50 @@ pub struct Geom {
     pub cell_h: u32,
     /// Ascender del font in px (la base della linea dentro la cella).
     pub ascent_px: i32,
+    /// Origine X della griglia nel framebuffer (px): il resto orizzontale
+    /// diviso a meta' (D4: il terminale resta centrato nella finestra).
+    pub origin_x: u32,
+    /// Origine Y della griglia nel framebuffer (px): il resto verticale
+    /// diviso a meta' (sopra e sotto).
+    pub origin_y: u32,
+}
+
+impl Default for Geom {
+    fn default() -> Self {
+        Geom {
+            cols: 1,
+            rows: 1,
+            cell_w: 8,
+            cell_h: 16,
+            ascent_px: 13,
+            origin_x: 0,
+            origin_y: 0,
+        }
+    }
+}
+
+impl Geom {
+    /// La geometria di una superficie pixel: celle intere, resto centrato.
+    ///
+    /// `cols = floor(W/cell_w)`, `rows = floor(H/cell_h)` e l'origine mette
+    /// la griglia al centro dello spazio rimasto (D4).
+    pub fn for_surface(width: u32, height: u32, cell_w: u32, cell_h: u32, ascent_px: i32) -> Geom {
+        let cell_w = cell_w.max(1);
+        let cell_h = cell_h.max(1);
+        let cols = (width / cell_w) as usize;
+        let rows = (height / cell_h) as usize;
+        let used_w = cols as u32 * cell_w;
+        let used_h = rows as u32 * cell_h;
+        Geom {
+            cols: cols.max(1),
+            rows: rows.max(1),
+            cell_w,
+            cell_h,
+            ascent_px,
+            origin_x: (width.saturating_sub(used_w)) / 2,
+            origin_y: (height.saturating_sub(used_h)) / 2,
+        }
+    }
 }
 
 /// Surface pixel: un framebuffer lineare BGRA.
@@ -133,6 +177,8 @@ impl Surface {
                 cell_w: 8,
                 cell_h: 16,
                 ascent_px: 13,
+                origin_x: 0,
+                origin_y: 0,
             },
         }
     }
@@ -154,8 +200,9 @@ impl Surface {
             Surface::Pixel(p) => {
                 let cw = p.geom.cell_w;
                 let ch = p.geom.cell_h;
-                let x = (col as u32) * cw;
-                let y = (row as u32) * ch;
+                // L'origine centra la griglia nel framebuffer (D4).
+                let x = p.geom.origin_x + (col as u32) * cw;
+                let y = p.geom.origin_y + (row as u32) * ch;
                 let bg_color = bgra(bg);
                 p.fill_rect(x, y, cw, ch, bg_color);
                 if let Some(bmp) = font.and_then(|f| f.glyph(cp)) {

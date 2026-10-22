@@ -299,7 +299,7 @@ unsafe fn flip_write_bit(cr3: u64, vaddr: u64, count: usize, writable: bool) {
 /// Le foglie owned (pagine materializzate, incluse le condivise COW della Fase
 /// 33) vengono rilasciate via `deref` (il frame condiviso sopravvive); le
 /// altre solo staccate. Flush per pagina.
-unsafe fn unmap_user_range(cr3: u64, vaddr: u64, count: usize) {
+pub(crate) unsafe fn unmap_user_range(cr3: u64, vaddr: u64, count: usize) {
     let mut addr = vaddr;
     for _ in 0..count {
         let l1 = unsafe { entry_at(cr3, pml4_index(addr)) };

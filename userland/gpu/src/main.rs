@@ -18,18 +18,6 @@
 extern crate alloc;
 use civis;
 
-// ── Ring I/O (Fase 10.2) ─────────────────────────────────────────
-// Le finestre CLI_* sono mappate da cardo (map_in) con i ring del client
-// a ogni relay DEV (zero-copy); i ring propri del server non cambiano mai.
-
-const REQ_RING_VA: u64 = civis::CLI_REQ_VA;
-const RESP_RING_VA: u64 = civis::CLI_RESP_VA;
-// Geometria ring (A1) + frame helpers (A2): single source in `civis`.
-use civis::{req_frame_read, resp_frame_write};
-
-// ── Tag IPC del device (DocsD: single source in `syscall-numbers`) ───
-use civis::{DEV_CLOSE, DEV_OPEN, DEV_READ, DEV_WRITE};
-
 /// Valore di errore IPC.
 const ERR: u64 = !0u64;
 
@@ -94,21 +82,42 @@ fn real_main(_sp: u64) -> ! {
                         let _ = civis::reply(msg.tag, if ok { 0 } else { ERR }, 0);
                     }
 
-                    DEV_OPEN => {
-                        // Il driver non serve piu' device FS (il display e' in
-                        // diretta): qualunque altra richiesta e' un errore.
-                        let _ = civis::reply(msg.tag, ERR, 0);
-                    }
-
-                    DEV_READ | DEV_WRITE | DEV_CLOSE => {
-                        let _ = civis::reply(msg.tag, ERR, 0);
-                    }
-
+                    // Il driver non serve piu' device FS (il display e' in
+                    // diretta): qualunque altra richiesta e' un errore.
                     civis::IRQ_NOTIFY_GPU => {
                         // MSI-X del config change (L0b): il driver osserva e
-                        // logga. Il re-sync (D4) ricreera' la risorsa.
+                        // logga. Se la misura dell'host e' cambiata, avvisa
+                        // la console (D4): e' lei che possiede i pixel e
+                        // decide di riadattarsi (la notifica e' fire-and-forget:
+                        // il driver non deve aspettare la console, che puo'
+                        // essere occupata a servire un cliente).
                         if let Some(d) = dev.as_mut() {
                             d.handle_irq();
+                            let (w, h) = match d.host_size() {
+                                Some(sz) => sz,
+                                None => (0, 0),
+                            };
+                            let changed = match presented {
+                                Some((pw, ph, _)) => pw != w || ph != h,
+                                None => false,
+                            };
+                            if changed && w > 0 && h > 0 {
+                                let geom = term::disp::Geometry {
+                                    width: w,
+                                    height: h,
+                                    stride: w * 4,
+                                    format: term::disp::FORMAT_B8G8R8A8,
+                                };
+                                if let Ok(chan) = civis::service_lookup(civis::Service::Console) {
+                                    let chan = chan as u64;
+                                    let _ = civis::send_async(
+                                        chan,
+                                        civis::syscall_numbers::GPU_DISPLAY_CHANGED,
+                                        0,
+                                        geom.pack(),
+                                    );
+                                }
+                            }
                         }
                     }
 
@@ -118,7 +127,11 @@ fn real_main(_sp: u64) -> ! {
                     }
 
                     _ => {
-                        let _ = civis::reply(msg.tag, 0, 0);
+                        // Solo le richieste (req_id == 0) vanno risposte: una
+                        // risposta async non va rimbalzata (ping-pong).
+                        if msg.req_id == 0 {
+                            let _ = civis::reply(msg.tag, 0, 0);
+                        }
                     }
                 }
             }
@@ -187,6 +200,12 @@ fn handle_present(
         return false;
     }
     const RESOURCE_ID: u32 = 1;
+    // La risorsa ha dimensione fissa: per cambiare misura va rifatta (D4).
+    // Ordine: (1) stacca la risorsa dallo scanout (resource_id = 0: altrimenti
+    // l'UNREF di una risorsa *in uso* viene rifiutato dal device), (2) rilascia
+    // la risorsa vecchia, (3) crea quella nuova.
+    let _ = dev.set_scanout(0, 0, geom.width, geom.height);
+    let _ = dev.unref(RESOURCE_ID);
     if !dev.create_2d(RESOURCE_ID, geom.format, geom.width, geom.height) {
         return false;
     }
