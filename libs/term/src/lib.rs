@@ -10,7 +10,7 @@
 //! Il driver linka **solo** `term::disp`: tutto il resto (modello, rasterizer)
 //! resta dead code per lui — il driver non sa cosa sia una cella.
 
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
 

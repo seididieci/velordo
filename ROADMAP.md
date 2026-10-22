@@ -115,7 +115,12 @@ Voci con scope e vittoria dichiarati (non date).
       Font **Maple Mono NF** (OFL 1.1, in `third_party/`) letto dal volume
       root come oggetto, rasterizzato in **punto fisso** (`cmap` formato 4 e
       12 → le icone Nerd), font fisso 16 px, cella 10x22, griglia dalla
-      risoluzione (128x36 a 1280x800). Fallback: **VGA testuale** (80x25);
+      risoluzione (128x36 a 1280x800). Copertura: esatta in orizzontale,
+      **8 sub-scanline** in verticale; l'ultimo pixel parziale di uno span
+      va contato (il bug che rendeva il testo assottigliato e irregolare —
+      61-97% dell'inchiostro vero, ADR-0060 appendice) e la bbox usa il
+      `ceil`; guardia: unit test host `scripts/run-unit-tests.sh`, fuori dal
+      gate. Fallback: **VGA testuale** (80x25);
       il VGA *grafico* (VBE/real-mode) e' rinviato. Vittoria conseguita:
       marker `[console] surface: pixel 1280x800 grid=128x36` +
       `[gpu] scanout: 1280x800`, rendering **bit-identico** al host

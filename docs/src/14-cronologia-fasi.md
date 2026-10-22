@@ -2641,7 +2641,22 @@
       resta a "Booting from ROM" (il terminale e' nella console del device
       virtio-gpu: con il UI GTK non ha finestra propria → `FB_WINDOW=1` per
       togliere la VGA, o il dump `screendump` del monitor per la prova
-      headless). Prossimo: **D4** (modeset e host-sync), piu' console server
+      headless).
+      **Fix successivo (stessa fase, trovato a occhio)**: le lettere
+      risultavano "assottigliate e non uniformi". La causa era in
+      `add_span`: `for px in pa..pb` **escludeva l'ultimo pixel parziale** di
+      ogni span (un'asta di 1 px a 0.25..1.25 rendeva `[191, 0]` invece di
+      `[191, 63]`) — bordo sinistro sfumato, bordo destro duro e inchiostro
+      perso **diverso per glifo** (61-97% del vero contro un riferimento
+      8x8 campioni/pixel; totale 74%). Fix `..=pb` (il guard `b <= a` evita
+      il doppio conteggio), bbox con **`ceil`** (niente riga/colonna
+      trasparente) e sub-scanline **4 → 8** (errore massimo sui bordi
+      orizzontali 32 → 15/255). Il marker `[console] fb blake2s=` cambia
+      (atteso). Perche' era invisibile: **nessun test guardava i pixel** —
+      ora c'e' un unit test **host** (`scripts/run-unit-tests.sh`, fuori dal
+      gate) con l'asta a cavallo del confine, il rettangolo allineato,
+      inchiostro = area e determinismo.
+      Prossimo: **D4** (modeset e host-sync), piu' console server
       con mirror seriale e routing POSIX stdout→device.
 - [x] D4 — modeset e host-sync: chi comanda la risoluzione (2026-10-22,
       ADR-0061): la risoluzione del display diventa una **decisione**. Il

@@ -131,9 +131,12 @@ dma_alloc(pages, slot) -> rax = phys | rdi = pagine | rsi = VA dello slot
 - **`libs/term::ttf`**: parser sfnt (`head`, `maxp`, `hhea`/`hmtx`, `cmap`
   4/12, `loca`, `glyf` semplici e composti).
 - **`libs/term::raster`**: rasterizzazione con antialiasing in **punto
-  fisso** (16.16, nessun float, nessuna libm): 4 sub-scanline per riga,
-  copertura orizzontale frazionaria. Il rendering è **deterministico** (stesso
-  byte a ogni boot).
+  fisso** (16.16, nessun float, nessuna libm): copertura **esatta in
+  orizzontale** (la frazione di span che cade in un pixel si somma in 16.16) e
+  **campionata in verticale** (8 sub-scanline per riga). Il rendering è
+  **deterministico** (stesso byte a ogni boot). Due invarianti: l'ultimo
+  pixel parziale di uno span va contato (l'appendice racconta il bug) e il
+  bounding box usa il `ceil`.
 - **Dimensione fissa 16 px**: la cella deriva dalle metriche del font
   (advance 9.6 → 10 px, em box 21.1 → 22 px) e la **griglia** dalla
   risoluzione: `cols = W / cell_w`, `rows = H / cell_h` → **128×36** a
@@ -253,6 +256,38 @@ E una lezione del device: nel path non-virgl di QEMU il `RESOURCE_FLUSH`
 **non copia i pixel** (li copia il `TRANSFER_TO_HOST_2D`): senza il
 transfer, lo schermo resta nero anche se il rendering è corretto.
 
+## Appendice: il testo assottigliato (il bug della copertura)
+
+Sintomo riportato all'occhio: lettere «assottigliate in alcuni punti e non
+uniformi». La causa non era il font né la scala: in `add_span` il loop
+`for px in pa..pb` **escludeva** il pixel `pb`, cioè l'ultimo pixel parziale
+di ogni span. Un'asta di 1 px a cavallo del confine (0.25..1.25) rendeva
+`[191, 0]` invece di `[191, 63]`: bordo sinistro sfumato, bordo destro duro,
+e una frazione di inchiostro persa **diversa per glifo** — da qui
+l'irregolarità, non solo il peso ridotto.
+
+Misura (Maple Mono NF, 16 px, contro un riferimento indipendente 8×8
+campioni/pixel): `l` 60.8%, `W` 63.6%, `m` 66.7%, `a` 69.6%, `e` 81.9%,
+`-` 96.6% dell'inchiostro vero — totale **74%**. Con `..=pb`: 98–101% e
+errore medio 2.4/255 (max 32). Sullo schermo (stesso contenuto, screendump
+headless): pixel inchiostrati 2109 → 3029, **+44%**, con le stesse righe
+occupate (668..795 a 1280×800) — il testo non si allarga, si riempie. Il guard `b <= a` già presente evita il doppio
+conteggio quando `xa`/`xb` cadono sul confine.
+
+Due migliorie che sono venute con lo stesso giro: il bounding box con
+**`ceil`** (toglieva una riga/colonna trasparente quando il contorno finiva
+su un confine) e le sub-scanline da **4 a 8** (errore massimo sui bordi
+orizzontali da 32 a 15/255; a 16 non si guadagna più nulla misurabile).
+
+Perché era invisibile: nessun test guardava i pixel (il marker `blake2s` è
+deterministico, quindi *coerente* anche quando sbagliato). Ora c'è un unit
+test **host**, fuori dal gate (`scripts/run-unit-tests.sh`): asta a cavallo
+del confine → `[191, 63]`, rettangolo allineato → pieno, inchiostro uguale
+all'area, determinismo. Col bug rimesso il test fallisce (`[191, 0]`,
+inchiostro 764 vs 892 di area).
+
 ---
 *Registro delle modifiche: primo redatto il 21 ottobre 2026 per D3 (console
-virtuale: driver `gpu` + servizio `console` + font TTF a runtime).*
+virtuale: driver `gpu` + servizio `console` + font TTF a runtime); seconda
+revisione (appendice sulla copertura: fix dell'ultimo pixel dello span,
+`ceil` del bbox, sub-scanline 8, unit test host).*

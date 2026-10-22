@@ -169,6 +169,12 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   terminale e' nella console del device virtio-gpu — con il UI GTK non ha
   una finestra propria (`RUN_DISPLAY=gtk FB_WINDOW=1` per togliere la VGA,
   oppure il dump `screendump` del monitor per la prova headless).
+  **Rasterizzazione** (`libs/term::raster`, punto fisso 16.16): copertura
+  esatta in orizzontale + 8 sub-scanline in verticale; **l'ultimo pixel
+  parziale di uno span va contato** (`pa..=pb`: con `pa..pb` il testo si
+  assottiglia e diventa irregolare, 61-97% dell'inchiostro vero) e la bbox
+  usa il `ceil`. Guardia: unit test host fuori dal gate
+  (`./scripts/run-unit-tests.sh`).
   **D4 (ADR-0061)**: la risoluzione e' una decisione — il guest comanda
   (`CONSOLE_SET_MODE`) e l'host insiste (config change MSI-X →
   `GPU_DISPLAY_CHANGED` → la console cede e si riadatta). `SYS_DMA_FREE=62`
@@ -372,6 +378,9 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
 ## Testing
 
 ```bash
+# Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
+./scripts/run-unit-tests.sh   # term (rasterizer), valloc, blake2s: 14 test
+
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh
 

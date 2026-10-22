@@ -6,6 +6,9 @@
 > shell) e in `AGENTS.md`. La suite **FAT32** e' **fuori dal gate**
 > (ADR-0059: il FAT non e' piu' il filesystem di sistema): vive in
 > `scripts/run-fat-tests.sh`, un run dedicato con un disco FAT attaccato.
+> Fuori dal gate ci sono anche gli **unit test host** dei crate condivisi
+> (`scripts/run-unit-tests.sh`): millisecondi, nessun boot — vedi "Run
+> dedicati".
 
 La regressione automatica del sistema gira **dentro QEMU** a ogni boot: i
 binari di test sono processi user reali, spawnati da `init` in sequenza prima
@@ -212,6 +215,18 @@ di init non matcha i binari su disco e il boot fallisce loud).
 Boot separati, costosi per costruzione (toolchain host + RAM/volume grandi):
 non entrano in `run-tests.sh`, si lanciano a mano e hanno esito esplicito nel
 log seriale.
+
+- **unit test host** (`scripts/run-unit-tests.sh`): `cargo test` dei crate
+  condivisi che hanno `#[cfg(test)]` — `libs/term` (rasterizzatore:
+  copertura dell'ultimo pixel, `ceil` della bbox, inchiostro = area,
+  determinismo), `libs/valloc` e `blake2s` (14 test in tutto). Girano da una
+  **directory neutra**: il `.cargo/config.toml` del repo impone
+  `build.target = x86_64-unknown-none` + `build-std` in base alla directory
+  corrente, e da dentro il repo `cargo test` proverebbe a compilare l'harness
+  per il target freestanding (doppio `alloc`). `CARGO_TARGET_DIR` in
+  `target/unit-tests`. Il test del rasterizer e' nato da un bug vero: la
+  copertura perdeva l'ultimo pixel di ogni span (testo assottigliato e
+  irregolare, ADR-0060 appendice).
 
 - **hello std** (S1.3…S2.4): `scripts/build-pal.sh` (PAL + sysroot in
   `$PAL_WORK`) produce `pal/build/hello-std.bin`, seedato come

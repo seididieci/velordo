@@ -4,9 +4,21 @@
 //! (px per unita' del font) e' un intero in 16.16, quindi il troncamento
 //! non si vede. Le quadratiche di
 //! Bezier vengono appiattite in segmenti (subdivisione a profondita'
-//! costante) e il riempimento usa la regola del winding non-zero con 4
-//! sub-scanline per riga: la copertura (0..255) risultante e' deterministica
-//! (stesso byte a ogni boot: il CRC del rendering e' un marker stabile).
+//! costante) e il riempimento usa la regola del winding non-zero.
+//!
+//! La copertura e' **esatta in orizzontale** (la parte di span che cade in un
+//! pixel si somma in 16.16, senza quantizzazione) e **campionata in
+//! verticale** (8 sub-scanline per riga). Il risultato (0..255) e'
+//! deterministico: stesso byte a ogni boot (il CRC del rendering e' un marker
+//! stabile).
+//!
+//! Due invarianti che il codice deve rispettare (un errore qui si vede come
+//! testo "assottigliato" e irregolare, non come un crash):
+//! - uno span puo' stare **interamente dentro un pixel** (asta sottile, punta
+//!   di una diagonale): l'ultimo pixel parziale va contato, non solo quelli
+//!   attraversati per intero;
+//! - il bounding box usa il **ceil** (un contorno che finisce sul confine non
+//!   aggiunge una riga/colonna trasparente).
 
 extern crate alloc;
 
@@ -16,8 +28,12 @@ use crate::ttf::Outline;
 /// Sub-pixel in 16.16: 65536 = 1 px.
 pub const SUB: i32 = 65536;
 
-/// Sotto-scanline per riga di pixel (copertura 0..4 per sub-scanline).
-const SUBSAMPLES: i32 = 4;
+/// Sotto-scanline per riga di pixel (copertura 0..SUBSAMPLES per
+/// sub-scanline). A 4 il bordo orizzontale e' quantizzato a 1/4 di pixel e si
+/// vede sulle aste orizzontali (errore max 32/255 contro un riferimento
+/// 8x8); a 8 l'errore massimo scende a 15/255. Oltre non serve: il
+/// rasterizzato e' gia' indistinguibile dal riferimento.
+const SUBSAMPLES: i32 = 8;
 
 /// Segmenti per quadratiche (appiattimento).
 const CURVE_SEGMENTS: usize = 8;
@@ -39,9 +55,9 @@ pub struct Bitmap {
 }
 
 /// Rasterizza il contorno (in unita' del font) con la scala `scale`
-/// (24.8 px per unita' del font).
+/// (`scale` = px per unita' del font, in 16.16).
 pub fn rasterize(outline: &Outline, scale: i32) -> Bitmap {
-    // 1. Appiattisci in polilinee 24.8.
+    // 1. Appiattisci in polilinee 16.16.
     let mut polys: Vec<Vec<(i32, i32)>> = Vec::with_capacity(outline.contours.len());
     for contour in outline.contours.iter() {
         if let Some(poly) = flatten(contour, scale) {
@@ -77,8 +93,10 @@ pub fn rasterize(outline: &Outline, scale: i32) -> Bitmap {
     }
     let x0 = min_x.div_euclid(SUB);
     let y0 = min_y.div_euclid(SUB);
-    let x1 = max_x.div_euclid(SUB) + 1;
-    let y1 = max_y.div_euclid(SUB) + 1;
+    // `ceil`: un contorno che finisce esattamente sul confine di un pixel non
+    // deve aggiungere una riga/colonna tutta trasparente.
+    let x1 = (max_x + SUB - 1).div_euclid(SUB);
+    let y1 = (max_y + SUB - 1).div_euclid(SUB);
     let w = (x1 - x0).max(0) as usize;
     let h = (y1 - y0).max(0) as usize;
     if w == 0 || h == 0 {
@@ -143,7 +161,7 @@ pub fn rasterize(outline: &Outline, scale: i32) -> Bitmap {
     }
 }
 
-/// Intersezione del segmento con la scanline `y` (24.8).
+/// Intersezione del segmento con la scanline `y` (16.16).
 fn edge_x(a: (i32, i32), b: (i32, i32), y: i32) -> i32 {
     let dy = b.1 - a.1;
     if dy == 0 {
@@ -153,7 +171,7 @@ fn edge_x(a: (i32, i32), b: (i32, i32), y: i32) -> i32 {
     (a.0 as i64 + num / dy as i64) as i32
 }
 
-/// Accumula la copertura dello span `[xa, xb)` (24.8) sulla riga `row`.
+/// Accumula la copertura dello span `[xa, xb)` (16.16) sulla riga `row`.
 fn add_span(
     cov: &mut [u32],
     w: usize,
@@ -169,7 +187,11 @@ fn add_span(
     let _ = y0;
     let pa = xa.div_euclid(SUB);
     let pb = xb.div_euclid(SUB);
-    for px in pa..pb {
+    // `..=pb`: lo span puo' **finire dentro** il pixel `pb` senza raggiungerne
+    // il bordo destro (asta sottile, punta di una diagonale) — con `..pb` la
+    // sua copertura veniva persa. Il guard `b <= a` sotto scarta il caso in cui
+    // `xa`/`xb` cadono sul confine (nessun doppio conteggio).
+    for px in pa..=pb {
         let left = px * SUB;
         let right = left + SUB;
         let a = if xa > left { xa } else { left };
@@ -185,7 +207,7 @@ fn add_span(
     }
 }
 
-/// Appiattisce un contorno TrueType in una polilinea 24.8.
+/// Appiattisce un contorno TrueType in una polilinea 16.16.
 fn flatten(contour: &[crate::ttf::Point], scale: i32) -> Option<Vec<(i32, i32)>> {
     if contour.is_empty() {
         return None;
@@ -264,5 +286,65 @@ fn quad(out: &mut Vec<(i32, i32)>, p0: (i32, i32), c: (i32, i32), p1: (i32, i32)
         let x = (a * a * s0.0 as i64 + 2 * a * i * s1.0 as i64 + i * i * s2.0 as i64) / (N * N);
         let y = (a * a * s0.1 as i64 + 2 * a * i * s1.1 as i64 + i * i * s2.1 as i64) / (N * N);
         out.push((x as i32, y as i32));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regressione della **copertura** (host, `cargo test`): il bug storico
+    //! era invisibile — nessun test guardava i pixel — e si vedeva solo come
+    //! testo assottigliato e irregolare sullo schermo.
+
+    use super::*;
+    use crate::ttf::{Outline, Point};
+
+    /// Rettangolo (in unita' del font) con la scala data: 1 unita' = `scale`
+    /// pixel. Con `scale = 16384` un'unita' e' un quarto di pixel.
+    fn rect(x0: i32, x1: i32, y0: i32, y1: i32) -> Outline {
+        let p = |x, y| Point { x, y, on: true };
+        Outline {
+            contours: alloc::vec![alloc::vec![p(x0, y0), p(x1, y0), p(x1, y1), p(x0, y1)]],
+        }
+    }
+
+    /// Un'asta di 1 px a cavallo del confine (0.25..1.25) deve coprire
+    /// **entrambi** i pixel: 0.75 e 0.25. Con `pa..pb` il secondo restava 0
+    /// (bordo destro senza antialiasing, ~26% d'inchiostro perso).
+    #[test]
+    fn asta_a_cavallo_del_confine() {
+        let b = rasterize(&rect(1, 5, 0, 8), 16384);
+        assert_eq!((b.w, b.h), (2, 2), "bbox: niente riga/colonna vuota");
+        assert_eq!(b.bits, [191u8, 63, 191, 63]);
+    }
+
+    /// Un rettangolo allineato ai pixel e' pieno: nessuna perdita e nessuna
+    /// sbavatura.
+    #[test]
+    fn rettangolo_allineato() {
+        let b = rasterize(&rect(0, 2, 0, 2), SUB);
+        assert_eq!((b.w, b.h), (2, 2));
+        assert_eq!(b.bits, [255u8; 4]);
+    }
+
+    /// La copertura totale e' l'**area** della forma (1.75 x 2 px = 3.5 px):
+    /// e' l'invariante che il bug violava (perdeva il resto frazionario
+    /// dell'ultimo pixel, qui 0.25 x 2 px = 14%).
+    #[test]
+    fn inchiostro_uguale_all_area() {
+        let b = rasterize(&rect(2, 9, 0, 8), 16384); // 0.5..2.25 px, 2 px alto
+        let ink: u32 = b.bits.iter().map(|&v| v as u32).sum();
+        let atteso = 7 * 255 / 2;
+        let scarto = ink.max(atteso) - ink.min(atteso);
+        assert!(scarto <= atteso / 100, "inchiostro {ink} vs area {atteso}");
+    }
+
+    /// Determinismo: stesso contorno, stesso byte a ogni rasterizzazione (il
+    /// CRC del rendering e' un marker stabile fra i boot).
+    #[test]
+    fn deterministico() {
+        let a = rasterize(&rect(1, 7, 0, 9), 12345);
+        let b = rasterize(&rect(1, 7, 0, 9), 12345);
+        assert_eq!((a.w, a.h, a.xoff, a.yoff), (b.w, b.h, b.xoff, b.yoff));
+        assert_eq!(a.bits, b.bits);
     }
 }
