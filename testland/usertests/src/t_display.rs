@@ -52,6 +52,12 @@ fn console_grid(chan: u64) -> Option<(u64, u64)> {
     Some((r.w0, r.w1))
 }
 
+/// Statistiche del driver: `(PRESENT ricevuti, FLUSH dopo l'ultimo PRESENT)`.
+fn driver_stats(chan: u64) -> Option<(u64, u64)> {
+    let r = civis::send(chan, civis::syscall_numbers::GPU_DISPLAY_STATS, 0, 0).ok()?;
+    Some((r.w0, r.w1))
+}
+
 /// Il contenuto del terminale: `(celle non vuote, CRC del testo)`.
 fn console_state(chan: u64) -> Option<(u64, u64)> {
     let r = civis::send(chan, civis::syscall_numbers::CONSOLE_STATE, 0, 0).ok()?;
@@ -91,6 +97,7 @@ pub fn t_display_modeset() -> bool {
     };
     println!("[t63] device {}x{}", w0, h0);
 
+    let (presents0, _) = driver_stats(driver).unwrap_or((0, 0));
     let (cols0, rows0) = match console_grid(console) {
         Some(g) => g,
         None => return false,
@@ -124,6 +131,19 @@ pub fn t_display_modeset() -> bool {
             println!("[t63] modeset fallito");
             return false;
         }
+    }
+
+    // 1b) Il contratto del refresh: dopo il PRESENT il contenuto va **flushato**
+    //     (il PRESENT aggancia il buffer, ma il device vede solo gli zeri
+    //     dell'allocazione: senza FLUSH lo schermo resta nero fino al primo
+    //     tasto). La regressione che questo test difende.
+    let (presents1, flushes1) = driver_stats(driver).unwrap_or((0, 0));
+    if presents1 != presents0 + 1 || flushes1 == 0 {
+        println!(
+            "[t63] refresh mancante: presents {}->{} flushes dopo PRESENT {}",
+            presents0, presents1, flushes1
+        );
+        return false;
     }
 
     // 2) la griglia si e' ricalcolata (celle intere).

@@ -436,6 +436,21 @@ pub const CONSOLE_SET_MODE: u64 = 0x7A;
 /// Riepilogo del contenuto del terminale (D4, per i test): `w0` = celle non
 /// vuote, `w1` = CRC32 del testo.
 pub const CONSOLE_STATE: u64 = 0x7B;
+/// Statistiche del driver (D4, per i test): `w0` = `PRESENT` ricevuti,
+/// `w1` = `FLUSH` ricevuti **dopo l'ultimo** `PRESENT`. Serve a verificare
+/// il contratto "chi ridisegna manda anche il flush": un `PRESENT` aggancia
+/// il buffer ma il device vede solo ciò che c'è in quel momento (il buffer
+/// nuovo è appena azzerato), quindi un ri-adattamento senza `FLUSH` lascia
+/// lo schermo nero fino al tasto successivo.
+///
+/// ATTENZIONE: **mai `0x7C`** (era il valore scelto: deadlock). `0x7C` e'
+/// `EXIT_NOTIFY` e il kernel, in `pop_msg`, NON arma la reply implicita per i
+/// messaggi con quel tag (una notifica di morte non si risponde): il driver
+/// riceveva la richiesta e la sua reply finiva altrove, il client restava in
+/// `BlockedOnReply` per sempre. Regola generale: nessun tag di **richiesta**
+/// puo' coincidere con un tag notifica senza reply (`EXIT_NOTIFY`, e i
+/// notifica kernel con canale 0).
+pub const GPU_DISPLAY_STATS: u64 = 0x74;
 // ── Protocollo TIME_* (client→usertime, Fase 50/P1) ─────────────────────
 // Single source of truth dei tag. Il server `Time` e' il fornitore di
 // data/ora del sistema (CMOS all'avvio + monotono PIT): serve il FS (mtime)
@@ -483,6 +498,9 @@ pub const LOG_RAM_TAIL: usize = 128;
 /// Tag kernel→parent: un figlio e' terminato (exit o kill). Il kernel lo invia
 /// sul canale di nascita con `w0` = exit code e `w1` = pid del figlio morto
 /// (Fase 14, ADR-0010). Non e' una richiesta: il parent non deve rispondere.
+/// Notifica kernel → peer alla morte di un processo (mai una richiesta: il
+/// kernel non arma la reply implicita per questo tag, vedi `pop_msg`). Per
+/// questo nessun tag di richiesta puo' valere `0x7C`.
 pub const EXIT_NOTIFY: u64 = 0x7C;
 
 /// Tag IPC del servizio `Identis` (ADR-0055, Fase 3.1/ADR-0058).

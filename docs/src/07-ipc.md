@@ -322,6 +322,8 @@ nei test).
 | `IDENTIS_*` | 0x70-0x72 | servizio Identis (client→Identis, Fase 3.1/ADR-0058: `VERIFY`/`ADD_USER` con **payload chunked** (magic `ACLI`/`ACUS`, header `w0=total_len`, chunk `w0=offset`/`w1=4 byte`, EOF `w0=0xFFFFFFFF`), `LIST` in una richiesta; `w1` della reply di `VERIFY` = **token di sessione**) |
 | `DEV_*` | 0x20-0x24 | op cardo↔driver (`OPEN/READ/WRITE/CLOSE/READDIR`; DocsD: prima duplicati in 6 file) |
 | `DEV_*` type (`w0` di `DEV_OPEN`) | 0-4 | `NULL/ZERO` (devfs), `KEYBOARD` (tty), `CONSOLE` (console), `KBD` (kbd) |
+| `GPU_DISPLAY_*` | 0x74-0x78 | protocollo display (console↔gpu, D3/D4: `STATS` 0x74, `QUERY`/`PRESENT`/`FLUSH`/`CHANGED` 0x75-0x78) |
+| `CONSOLE_*` | 0x79-0x7B | `QUERY`/`SET_MODE`/`STATE` (client→console, D4) |
 | `EXIT_NOTIFY` | 0x7C | morte peer (kernel→tutti i peer, `w0` = code, `w1` = pid) |
 | `KBD_NOTIFY` | 0x40 | scancode pronti (kbd→porta) |
 | `IRQ_NOTIFY_KBD` | 0x41 | bridge interrupt→IPC (kernel→kbd) |
@@ -330,6 +332,21 @@ nei test).
 | `SVC_READY` | 0x7D | servizio pronto (fire-and-forget a init sul canale di nascita) |
 | `TEST_DONE` | 0x7E | fine test (sul canale di nascita verso init) |
 | `CHANNEL_PARENT` | 0 | alias canale di nascita verso il parent |
+
+### Trappola: un tag di richiesta non può valere `EXIT_NOTIFY`
+
+`pop_msg` (kernel) non arma la reply implicita per i messaggi con tag
+`EXIT_NOTIFY`: una notifica di morte non si risponde, e la regola evita che
+un server in `recv` con una reply in sospeso la perda al primo `EXIT` altrui.
+Conseguenza meno ovvia: se un **client** manda una richiesta con quel tag, il
+server riceve `w0`/`w1` ma `reply_chan`/`reply_req` restano quelli di prima:
+la reply va altrove (o fallisce) e il client resta in `BlockedOnReply` **per
+sempre**. Osservato in D4: `GPU_DISPLAY_STATS` era nato a `0x7C` (uguale a
+`EXIT_NOTIFY`) e t63 si bloccava subito dopo `[t63] device 1280x800`, con il
+driver fermo in `BlockedOnRecv` (aveva già risposto, ma nel vuoto). Regola:
+la fascia dei tag di richiesta **non riusa** i valori delle notifiche senza
+reply (`EXIT_NOTIFY` 0x7C e i notifica kernel con canale 0); il tag è stato
+spostato a `0x74`.
 
 ## Riferimenti
 

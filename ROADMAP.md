@@ -141,9 +141,15 @@ Voci con scope e vittoria dichiarati (non date).
       mostrato che a 4 MiB il primo resize della finestra faceva fallire il
       riadattamento (1145/2040 pagine); oltre il bound la console rifiuta
       *prima* della syscall, spiegando, e tiene la risoluzione corrente.
-      Vittoria conseguita: il **nuovo test t63** nella suite (usertests
-      59/59: modeset a 1920x1088 → griglia ricalcolata, testo conservato,
-      oltre-bound rifiutato, risoluzione ripristinata), gate invariato,
+      Il secondo giro della prova manuale ha trovato che dopo il resize lo
+      schermo restava **nero fino al primo tasto**: il `PRESENT` trasferisce
+      il buffer *com'è in quel momento* (appena azzerato), quindi chi
+      ridisegna deve anche **flushare** — lezione "disegnare ≠ mostrare",
+      con la guardia `GPU_DISPLAY_STATS` (PRESENT + FLUSH dopo l'ultimo
+      PRESENT) verificata da t63. Vittoria conseguita: il **nuovo test t63**
+      nella suite (usertests 59/59: modeset a 1920x1088 → griglia
+      ricalcolata, testo conservato, oltre-bound rifiutato, refresh
+      verificato, risoluzione ripristinata), gate invariato,
       `test-shell-all.sh` 10/10. Il config change vero (resize della
       finestra) resta una prova **manuale** con GTK.
       **Prossimo**: console server con mirror seriale e routing POSIX

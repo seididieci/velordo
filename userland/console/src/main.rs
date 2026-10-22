@@ -195,8 +195,13 @@ impl Term {
             geom: grid_geom,
         });
         self.grid.resize(grid_geom.cols, grid_geom.rows);
-        // 5) ridisegna tutto (il resize ha segnato la zona sporca intera).
+        // 5) ridisegna tutto (il resize ha segnato la zona sporca intera) e
+        //    **trasferisci i pixel all'host**: il PRESENT ha agganciato il
+        //    buffer nuovo ma il device ha visto solo gli zeri dell'allocazione
+        //    (il primo FLUSH, senza questo, arriverebbe al primo tasto:
+        //    schermo nero fino a li').
         self.render();
+        self.flush_display();
         true
     }
 

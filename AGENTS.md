@@ -178,8 +178,11 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   (`DMA_DEVICE_PAGES_MAX` = 8192 pagine = 32 MiB, copre 4K, con
   `DMA_SLOT_SPAN` a 32 MiB: le due costanti vanno assieme); oltre il bound
   la console rifiuta *prima* della syscall e tiene la risoluzione corrente
-  (il device scala lo scanout). Test: `t63` nella suite (usertests 59/59,
-  modeset a 1920x1088 + rifiuto oltre-bound).
+  (il device scala lo scanout). Il `PRESENT` non trasporta i pixel futuri:
+  chi ridisegna deve anche **flushare** (`GPU_DISPLAY_STATS` conta i FLUSH
+  dopo l'ultimo PRESENT; senza flush lo schermo resta nero fino al tasto).
+  Test: `t63` nella suite (usertests 59/59, modeset a 1920x1088 + rifiuto
+  oltre-bound + refresh verificato).
   Prossimo: console server con mirror seriale e routing POSIX
   stdout→device (l'hook `persona`), poi il DE.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-56, Pianificate, Parcheggiate).

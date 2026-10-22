@@ -129,6 +129,31 @@ finestra: il terminale resta leggibile, solo a risoluzione interna più
 bassa. Il config change sulla stessa misura già mostrata viene ignorato
 (niente riallocazione inutile).
 
+### 3ter. `PRESENT` ≠ flush: chi ridisegna deve anche mostrare
+
+Il secondo giro di prova manuale ha trovato l'altra metà: **dopo il resize lo
+schermo era nero finché non si premeva un tasto**. Il riadattamento
+funzionava (risorsa nuova, griglia nuova, testo nel modello), ma:
+
+1. la console mandava `PRESENT` **prima** di disegnare;
+2. il driver, nel `PRESENT`, aggancia il backing e fa un `TRANSFER_TO_HOST_2D`
+   del buffer **così com'è** — cioè appena azzerato dall'allocazione (nero);
+3. la console poi disegnava in RAM (`render()`) ma **non mandava `FLUSH`**;
+4. il primo `FLUSH` arrivava dal percorso normale successivo — un tasto.
+
+Il `PRESENT` trasferisce ciò che *c'è in quel momento*, non quello che ci
+sarà: agganciare e mostrare sono due passi distinti. Fix: dopo `render()`,
+`flush_display()`. È il contratto da ricordare per ogni futuro percorso che
+disegna (un DE, un overlay, un cursore): **disegnare ≠ mostrare**.
+
+Perché non se ne accorgeva nessuno: il percorso normale (`feed` → `render` →
+`flush`) è accoppiato da sempre; il riadattamento è l'unico punto che
+disegna *fuori* da quel percorso. La regressione è ora difesa da un test:
+il driver conta i `PRESENT` e i `FLUSH` **dopo l'ultimo** `PRESENT`
+(`GPU_DISPLAY_STATS`), e t63 pretende `presents+1` e `flushes ≥ 1` subito
+dopo il modeset — col flush rimosso il test fallisce con
+`refresh mancante: presents N->N+1 flushes dopo PRESENT 0`.
+
 ### 4. Il modello: scrollback e riflow
 
 - `Grid` tiene uno **scrollback** bounded (1000 righe): lo `scroll_up()` ci
@@ -226,7 +251,12 @@ tutto com'è — la surface non deve mai puntare a un buffer liberato.
   rifiuto oltre il bound).
 - `syscall-numbers`: `DMA_DEVICE_PAGES_MAX` 1024 → 8192, `DMA_SLOT_SPAN`
   4 MiB → 32 MiB; `libs/civis` riesporta il bound (la console rifiuta
-  spiegando prima della syscall).
+  spiegando prima della syscall); `GPU_DISPLAY_STATS` (0x74) per il
+  contratto del refresh — **non** 0x7C, che è `EXIT_NOTIFY` e il kernel non
+  arma la reply implicita per quel tag (la reply si perdeva e t63 restava in
+  `BlockedOnReply`: vedi `07-ipc.md`).
+- `userland/console`: `flush_display()` dopo il `render()` del
+  riadattamento; `userland/gpu`: contatore `PRESENT`/`FLUSH dopo PRESENT`.
 
 Validazione: gate invariato + il **nuovo test t63** (modeset a **1920×1088**
 = 2040 pagine, cioè il caso che il bound vecchio rifiutava → la griglia si

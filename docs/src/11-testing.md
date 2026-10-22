@@ -133,7 +133,11 @@ Righe di gate:
 > `[gpu] scanout: 1920x1088 stride=7680`,
 > `[console] display: 8192x8192 troppo grande (65536 pagine, max 8192)` e
 > `[t63] modeset 1920x1088 OK (griglia 128x36 -> 192x49 -> 128x36, testo
-> conservato, oltre-bound rifiutato)`. La prova del **config change vero**
+> conservato, oltre-bound rifiutato)`. Il test verifica anche il **contratto
+> del refresh** (`GPU_DISPLAY_STATS`): dopo il modeset `presents` è cresciuto
+> di uno e c'è almeno un `FLUSH` **dopo** l'ultimo `PRESENT`; col flush
+> mancante fallisce con `refresh mancante: presents N->N+1 flushes dopo
+> PRESENT 0` (regressione trovata a mano: schermo nero fino al primo tasto). La prova del **config change vero**
 > (resize della finestra dell'host → l'host insiste → la console cede e si
 > riadatta) resta **manuale** con `RUN_DISPLAY=gtk FB_WINDOW=1`: in headless
 > l'UI non si muove e l'evento non scatta. È stata fatta e ha **trovato** un

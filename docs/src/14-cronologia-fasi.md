@@ -2674,6 +2674,23 @@
       corrente (il device scala lo scanout nella finestra). Il test t63 ora
       usa 1920x1088 (il caso che il bound vecchio rifiutava) e verifica che
       una misura oltre bound venga rifiutata senza toccare il terminale.
+      Il **secondo giro** della prova manuale ha trovato l'altra meta':
+      dopo il resize lo schermo restava **nero finche' non si premeva un
+      tasto**. Il `PRESENT` aggancia il buffer nuovo e ne trasferisce il
+      contenuto *di quel momento* (appena azzerato dall'allocazione: nero);
+      il riadattamento disegnava in RAM ma non mandava il `FLUSH`, che
+      arrivava solo dal percorso normale (un tasto). Lezione: **disegnare
+      != mostrare**, e il `PRESENT` non trasporta i pixel futuri. Fix:
+      `flush_display()` dopo il `render()` del riadattamento, e una guardia
+      (`GPU_DISPLAY_STATS`: `PRESENT` totali + `FLUSH` dopo l'ultimo
+      `PRESENT`) che t63 pretende subito dopo il modeset; con il flush
+      rimosso il test fallisce (`refresh mancante`). La guardia stessa ha
+      trovato una **seconda trappola**: il tag era nato a `0x7C`, lo stesso
+      di `EXIT_NOTIFY`, e il kernel non arma la reply implicita per quel tag
+      (`pop_msg`) — la reply del driver andava persa e t63 si bloccava in
+      `BlockedOnReply` (driver in `BlockedOnRecv`, gia' risposto nel vuoto).
+      Tag spostato a `0x74`; regola scritta in `07-ipc.md`: nessun tag di
+      **richiesta** puo' coincidere con una notifica senza reply.
       Tre lezioni del device: la risorsa ha dimensione fissa (va staccata
       dallo scanout prima dell'`UNREF`), le struct uapi contano i padding
       (`virtio_gpu_resource_unref` = 32 byte: senza il padding il device

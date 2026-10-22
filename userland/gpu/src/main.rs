@@ -60,6 +60,11 @@ fn real_main(_sp: u64) -> ! {
     // 5. Loop IPC: il device /dev/display (Open/Read/Write) + le notify.
     // `presented` = l'ultima geometria presentata (per il flush).
     let mut presented: Option<(u32, u32, u32)> = None;
+    // Statistiche (D4, `GPU_DISPLAY_STATS`): quanti PRESENT e quanti FLUSH
+    // dopo l'ultimo PRESENT. Il secondo e' il contratto "chi ridisegna manda
+    // anche il flush": senza, il device mostra solo gli zeri del buffer nuovo.
+    let mut presents: u64 = 0;
+    let mut flushes_after_present: u64 = 0;
     loop {
         match civis::recv() {
             Ok(msg) => {
@@ -74,12 +79,23 @@ fn real_main(_sp: u64) -> ! {
                         // w0 = fisico del buffer, w1 = geometria impacchettata.
                         let geom = term::disp::Geometry::unpack(msg.w1);
                         let ok = handle_present(&mut dev, msg.w0, geom, &mut presented);
+                        if ok {
+                            presents += 1;
+                            flushes_after_present = 0;
+                        }
                         let _ = civis::reply(msg.tag, if ok { 0 } else { ERR }, 0);
                     }
 
                     civis::syscall_numbers::GPU_DISPLAY_FLUSH => {
                         let ok = handle_flush(&mut dev, &mut presented);
+                        if ok {
+                            flushes_after_present += 1;
+                        }
                         let _ = civis::reply(msg.tag, if ok { 0 } else { ERR }, 0);
+                    }
+
+                    civis::syscall_numbers::GPU_DISPLAY_STATS => {
+                        let _ = civis::reply(msg.tag, presents, flushes_after_present);
                     }
 
                     // Il driver non serve piu' device FS (il display e' in
