@@ -150,8 +150,12 @@ Voci con scope e vittoria dichiarati (non date).
       nella suite (usertests 59/59: modeset a 1920x1088 → griglia
       ricalcolata, testo conservato, oltre-bound rifiutato, refresh
       verificato, risoluzione ripristinata), gate invariato,
-      `test-shell-all.sh` 10/10. Il config change vero (resize della
-      finestra) resta una prova **manuale** con GTK.
+      `test-shell-all.sh` 10/10. La prova **manuale** con GTK (config
+      change vero: resize della finestra) e' stata fatta in **tre giri**: il
+      1° ha trovato il bound del device buffer a 4 MiB (→ §3bis), il 2° lo
+      schermo nero fino al primo tasto (→ §3ter), il 3° ha **confermato**
+      che il terminale si aggiorna **subito** e che il testo si conserva.
+      D4 chiusa.
       **Prossimo**: console server con mirror seriale e routing POSIX
       stdout→device (l'hook `persona`), poi il desktop environment.
 - [ ] **S3.2 — Shell nativa** (dopo la Fase 3.1): programma interattivo

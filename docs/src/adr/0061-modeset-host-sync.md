@@ -217,8 +217,9 @@ tutto com'è — la surface non deve mai puntare a un buffer liberato.
   `CONSOLE_SET_MODE` risponde -1 e il terminale resta su quello che è.
 - **Il config change MSI-X** è ora un percorso con effetti (non solo un
   log): il driver notifica, la console cede e si riadatta. La prova del
-  resize **reale** della finestra resta **manuale** (GTK): in headless
-  l'UI non si muove e l'evento non scatta.
+  resize **reale** della finestra è stata **fatta e superata** con GTK
+  (§Validazione); resta **manuale** perché in headless l'UI non si muove e
+  l'evento non scatta.
 - Il re-adattamento **non** è gratis: una nuova risorsa, un nuovo buffer
   (fino a 32 MiB ricontiguiati) e un ridisegno completo della griglia.
 
@@ -263,12 +264,15 @@ Validazione: gate invariato + il **nuovo test t63** (modeset a **1920×1088**
 ricalcola 128×36 → 192×49, il device non insiste, il testo sopravvive, una
 misura oltre il bound — 8192×8192 — viene **rifiutata senza toccare il
 terminale**, e la risoluzione iniziale viene ripristinata),
-`test-shell-all.sh` 10/10, e la prova manuale con GTK (in due tempi: il
-primo giro ha **trovato** il limite del bound — vedi 3bis —, il secondo lo
-conferma: resize della finestra → `[console] display: ... (adattato, testo
-conservato)`). Il config change MSI-X è così percorso davvero, per la prima
-volta con un effetto.
+`test-shell-all.sh` 10/10, e la prova **manuale** con GTK in **tre giri**:
+il 1° ha **trovato** il limite del bound (→ §3bis), il 2° lo schermo nero
+fino al primo tasto (→ §3ter, "`PRESENT` ≠ flush"), il 3° ha **confermato**
+il comportamento voluto: resize della finestra → l'host insiste → la console
+cede (`[console] display: ... (adattato, testo conservato)`) e il terminale
+si aggiorna **subito**, senza attendere un tasto. Il config change MSI-X è
+così percorso davvero, per la prima volta con un effetto.
 
 ---
 *Registro delle modifiche: primo redatto il 22 ottobre 2026 per D4 (modeset e
-host-sync: la risoluzione del display).*
+host-sync: la risoluzione del display); seconda revisione lo stesso giorno
+(§3ter "`PRESENT` ≠ flush" e prova manuale in tre giri: chiusura di D4).*

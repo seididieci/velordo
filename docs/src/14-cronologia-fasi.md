@@ -2699,9 +2699,13 @@
       il **nuovo test t63** (modeset → griglia ricalcolata, testo
       conservato, risoluzione ripristinata; usertests 59/59),
       `test-shell-all.sh` 10/10. La prova del config change vero (resize
-      della finestra) resta manuale con GTK: in headless l'UI non si muove e
-      l'evento non scatta. Prossimo: console server con mirror seriale e
-      routing POSIX stdout→device (l'hook `persona`), poi il DE.
+      della finestra) e' stata fatta a **mano** con GTK in **tre giri**: il
+      1° ha trovato il bound (4 MiB, → §3bis), il 2° lo schermo nero fino al
+      primo tasto (→ §3ter), il 3° ha confermato che il terminale si
+      aggiorna **subito** al resize, con il testo conservato. Resta non
+      ripetibile in automatico: in headless l'UI non si muove e l'evento non
+      scatta. Prossimo: console server con mirror seriale e routing POSIX
+      stdout→device (l'hook `persona`), poi il DE.
 - [x] Fase 3.1 — Gestione utenti: token di sessione e creazione utente
       (2026-10-21, ADR-0058): chiuso il backend di ADR-0055 e preparato il
       terreno per la shell nativa (Fase 3.2). Il servizio `Identis`

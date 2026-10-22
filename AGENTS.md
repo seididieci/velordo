@@ -182,7 +182,8 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   chi ridisegna deve anche **flushare** (`GPU_DISPLAY_STATS` conta i FLUSH
   dopo l'ultimo PRESENT; senza flush lo schermo resta nero fino al tasto).
   Test: `t63` nella suite (usertests 59/59, modeset a 1920x1088 + rifiuto
-  oltre-bound + refresh verificato).
+  oltre-bound + refresh verificato). Prova manuale GTK **fatta**: al resize
+  il terminale si aggiorna subito, testo conservato.
   Prossimo: console server con mirror seriale e routing POSIX
   stdout→device (l'hook `persona`), poi il DE.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-56, Pianificate, Parcheggiate).

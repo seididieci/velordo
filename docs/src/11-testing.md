@@ -137,12 +137,18 @@ Righe di gate:
 > del refresh** (`GPU_DISPLAY_STATS`): dopo il modeset `presents` è cresciuto
 > di uno e c'è almeno un `FLUSH` **dopo** l'ultimo `PRESENT`; col flush
 > mancante fallisce con `refresh mancante: presents N->N+1 flushes dopo
-> PRESENT 0` (regressione trovata a mano: schermo nero fino al primo tasto). La prova del **config change vero**
+> PRESENT 0` (regressione trovata a mano: schermo nero fino al primo tasto).
+>
+> La prova del **config change vero**
 > (resize della finestra dell'host → l'host insiste → la console cede e si
 > riadatta) resta **manuale** con `RUN_DISPLAY=gtk FB_WINDOW=1`: in headless
-> l'UI non si muove e l'evento non scatta. È stata fatta e ha **trovato** un
-> limite vero: il bound del device buffer a 4 MiB (→ ADR-0061 §3bis, alzato a
-> 32 MiB con rifiuto spiegato dalla console).
+> l'UI non si muove e l'evento non scatta. È stata fatta in **tre giri** e ha
+> trovato due limiti veri: il bound del device buffer a 4 MiB (→ ADR-0061
+> §3bis, alzato a 32 MiB con rifiuto spiegato dalla console) e lo schermo
+> nero fino al primo tasto (→ ADR-0061 §3ter, "`PRESENT` ≠ flush", con la
+> guardia `GPU_DISPLAY_STATS` in t63). Il terzo giro ha **confermato** il
+> comportamento voluto: al resize il terminale si aggiorna **subito**, con il
+> testo conservato.
 >
 > L0b (virtio-gpu modern + MSI-X, ADR-0057): nessuna nuova riga di suite.
 > Marker deterministici nel boot con il device (default di `run.sh`):
