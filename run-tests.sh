@@ -14,6 +14,9 @@
 #   [usertests] PASS 59/59
 #   [threadtest] PASS 12/12
 # (D4: la suite e' cresciuta di una riga: [usertests] 59/59 con t63)
+# D5/ADR-0062: dopo la suite il boot finisce al **prompt del login** (il
+# login e' il gate: la shell parte solo dopo l'autenticazione) — il gate si
+# chiude col timeout, il contratto sono le righe PASS sopra.
 # L0b (virtio-gpu + MSI-X, ADR-0057): nessuna riga nuova; il boot verifica i
 # marker `[gpu] virtio-gpu ...` / `[gpu] display info: 1280x800 enabled=1`.
 # D3 (console virtuale, ADR-0060): nessuna riga nuova; i marker sono

@@ -65,6 +65,15 @@ pub fn _print(args: ::core::fmt::Arguments) {
 /// byte in = byte sul filo) e non alloca mai, per qualunque lunghezza.
 /// Lo stato inizio-riga e' globale e persiste tra chiamate, quindi il
 /// chunking del chiamante (e `\n` a cavallo tra chunk) e' trasparente.
+///
+/// **Byte fedeli**: si usa `send_raw`, non `send`. Il driver `uart_16550`
+/// con `send()` *espande* il backspace (0x08/0x7F) nella sequenza
+/// "BS SP BS" (comportamento da terminale): su questo percorso il byte
+/// utente deve arrivare sul filo identico a come e' stato scritto
+/// (l'audit "byte in = byte sul filo" e' la proprieta' che rende il
+/// mirror seriale confrontabile con il terminale). Con `send()` la
+/// sequenza di cancellazione "\x08 \x08" (3 byte) arrivava sul filo come
+/// 7 byte: il mirror seriale non combaciava con lo schermo.
 #[doc(hidden)]
 pub fn _write_bytes(data: &[u8]) {
     use x86_64::instructions::interrupts;
@@ -80,11 +89,11 @@ pub fn _write_bytes(data: &[u8]) {
                 let mut ts = [0u8; TS_LEN];
                 let n = format_ts(&mut ts, t / 100, t % 100);
                 for &tb in &ts[..n] {
-                    guard.send(tb);
+                    guard.send_raw(tb);
                 }
                 at_start = false;
             }
-            guard.send(b);
+            guard.send_raw(b);
             if b == b'\n' {
                 at_start = true;
             }

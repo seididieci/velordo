@@ -56,7 +56,8 @@ SEQUENZA, aspettando un IPC `TEST_DONE` (tag `0x7E`)
 da ciascuno prima dello spawn successivo: i binari condividono la ramfs di
 cardo (path e file di lavoro) e la sequenza rende output e PID deterministici
 (con i ring SPSC per-processo, Fase 10.2, nessuna race da buffer condivisi).
-La shell e' spawnata per ultima. `run-tests.sh` esporta `ARCA_IMG=1`: il gate
+Dopo la suite parte il **login** (l'ultimo programa interattivo: legge la
+tastiera). `run-tests.sh` esporta `ARCA_IMG=1`: il gate
 ha terzo drive ArcaFS root (sdc) + quarto (partizione GPT su arca-gpt.img,
 sdd/sdd1), quindi `testsarca` gira 62/62 (E2: 22-40 sul root vivo in bucket
 isolati, 41-50 su mount root esplicito, 51-54 quota A3 in bucket `q5*`,
@@ -71,6 +72,12 @@ che t34 verifica; threadtest ultimo: non dipende dai diritti e stressa lo
 scheduler a servizi caldi). **La suite FAT32 non c'e' piu'** (ADR-0059: il FAT
 e' fuori dal boot): `scripts/run-fat-tests.sh` la esegue in un run dedicato
 con un disco FAT attaccato (feature `fat_tests` di init).
+
+Dopo la suite il boot finisce **al prompt del login** (D5/ADR-0062: il
+login e' il gate — la shell parte solo dopo l'autenticazione, e senza
+tastiera il prompt resta li'). Il gate si chiude quindi col **timeout** (il
+contratto sono le righe `PASS` sotto, non l'uscita di QEMU): il login
+gratis ci mette un prompt interattivo.
 
 Righe di gate:
 
@@ -219,14 +226,19 @@ log seriale.
 - **unit test host** (`scripts/run-unit-tests.sh`): `cargo test` dei crate
   condivisi che hanno `#[cfg(test)]` — `libs/term` (rasterizzatore:
   copertura dell'ultimo pixel, `ceil` della bbox, inchiostro = area,
-  determinismo), `libs/valloc` e `blake2s` (14 test in tutto). Girano da una
+  determinismo; **modello a celle**: il cursore **non salta in fondo** al
+  re-adattamento, il testo non scivola, il reflow lascia il cursore sul
+  testo), `libs/valloc` e `blake2s` (19 test in tutto). Girano da una
   **directory neutra**: il `.cargo/config.toml` del repo impone
   `build.target = x86_64-unknown-none` + `build-std` in base alla directory
   corrente, e da dentro il repo `cargo test` proverebbe a compilare l'harness
   per il target freestanding (doppio `alloc`). `CARGO_TARGET_DIR` in
   `target/unit-tests`. Il test del rasterizer e' nato da un bug vero: la
   copertura perdeva l'ultimo pixel di ogni span (testo assottigliato e
-  irregolare, ADR-0060 appendice).
+  irregolare, ADR-0060 appendice). I test del **cursore** sono nati da un
+  altro bug vero: al re-adattamento (resize) il cursore finiva **in fondo**
+  allo schermo, lontano dal punto in cui l'utente stava scrivendo
+  (ADR-0061 §4, corretto in D5/ADR-0062).
 
 - **hello std** (S1.3…S2.4): `scripts/build-pal.sh` (PAL + sysroot in
   `$PAL_WORK`) produce `pal/build/hello-std.bin`, seedato come

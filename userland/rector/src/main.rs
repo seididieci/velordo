@@ -325,6 +325,10 @@ fn handle_bounce(supervised: &[Supervised], svc_disc: u64) -> u64 {
 fn handle_child_death(supervised: &mut [Supervised], pid: i64, code: i64) {
     match supervised.iter_mut().find(|e| e.pid == pid) {
         Some(e) if !e.held => {
+            if e.on_death == OnDeath::LoginGate {
+                restart_login(e, code);
+                return;
+            }
             println!(
                 "[init] supervisione: pid={} morto (code {}), riavvio",
                 pid, code
@@ -346,10 +350,79 @@ fn handle_child_death(supervised: &mut [Supervised], pid: i64, code: i64) {
     }
 }
 
+/// Il **login** e' morto: si riavvia **solo se ha fallito** (codice != 0).
+///
+/// Il login e' il gate del sistema (la shell parte solo se l'autenticazione
+/// e' riuscita): fallito, init lo riavvia come un getty — l'utente trova un
+/// altro prompt invece di un sistema muto. Riuscito (codice 0), la shell e'
+/// gia' partita e non si tocca niente.
+///
+/// Anti spawn-storm come `restart_service`: 3 riavvii in 300 tick, poi HELD
+/// (accesso negato, ma il sistema vivo e loggato).
+fn restart_login(e: &mut Supervised, code: i64) {
+    if code == 0 {
+        println!("[init] login ok (shell avviata): niente riavvio");
+        e.pid = -1;
+        return;
+    }
+    // Anti spawn-storm come `restart_service`: 3 riavvii in 300 tick, poi
+    // HELD (accesso negato, ma il sistema vivo e loggato).
+    loop {
+        let now = civis::get_ticks();
+        if now - e.window_start > 300 {
+            e.window_start = now;
+            e.restarts = 0;
+        }
+        e.restarts += 1;
+        if e.restarts > 3 {
+            e.held = true;
+            println!("[init] login: riavvii falliti, HELD (accesso negato)");
+            return;
+        }
+        println!(
+            "[init] login: tentativo fallito (code {}), riavvio {}",
+            code, e.restarts
+        );
+        // Pausa prima del riavvio: se il login muore subito (Identis
+        // irraggiungibile) il ciclo non diventa una macina da respawn.
+        civis::spin_ticks(50);
+        let Some(chan) = spawn_entry(e.meta) else {
+            println!("[init] login: spawn FAILED, riprovo");
+            continue;
+        };
+        e.chan = chan;
+        // Il READY attende che il login abbia **registrato il servizio**: e'
+        // da li' che init ricava il pid. Senza l'attesa il pid sarebbe -1 e
+        // la morte successiva non sarebbe riconosciuta (niente altri
+        // riavvii: il sistema resterebbe muto).
+        if wait_ready(chan) {
+            // Il pid dal canale (peer_pid): deterministico, non una race
+            // sulla registrazione del servizio.
+            e.pid = civis::peer_pid(chan as u64).unwrap_or(-1);
+            println!("[init] login riavviato pid={}", e.pid);
+            return;
+        }
+        println!("[init] login: READY mancante (morte/timeout), riprovo");
+    }
+}
+
 /// Servizio supervisionato da init (Fase 14, init-restart): alla morte viene
 /// riavviato dalla sua sorgente (embedded o disco, Fase 21). Solo
 /// gpu/disk/fs/vela/kbd/tty; gli altri figli (uptime/shell/test) sono
 /// loggati ma non riavviati.
+/// Cosa fare quando un figlio supervisionato muore.
+#[derive(Clone, Copy, PartialEq)]
+enum OnDeath {
+    /// Riavvia il servizio (la via normale).
+    Restart,
+    /// Il **login**: la shell parte solo se l'autenticazione e' riuscita,
+    /// quindi si riavvia **solo se il login ha fallito** (codice di uscita
+    /// != 0). Se ha riescito (codice 0) la shell e' gia' partita: un altro
+    /// prompt qui sarebbe una seconda porta aperta.
+    LoginGate,
+}
+
+/// Voce della tabella di supervisione.
 struct Supervised {
     meta: &'static SvcMeta,
     svc: civis::Service,
@@ -358,6 +431,24 @@ struct Supervised {
     restarts: u32,
     window_start: i64,
     held: bool,
+    /// Politica alla morte (vedi `OnDeath`).
+    on_death: OnDeath,
+}
+
+impl Supervised {
+    /// Voce nuova (nessun canale, nessun pid, nessun restart ancora).
+    const fn new(meta: &'static SvcMeta, svc: civis::Service) -> Self {
+        Supervised {
+            meta,
+            svc,
+            chan: -1,
+            pid: -1,
+            restarts: 0,
+            window_start: 0,
+            held: false,
+            on_death: OnDeath::Restart,
+        }
+    }
 }
 
 /// Attesa di `n` tick con spin puri IF=1 a batch (non affama il timer).
@@ -375,6 +466,11 @@ fn wait_ready(chan: i64) -> bool {
     loop {
         match civis::recv() {
             Ok(m) if m.channel == chan as u64 && m.tag == SVC_READY => {
+                println!(
+                    "[init] wait_ready: READY su canale {} (peer {:?})",
+                    chan,
+                    civis::peer_pid(m.channel)
+                );
                 return true;
             }
             Ok(m) if m.channel == chan as u64 && m.tag == civis::EXIT_NOTIFY => {
@@ -709,16 +805,22 @@ fn real_main(_sp: u64) -> ! {
     const META_DISK: SvcMeta = SvcMeta { bin: b"block", obj: None, prio: 16, io: &[] };
     const META_FS: SvcMeta = SvcMeta { bin: b"cardo", obj: None, prio: 16, io: &[] };
     let mut supervised = [
-        Supervised { meta: &SVC_GPU, svc: civis::Service::Gpu, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
-        Supervised { meta: &SVC_CONSOLE, svc: civis::Service::Console, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
-        Supervised { meta: &META_DISK, svc: civis::Service::Block, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
-        Supervised { meta: &META_FS, svc: civis::Service::Cardo, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
-        Supervised { meta: &SVC_VELA, svc: civis::Service::Vela, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
-        Supervised { meta: &SVC_KBD, svc: civis::Service::Kbd, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
-        Supervised { meta: &SVC_PORTA, svc: civis::Service::Porta, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
-        Supervised { meta: &SVC_POSIX, svc: civis::Service::Posix, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
-        Supervised { meta: &SVC_TIME, svc: civis::Service::Time, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
-        Supervised { meta: &SVC_VESTIGIA, svc: civis::Service::Vestigia, chan: -1, pid: -1, restarts: 0, window_start: 0, held: false },
+        Supervised::new(&SVC_GPU, civis::Service::Gpu),
+        Supervised::new(&SVC_CONSOLE, civis::Service::Console),
+        Supervised::new(&META_DISK, civis::Service::Block),
+        Supervised::new(&META_FS, civis::Service::Cardo),
+        Supervised::new(&SVC_VELA, civis::Service::Vela),
+        Supervised::new(&SVC_KBD, civis::Service::Kbd),
+        Supervised::new(&SVC_PORTA, civis::Service::Porta),
+        Supervised::new(&SVC_POSIX, civis::Service::Posix),
+        Supervised::new(&SVC_TIME, civis::Service::Time),
+        Supervised::new(&SVC_VESTIGIA, civis::Service::Vestigia),
+        // Il **login** (programma di autenticazione): politica di morte
+        // propria — si riavvia solo se ha fallito (vedi `OnDeath`).
+        Supervised {
+            on_death: OnDeath::LoginGate,
+            ..Supervised::new(&SVC_LOGIN, civis::Service::Login)
+        },
     ];
     for e in supervised.iter_mut() {
         e.pid = civis::service_pid(e.svc).unwrap_or(-1);
@@ -765,9 +867,30 @@ fn real_main(_sp: u64) -> ! {
     // Login al posto della shell: chiede utente/password, stampa SUCCESS/FAIL.
     // Resta ULTIMO: e' il programma interattivo (legge la tastiera: dopo la
     // suite, non in concorrenza con essa).
-    if boot_svc(&SVC_LOGIN, false).is_none() {
+    //
+    // Il login e' il **gate**: la shell parte solo se l'autenticazione va a
+    // buon fine (nel login, non in init). Se il login fallisce esce con
+    // codice != 0 e init lo **riavvia** (politica `OnDeath::LoginGate`):
+    // l'utente trova un altro prompt invece di un sistema muto.
+    let Some(login_chan) = boot_svc(&SVC_LOGIN, false) else {
         println!("[init] boot FAILED (login), panic");
         civis::exit(1);
+    };
+    // Il READY attende che il login abbia registrato il servizio: e' da li'
+    // che init ricava il pid per supervisionarlo.
+    if !wait_ready(login_chan) {
+        println!("[init] boot FAILED (login READY), panic");
+        civis::exit(1);
+    }
+    for e in supervised.iter_mut() {
+        if e.svc == civis::Service::Login {
+            // Il pid dal **canale** (peer_pid), non dal servizio registrato:
+            // il canale di nascita e' la fonte di verita' (il peer e' il
+            // login) e non dipende da un messaggio ne' da una registrazione
+            // che potrebbe non essere ancora visibile.
+            e.pid = civis::peer_pid(login_chan as u64).unwrap_or(-1);
+            println!("[init] login ready pid={}", e.pid);
+        }
     }
 
     // Supervisore init-restart (Fase 14): se un servizio e' morto prima della

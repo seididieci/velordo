@@ -241,13 +241,29 @@ impl Grid {
     /// Il contenuto (scrollback + griglia) viene rilegto come un flusso di
     /// righe e rimesso nella nuova griglia: le righe piu' lunghe della nuova
     /// larghezza si spezzano (reflow da terminale). Se il testo non sta, le
-    /// righe piu' vecchie vengono perse. Il cursore finisce in fondo.
+    /// righe piu' vecchie vengono perse.
+    ///
+    /// **Il cursore mantiene la sua posizione** (riga e colonna): il
+    /// contenuto viene ancorato in modo che la riga del cursore resti
+    /// dov'era. Prima finiva *sempre* in fondo e il testo era ancorato al
+    /// basso: crescendo la finestra tutto il testo scendeva di N righe e il
+    /// prompt finiva sul bordo — il terminale "saltava" invece di adattarsi.
+    /// Ora la finestra che cresce allarga il terminale e il contenuto resta
+    /// fermo; quando il testo non sta piu' (finestra che si restringe) il
+    /// fondo e' ancorato al basso e il cursore resta visibile.
     pub fn resize(&mut self, new_cols: usize, new_rows: usize) {
         let new_cols = new_cols.max(1);
         let new_rows = new_rows.max(1);
         if new_cols == self.cols && new_rows == self.rows {
             return;
         }
+
+        // Il cursore, nel flusso delle righe (scrollback + griglia): la riga
+        // che occupa e la colonna (la colonna puo' essere oltre la fine del
+        // testo: il cursore a capo).
+        let cursor_row = self.cursor.1.min(self.rows.saturating_sub(1));
+        let cursor_col = self.cursor.0;
+        let cursor_src = self.scrollback.len() + cursor_row;
 
         // 1) Le righe, dalla piu' vecchia: scrollback + griglia corrente.
         let mut lines: Vec<Vec<Cell>> = Vec::with_capacity(self.scrollback.len() + self.rows);
@@ -257,32 +273,71 @@ impl Grid {
         for r in 0..self.rows {
             lines.push(trim_row(&self.cells[r * self.cols..(r + 1) * self.cols]));
         }
-        // 2) Via le righe vuote in coda (il testo finisce dove finiva).
-        while let Some(last) = lines.last() {
-            if last.is_empty() {
-                lines.pop();
-            } else {
-                break;
+        // 2) Via le righe vuote in coda (il testo finisce dove finiva), MA
+        //    **non oltre la riga del cursore**: il cursore sta spesso su
+        //    una riga vuota (dopo l'ultimo testo) e deve restare li' —
+        //    senza questo la sua riga sparirebbe dal flusso e il cursore
+        //    finirebbe in fondo (il comportamento di prima).
+        while lines.len() > cursor_src + 1 {
+            match lines.last() {
+                Some(last) if last.is_empty() => {
+                    lines.pop();
+                }
+                _ => break,
             }
         }
+        // Se la riga del cursore era vuota e in coda, e' stata rimossa: il
+        // cursore finisce in fondo all'ultima riga (il default sotto).
+        let cursor_live = cursor_src < lines.len();
 
-        // 3) Spezza le righe troppo lunghe alla nuova larghezza.
+        // 3) Spezza le righe troppo lunghe alla nuova larghezza, tenendo il
+        //    posto del cursore (indice piatto della riga + colonna).
         let mut flat: Vec<Vec<Cell>> = Vec::new();
-        for line in lines.iter() {
+        let mut cursor_flat: Option<(usize, usize)> = None;
+        for (src_idx, line) in lines.iter().enumerate() {
             if line.is_empty() {
                 flat.push(Vec::new());
+                // Riga **vuota**: puo' essere quella del cursore (il
+                // cursore sta spesso sotto l'ultimo testo). La colonna non
+                // si taglia (non c'e' testo): il cursore resta dov'e'.
+                if cursor_live && src_idx == cursor_src {
+                    cursor_flat = Some((flat.len() - 1, cursor_col));
+                }
                 continue;
             }
             let mut i = 0;
             while i < line.len() {
                 let end = (i + new_cols).min(line.len());
                 flat.push(line[i..end].to_vec());
+                if cursor_live && src_idx == cursor_src {
+                    // Il cursore puo' essere oltre la fine del testo della
+                    // riga: in quel caso resta in coda all'ultimo pezzo.
+                    let col = cursor_col.min(line.len());
+                    if col >= i && col <= end {
+                        cursor_flat = Some((flat.len() - 1, col - i));
+                    }
+                }
                 i = end;
             }
         }
 
-        // 4) La nuova griglia: le ultime `new_rows` righe.
-        let start = flat.len().saturating_sub(new_rows);
+        // 4) La nuova griglia: il contenuto ancorato in modo che il cursore
+        //    resti sulla sua riga (l'alto se la finestra cresce, il basso se
+        //    il testo non sta piu').
+        let (flat_cursor, cursor_col) = cursor_flat.unwrap_or_else(|| {
+            let last = flat.len().saturating_sub(1);
+            let col = flat.last().map(|l| l.len()).unwrap_or(0);
+            (last, col)
+        });
+        let max_start = flat.len().saturating_sub(new_rows);
+        // Il cursore deve restare nella griglia (il suo offset piatto non
+        // puo' scendere sotto le ultime `new_rows` righe) e si vuole la sua
+        // riga di prima: il contenuto e' ancorato di conseguenza.
+        let min_start = (flat_cursor + 1).saturating_sub(new_rows);
+        let start = flat_cursor
+            .saturating_sub(cursor_row)
+            .max(min_start)
+            .min(max_start);
         let mut cells = alloc::vec![Cell::default(); new_cols * new_rows];
         for (dst_row, src) in flat[start..].iter().enumerate() {
             for (c, cell) in src.iter().enumerate() {
@@ -291,7 +346,6 @@ impl Grid {
                 }
             }
         }
-        let last_len = flat.last().map(|l| l.len()).unwrap_or(0);
 
         self.cols = new_cols;
         self.rows = new_rows;
@@ -299,7 +353,12 @@ impl Grid {
         // Il contenuto ora e' nella griglia: lo scrollback si svuota (le righe
         // piu' vecchie che non ci stanno sono perse).
         self.scrollback.clear();
-        self.cursor = (last_len.min(new_cols.saturating_sub(1)), new_rows - 1);
+        // Il cursore: stessa riga (dove il testo lo lascia), colonna seguita
+        // nel reflow.
+        self.cursor = (
+            cursor_col.min(new_cols.saturating_sub(1)),
+            flat_cursor - start,
+        );
         self.dirty.mark_all(new_cols, new_rows);
     }
 }
@@ -311,4 +370,107 @@ fn trim_row(row: &[Cell]) -> Vec<Cell> {
         end -= 1;
     }
     row[..end].to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    //! Il cursore al re-adattamento (D4, host, `cargo test`).
+    //!
+    //! Il terminale che cresce deve **allargarsi**, non far saltare il
+    //! testo: prima il cursore finiva sempre in fondo e il contenuto era
+    //! ancorato al basso, quindi al resize la finestra tutto scendeva di N
+    //! righe e il prompt finiva sul bordo.
+
+    use super::*;
+    use alloc::string::String;
+
+    /// Mette `s` nella riga `row` dalla colonna 0.
+    fn put_str(g: &mut Grid, row: usize, s: &str) {
+        for (i, b) in s.bytes().enumerate() {
+            g.put(i, row, b as u32, 0x0F, 0x00);
+        }
+    }
+
+    /// Il testo della riga (senza gli spazi finali).
+    fn row_str(g: &Grid, row: usize) -> String {
+        let mut s = String::new();
+        for col in 0..g.cols() {
+            let c = g.cell(col, row);
+            s.push(if c.cp == 0 {
+                ' '
+            } else {
+                char::from_u32(c.cp).unwrap_or('?')
+            });
+        }
+        s.trim_end().to_string()
+    }
+
+    /// Il cursore resta sulla stessa riga (e colonna) quando la griglia
+    /// cresce: il testo non scivola.
+    #[test]
+    fn cursore_mantiene_la_riga() {
+        let mut g = Grid::new(10, 5);
+        put_str(&mut g, 0, "abc");
+        put_str(&mut g, 1, "def");
+        put_str(&mut g, 2, "ghi");
+        g.cursor = (3, 2); // subito dopo "ghi"
+        g.resize(10, 8);
+        assert_eq!(g.cursor, (3, 2), "il cursore deve restare dove era");
+        assert_eq!(row_str(&g, 0), "abc");
+        assert_eq!(row_str(&g, 2), "ghi");
+    }
+
+    /// Il cursore su una riga **vuota** (dopo l'ultimo testo: il caso del
+    /// banner, senza prompt) resta sulla sua riga: la riga vuota non
+    /// sparisce dal flusso.
+    #[test]
+    fn cursore_su_riga_vuota() {
+        let mut g = Grid::new(10, 5);
+        put_str(&mut g, 0, "abc");
+        g.cursor = (3, 4); // tre righe sotto l'ultimo testo
+        g.resize(10, 9);
+        assert_eq!(g.cursor, (3, 4), "il cursore resta sulla sua riga");
+        assert_eq!(row_str(&g, 0), "abc");
+    }
+
+    /// Crescendo la griglia il contenuto resta **in alto** (prima era
+    /// ancorato al basso: la riga 0 finiva in fondo).
+    #[test]
+    fn il_testo_non_scivola() {
+        let mut g = Grid::new(10, 5);
+        put_str(&mut g, 0, "abc");
+        g.cursor = (3, 0);
+        g.resize(10, 9);
+        assert_eq!(row_str(&g, 0), "abc", "il testo resta dov'era");
+        assert_eq!(row_str(&g, 6), "", "il fondo e' vuoto, non il testo");
+        assert_eq!(g.cursor, (3, 0));
+    }
+
+    /// Il reflow spezza la riga: il cursore resta **sullo stesso testo**
+    /// ("j" resta sotto il cursore), non a capo della riga.
+    #[test]
+    fn reflow_il_cursore_resta_sul_testo() {
+        let mut g = Grid::new(10, 3);
+        put_str(&mut g, 0, "abcdefghij");
+        g.cursor = (9, 0); // sull'ultima lettera
+        g.resize(5, 3);
+        assert_eq!(row_str(&g, 0), "abcde");
+        assert_eq!(row_str(&g, 1), "fghij");
+        assert_eq!(g.cursor, (4, 1), "il cursore resta su 'j'");
+    }
+
+    /// Restringendo la griglia il cursore resta **visibile** (l'ultima
+    /// riga): il testo che non sta viene ancorato al basso.
+    #[test]
+    fn restringendo_il_cursore_resta_visibile() {
+        let mut g = Grid::new(10, 10);
+        for r in 0..10 {
+            put_str(&mut g, r, "0123456789");
+        }
+        g.cursor = (2, 9);
+        g.resize(10, 4);
+        assert!(g.cursor.1 < g.rows(), "il cursore deve restare nella griglia");
+        assert_eq!(g.cursor, (2, 3), "il cursore finisce sull'ultima riga");
+        assert_eq!(row_str(&g, 3), "0123456789");
+    }
 }

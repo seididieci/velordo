@@ -861,6 +861,12 @@ pub enum Service {
     /// possiede i pixel del display (surface framebuffer o VGA testuale).
     /// Owner del grant "device buffer" (slot DMA >= 1, ADR-0057-style).
     Console = 12,
+    /// Programma di **autenticazione** (login): chiede utente e password e
+    /// verifica le credenziali presso `Identis`. Non e' un servizio che
+    /// altri risolvono per nome: e' registrato solo perche' **init lo
+    /// supervisioni** (se il login fallisce, init lo riavvia come un getty:
+    /// l'utente trova un altro prompt invece di un sistema muto).
+    Login = 13,
 }
 
 /// Massimo numero di servizi conosciuti = dimensione del registro kernel.

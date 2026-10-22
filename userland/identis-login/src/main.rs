@@ -58,6 +58,18 @@ fn real_main(_sp: u64) -> ! {
     };
     unsafe { CONSOLE_FD = console_fd; }
 
+    // Registra il servizio: serve a **init** per supervisionarlo (e'
+    // l'unico modo per entrare nel sistema: se il login fallisce, init lo
+    // riavvia come un getty). Nessuno lo risolve per nome.
+    if civis::service_register(civis::Service::Login).is_ok() {
+        let _ = civis::print_string(b"[login] registered as service Login\n");
+    } else {
+        let _ = civis::print_string(b"[login] FAILED to register service Login\n");
+    }
+    // READY a init: da qui init ricava il pid (dal servizio registrato) e lo
+    // supervisiona.
+    civis::signal_ready(1);
+
     console_write(b"[login] Velordo login\n");
 
     let chan = match resolve_identis() {
@@ -83,39 +95,62 @@ fn real_main(_sp: u64) -> ! {
     }
 
     // ---- Login interattivo ----
-    console_write(b"\n[login] Nome utente: ");
-    let name = read_line_from_keyboard(false);
-    console_write(b"\n[login] Password: ");
-    let pwd = read_line_from_keyboard(true);
-    console_write(b"\n");
+    //
+    // Il login e' il **gate**: la shell parte **solo** se l'autenticazione
+    // va a buon fine. Prima partiva sempre, qualunque cosa dicesse la
+    // verifica: un login fallito apriva la shell come se fosse riuscito
+    // (e l'utente entrava senza autenticarsi).
+    //
+    // Si prova piu' volte (l'utente sbaglia la password): esauriti i
+    // tentativi il processo esce con codice != 0 e **init lo riavvia** (come
+    // un getty): l'utente trova un altro prompt invece di un sistema muto.
+    for attempt in 1..=MAX_ATTEMPTS {
+        console_write(b"\n[login] Nome utente: ");
+        let name = read_line_from_keyboard(false);
+        console_write(b"\n[login] Password: ");
+        let pwd = read_line_from_keyboard(true);
+        console_write(b"\n");
 
-    // L'hash e' calcolato in locale: la password non lascia mai il processo.
-    let hash = blake2s(pwd.as_bytes());
-    let payload = proto::build_verify(&name, &hash);
+        // L'hash e' calcolato in locale: la password non lascia mai il processo.
+        let hash = blake2s(pwd.as_bytes());
+        let payload = proto::build_verify(&name, &hash);
 
-    match proto::send_payload_retry(chan, civis::IDENTIS_VERIFY, &payload, RETRIES) {
-        Ok(r) if r.ok() => {
-            unsafe { SESSION_TOKEN = r.w1; }
-            console_write(b"[login] SUCCESS\n");
+        match proto::send_payload_retry(chan, civis::IDENTIS_VERIFY, &payload, RETRIES) {
+            Ok(r) if r.ok() => {
+                unsafe { SESSION_TOKEN = r.w1; }
+                console_write(b"[login] SUCCESS\n");
+                // La shell prende il posto del login: il login e' il programma
+                // di autenticazione, non il terminale. Oggi e' la shell
+                // **POSIX** (la personalita' ha la sua shell:
+                // `bin/posix/shell.bin` nel bucket `sys`); la shell **nativa**
+                // — che eredita anche la sessione — arriva con la Fase 3.2.
+                // Il binario e' spawnato *detached*: quando il login esce, la
+                // shell viene ri-parentata a init (senza, la cascata della
+                // morte del parent la ucciderebbe).
+                spawn_shell();
+                civis::exit(0);
+            }
+            Ok(r) => {
+                console_write(b"[login] FAIL (");
+                console_write(r.describe().as_bytes());
+                console_write(b")\n");
+            }
+            Err(_) => console_write(b"[login] ERRORE IPC\n"),
         }
-        Ok(r) => {
-            console_write(b"[login] FAIL (");
-            console_write(r.describe().as_bytes());
-            console_write(b")\n");
+        if attempt < MAX_ATTEMPTS {
+            console_write(b"[login] Credenziali non valide: si riprova\n");
         }
-        Err(_) => console_write(b"[login] ERRORE IPC\n"),
     }
 
-    // La shell prende il posto del login: il login e' il programma di
-    // autenticazione, non il terminale. Oggi e' la shell **POSIX** (la
-    // personalita' ha la sua shell: `bin/posix/shell.bin` nel bucket `sys`);
-    // la shell **nativa** — che eredita anche la sessione — arriva con la
-    // Fase 3.2. Il binario e' spawnato *detached*: quando il login esce, la
-    // shell viene ri-parentata a init (senza, la cascata della morte del
-    // parent la ucciderebbe).
-    spawn_shell();
-    civis::exit(0);
+    // Falliti tutti i tentativi: **niente shell**. Il codice di uscita != 0
+    // dice a init che il login ha fallito (init lo riavvia).
+    console_write(b"[login] Tentativi esauriti: accesso negato\n");
+    civis::exit(1);
 }
+
+/// Tentativi di login prima di rinunciare (l'utente ha diritto a sbagliare
+/// la password: il login riprova, non chiude).
+const MAX_ATTEMPTS: u32 = 3;
 
 /// Spawla la shell POSIX dall'oggetto ArcaFS (`sys:bin/posix/shell.bin`).
 fn spawn_shell() {
@@ -169,9 +204,11 @@ fn read_line_from_keyboard(mask: bool) -> String {
         if b == 0x7F || b == 0x08 {
             if !buf.is_empty() {
                 buf.pop();
-                if mask {
-                    console_write(b"\x08 \x08");
-                }
+                // L'eco della cancellazione **anche** nel campo non
+                // mascherato (il nome utente): senza, lo schermo mostra
+                // piu' caratteri di quanti ne restino nel buffer — e il
+                // login autenticava una stringa diversa da quella mostrata.
+                console_write(b"\x08 \x08");
             }
             continue;
         }

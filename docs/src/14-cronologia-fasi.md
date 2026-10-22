@@ -2875,3 +2875,59 @@
       file che il gate legge per sapere cosa aspettare); (3) un singolo
       probe a t=0 non distingue "assente" da "non ancora pronto" — e il
       costo di sbagliare li' e' un boot che non parte.
+- [x] **D5 — display di default (terminale pixel) + login-gate** (2026-10-22,
+      ADR-0062): tre difetti raccolti nelle prove manuali col terminale
+      pixel, piu' un quarto scoperto confrontando il terminale col **mirror
+      seriale**. (1) **La finestra mostrava il boot stantio**: con la VGA
+      presente QEMU apre la **console 0** = VGA, e quella e' la console
+      *morta* nel path pixel (il terminale vive sulla console 1, il
+      virtio-gpu, senza finestra). Fix: `run.sh` espone `FB_WINDOW` —
+      `auto` (default) toglie la VGA **solo** se si vuole un display
+      grafico *e* il device virtio-gpu c'e' (senza il device la console non
+      ha dove scrivere: il fallback testuale richiede la VGA), `1` forza
+      `-vga none` (headless, dump `screendump` della superficie), `0`
+      forza la VGA. (2) **Il login non era un gate**: dopo la verifica
+      lanciava la shell **comunque** (login fallito = shell aperta senza
+      autenticarsi) e il suo codice di uscita non diceva niente a `init`.
+      Fix: 3 tentativi, la shell parte **solo** dopo il `SUCCESS`, uscita
+      != 0 = accesso negato; `init` supervisiona il login come un **getty**
+      (`Service::Login` = 13, politica di morte `OnDeath::LoginGate`:
+      riavvio col backoff e tetto ai riavvii — i servizi, invece, si
+      riavviano *sempre*). (3) **Il backspace non cancellava nel campo
+      utente**: l'eco esisteva solo nel campo mascherato, e nel campo
+      username lo schermo mostrava piu' caratteri di quanti ne restassero
+      nel buffer — il login autenticava una stringa **diversa** da quella
+      mostrata. Fix: l'eco (`\x08 \x08`) in ogni campo. (4) **Il mirror
+      seriale non combaciava col terminale**: la sequenza di cancellazione
+      (3 byte) arrivava sul filo come **7**. La caccia e' stata la piu'
+      istruttiva: la diagnostica nel kernel (`sys_write` loggava ogni
+      scrittura) diceva *una* scrittura di 3 byte `[8, 32, 8]`, e il filo
+      ne aveva 8 — la contraddizione ha spinto a leggere il **driver
+      UART**: `uart_16550::send()` **espande** il backspace in "BS SP BS"
+      (comportamento da console), e il percorso raw del kernel
+      (`serial::_write_bytes`, da cui passa `sys_write`) lo usava: la
+      promessa del codice — "byte in = byte sul filo", l'audit che rende il
+      mirror confrontabile col terminale — era **falsa**. Fix:
+      `send_raw` sul percorso raw (l'espansione resta nel percorso di
+      *testo* del kernel, dove e' un comportamento da console e non un
+      audit). Bonus: `Grid::resize` (D4) finiva col **cursore in fondo**
+      allo schermo, lontano dal punto in cui l'utente stava scrivendo —
+      corretto (il cursore tiene la sua riga, il contenuto resta ancorato
+      al testo) e coperto dai **unit test host** di `libs/term` (fuori dal
+      gate: il gate resta a 6 righe). Validazione: gate **6 righe**
+      (testfs 5/5, testsarca 64/64, posixtests 4/4, identistest 11/11,
+      usertests 59/59, threadtest 12/12), zero FAIL/PANIC/FAULT; unit test
+      host 19/19; prove manuali headless (screendump della superficie
+      virtio-gpu): il campo username mostra "ab" dopo "abc"+backspace (prima
+      mostrava "abc"), la password errata non apre la shell e dopo 3
+      tentativi `init` riavvia il login ("login: tentativo fallito (code
+      1), riavvio 1" -> nuovo prompt). Lezioni: (1) **una sola console
+      visibile**: la VGA presente non e' "una console in piu'", e' *la*
+      console — e quella giusta era la morta; (2) il **mirror** di un
+      canale e' un audit solo se e' byte-fedele: l'expand del driver UART
+      rendeva il confronto fra terminale e filo impossibile, e il bug
+      nascondeva un altro difetto (l'eco mancante); (3) la diagnostica
+      **piu' strana** e' quella che dice la verita': una sola scrittura di 3
+      byte che sul filo erano 8 non si spiega con il caller — il
+      richiamo era il driver sotto; (4) un programma che **non** e' un gate
+      non e' un gate: il login autenticava e poi lasciava comunque entrare.

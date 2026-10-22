@@ -166,9 +166,16 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   cliente si deadlocka, e i ring `CLI_*` sono una finestra per processo). Il
   font e' letto tutto in RAM all'avvio (niente I/O FS durante il servizio).
   Nel path pixel la finestra VGA resta vuota ("Booting from ROM"): il
-  terminale e' nella console del device virtio-gpu — con il UI GTK non ha
-  una finestra propria (`RUN_DISPLAY=gtk FB_WINDOW=1` per togliere la VGA,
-  oppure il dump `screendump` del monitor per la prova headless).
+  terminale e' nella console del device virtio-gpu. **Il display di default
+  e' il terminale pixel** (D5, ADR-0062): `run.sh` espone `FB_WINDOW`
+  (`auto` = default: `-vga none` se si vuole un display grafico **e** il
+  device virtio-gpu c'e'; `1` forza `-vga none`; `0` forza la VGA) — con la
+  VGA presente QEMU apre la finestra della **console 0 = VGA**, cioe' della
+  console *morta* nel path pixel, e il terminale (console 1) resta senza
+  finestra: due console, una sola visibile, e quella visibile e' quella
+  sbagliata. `RUN_DISPLAY=gtk ./run.sh` mostra **il terminale**;
+  per la prova headless: il dump `screendump` del monitor (la superficie
+  virtio-gpu; con la VGA presente il dump prende la VGA 720x400).
   **Rasterizzazione** (`libs/term::raster`, punto fisso 16.16): copertura
   esatta in orizzontale + 8 sub-scanline in verticale; **l'ultimo pixel
   parziale di uno span va contato** (`pa..=pb`: con `pa..pb` il testo si
@@ -189,10 +196,12 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   dopo l'ultimo PRESENT; senza flush lo schermo resta nero fino al tasto).
   Test: `t63` nella suite (usertests 59/59, modeset a 1920x1088 + rifiuto
   oltre-bound + refresh verificato). Prova manuale GTK **fatta**: al resize
-  il terminale si aggiorna subito, testo conservato.
+  il terminale si aggiorna subito, testo conservato. **D5**: al
+  ri-adattamento il **cursore non salta piu' in fondo** (tiene la sua riga,
+  il contenuto resta ancorato al testo): unit test host in `libs/term`.
   Prossimo: console server con mirror seriale e routing POSIX
   stdout→device (l'hook `persona`), poi il DE.
-- **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-56, Pianificate, Parcheggiate).
+- **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
   `libs/civis` (ex `libs/libr`), personalità `flavours/posix/libr`; binari in
@@ -212,6 +221,15 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   bucket `identis:config` non e' ancora protetto in cardo, il token e' un
   bearer in env (`VELORDO_SESSION`), il bucket home `usr:<nome>` non esiste
   ancora, e `create-user` non e' lanciato da nessuno (manca la shell nativa).
+- **Il login e' il gate (ADR-0062, D5)**: `userland/identis-login` prova 3
+  volte, **la shell parte solo dopo l'autenticazione** (prima partiva
+  comunque: login fallito = shell aperta), e `init` lo supervisiona come un
+  **getty** (`Service::Login = 13`, `OnDeath::LoginGate`: uscita 0 = shell
+  avviata = nessun riavvio; uscita != 0 = accesso negato = riavvio con
+  backoff e tetto ai riavvii). Il boot finisce quindi al **prompt** del
+  login: il gate di regressione si chiude col timeout (le righe `PASS` sono
+  il contratto). L'eco del backspace c'e' in **ogni** campo (nel campo
+  username senza, si autenticava una stringa diversa da quella mostrata).
 
 ## Important Notes
 
@@ -379,7 +397,7 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
 
 ```bash
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term (rasterizer), valloc, blake2s: 14 test
+./scripts/run-unit-tests.sh   # term (rasterizer + cursore), valloc, blake2s: 19 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh
@@ -443,3 +461,10 @@ test "$(rg -c 'FAIL|PANIC|#.* FAULT' /tmp/boot.log)" = "0"
    (`DEV_READ`→`node_read`) servono dati stale mentre le scritture su disco
    sono fresche (fix 56.2c). Il PIO (`node_read_multi`/`node_write_multi`) lo
    fa già; i due path devono restare coerenti.
+8. **Seriale: `send` vs `send_raw`**: il driver `uart_16550` espande il
+   backspace (0x08/0x7F) in "BS SP BS" — comportamento da **console**.
+   Sul percorso **raw** (`serial::_write_bytes`, da cui passa `sys_write`)
+   il byte deve arrivare sul filo identico ("byte in = byte sul filo" = audit):
+   lì si usa `send_raw` (D5/ADR-0062). Con `send()` la sequenza di
+   cancellazione (3 byte) arrivava come 7 e il mirror seriale non combaciava
+   col terminale.

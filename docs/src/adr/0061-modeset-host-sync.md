@@ -165,6 +165,15 @@ dopo il modeset — col flush rimosso il test fallisce con
   vengono perse. Il cursore finisce in fondo.
 - Il testo **sopravvive** al ri-adattamento: è la proprietà verificata dal
   test (lo CRC del testo resta identico).
+- **Correzione D5 (ADR-0062)**: il cursore **non** finisce più in fondo.
+  Il ri-adattamento è un'operazione **focale**: l'utente sta scrivendo e
+  deve ritrovare il punto esatto in cui era. `Grid::resize` traccia il
+  cursore **logico** (riga + colonna nel flusso) e lo riporta sulla
+  griglia nuova; il contenuto resta **ancorato al testo** (le righe
+  vuote in coda non trascinano il cursore in fondo). Se il cursore cade
+  oltre l'ultima riga, viene appoggiato all'ultima riga con la colonna
+  conservata. Coperto dai **unit test host** di `libs/term` (fuori dal
+  gate: il gate resta a 6 righe).
 
 ### 5. Il layout: celle intere, resto centrato
 
@@ -275,4 +284,6 @@ così percorso davvero, per la prima volta con un effetto.
 ---
 *Registro delle modifiche: primo redatto il 22 ottobre 2026 per D4 (modeset e
 host-sync: la risoluzione del display); seconda revisione lo stesso giorno
-(§3ter "`PRESENT` ≠ flush" e prova manuale in tre giri: chiusura di D4).*
+(§3ter "`PRESENT` ≠ flush" e prova manuale in tre giri: chiusura di D4); terza
+revisione lo stesso giorno (§4: il cursore non finisce più in fondo —
+correzione D5, vedi ADR-0062).*

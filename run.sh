@@ -119,21 +119,43 @@ if [ -n "$APPEND" ]; then
     set -- "$@" -append "$APPEND"
 fi
 
-# L0b (ADR-0057): virtio-gpu-pci in modalita' modern (MSI-X). NON sostituisce
-# la VGA: il driver legge la risoluzione dal device ma continua a usare la
-# console VGA. VIRTIO_GPU=0 = path di fallback (device assente, gpu su VGA).
+# L0b (ADR-0057): virtio-gpu-pci in modalita' modern (MSI-X). D3: il device
+# e' il display del terminale (i pixel sono della console server, il driver
+# e' solo il device); VIRTIO_GPU=0 = path di fallback (device assente,
+# console su VGA testuale).
 GPU_DEV=""
 if [ "${VIRTIO_GPU:-1}" = "1" ]; then
     GPU_DEV="-device virtio-gpu-pci,disable-legacy=on"
 fi
-# FB_WINDOW=1: toglie la VGA standard, cosi' l'unica finestra del UI GTK
-# mostra il display virtio-gpu (il terminale). Con la VGA presente il UI
-# mostra solo la console predefinita e il framebuffer resta in una seconda
-# console senza finestra. Attenzione: senza il device VGA il fallback
-# "VGA testuale" non ha dove scrivere (il device e' assente, non e' solo
-# vuoto) — va usato solo con il device virtio-gpu presente.
-if [ "${FB_WINDOW:-0}" = "1" ]; then
-    GPU_DEV="$GPU_DEV -vga none"
+# Il **display di default** del sistema e' il terminale pixel (virtio-gpu).
+# Il UI GTK di QEMU mostra la **console 0**: con la VGA presente la console 0
+# e' la VGA, e il terminale pixel (console 1) resta senza finestra (la VGA
+# mostra il testo di boot stantio: nel path pixel la console non ci scrive
+# piu'). Tolta la VGA, il virtio-gpu diventa la console 0 e la finestra
+# mostra il terminale.
+#
+#   FB_WINDOW=auto (default) -vga none se si vuole un display GRAFICO
+#                             (RUN_DISPLAY != none) e il device virtio-gpu
+#                             e' presente
+#   FB_WINDOW=1             -vga none sempre (forza)
+#   FB_WINDOW=0             VGA presente (forza: fallback testuale della
+#                             console e dump screendump della VGA)
+#
+# NB: senza il device VGA il fallback "VGA testuale" della console non ha
+# dove scrivere (il device e' assente, non e' solo vuoto) — il percorso
+# automatico lo toglie solo con il device virtio-gpu presente.
+VGA_DEV=""
+case "${FB_WINDOW:-auto}" in
+    1) VGA_DEV="-vga none" ;;
+    0) VGA_DEV="" ;;
+    *)
+        if [ "$DISPLAY" != "none" ] && [ "${VIRTIO_GPU:-1}" = "1" ]; then
+            VGA_DEV="-vga none"
+        fi
+        ;;
+esac
+if [ -n "$VGA_DEV" ]; then
+    GPU_DEV="$GPU_DEV $VGA_DEV"
 fi
 # shellcheck disable=SC2086
 exec qemu-system-x86_64 \

@@ -203,9 +203,11 @@ fn read_line_from_keyboard(mask: bool) -> String {
         if b == 0x7F || b == 0x08 {
             if !buf.is_empty() {
                 buf.pop();
-                if mask {
-                    console_write(b"\x08 \x08");
-                }
+                // L'eco della cancellazione **anche** nel campo non
+                // mascherato: senza, lo schermo mostra piu' caratteri di
+                // quanti ne restino nel buffer (si autenticava una stringa
+                // diversa da quella mostrata).
+                console_write(b"\x08 \x08");
             }
             continue;
         }

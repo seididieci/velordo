@@ -14,7 +14,7 @@ nulla da solo.
 ## Stato (completate 1-57)
 
 Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
-`[identistest] PASS 11/11` + `[usertests] PASS 58/58` + `[threadtest] PASS 12/12`,
+`[identistest] PASS 11/11` + `[usertests] PASS 59/59` + `[threadtest] PASS 12/12`,
 zero FAIL/PANIC/FAULT. La suite FAT32 e' **fuori dal gate** (ADR-0059:
 `scripts/run-fat-tests.sh`).
 
@@ -163,6 +163,27 @@ Voci con scope e vittoria dichiarati (non date).
       D4 chiusa.
       **Prossimo**: console server con mirror seriale e routing POSIX
       stdout→device (l'hook `persona`), poi il desktop environment.
+- [x] **D5 — display di default + login-gate** (completata, ADR-0062): il
+      **terminale pixel e' la console 0** (`FB_WINDOW=auto` → `-vga none`
+      quando si vuole un display grafico e il device virtio-gpu c'e': con la
+      VGA presente QEMU apriva la finestra della console **morta** e il
+      terminale restava senza finestra), il **login e' il gate** (3
+      tentativi, la shell parte **solo** dopo l'autenticazione, uscita
+      != 0 = accesso negato) e `init` lo **supervisiona come un getty**
+      (`Service::Login` = 13, `OnDeath::LoginGate`: riavvio con backoff e
+      tetto ai riavvii, i servizi invece si riavviano sempre). Il backspace
+      ora cancella **in ogni campo** (prima solo nel campo mascherato:
+      nel campo username lo schermo mostrava piu' caratteri di quanti ne
+      restassero nel buffer — si autenticava una stringa diversa da
+      quella mostrata) e il **mirror seriale e' byte-fedele** (il percorso
+      raw usa `send_raw`: il driver UART espande il backspace in "BS SP
+      BS" e la sequenza di cancellazione (3 byte) arrivava sul filo come
+      7). Vittoria conseguita: `RUN_DISPLAY=gtk ./run.sh` mostra il
+      terminale, un login fallito **non** apre la shell e l'utente trova
+      un altro prompt, il gate resta invariato (6 righe, zero
+      FAIL/PANIC/FAULT) e i **casi nuovi del terminale** (cursore che
+      non salta in fondo al resize, eco del backspace) sono coperti dai
+      **unit test host** di `libs/term` (fuori dal gate).
 - [ ] **S3.2 — Shell nativa** (dopo la Fase 3.1): programma interattivo
       **nativo** (meccanismo, niente POSIX) che prende il posto dello
       spin-loop del login: dispatcher di comandi su `/dev/input/keyboard` +
