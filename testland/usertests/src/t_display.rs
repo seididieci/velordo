@@ -104,11 +104,13 @@ pub fn t_display_modeset() -> bool {
         return false;
     }
 
-    // 1) il modeset: il guest sceglie 1024x768.
-    let target = if (w0, h0) == (1024, 768) {
+    // 1) il modeset: il guest sceglie una misura **piu' grande** di quella
+    //    attuale. 1920x1088 = 2040 pagine: e' il caso che il bound vecchio del
+    //    device buffer (4 MiB = 1024 pagine) rifiutava (ADR-0061).
+    let target = if (w0, h0) == (1920, 1088) {
         (1280, 800)
     } else {
-        (1024, 768)
+        (1920, 1088)
     };
     let r = civis::send(
         console,
@@ -166,7 +168,23 @@ pub fn t_display_modeset() -> bool {
         return false;
     }
 
-    // 5) ripristina la risoluzione iniziale.
+    // 5) Una misura **oltre il bound** del device buffer (8192x8192 = 64 MiB)
+    //    viene rifiutata senza toccare il terminale: griglia e testo restano
+    //    quelli di prima (il rifiuto e' pulito, non un fallimento a meta').
+    let huge = 8192u64;
+    let r = civis::send(console, civis::syscall_numbers::CONSOLE_SET_MODE, huge, huge);
+    let refused = matches!(r, Ok(rep) if rep.w0 != 0);
+    let (cols_h, rows_h) = console_grid(console).unwrap_or((0, 0));
+    let (ne_h, crc_h) = console_state(console).unwrap_or((0, 0));
+    if !refused || (cols_h, rows_h) != (cols1, rows1) || (ne_h, crc_h) != (ne1, crc1) {
+        println!(
+            "[t63] rifiuto non pulito: refused={} griglia {}x{} (attesa {}x{})",
+            refused, cols_h, rows_h, cols1, rows1
+        );
+        return false;
+    }
+
+    // 6) ripristina la risoluzione iniziale.
     let r = civis::send(
         console,
         civis::syscall_numbers::CONSOLE_SET_MODE,
@@ -176,7 +194,7 @@ pub fn t_display_modeset() -> bool {
     let restored = matches!(r, Ok(rep) if rep.w0 == 0);
     let (cols2, rows2) = console_grid(console).unwrap_or((0, 0));
     println!(
-        "[t63] modeset {}x{} OK (griglia {}x{} -> {}x{} -> {}x{}, testo conservato)",
+        "[t63] modeset {}x{} OK (griglia {}x{} -> {}x{} -> {}x{}, testo conservato, oltre-bound rifiutato)",
         target.0, target.1, cols0, rows0, cols1, rows1, cols2, rows2
     );
     restored && cols2 != cols1

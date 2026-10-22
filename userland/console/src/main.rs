@@ -124,6 +124,20 @@ impl Term {
         //    fallito non deve lasciare la surface su un buffer liberato).
         let bytes = (w as u64) * (h as u64) * 4;
         let pages = ((bytes + 4095) / 4096) as usize;
+        // Il bound dei device buffer lo conosce `civis` (single source): se la
+        // misura non ci sta lo si dice **prima** della syscall, con il perche'
+        // (un resize dell'host oltre il bound e' legittimo: si tiene la
+        // risoluzione corrente e il device scala il scanout nella finestra).
+        if pages > civis::DMA_DEVICE_PAGES_MAX {
+            civis::println!(
+                "[console] display: {}x{} troppo grande ({} pagine, max {})",
+                w,
+                h,
+                pages,
+                civis::DMA_DEVICE_PAGES_MAX
+            );
+            return false;
+        }
         let new_slot = if self.fb_slot == civis::DMA_SLOT_DEVICE {
             civis::DMA_SLOT_DEVICE + 1
         } else {
@@ -197,8 +211,11 @@ impl Term {
             self.desired = None;
             return Ok(());
         }
-        self.desired = Some((w, h));
+        // La misura desiderata si registra **solo** se il riadattamento
+        // riesce: un modeset rifiutato non deve lasciare una desired che il
+        // terminale non sta mostrando.
         if self.resize_to(w, h) {
+            self.desired = Some((w, h));
             Ok(())
         } else {
             Err(())
@@ -521,7 +538,20 @@ fn real_main(_sp: u64) -> ! {
                         // rimbalzano le risposte a vicenda).
                         let g = term::disp::Geometry::unpack(msg.w1);
                         if g.valid() {
+                            // L'host insiste: il guest cede la scelta.
                             term.desired = None;
+                            // Se la misura e' gia' quella che il terminale
+                            // mostra (l'host ha solo confermato) non si
+                            // rialloca niente: un buffer contiguo non e'
+                            // gratis.
+                            let already = matches!(
+                                &term.surface,
+                                Surface::Pixel(p)
+                                    if p.width == g.width && p.height == g.height
+                            );
+                            if already {
+                                continue;
+                            }
                             if term.resize_to(g.width, g.height) {
                                 civis::println!(
                                     "[console] display: {}x{} grid={}x{} (adattato, testo conservato)",

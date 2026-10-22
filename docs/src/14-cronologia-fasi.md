@@ -2661,6 +2661,19 @@
       sotto). Il ri-adattamento e' **transazionale** (il buffer nuovo va
       nello slot alternato, il vecchio si libera solo dopo il `PRESENT`:
       un fallimento non lascia la surface su un buffer liberato).
+      Il primo giro di **prova manuale** (resize della finestra con GTK) ha
+      trovato il limite che il gate headless non poteva vedere: il bound del
+      device buffer era **4 MiB** (1024 pagine), cioè la misura del guest
+      (1280x800) — al primo resize la syscall rispondeva -1 (1145 pagine a
+      1341x874, 2040 a 1920x1088) e il terminale restava alla risoluzione
+      vecchia. Il riadattamento **transazionale** ha retto (nessun crash, la
+      shell usabile), ma il bound si misura sull'**host**: alzato a 8192
+      pagine (32 MiB, copre 4K) con `DMA_SLOT_SPAN` a 32 MiB (le due
+      costanti sono accoppiate), e il rifiuto oltre il bound lo tratta la
+      console **prima** della syscall, spiegandolo e tenendo la risoluzione
+      corrente (il device scala lo scanout nella finestra). Il test t63 ora
+      usa 1920x1088 (il caso che il bound vecchio rifiutava) e verifica che
+      una misura oltre bound venga rifiutata senza toccare il terminale.
       Tre lezioni del device: la risorsa ha dimensione fissa (va staccata
       dallo scanout prima dell'`UNREF`), le struct uapi contano i padding
       (`virtio_gpu_resource_unref` = 32 byte: senza il padding il device

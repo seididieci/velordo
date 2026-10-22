@@ -159,7 +159,7 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `third_party/`) letto dal volume root come oggetto, rasterizzato in punto
   fisso; font fisso 16 px, cella 10x22, griglia dalla risoluzione (128x36 a
   1280x800). `SYS_DMA_ALLOC` prende lo **slot** (0 = staging invariato;
-  >= 1 = device buffer contiguo <= 4 MiB, **grant chiuso** all'owner di
+  >= 1 = device buffer contiguo <= 32 MiB, **grant chiuso** all'owner di
   `Service::Console` = 12). Fallback: VGA testuale (`VIRTIO_GPU=0`). Il
   display si parla in **diretta** (IPC per nome col driver: niente device
   FS — il cardo e' single-threaded: un driver che lo blocca mentre serve un
@@ -174,7 +174,12 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `GPU_DISPLAY_CHANGED` → la console cede e si riadatta). `SYS_DMA_FREE=62`
   (la DMA API puo' liberare: il buffer device si rialloca), scrollback +
   `Grid::resize` (il testo sopravvive), layout centrato (celle intere,
-  resto diviso a meta'). Test: `t63` nella suite (usertests 59/59).
+  resto diviso a meta'). Il bound del device buffer si misura sull'host
+  (`DMA_DEVICE_PAGES_MAX` = 8192 pagine = 32 MiB, copre 4K, con
+  `DMA_SLOT_SPAN` a 32 MiB: le due costanti vanno assieme); oltre il bound
+  la console rifiuta *prima* della syscall e tiene la risoluzione corrente
+  (il device scala lo scanout). Test: `t63` nella suite (usertests 59/59,
+  modeset a 1920x1088 + rifiuto oltre-bound).
   Prossimo: console server con mirror seriale e routing POSIX
   stdout→device (l'hook `persona`), poi il DE.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-56, Pianificate, Parcheggiate).

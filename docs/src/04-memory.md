@@ -256,16 +256,17 @@ dma_alloc(pages, slot) -> rax = phys | rdi = pagine | rsi = VA dello slot
 
 - **slot 0 = staging**: la via storica di `block` (ATA DMA): ≤ 4 pagine,
   VA `USER_DMA_VA` (invariata), aperta a tutti come prima.
-- **slot ≥ 1 = device buffer**: il framebuffer del terminale grafico
-  (1280×800×4 = 4 MiB = 1000 pagine): ≤ `DMA_DEVICE_PAGES_MAX` (1024) e
-  **grant riservato all'owner di `Service::Console`** (come il grant MMIO
-  di ADR-0057: alzare il bound a 4 MiB per qualunque processo sarebbe una
-  regressione di hardening, ADR-0026).
+- **slot ≥ 1 = device buffer**: il framebuffer del terminale grafico,
+  ≤ `DMA_DEVICE_PAGES_MAX` (**D4: 8192 pagine = 32 MiB**, copre 4K — vedi
+  il paragrafo D4 qui sotto) e **grant riservato all'owner di
+  `Service::Console`** (come il grant MMIO di ADR-0057: aprire il bound
+  grande a qualunque processo sarebbe una regressione di hardening,
+  ADR-0026).
 - `DMA_SLOT_ANY` prende il primo slot libero; N slot per address space
   (`DMA_SLOTS = 8`), record come i ring: free a teardown/exec, mai ereditati
   dal figlio-copia.
-- L'area VA (`USER_DMA_BASE`, 4 MiB per slot) sta dopo le finestre piccole
-  (FS/CLI/disco) e dopo quella MMIO.
+- L'area VA (`USER_DMA_BASE`, `DMA_SLOT_SPAN` per slot — 32 MiB in D4) sta
+  dopo le finestre piccole (FS/CLI/disco) e dopo quella MMIO.
 
 **Perché contigui**: `virtio_gpu_create_mapping_iov()` (QEMU) traduce
 l'indirizzo passato in `ATTACH_BACKING` nello address space PCI del device e
@@ -278,6 +279,16 @@ slot: `dma_free(slot)` libera le pagine contigue e **smonta il mapping**
 della finestra dello slot (la VA non deve restare mappata su pagine
 rusate). Gli slot ≥ 1 restano dell'owner di `Service::Console` (stesso
 grant dell'alloc).
+
+**Bound dello slot device (D4)**: `DMA_DEVICE_PAGES_MAX` = 8192 pagine
+(32 MiB: copre un framebuffer 4K) e `DMA_SLOT_SPAN` = 32 MiB — le due
+costanti vanno **assieme**, altrimenti uno slot grande sfonda nella finestra
+del successivo. Il bound si misura sulla risoluzione dell'**host** (che può
+arrivare a 4K), non su quella iniziale del guest: con 4 MiB il primo resize
+della finestra faceva fallire il ri-adattamento (1145 pagine a 1341×874).
+L'arena (slot 1..7) sta nel blocco FS, sopra `USER_HEAP_LIMIT`. Il limite
+vero resta la **contiguità fisica** del run: se non c'è, la console tiene la
+risoluzione corrente (rifiuto spiegato, prima della syscall).
 
 ## Grant MMIO device (L0b, ADR-0057)
 

@@ -89,6 +89,46 @@ dma_free(slot) -> 0 | -1
 - gli slot ≥ 1 restano dell'owner di `Service::Console` (stesso grant
   dell'alloc, ADR-0057/0060): nessuna regressione di hardening (ADR-0026).
 
+### 3bis. Il bound del device buffer si misura sull'host, non sul guest
+
+La prima prova manuale (resize della finestra con GTK) ha trovato il punto
+debole: il bound dei device buffer era **1024 pagine = 4 MiB**, cioè
+1280×800 — la misura del *guest*, non quella dell'host. Al primo resize
+della finestra il config change arriva davvero, la console tenta il
+riadattamento e la syscall risponde `-1`:
+
+```
+[gpu] config change: events=0x1
+[gpu] display info: 1341x874 enabled=1
+[dma] alloc: 1145 pagine fuori bound (max 1024)
+[console] display: alloc del nuovo buffer fallita
+[console] display: riadattamento fallito
+```
+
+Il riadattamento **transazionale** ha retto (la surface è rimasta valida, il
+terminale vivo, la shell usabile), ma il terminale non seguiva più la
+finestra. Le misure: 1341×874 = 1145 pagine, 1920×1088 = 2040, 4K
+(3840×2160) = 8100.
+
+Decisione: il bound si misura sull'**host** → 8192 pagine (32 MiB, copre 4K
+con margine) e lo **span VA per slot** cresce con lui (`DMA_SLOT_SPAN` =
+32 MiB). Le due costanti sono accoppiate: se lo span resta più piccolo del
+bound, uno slot "grande" sfonda nella finestra del successivo. L'arena
+(slot 1..7) occupa 224 MiB di VA nel blocco FS, sopra `USER_HEAP_LIMIT`:
+non tocca nessuno. Il grant resta chiuso all'owner di `Service::Console`
+(ADR-0026 invariato) e lo staging resta a 4 pagine.
+
+Il limite vero però è la **contiguità fisica**: il run unico da 32 MiB si
+trova finché la RAM è poco frammentata, e può non trovarsi (la transazione
+costa il buffer vecchio + quello nuovo). Per questo il rifiuto deve essere
+**trattato dalla console, non subito**: la console conosce il bound
+(`civis::DMA_DEVICE_PAGES_MAX`, single source), rifiuta *prima* della
+syscall col perché nel log (`... troppo grande (N pagine, max M)`) e
+**tiene la risoluzione corrente**. Il device scala lo scanout nella
+finestra: il terminale resta leggibile, solo a risoluzione interna più
+bassa. Il config change sulla stessa misura già mostrata viene ignorato
+(niente riallocazione inutile).
+
 ### 4. Il modello: scrollback e riflow
 
 - `Grid` tiene uno **scrollback** bounded (1000 righe): lo `scroll_up()` ci
@@ -155,7 +195,7 @@ tutto com'è — la surface non deve mai puntare a un buffer liberato.
   resize **reale** della finestra resta **manuale** (GTK): in headless
   l'UI non si muove e l'evento non scatta.
 - Il re-adattamento **non** è gratis: una nuova risorsa, un nuovo buffer
-  (4 MiB ricontiguiati) e un ridisegno completo della griglia.
+  (fino a 32 MiB ricontiguiati) e un ridisegno completo della griglia.
 
 ## Relations
 
@@ -182,13 +222,22 @@ tutto com'è — la surface non deve mai puntare a un buffer liberato.
   risorsa, `RESOURCE_UNREF` a 32 byte.
 - `userland/console`: `resize_to` (transazionale), `set_mode`, i tag
   `CONSOLE_*`, la gestione di `GPU_DISPLAY_CHANGED`.
-- `testland/usertests/src/t_display.rs`: il test t63.
+- `testland/usertests/src/t_display.rs`: il test t63 (misura più grande +
+  rifiuto oltre il bound).
+- `syscall-numbers`: `DMA_DEVICE_PAGES_MAX` 1024 → 8192, `DMA_SLOT_SPAN`
+  4 MiB → 32 MiB; `libs/civis` riesporta il bound (la console rifiuta
+  spiegando prima della syscall).
 
-Validazione: gate invariato + il **nuovo test t63** (modeset → la griglia si
-ricalcola, il device non insiste, il testo sopravvive, la risoluzione
-iniziale viene ripristinata), `test-shell-all.sh` 10/10, e la prova manuale
-con GTK (resize della finestra → il terminale si riallinea: il config change
-MSI-X percorso davvero, per la prima volta).
+Validazione: gate invariato + il **nuovo test t63** (modeset a **1920×1088**
+= 2040 pagine, cioè il caso che il bound vecchio rifiutava → la griglia si
+ricalcola 128×36 → 192×49, il device non insiste, il testo sopravvive, una
+misura oltre il bound — 8192×8192 — viene **rifiutata senza toccare il
+terminale**, e la risoluzione iniziale viene ripristinata),
+`test-shell-all.sh` 10/10, e la prova manuale con GTK (in due tempi: il
+primo giro ha **trovato** il limite del bound — vedi 3bis —, il secondo lo
+conferma: resize della finestra → `[console] display: ... (adattato, testo
+conservato)`). Il config change MSI-X è così percorso davvero, per la prima
+volta con un effetto.
 
 ---
 *Registro delle modifiche: primo redatto il 22 ottobre 2026 per D4 (modeset e

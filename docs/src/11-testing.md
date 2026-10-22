@@ -121,17 +121,24 @@ Righe di gate:
 >
 > D4 (modeset e host-sync, ADR-0061): **una riga di suite in più** —
 > `[usertests] t63 modeset + re-adattamento` (il gate passa da 58/58 a
-> **59/59**). Il test chiede al terminale una risoluzione diversa (modeset
-> dal guest), verifica che la griglia si ricalcoli (celle intere, resto
-> centrato), che il device non abbia ceduto (l'host non ha insistito: in
-> headless l'UI non si muove) e che **il testo sia sopravvissuto** (lo CRC
-> del contenuto resta identico); poi ripristina la risoluzione iniziale.
-> Marker del percorso: `[gpu] scanout: 1024x768 stride=4096` e
-> `[t63] modeset 1024x768 OK (griglia 128x36 -> 102x34 -> 128x36, testo
-> conservato)`. La prova del **config change vero** (resize della finestra
-> dell'host → l'host insiste → la console cede e si riadatta) resta
-> **manuale** con `RUN_DISPLAY=gtk FB_WINDOW=1`: in headless l'UI non si
-> muove e l'evento non scatta.
+> **59/59**). Il test chiede al terminale una risoluzione **più grande**
+> (modeset dal guest a **1920×1088** = 2040 pagine: è il caso che il bound
+> vecchio del device buffer — 4 MiB — rifiutava), verifica che la griglia si
+> ricalcoli (celle intere, resto centrato), che il device non abbia ceduto
+> (l'host non ha insistito: in headless l'UI non si muove) e che **il testo
+> sia sopravvissuto** (lo CRC del contenuto resta identico); poi prova una
+> misura **oltre il bound** (8192×8192): deve essere **rifiutata senza
+> toccare il terminale** (griglia e CRC invariati), e infine ripristina la
+> risoluzione iniziale. Marker del percorso:
+> `[gpu] scanout: 1920x1088 stride=7680`,
+> `[console] display: 8192x8192 troppo grande (65536 pagine, max 8192)` e
+> `[t63] modeset 1920x1088 OK (griglia 128x36 -> 192x49 -> 128x36, testo
+> conservato, oltre-bound rifiutato)`. La prova del **config change vero**
+> (resize della finestra dell'host → l'host insiste → la console cede e si
+> riadatta) resta **manuale** con `RUN_DISPLAY=gtk FB_WINDOW=1`: in headless
+> l'UI non si muove e l'evento non scatta. È stata fatta e ha **trovato** un
+> limite vero: il bound del device buffer a 4 MiB (→ ADR-0061 §3bis, alzato a
+> 32 MiB con rifiuto spiegato dalla console).
 >
 > L0b (virtio-gpu modern + MSI-X, ADR-0057): nessuna nuova riga di suite.
 > Marker deterministici nel boot con il device (default di `run.sh`):

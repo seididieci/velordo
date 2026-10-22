@@ -35,8 +35,10 @@ pub use syscall_numbers::USER_DMA_VA;
 /// `syscall-numbers` (S2.2).
 pub use syscall_numbers::{USER_FS_BUFFER, USER_RESP_RING, CLI_REQ_VA, CLI_RESP_VA};
 /// Slot DMA (D3): `ANY` = primo libero; `USER_DMA_BASE` = base dell'arena
-/// degli slot (lo slot 0 resta a `USER_DMA_VA`).
-pub use syscall_numbers::{DMA_SLOT_ANY, DMA_SLOT_DEVICE, USER_DMA_BASE};
+/// degli slot (lo slot 0 resta a `USER_DMA_VA`). `DMA_DEVICE_PAGES_MAX` e' il
+/// bound dei device buffer (D4): chi chiede di allocare oltre lo sa **prima**
+/// della syscall e puo' rifiutare spiegando.
+pub use syscall_numbers::{DMA_DEVICE_PAGES_MAX, DMA_SLOT_ANY, DMA_SLOT_DEVICE, USER_DMA_BASE};
 /// Finestra MMIO device (L0b, ADR-0057): `SYS_MAP_MMIO` mappa qui le BAR
 /// (UC, non-owned) dell'owner di `Service::Gpu`.
 pub use syscall_numbers::{

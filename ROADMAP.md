@@ -109,7 +109,8 @@ Voci con scope e vittoria dichiarati (non date).
       pixel|VGA testuale; serve `/dev/console` e possiede i pixel), `shell`
       = testo. Il codice di testo e' **estratto** in `libs/term` (no_std), non
       spostato nel driver. `SYS_DMA_ALLOC` prende lo **slot** (0 = staging
-      invariato; >= 1 = device buffer <= 4 MiB, **grant chiuso** all'owner
+      invariato; >= 1 = device buffer <= 4 MiB — alzato a 32 MiB in D4 —
+      **grant chiuso** all'owner
       di `Service::Console` = 12): il device vuole la memoria **contigua**.
       Font **Maple Mono NF** (OFL 1.1, in `third_party/`) letto dal volume
       root come oggetto, rasterizzato in **punto fisso** (`cmap` formato 4 e
@@ -134,9 +135,15 @@ Voci con scope e vittoria dichiarati (non date).
       **sopravvive** al ri-adattamento), layout **centrato** (celle intere,
       resto diviso a meta': 1280x800 → 4 px sopra/sotto). Il ri-adattamento
       e' transazionale (buffer nuovo nello slot alternato, il vecchio si
-      libera dopo il `PRESENT`). Vittoria conseguita: il **nuovo test t63**
-      nella suite (usertests 59/59: modeset → griglia ricalcolata, testo
-      conservato, risoluzione ripristinata), gate invariato,
+      libera dopo il `PRESENT`). Il bound del device buffer si misura
+      sull'**host** (`DMA_DEVICE_PAGES_MAX` 1024 → 8192 pagine = 32 MiB,
+      copre 4K, con `DMA_SLOT_SPAN` a 32 MiB): la prova manuale con GTK ha
+      mostrato che a 4 MiB il primo resize della finestra faceva fallire il
+      riadattamento (1145/2040 pagine); oltre il bound la console rifiuta
+      *prima* della syscall, spiegando, e tiene la risoluzione corrente.
+      Vittoria conseguita: il **nuovo test t63** nella suite (usertests
+      59/59: modeset a 1920x1088 → griglia ricalcolata, testo conservato,
+      oltre-bound rifiutato, risoluzione ripristinata), gate invariato,
       `test-shell-all.sh` 10/10. Il config change vero (resize della
       finestra) resta una prova **manuale** con GTK.
       **Prossimo**: console server con mirror seriale e routing POSIX

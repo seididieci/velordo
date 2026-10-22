@@ -226,16 +226,27 @@ pub const DMA_SLOT_ANY: u64 = 0xFFFF;
 /// lo staging (path storico), questo e' il primo slot "device" (bound
 /// `DMA_DEVICE_PAGES_MAX`, grant owner `Service::Console`).
 pub const DMA_SLOT_DEVICE: u64 = 1;
-/// Bound pagine degli slot "device buffer" (D3): 1024 pagine = 4 MiB, la
-/// dimensione di un framebuffer 1280x800x4. Lo slot 0 (staging) resta
-/// limitato a `DMA_PAGES_MAX`: alzare il bound per tutti sarebbe una
-/// regressione di hardening (ADR-0026) — il device buffer e' un grant
-/// riservato all'owner di `Service::Console`.
-pub const DMA_DEVICE_PAGES_MAX: usize = 1024;
+/// Bound pagine degli slot "device buffer" (D3, alzato in D4): 8192 pagine =
+/// 32 MiB, cioe' un framebuffer **4K** (3840x2160x4 = 8100 pagine) con
+/// margine. Il bound precedente (4 MiB = 1280x800) era una misura del guest,
+/// non dell'host: al primo resize della finestra (1341x874 = 1145 pagine,
+/// 1920x1088 = 2040) il ri-adattamento falliva (ADR-0061). Lo slot 0
+/// (staging) resta limitato a `DMA_PAGES_MAX`: alzare il bound per tutti
+/// sarebbe una regressione di hardening (ADR-0026) — il device buffer e' un
+/// grant riservato all'owner di `Service::Console`. Il limite vero resta la
+/// **contiguita' fisica** (run unico): se il run non si trova, il
+/// ri-adattamento fallisce in modo pulito (la console tiene la risoluzione
+/// corrente, la passa il device la scala nella finestra).
+pub const DMA_DEVICE_PAGES_MAX: usize = 8192;
 /// Slot DMA per processo (D3): 0 = staging, 1.. = device buffer.
 pub const DMA_SLOTS: usize = 8;
-/// Span VA per slot DMA (4 MiB): ogni slot ha la sua finestra.
-pub const DMA_SLOT_SPAN: u64 = 0x40_0000;
+/// Span VA per slot DMA (32 MiB): ogni slot ha la sua finestra, grande
+/// quanto il bound dei device buffer (`DMA_DEVICE_PAGES_MAX`) — le due
+/// costanti devono crescere assieme, altrimenti uno slot "grande" sfonda
+/// nella finestra del successivo. L'arena (slot 1..`DMA_SLOTS`) vive nel
+/// blocco FS, sopra il limite dello heap: 7 x 32 MiB = 224 MiB di VA, che
+/// non tocca nessuno (lo heap si ferma a `USER_HEAP_LIMIT`).
+pub const DMA_SLOT_SPAN: u64 = 0x200_0000;
 /// Bound del payload argv+env serializzato (Fase 37.1, esteso in 43a):
 /// blocco `[argc:8][envc:8][argv NUL-separated][env NUL-separated
 /// "NAME=val"]` oltre cui `exec` rifiuta fail-loud. Single source
