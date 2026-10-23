@@ -207,7 +207,7 @@ pub struct Pixel {
 
 impl Pixel {
     /// Scrive un pixel BGRA.
-    unsafe fn put(&mut self, x: u32, y: u32, color: u32) {
+    pub unsafe fn put(&mut self, x: u32, y: u32, color: u32) {
         if x >= self.width || y >= self.height {
             return;
         }
