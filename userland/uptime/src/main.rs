@@ -11,7 +11,7 @@ use civis::{println};
 
 const PERIOD_TICKS: i64 = 500; // 100 Hz -> 5 s
 
-/// Entry: loop infinito che stampa l'uptime ogni 5 secondi.
+// Entry: loop infinito che stampa l'uptime ogni 5 secondi.
 civis::entry!(real_main);
 fn real_main(_sp: u64) -> ! {
     println!("[uptime] user process up");

@@ -51,11 +51,13 @@ impl<B: BlockSource> Fat32<B> {
     }
 
     /// Seriale volume (`UUID=`, maiuscolo hex 8 char) o `None` se assente.
+    #[allow(dead_code)] // identita' FAT: riservata al match UUID (fuori gate)
     pub fn vol_serial(&self) -> Option<u32> {
         self.vol_serial
     }
 
     /// Label volume normalizzata (trim spazi) per match `LABEL=`.
+    #[allow(dead_code)] // identita' FAT: riservata al match label (fuori gate)
     pub fn vol_label_trimmed(&self) -> &[u8] {
         let mut n = self.vol_label.len();
         while n > 0 && self.vol_label[n - 1] == b' ' {

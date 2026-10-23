@@ -2,7 +2,7 @@ pub(super) const PTE_PRESENT: u64 = 0x1;
 
 // Split from vmm_user.rs (byte-identical move; see facade).
 use core::sync::atomic::{AtomicU64, Ordering};
-use super::layout::{USER_BASE, USER_PRESENT_WRITABLE, PAGE_SIZE, USER_STACK_TOP, USER_STACK_FRAMES};
+use super::layout::{USER_BASE, USER_PRESENT_WRITABLE, PAGE_SIZE, USER_STACK_TOP};
 
 /// Ritorna il CR3 attivo (del processo correntemente in esecuzione).
 pub fn active_cr3() -> u64 {

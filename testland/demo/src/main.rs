@@ -23,8 +23,8 @@ fn start() {
     println!("[demo] hello from userland, pid={}", pid);
 }
 
-/// Entry della demo: messaggio iniziale poi busy-loop con tick periodici.
-/// Il kernel carica RIP a USER_CODE = indirizzo di `_start` (inizio `.text`).
+// Entry della demo: messaggio iniziale poi busy-loop con tick periodici.
+// Il kernel carica RIP a USER_CODE = indirizzo di `_start` (inizio `.text`).
 civis::entry!(real_main);
 fn real_main(_sp: u64) -> ! {
     start();

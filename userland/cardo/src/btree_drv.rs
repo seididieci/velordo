@@ -15,7 +15,7 @@
 //! sconsigliati (freelist condivisa: corretti, ma sorprendenti).
 
 use super::*;
-use arcafs::btree::{BlockStore, BTree, EXT_BLOCKS_MAX, TREE_PRIMARY, TREE_REFCOUNT, TREE_SECONDARY};
+use arcafs::btree::{BlockStore, BTree, TREE_PRIMARY, TREE_REFCOUNT, TREE_SECONDARY};
 use arcafs::format::{
     self, ARCA_NODE_PAYLOAD_LEN, ARCA_NODE_TYPE_DATA, ARCA_NODE_TYPE_INTERNAL,
     ARCA_NODE_TYPE_LEAF, ARCA_NODE_TYPE_MAP, ARCA_NODE_TYPE_RAW, ARCA_XH_DIRTY,
@@ -1095,6 +1095,7 @@ pub fn raw_open(path: &str) -> Option<VolumeStore> {
 /// mai wedge su nomi ignoti.
 /// `#[inline(never)]`: chiamato una volta da real_main, resta fuori dal suo
 /// frame (stessa ragione dei firewall btree con LTO).
+#[allow(dead_code)] // entry di auto-bind non ancora cablata (il boot usa root=UUID)
 #[inline(never)]
 pub fn scan_and_open() -> Option<VolumeStore> {
     let mut path = [0u8; 16];

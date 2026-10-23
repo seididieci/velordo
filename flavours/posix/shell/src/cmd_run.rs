@@ -265,7 +265,7 @@ struct Spawned {
 /// i grant vivono snapshot server-side). Il figlio ha l'FS avvelenato e fa
 /// solo exec. A fork fallita chiude tutto e cancella i grant.
 fn spawn_run_exec(
-    exec_argv: &[&str],
+    _exec_argv: &[&str],
     img: &[u8],
     buf: &[u8],
     fds: [i64; 3],

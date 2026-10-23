@@ -35,7 +35,7 @@ pub fn fs_gate() -> Result<(), Error> {
 }
 
 
-pub fn poll_wait(bound_ticks: i64, period_ticks: i64, mut f: impl FnMut() -> bool) -> bool {
+pub fn poll_wait(bound_ticks: i64, period_ticks: i64, f: impl FnMut() -> bool) -> bool {
     vfscli::session::poll_wait::<super::CivisSys>(bound_ticks, period_ticks, f)
 }
 
@@ -132,7 +132,7 @@ pub fn ring_phys() -> (u64, u64) {
 /// Variante di `poll_wait` che ritorna il valore prodotto da `f()`
 /// (`None` = "non ancora pronto, riprova"). Utile quando serve il risultato
 /// del tentativo riuscito (fd, pid, ...), non solo un booleano.
-pub fn poll_value<T>(bound_ticks: i64, period_ticks: i64, mut f: impl FnMut() -> Option<T>) -> Option<T> {
+pub fn poll_value<T>(bound_ticks: i64, period_ticks: i64, f: impl FnMut() -> Option<T>) -> Option<T> {
     vfscli::session::poll_value::<super::CivisSys, T>(bound_ticks, period_ticks, f)
 }
 pub use vfscli::session::{fs_reply_check, ring_reset};

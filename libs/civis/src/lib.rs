@@ -25,7 +25,7 @@ extern crate alloc;
 pub extern crate syscall_numbers;
 use syscall_numbers::*;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
 /// Pagina fisica scratch riservata dal kernel per i test `map_physical`.
 pub use syscall_numbers::MAP_TEST_PHYS;

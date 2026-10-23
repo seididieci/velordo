@@ -14,9 +14,6 @@ pub const T_READY: u64 = 107;
 // Mode client.
 pub const M_ECHO: u64 = 0;
 pub const M_ZERO: u64 = 1;
-// Server sacrificale request/reply (come MODE_SRV del client): risponde
-// T_REQ, esce pulito su T_STOP. Usato da t55 (suspend di un bloccato).
-pub const M_SRV: u64 = 3;
 // Lifecycle (Fase 14).
 pub const M_CHURN: u64 = 4;
 pub const M_KILLME: u64 = 5;
@@ -41,9 +38,6 @@ pub const M_COWDEMO: u64 = 20;
 // Fase 34: fork COW di se stesso (isolamento padre/figlio su globale,
 // report sul canale di nascita, exit 0).
 pub const M_FORKDEMO: u64 = 21;
-// Fase 35: come KILLME ma alla morte del parent esce 0 da solo dopo ~100
-// tick (igiene senza kill parent-scoped, per t40 dopo il reparent a init).
-pub const M_ORPHAN: u64 = 22;
 // Fase 35 (t50): tentativi ostili che devono fallire (kill non-figlio,
 // register servizio di sistema). w1 = pid target del kill.
 pub const M_HARDEN: u64 = 23;
@@ -54,16 +48,6 @@ pub const M_REG51: u64 = 24;
 // w1 seleziona il target: 0 = testspin senza argv (nucleo 37.0); 1 = testcli
 // con argv ["ARGPROBE","hello","world"] (37.1: sonda argv post-exec).
 pub const M_EXECDEMO: u64 = 25;
-// Fase 40 (t54): handoff grant/claim modello B + SEEK-deny. w1 = nonce del
-// grant da riscuotere (26/28) o ignorato (27/29).
-pub const M_DUPCLAIM: u64 = 26;
-pub const M_DUPGRANT: u64 = 27;
-pub const M_DUPSIBCLAIM: u64 = 28;
-pub const M_SEEKDENY: u64 = 29;
-// Fase 44a (t55): sonda suspend/resume ostili (w1 = pid target non-figlio).
-pub const M_SUSPENDENY: u64 = 30;
-// Fase 44b (t56): catcher cooperativo del cancel (esce 42 al JOB_CANCEL).
-pub const M_SIGCATCH: u64 = 31;
 // Fase 45 (t57): sonda diritti GRANT+PIPE sul proprio canale (testcli con
 // riga test-policy ALL) + detail bitmask esiti.
 pub const M_GRANTDENY: u64 = 32;
@@ -343,12 +327,6 @@ pub fn poll_parent(pid: u64, bound_ticks: i64) -> Option<Option<u32>> {
         }
     }
 }
-
-/// Fixture disco secondario (Fase 16d, accoppiate a run.sh: fat2.img
-/// generata con `--serial C0FFEE01 --label SECOND --marker ...`).
-pub const DISK2_UUID: &str = "C0FFEE01";
-pub const DISK2_LABEL: &str = "SECOND";
-pub const DISK2_MARKER: &[u8] = b"second disk marker";
 
 /// true se il buffer readdir (voci NUL-separate) contiene `name` intero.
 pub fn readdir_contains(buf: &[u8], name: &[u8]) -> bool {

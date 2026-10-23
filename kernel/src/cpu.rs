@@ -23,9 +23,9 @@ static mut HAS_FSGSBASE: bool = false;
 /// grezzi con FCW smascherato).
 pub fn init() {
     // Leaf 0: max basic leaf (niente structured-extended sotto il 7).
-    let max_basic = unsafe { __cpuid(0) }.eax;
+    let max_basic = __cpuid(0).eax;
     let supported = if max_basic >= 7 {
-        unsafe { __cpuid_count(7, 0) }.ebx & (1 << 0) != 0
+        __cpuid_count(7, 0).ebx & (1 << 0) != 0
     } else {
         false
     };
@@ -56,6 +56,7 @@ pub fn init() {
 
 /// FSGSBASE disponibile per ring 3? (La suite threadtest adatta il test TLS:
 /// isolamento via rdfsbase se presente, smoke set_fs altrimenti.)
+#[allow(dead_code)] // API diagnostica: oggi la suite adatta via CPUID
 pub fn has_fsgsbase() -> bool {
     unsafe { HAS_FSGSBASE }
 }

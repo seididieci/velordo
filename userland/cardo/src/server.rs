@@ -151,7 +151,7 @@ fn seed_sys_disk(
 }
 
 civis::entry!(real_main);
-#[inline(never)]
+
 /// Risposta IO_STATS (Fase 0): funzione separata `#[inline(never)]` per non
 /// gonfiare il frame del loop server (stack cardo 16 KiB).
 #[inline(never)]
@@ -302,7 +302,7 @@ fn real_main(_sp: u64) -> ! {
     // Volume on-disk (scaffold RAW + motore): legato da R_ARCA_DEBUG/OPEN
     // come `VolumeStore` (un solo handle: USEDISK lo muove nel motore, mai
     // duplicato). Vive finche' cardo vive (al restart si rilega dal disco).
-    let mut dbgvol: Option<btree_drv::VolumeStore> = None;
+    let mut dbgvol: Option<btree_drv::VolumeStore>;
 
     // Motore B+tree su disco (backend UNICO): legato all'AVVIO se un volume
     // ArcaFS esiste (56.2c sys-dal-volume), altrimenti lazy da USEDISK(1)
@@ -336,7 +336,6 @@ fn real_main(_sp: u64) -> ! {
     fat_gen = fat_gen.wrapping_add(1);
     // ADR-0059 (v4): il volume si presenta — uuid + label (il nome).
     let root_label = {
-        let mut sec = [0u8; 512];
         match mount::probe_arca(root_handle) {
             Some(id) => alloc::string::String::from(id.label_str()),
             None => String::new(),

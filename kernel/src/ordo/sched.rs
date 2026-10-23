@@ -47,6 +47,7 @@ pub(crate) const MAX_PIDS: usize = 128;
 pub struct Priority(pub u8);
 
 #[allow(non_upper_case_globals)]
+#[allow(dead_code)] // alias documentati: il codice usa Normal/Idle
 impl Priority {
     pub const High: Priority = Priority(31);
     pub const Normal: Priority = Priority(16);

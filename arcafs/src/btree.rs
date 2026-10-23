@@ -544,6 +544,10 @@ fn internal_pick(it: &Internal, key: &[u8]) -> usize {
 
 // ── Overflow: catena RAW `[next:8][chunk:3552]` ───────────────────────────
 
+/// Scrittura di catena OV (legacy): i write nuovi producono solo extent.
+/// Usata dall'unit test che forgia un record OV per provare la lettura duale
+/// e la migrazione al primo write.
+#[cfg(test)]
 fn ov_write<S: BlockStore>(
     store: &mut S,
     gen: u64,
@@ -610,21 +614,6 @@ fn ov_read<S: BlockStore>(store: &S, head: u64, size: usize) -> Option<Vec<u8>> 
         return None;
     }
     Some(out)
-}
-
-fn ov_free<S: BlockStore>(store: &mut S, head: u64) {
-    let mut cur = head;
-    let mut guard = 1 << 20; // mai loop infinito su catena corrotta
-    let mut payload = format::boxed_node();
-    while cur != 0 && guard > 0 {
-        guard -= 1;
-        let next = match store.read_node(cur, &mut payload) {
-            Some((ARCA_NODE_TYPE_RAW, _)) => rd64(&payload[..], 0).unwrap_or(0),
-            _ => 0,
-        };
-        store.free(cur);
-        cur = next;
-    }
 }
 
 /// Byte logici di un record (qualunque variante: inline, legacy, extent).
@@ -1167,33 +1156,6 @@ impl<S: BlockStore> BTree<S> {
         blocks.sort_unstable();
         blocks.dedup();
         Some(blocks.len() as u64)
-    }
-
-    /// Walk di catena overflow che tollera i blocchi gia' visti (dedup, non
-    /// ciclo: le catene non si condividono per costruzione, ma un puntatore
-    /// riveduto si conta una volta sola invece di dichiarare corruzione —
-    /// i detector di corruzione restano `reachable_blocks`/GC).
-    #[inline(never)]
-    fn quota_walk_ov(&self, head: u64, out: &mut Vec<u64>) -> Option<()> {
-        let mut cur = head;
-        let mut guard = 1usize << 20;
-        let mut payload = format::boxed_node();
-        while cur != 0 {
-            if guard == 0 {
-                return None;
-            }
-            guard -= 1;
-            if out.contains(&cur) {
-                break;
-            }
-            out.push(cur);
-            let (ty, _) = self.store.read_node(cur, &mut payload)?;
-            if ty != ARCA_NODE_TYPE_RAW {
-                return None;
-            }
-            cur = rd64(&payload[..], 0)?;
-        }
-        Some(())
     }
 
     /// Il bucket puo' accogliere `add_bytes` in piu'? `None` = misura

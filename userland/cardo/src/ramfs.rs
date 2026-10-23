@@ -125,17 +125,6 @@ impl RamFs {
         None
     }
 
-    /// Crea un file vuoto se non esiste, ritorna il nodo.
-    pub fn create_file(&mut self, path: &str) -> Option<&mut Vec<u8>> {
-        let node = self.find_or_create(path)?;
-        match node {
-            FsNode::File { data, .. } => Some(data),
-            // Symlink: mai scrittura sul link (l'handler segue prima);
-            // diretto = rifiuto loud.
-            FsNode::Symlink { .. } | FsNode::Dir { .. } => None,
-        }
-    }
-
     /// Byte dati contenuti nell'albero (Fase 52, P3: sensore statvfs).
     /// Solo payload file (niente overhead nodi: stima per difetto onesta,
     /// mai gonfiata — la quota futura misuri per eccesso altrove).
@@ -164,30 +153,6 @@ impl RamFs {
             FsNode::Dir { entries, .. } => Some(entries.keys().cloned().collect()),
             _ => None,
         }
-    }
-
-    /// Crea una directory al path specificato (crea le directory intermedie).
-    pub fn mkdir(&mut self, path: &str) -> Option<()> {
-        let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-        if parts.is_empty() || parts[0].is_empty() {
-            return None;
-        }
-        let mut current = &mut self.root;
-        let now = crate::wall::wall_secs();
-        for (i, &part) in parts.iter().enumerate() {
-            if i == parts.len() - 1 {
-                current.entry(String::from(part))
-                    .or_insert_with(|| FsNode::Dir { entries: BTreeMap::new(), mode: MODE_DIR_DEF, mtime: now });
-                return Some(());
-            }
-            let entry = current.entry(String::from(part))
-                .or_insert_with(|| FsNode::Dir { entries: BTreeMap::new(), mode: MODE_DIR_DEF, mtime: now });
-            match entry {
-                FsNode::Dir { entries: dir, .. } => current = dir,
-                _ => return None,
-            }
-        }
-        None
     }
 
     /// Cancella un file o una directory VUOTA (Fase 18.2, `R_DELETE`).
@@ -256,7 +221,7 @@ impl LocalFs for RamFs {
                 // Il file esiste gia': svuotalo.
                 let node = self.find(path).unwrap();
                 match node {
-                    FsNode::File { data, .. } => {
+                    FsNode::File { .. } => {
                         // Devo usare find_or_create per avere &mut Vec<u8>.
                         let mut_node = self.find_or_create(path);
                         if let Some(FsNode::File { data, mtime, .. }) = mut_node {
@@ -271,7 +236,7 @@ impl LocalFs for RamFs {
             // OPEN_TRUNC senza OPEN_CREATE: il file deve esistere.
             let node = self.find(path).ok_or(crate::ERR_NOTFOUND)?;
             match node {
-                FsNode::File { data, .. } => {
+                FsNode::File { .. } => {
                     let mut_node = self.find_or_create(path);
                     if let Some(FsNode::File { data, mtime, .. }) = mut_node {
                         data.clear();
@@ -339,10 +304,6 @@ impl LocalFs for RamFs {
             Some(FsNode::Dir { .. }) => Err(crate::ERR_ISDIR),
             None => Err(crate::ERR_NOTFOUND),
         }
-    }
-
-    fn close(&mut self, _h: Self::Handle) {
-        // RamFs non ha stato per-fd.
     }
 
     fn readdir(&mut self, rel: &str, out: &mut dyn EntrySink) -> Result<usize, u64> {

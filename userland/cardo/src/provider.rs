@@ -37,7 +37,6 @@ pub trait LocalFs {
     fn open(&mut self, rel: &str, flags: u32) -> Result<Self::Handle, u64>;
     fn read(&mut self, h: Self::Handle, off: usize, buf: &mut [u8]) -> Result<usize, u64>;
     fn write(&mut self, h: Self::Handle, off: usize, buf: &[u8], append: bool) -> Result<usize, u64>;
-    fn close(&mut self, h: Self::Handle);
     fn readdir(&mut self, rel: &str, out: &mut dyn EntrySink) -> Result<usize, u64>;
     fn stat(&mut self, rel: &str) -> Result<Meta, u64>;
     fn mkdir(&mut self, rel: &str) -> Result<(), u64>;

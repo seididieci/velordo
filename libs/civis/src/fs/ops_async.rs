@@ -139,10 +139,8 @@ pub fn fs_collect(req: i64, dst: &mut [u8], cap: usize) -> Result<usize, Error> 
             // ring: il frame async e' orfano (mai consumato o senza reply) e
             // disallineerebbe le op successive; la prossima op riscrive.
             println!("[civis] fs_collect: server pid {} morto (code {}), req {} perso", pid, code, req);
-            unsafe {
-                session::ring_reset(ring::REQ_RING_VA);
-                session::ring_reset(ring::RESP_RING_VA);
-            }
+            session::ring_reset(ring::REQ_RING_VA);
+            session::ring_reset(ring::RESP_RING_VA);
             session::guard_clear();
             return Err(Error::ServerDied);
         }
@@ -206,8 +204,6 @@ pub fn fs_collect_msg(m: &IpcMsg, dst: &mut [u8], cap: usize, is_read: bool) -> 
 /// disallineerebbero le op successive; la prossima op riscrive da zero.
 pub fn fs_abort_pending() {
     session::guard_clear();
-    unsafe {
-        session::ring_reset(ring::REQ_RING_VA);
-        session::ring_reset(ring::RESP_RING_VA);
-    }
+    session::ring_reset(ring::REQ_RING_VA);
+    session::ring_reset(ring::RESP_RING_VA);
 }

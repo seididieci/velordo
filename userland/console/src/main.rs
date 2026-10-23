@@ -23,7 +23,7 @@ use alloc::boxed::Box;
 use civis;
 
 use term::font::Font;
-use term::grid::{self, color, Grid};
+use term::grid::{color, Grid};
 use term::surface::{self, Geom, Pixel, Surface, VgaText};
 use term::utf8::Decoder;
 

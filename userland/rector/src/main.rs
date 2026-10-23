@@ -17,10 +17,10 @@ use civis::{println, print_str};
 // `syscall-numbers`, via `civis` (prima duplicati qui).
 use civis::{SVC_READY, TEST_DONE};
 
-/// Manifest degli hash dei servizi (Fase 36, identita' misurata, Strato 2 di
-/// ADR-0026): generato a build-time da scripts/gen-service-hashes.sh sui
-/// `.bin` finali, incluso qui via `VELORDO_SERVICE_HASHES` (esportata da
-/// build-userland.sh; senza, questa compilazione fallisce loud).
+// Manifest degli hash dei servizi (Fase 36, identita' misurata, Strato 2 di
+// ADR-0026): generato a build-time da scripts/gen-service-hashes.sh sui
+// `.bin` finali, incluso qui via `VELORDO_SERVICE_HASHES` (esportata da
+// build-userland.sh; senza, questa compilazione fallisce loud).
 include!(env!("VELORDO_SERVICE_HASHES"));
 
 /// Hash atteso del servizio `bin` (nome display, es. `b"gpu"`), o
@@ -611,12 +611,6 @@ const SVC_POSIX: SvcMeta = SvcMeta {
     prio: 16,
     io: &[],
 };
-const SVC_SHELL: SvcMeta = SvcMeta {
-    bin: b"usershell",
-    obj: Some((b"sys", b"bin/posix/shell.bin")),
-    prio: 16,
-    io: &[],
-};
 // Servizio identita'/autenticazione utenti (ADR-0055): identis gestisce il
 // bucket `identis:config` (nome -> hash password). identis-login e' il primo
 // programma interattivo (chiede utente/password, stampa SUCCESS/FAIL).
@@ -649,18 +643,25 @@ const SVC_VESTIGIA: SvcMeta = SvcMeta {
 };
 // Suite di test (D2): caricate per object_id dal bucket `tst` (hash-pinned
 // come i servizi); `path` resta come gemello FAT documentato (t39 lo prova).
+#[cfg(not(feature = "skip_tests"))]
 const TEST_FS: SvcMeta = SvcMeta { bin: b"usertestfs", obj: Some((b"tst", b"test/testfs.bin")), prio: 16, io: &[] };
+#[cfg(all(not(feature = "skip_tests"), feature = "fat_tests"))]
 const TEST_FAT: SvcMeta = SvcMeta { bin: b"usertestfat", obj: Some((b"tst", b"test/testfat.bin")), prio: 16, io: &[] };
+#[cfg(not(feature = "skip_tests"))]
 const TEST_ARCA: SvcMeta = SvcMeta { bin: b"usertestsarca", obj: Some((b"tst", b"test/testarca.bin")), prio: 16, io: &[] };
 // Suite della personalita' POSIX (Fase 58.5, ADR-0041): gira PRIMA di
 // usertests (t54 deve precedere i drop di diritti di t34 in usertests).
+#[cfg(not(feature = "skip_tests"))]
 const TEST_POSIX: SvcMeta = SvcMeta { bin: b"userposixtests", obj: Some((b"tst", b"test/posixtst.bin")), prio: 16, io: &[] };
 // Protocollo di autenticazione/creazione utenti (ADR-0055, Fase 3.1):
 // sessione con token, add_user, duplicati, nomi non conformi, elenco.
+#[cfg(not(feature = "skip_tests"))]
 const TEST_IDENTIS: SvcMeta = SvcMeta { bin: b"identistest", obj: Some((b"tst", b"test/idtest.bin")), prio: 16, io: &[] };
+#[cfg(not(feature = "skip_tests"))]
 const TESTS: SvcMeta = SvcMeta { bin: b"usertests", obj: Some((b"tst", b"test/tests.bin")), prio: 16, io: &[] };
 // Thread 1:1 (S-T, ADR-0046): dopo usertests (nessuna dipendenza dai diritti),
 // prima della shell interattiva.
+#[cfg(not(feature = "skip_tests"))]
 const TEST_THREADS: SvcMeta = SvcMeta { bin: b"userthreadtest", obj: Some((b"tst", b"test/thread.bin")), prio: 16, io: &[] };
 // Fuse staticone (S2.5d): ricompone i chunk rustc e lo spawna bigstack.
 // Solo obj (niente FAT: i chunk vivono solo su arca grande), solo se la
@@ -686,7 +687,7 @@ fn boot_svc(meta: &'static SvcMeta, wait: bool) -> Option<i64> {
     Some(chan)
 }
 
-/// Entry di init: spawna i servizi e resta vivo come root della process tree.
+// Entry di init: spawna i servizi e resta vivo come root della process tree.
 civis::entry!(real_main);
 fn real_main(_sp: u64) -> ! {
     let my_pid = civis::getpid();

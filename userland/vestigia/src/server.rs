@@ -20,7 +20,7 @@ use super::*;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use civis::{
-    EXIT_NOTIFY, LOG_APPEND, LOG_FLUSH, LOG_MSG_MAX, LOG_RAM_TAIL, LOG_READ, LOG_REG,
+    EXIT_NOTIFY, LOG_APPEND, LOG_FLUSH, LOG_RAM_TAIL, LOG_READ, LOG_REG,
     LOG_SEAL, LOG_SRC_MAX, LOG_STATS,
 };
 

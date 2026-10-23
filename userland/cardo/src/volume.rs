@@ -211,6 +211,7 @@ impl ArcaVolume {
     /// superblock (checksum ricalcolato). Il superblock deve gia' esistere
     /// (`arca create`); qui si riempiono solo i campi A2. high_water = 2.
     /// (56.2c: recovery; per ora solo bootstrap dei volumi di test.)
+    #[allow(dead_code)] // recovery scaffold: nessun chiamante in produzione
     #[inline(never)]
     pub fn format(handle: u32) -> Option<Self> {
         let disk = IpcDisk::new(handle);

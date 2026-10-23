@@ -364,7 +364,7 @@ fn cmd_uuid(args: &[String]) {
         }
         i += 1;
     }
-    let mut f = match OpenOptions::new().read(true).write(true).open(path) {
+    let f = match OpenOptions::new().read(true).write(true).open(path) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("uuid {}: {}", path, e);

@@ -13,7 +13,6 @@
 extern crate alloc;
 
 use crate::font::Font;
-use crate::grid::color;
 
 /// Palette ANSI a 16 colori (RGB), sincronizzata con `grid::color`.
 ///
@@ -107,7 +106,6 @@ pub fn color256(n: u8) -> u32 {
             let g = 8u8.saturating_add((n as u32 - 232) as u8 * 10);
             rgba(g, g, g, 0xFF)
         }
-        _ => color::WHITE,
     }
 }
 

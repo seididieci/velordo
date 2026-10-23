@@ -87,8 +87,10 @@ pub struct Fat32<B: BlockSource> {
     /// Seriale volume FAT32 (`vol_id`, BPB+67 LE32 nel layout standard firma
     /// `0x29`@66; `fat_bpb_identity` accetta anche il legacy firma@67).
     /// `None` = assente: niente identità stabile da questo nodo (Fase 16d).
+    #[allow(dead_code)] // identita' FAT: riservata al match UUID (fuori gate)
     pub(crate) vol_serial: Option<u32>,
     /// Label volume BPB+71 (11 byte raw, padding spazi): identità `LABEL=`.
+    #[allow(dead_code)] // identita' FAT: riservata al match label (fuori gate)
     pub(crate) vol_label: [u8; 11],
     // Nota: nessun memo settoriale qui (il 24.1 `fat_memo` e' stato rimosso in
     // 25: la cache settoriale write-through vive in `block`, unico

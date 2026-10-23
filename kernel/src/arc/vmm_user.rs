@@ -21,7 +21,6 @@ mod teardown;
 mod spawn_copy;
 
 pub use layout::{USER_BASE, USER_CODE, USER_FS_BUFFER, USER_RESP_RING, USER_HEAP_BASE, USER_HEAP_LIMIT, MMAP_BASE, MMAP_END};
-pub use layout::USER_DMA_VA;
 // Compat: erano `pub` prima dello split (nessun uso interno attuale).
 #[allow(unused_imports)]
 pub use layout::{USER_STACK_TOP, USER_STACK_FRAMES, USER_STACK_GUARD};

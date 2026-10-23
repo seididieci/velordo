@@ -6,7 +6,7 @@
 //! fallback VGA parte se la risposta non e' valida).
 
 use crate::virtio::DisplayInfo;
-use vela::gpu::{VIRTIO_GPU_MAX_SCANOUTS, VIRTIO_GPU_RESP_OK_DISPLAY_INFO};
+use vela::gpu::VIRTIO_GPU_MAX_SCANOUTS;
 
 /// Dimensione di `virtio_gpu_ctrl_hdr`.
 pub const CTRL_HDR_LEN: usize = 24;
@@ -21,14 +21,6 @@ pub const DISPLAY_INFO_LEN: usize = CTRL_HDR_LEN + VIRTIO_GPU_MAX_SCANOUTS * DIS
 #[inline]
 fn rd32(base: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([base[off], base[off + 1], base[off + 2], base[off + 3]])
-}
-
-/// `hdr.type == RESP_OK_DISPLAY_INFO`.
-pub fn response_ok(resp: &[u8]) -> bool {
-    if resp.len() < CTRL_HDR_LEN {
-        return false;
-    }
-    rd32(resp, 0) == VIRTIO_GPU_RESP_OK_DISPLAY_INFO
 }
 
 /// Primo scanout abilitato con geometria non nulla.

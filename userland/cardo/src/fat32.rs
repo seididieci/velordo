@@ -71,10 +71,6 @@ impl<B: BlockSource> crate::provider::LocalFs for Fat32<B> {
         Ok(self.write_grow(&h, off, buf))
     }
 
-    fn close(&mut self, _h: Self::Handle) {
-        // FAT non ha stato per-fd.
-    }
-
     fn readdir(&mut self, rel: &str, out: &mut dyn crate::provider::EntrySink) -> Result<usize, u64> {
         let entries = self.list_dir(rel);
         for e in &entries {

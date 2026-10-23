@@ -1119,7 +1119,7 @@ fn path_readlink(
         if m.is_provider() {
             let r = if let Some(mut w) = m.arca_with(disk.as_mut()) {
                 w.readlink_dyn(rel)
-            } else if let Some(mut d) = m.local_dyn() {
+            } else if let Some(d) = m.local_dyn() {
                 d.readlink_dyn(rel)
             } else {
                 return Err(ERR);
@@ -1163,7 +1163,7 @@ fn path_stat(
         if m.is_provider() {
             if let Some(mut w) = m.arca_with(disk.as_mut()) {
                 *out = w.stat_dyn(rel)?;
-            } else if let Some(mut d) = m.local_dyn() {
+            } else if let Some(d) = m.local_dyn() {
                 *out = d.stat_dyn(rel)?;
             } else {
                 return Err(ERR);

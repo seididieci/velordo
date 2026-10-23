@@ -166,7 +166,7 @@ fn spawn_shell() {
         return;
     };
     match civis::spawn_image(&img, &meta.detached()) {
-        Ok(chan) => console_write(b"[login] shell POSIX avviata\n"),
+        Ok(_chan) => console_write(b"[login] shell POSIX avviata\n"),
         Err(_) => console_write(b"[login] spawn della shell fallito\n"),
     }
 }

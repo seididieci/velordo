@@ -485,7 +485,7 @@ fn real_main(_sp: u64) -> ! {
             // un frame ring; il server azzera la coda e il checksum copre
             // tutto il payload 64 KiB. Mai 64 KiB sullo stack (guardia 16 KiB).
             let npat = civis::RING_MAX_PAYLOAD - 440;
-            let mut pat: alloc::vec::Vec<u8> = (0..npat).map(|i| ((i * 7) % 251) as u8).collect();
+            let pat: alloc::vec::Vec<u8> = (0..npat).map(|i| ((i * 7) % 251) as u8).collect();
             let v24 = match (b1, b2) {
                 (Some(a), Some(b)) => {
                     civis::arca_write_node(a, &pat).is_ok()
@@ -822,7 +822,7 @@ fn real_main(_sp: u64) -> ! {
             };
             // 51. over-budget: rifiuto ESATTAMENTE NoSpace, dati intatti.
             let v51 = {
-                let (a, b, cc) = (qbig(51), qbig(52), qbig(53));
+                let (a, b) = (qbig(51), qbig(52));
                 let mut ok = civis::arca_quota_set(b"q51", 9).is_ok();
                 let p1 = civis::obj_put(b"q51", b"k1", &a);
                 let p2 = civis::obj_put(b"q51", b"k2", &b);
@@ -1435,7 +1435,7 @@ fn real_main(_sp: u64) -> ! {
                     ];
                     let mut all_ok = true;
                     // Misura base prima di scrivere: packed stats del volume.
-                    let mut rd_packed = || -> Option<(u64, u64, u64, u64)> {
+                    let rd_packed = || -> Option<(u64, u64, u64, u64)> {
                         civis::arca_extent_stats().ok().map(|(_, _, _, _, _, _, _, np, pb, pu, pc)| (np, pb, pu, pc))
                     };
                     let (np0, pb0, pu0, pc0) = rd_packed().unwrap_or((0, 0, 0, 0));

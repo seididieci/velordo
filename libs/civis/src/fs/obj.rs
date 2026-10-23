@@ -315,7 +315,6 @@ pub fn obj_delete(bucket: &[u8], key: &[u8]) -> Result<(), Error> {
 // registri portano sentinelle (via `fs_reply_check`). Il payload dedicato
 // (READ/STAT) si legge solo dopo registri-ok (mai oltre l'header).
 
-use arcafs::format::ARCA_NODE_PAYLOAD_LEN;
 use arcafs::proto::{
     ARCA_SUB_ALLOC, ARCA_SUB_CACHE_FLUSH, ARCA_SUB_FREE, ARCA_SUB_OPEN,
     ARCA_SUB_QUOTA_GET, ARCA_SUB_QUOTA_SET, ARCA_SUB_READ, ARCA_SUB_STAT,

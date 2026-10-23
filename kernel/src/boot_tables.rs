@@ -221,7 +221,7 @@ pub static BOOT_PT_VGA: PageTable = {
 /// Lo stub vi commuta RSP subito dopo il jump-high, prima di `rust_main`:
 /// dopo l'unmap di PML4[0] lo stack LOW di transizione non e' piu' mappato.
 #[repr(C, align(16))]
-struct BootStack([u8; 16384]);
+pub struct BootStack([u8; 16384]);
 
 #[unsafe(no_mangle)]
 pub static BOOT_HIGH_STACK: BootStack = BootStack([0; 16384]);

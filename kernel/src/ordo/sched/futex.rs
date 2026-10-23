@@ -6,7 +6,6 @@
 // Join/detach/mutex userspace vivono sopra (PAL/libc): il kernel da'
 // solo dormi/sveglia, mai code di join.
 
-use super::*;
 use crate::ordo::process::State;
 use core::sync::atomic::Ordering;
 use super::ctx::{SCHED, INITIALIZED, switch_to};

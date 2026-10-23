@@ -9,7 +9,7 @@ use vfscli::{State, Sys};
 
 /// Backing syscall per il client FS di questo processo (S2.2): wrapper
 /// sottili sopra i meccanismi esistenti (nessuna logica qui).
-struct CivisSys;
+pub(crate) struct CivisSys;
 
 impl Sys for CivisSys {
     unsafe fn ring_alloc() -> Option<(u64, u64)> {

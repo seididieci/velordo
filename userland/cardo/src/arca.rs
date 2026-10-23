@@ -47,10 +47,12 @@ impl ArcaHandle {
 /// Istanza ArcaFS: identita' dal mount + set transient delle dir esplicite.
 pub struct ArcaFs {
     /// Generation del superblock montato (diagnostica, come uuid).
+    #[allow(dead_code)] // identita' diagnostica del mount (letto via VolumeStore)
     pub generation: u64,
     /// UUID volume (identita' globale con `object_id`).
     pub uuid: u64,
     /// Offset LBA della partizione (0 = whole-disk; traduzione nel driver).
+    #[allow(dead_code)] // traduzione LBA delegata al driver (sempre 0 oggi)
     pub partition_offset: u64,
     /// Dir create per `mkdir` (path → mtime creazione): SOLO RAM, mai disco.
     /// Perso a restart/remount (le vuote spariscono, le piene riemergono).
@@ -748,7 +750,6 @@ impl LocalFs for ArcaFs {
     fn write(&mut self, _h: Self::Handle, _off: usize, _buf: &[u8], _append: bool) -> Result<usize, u64> {
         Err(crate::ERR_READONLY)
     }
-    fn close(&mut self, _h: Self::Handle) {}
     fn readdir(&mut self, _rel: &str, _out: &mut dyn EntrySink) -> Result<usize, u64> {
         Err(crate::ERR_NOTFOUND)
     }

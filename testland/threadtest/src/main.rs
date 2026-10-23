@@ -211,7 +211,7 @@ fn real_main(_sp: u64) -> ! {
                 // Join: dormi finche' il flag e' 0 (deadline generosa).
                 let addr = J_FLAG.as_ptr() as usize;
                 let t0 = civis::get_ticks();
-                let mut ok = false;
+                let ok;
                 while J_FLAG.load(Ordering::SeqCst) == 0 {
                     if civis::get_ticks() - t0 > 400 {
                         break;
@@ -458,10 +458,10 @@ fn real_main(_sp: u64) -> ! {
                     options(nostack),
                 );
             }
-            $back.0 == $pat.0
+            unsafe { $back.0 == $pat.0 }
         }};
     }
-    unsafe extern "C" fn txa_main() {
+    extern "C" fn txa_main() {
         let mut ok = true;
         let t0 = civis::get_ticks();
         while civis::get_ticks() - t0 < 10 {
@@ -473,7 +473,7 @@ fn real_main(_sp: u64) -> ! {
         X_A.store(if ok { 1 } else { 2 }, Ordering::SeqCst);
         civis::thread_exit(0);
     }
-    unsafe extern "C" fn txb_main() {
+    extern "C" fn txb_main() {
         let mut ok = true;
         let t0 = civis::get_ticks();
         while civis::get_ticks() - t0 < 10 {

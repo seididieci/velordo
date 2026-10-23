@@ -161,39 +161,6 @@ pub(crate) fn node_read(
     }
 }
 
-/// Scrive il settore `lba` del nodo `handle` (bound check sul nodo, come read).
-/// Write-through (Fase 25): prima il PIO stabile, poi la cache; a
-/// fallimento la entry e' invalidata (mai dati sporchi in cache).
-fn node_write(
-    disks: &[block::AtaDisk],
-    disk_sectors: &[u64],
-    parts: &[Vec<PartLoc>],
-    handle: u32,
-    lba: u64,
-    data: &[u8; 512],
-) -> bool {
-    let (disk, base, sectors) = match locate(handle, disk_sectors, parts) {
-        Some(r) => r,
-        None => return false,
-    };
-    if lba >= sectors {
-        return false;
-    }
-    match disks.get(disk) {
-        Some(d) => {
-            let phys = base + lba;
-            let ok = d.write_sector(phys, data);
-            if ok {
-                debug_assert!(cache::POLICY == cache::Policy::WriteThrough);
-                cache::insert_from(disk, phys, data);
-            } else {
-                cache::invalidate(disk, phys);
-            }
-            ok
-        }
-        None => false,
-    }
-}
 /// 24.2 — bound del protocollo (frame nel ring: 8 + 7*512 in request,
 /// 16 + 7*512 in response, entrambi < 4087).
 pub(crate) const DISK_MAX_SECTORS: usize = 7;

@@ -23,6 +23,7 @@ pub struct PartInfo {
 /// Tipo GPT ArcaFS (placeholder, da registrare con UUID alias prima del
 /// rilascio). In A1 il match sul tipo NON e' enforced: qualunque entry non
 /// vuota viene esposta (come MBR) — il mount decide sul magic `ACFS`.
+#[allow(dead_code)] // placeholder documentato per il match GPT futuro
 pub const ARCAFS_TYPE_GUID: [u8; 16] = [
     0x41, 0x52, 0x43, 0x41, 0x46, 0x53, 0x2D, 0x41,
     0x31, 0x2D, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31,

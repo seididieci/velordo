@@ -82,17 +82,17 @@ use civis::{
 // Tag IPC FS/boot (DocsB): single source in `syscall-numbers`, via `civis`.
 use civis::{FS_BUF_REG, FS_NOTIFY, FS_REGISTER};
 
-/// Manifest degli hash dei servizi (Fase 36, identita' misurata, Strato 2 di
-/// ADR-0026): generato a build-time da scripts/gen-service-hashes.sh, incluso
-/// via `VELORDO_SERVICE_HASHES` (esportata da build-userland.sh — cardo e'
-/// compilato DOPO la generazione, vedi ordine di build).
+// Manifest degli hash dei servizi (Fase 36, identita' misurata, Strato 2 di
+// ADR-0026): generato a build-time da scripts/gen-service-hashes.sh, incluso
+// via `VELORDO_SERVICE_HASHES` (esportata da build-userland.sh — cardo e'
+// compilato DOPO la generazione, vedi ordine di build).
 include!(env!("VELORDO_SERVICE_HASHES"));
-/// Tetto ops per hash noto (Fase 45, sandbox build): `SERVICE_POLICY`,
-/// generato dallo stesso script (referenzia le HASH_*, incluso DOPO).
-/// `TEST_POLICY` (hash dei binari testland, generato da
-/// scripts/gen-test-policy.sh in build-tests.sh): incluso SOLO qui, mai dai
-/// binari test (niente ciclo, vedi policy.rs). Entrambi `env!` = fail loud a
-/// variabile mancante (mai policy stale silenziosa).
+// Tetto ops per hash noto (Fase 45, sandbox build): `SERVICE_POLICY`,
+// generato dallo stesso script (referenzia le HASH_*, incluso DOPO).
+// `TEST_POLICY` (hash dei binari testland, generato da
+// scripts/gen-test-policy.sh in build-tests.sh): incluso SOLO qui, mai dai
+// binari test (niente ciclo, vedi policy.rs). Entrambi `env!` = fail loud a
+// variabile mancante (mai policy stale silenziosa).
 include!(env!("VELORDO_SERVICE_POLICY"));
 include!(env!("VELORDO_TEST_POLICY"));
 
