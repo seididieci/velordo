@@ -226,6 +226,16 @@ else
     echo "[arca] ATTENZIONE: third_party/MapleMono-NF-Regular.ttf mancante (console senza font: fallback VGA)" >&2
 fi
 
+# Sfondo immagine per la console grafica (D3/D4): BMP 32-bit non compresso,
+# 585x135 pixel, ordine BGRA nativo del framebuffer. La console lo legge da
+# `/bg.bmp` all'avvio (prima del banner).
+if [ -f "$ROOT/assets/bg.bmp" ]; then
+    SEED_NS+=( "ns:bg.bmp=$ROOT/assets/bg.bmp" )
+    echo "[arca] + bg.bmp (sfondo immagine)"
+else
+    echo "[arca] ATTENZIONE: assets/bg.bmp mancante (console senza sfondo immagine)" >&2
+fi
+
 # Seed bucket Identis (ADR-0055): utente root con hash BLAKE2s-256 di "root".
 # Seedato sempre (gate inclusi): il volume parte con un utente valido.
 IDENTIS_CFG="$(mktemp)"
