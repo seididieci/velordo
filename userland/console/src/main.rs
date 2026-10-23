@@ -91,6 +91,10 @@ struct Term {
     layer0: Option<alloc::vec::Vec<u8>>,
     /// Larghezza in pixel del layer 0 (stride = width * 4, nessun padding).
     layer0_width: u32,
+    /// Offset X del layer 0 centrato nel framebuffer (D4).
+    layer0_offset_x: u32,
+    /// Offset Y del layer 0 centrato nel framebuffer (D4).
+    layer0_offset_y: u32,
     /// Lo slot DMA del framebuffer corrente (D4: il riadattamento alloca
     /// l'altro slot e libera questo solo dopo che il nuovo e' presentato —
     /// un riadattamento fallito non deve lasciare la surface su un buffer
@@ -609,20 +613,34 @@ impl Term {
         }
     }
 
-    /// Disegna l'intero layer 0 nel framebuffer attivo (chiamato una volta
-    /// all'avvio, prima di qualsiasi testo).
+    /// Disegna l'intero layer 0 nel framebuffer attivo, centrato.
+    /// Calcola e memorizza gli offset di centratura per `restore_layer0_cell`.
     fn draw_layer0_full(&mut self, layer0: &[u8]) {
         let surface = match &mut self.surface {
             Surface::Pixel(p) => p,
             _ => return,
         };
-        let w = self.layer0_width as usize;
-        let h = layer0.len() / (w * 4);
-        for yy in 0..h {
-            let src = unsafe { layer0.as_ptr().add(yy * w * 4) };
-            let dst = unsafe { surface.ptr.add(yy * surface.stride as usize) };
+        let w_img = self.layer0_width as usize;
+        let h_img = layer0.len() / (w_img * 4);
+        let w_fb = surface.width as usize;
+        let h_fb = surface.height as usize;
+
+        // Centra l'immagine nel framebuffer (D4).
+        self.layer0_offset_x = ((w_fb.saturating_sub(w_img)) / 2) as u32;
+        self.layer0_offset_y = ((h_fb.saturating_sub(h_img)) / 2) as u32;
+
+        let ox = self.layer0_offset_x as usize;
+        let oy = self.layer0_offset_y as usize;
+
+        for yy in 0..h_img {
+            let src = unsafe { layer0.as_ptr().add(yy * w_img * 4) };
+            let dst = unsafe {
+                surface
+                    .ptr
+                    .add(((oy + yy) * surface.stride as usize) + ox * 4)
+            };
             unsafe {
-                core::ptr::copy_nonoverlapping(src, dst, w * 4);
+                core::ptr::copy_nonoverlapping(src, dst, w_img * 4);
             }
         }
     }
@@ -640,11 +658,17 @@ impl Term {
         let ch = surface.geom.cell_h as u32;
         let x = surface.geom.origin_x + (col as u32) * cw;
         let y = surface.geom.origin_y + (row as u32) * ch;
-        let w = self.layer0_width;
-        let h = (layer0.len() / (w as usize * 4)) as u32;
+        let w_img = self.layer0_width;
+        let h_img = (layer0.len() / (w_img as usize * 4)) as u32;
+        let ox = self.layer0_offset_x;
+        let oy = self.layer0_offset_y;
+
+        // Converti coordinate framebuffer -> coordinate layer 0.
+        let x0 = x.saturating_sub(ox);
+        let y0 = y.saturating_sub(oy);
 
         // Se la cella e' completamente fuori dal layer 0, riempi di nero.
-        if x >= w || y >= h {
+        if x0 >= w_img || y0 >= h_img {
             let black = color::BLACK;
             for yy in 0..ch {
                 let sy = y + yy;
@@ -659,7 +683,10 @@ impl Term {
                     }
                     let d = dst_off + (xx as usize) * 4;
                     unsafe {
-                        core::ptr::write_volatile(surface.ptr.add(d) as *mut u32, surface::rgba_to_bgra(black));
+                        core::ptr::write_volatile(
+                            surface.ptr.add(d) as *mut u32,
+                            surface::rgba_to_bgra(black),
+                        );
                     }
                 }
             }
@@ -668,13 +695,14 @@ impl Term {
 
         for yy in 0..ch {
             let sy = y + yy;
-            if sy >= surface.height || sy >= h {
+            let sy0 = sy.saturating_sub(oy);
+            if sy >= surface.height || sy0 >= h_img {
                 continue;
             }
-            let src_off = ((sy as usize) * w as usize + (x as usize)) * 4;
+            let src_off = ((sy0 as usize) * w_img as usize + (x0 as usize)) * 4;
             let dst_off = ((sy as usize) * surface.stride as usize + (x as usize)) * 4;
             // Quanti pixel di questa riga stanno dentro il layer 0.
-            let copy_w = cw.min(w - x) as usize;
+            let copy_w = cw.min(w_img - x0) as usize;
             if src_off + copy_w * 4 > layer0.len() {
                 continue;
             }
@@ -693,7 +721,10 @@ impl Term {
                 }
                 let d = dst_off + xx * 4;
                 unsafe {
-                    core::ptr::write_volatile(surface.ptr.add(d) as *mut u32, surface::rgba_to_bgra(color::BLACK));
+                    core::ptr::write_volatile(
+                        surface.ptr.add(d) as *mut u32,
+                        surface::rgba_to_bgra(color::BLACK),
+                    );
                 }
             }
         }
@@ -803,21 +834,19 @@ fn real_main(_sp: u64) -> ! {
         desired: None,
         layer0: None,
         layer0_width: 0,
+        layer0_offset_x: 0,
+        layer0_offset_y: 0,
         fb_slot: civis::DMA_SLOT_DEVICE,
     };
 
     // Carica lo sfondo immagine (layer 0) se disponibile. Deve essere fatto
     // PRIMA del banner, altrimenti il testo lo coprirebbe.
     // Se c'è un surface pixel, inizializza tutto il framebuffer a nero
-    // prima di disegnare il layer 0 (cosi' l'area oltre l'immagine non
+    // PRIMA di disegnare il layer 0 (cosi' l'area oltre l'immagine non
     // mostra spazzatura di memoria).
     if let Surface::Pixel(p) = &mut term.surface {
         let black = surface::rgba_to_bgra(color::BLACK);
-        for yy in 0..p.height {
-            for xx in 0..p.width {
-                unsafe { p.put(xx, yy, black) };
-            }
-        }
+        p.fill_rect(0, 0, p.width, p.height, black);
         term.flush_display();
     }
 

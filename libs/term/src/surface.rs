@@ -227,7 +227,7 @@ impl Pixel {
     }
 
     /// Riempie un rettangolo con un colore opaco.
-    fn fill_rect(&mut self, x: u32, y: u32, w: u32, h: u32, color: u32) {
+    pub fn fill_rect(&mut self, x: u32, y: u32, w: u32, h: u32, color: u32) {
         for yy in y..(y + h) {
             for xx in x..(x + w) {
                 unsafe { self.put(xx, yy, color) };
