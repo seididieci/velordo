@@ -825,12 +825,14 @@ fn real_main(_sp: u64) -> ! {
     // PRIMA del banner, altrimenti il testo lo coprirebbe.
     if let Some((l0, w, h)) = load_bmp("/bg.bmp") {
         let _ = civis::println!("[console] layer 0: {}x{} bg loaded OK", w, h);
+        // Imposta layer0_width PRIMA di draw_layer0_full: la funzione lo usa
+        // per calcolare le righe da copiare (divisione per zero se e' 0).
+        term.layer0_width = w;
         if matches!(term.surface, Surface::Pixel(_)) {
             term.draw_layer0_full(&l0);
             term.flush_display();
         }
         term.layer0 = Some(l0);
-        term.layer0_width = w;
     } else {
         let _ = civis::println!("[console] layer 0: /bg.bmp non trovato o non valido, sfondo nero");
     }
