@@ -7,6 +7,11 @@
 //! La cella tiene un **codepoint** (u32), non un byte: le icone Nerd (PUA)
 //! sono codepoint multi-byte in UTF-8 (D3).
 //!
+//! I colori sono truecolor **RGBA packed** (`0xRRGGBBAA`, alpha opaco per
+//! default). Il background puo' avere alpha < 0xFF per trasparire verso il
+//! layer 0 (sfondo immagine); il foreground resta opaco per ora (alpha sui
+//! caratteri rinviata a quando ci saranno le immagini).
+//!
 //! D4: la griglia ha uno **scrollback** (le righe che escono dal basso) e
 //! sa **ridimensionarsi** (`resize`): il testo viene rilegto come un flusso e
 //! rimesso nella nuova griglia (le righe troppo lunghe si spezzano: reflow
@@ -20,23 +25,56 @@ use alloc::vec::Vec;
 /// Righe di scrollback tenute (oltre quelle della griglia).
 const SCROLLBACK_MAX: usize = 1000;
 
-/// Una cella della griglia: il carattere e i colori (indici VGA 0-15).
+/// Colori truecolor predefiniti (RGBA packed, `0xRRGGBBAA`, alpha opaco).
+///
+/// Gli slot 0–15 sono la palette ANSI convenzionale: molti programmi li
+/// usano per nome. Gli slot 8–15 sono i "bright" corrispondenti.
+/// `BLACK` non e' nero puro: il blu-notte #0B0D14 rende l'interfaccia
+/// piu' morbida.
+pub mod color {
+    // Base (slot ANSI 0–7).
+    pub const BLACK: u32        = 0x0B0D_14FF;
+    pub const RED: u32          = 0xFF5C_70FF;
+    pub const GREEN: u32        = 0x55D6_A7FF;
+    pub const YELLOW: u32       = 0xF5C7_6AFF;
+    pub const BLUE: u32         = 0x5B7C_FFFF;
+    pub const MAGENTA: u32      = 0xC45C_FFFF;
+    pub const CYAN: u32         = 0x42D9_F5FF;
+    pub const WHITE: u32        = 0xE8EB_F2FF;
+
+    // Bright (slot ANSI 8–15).
+    pub const GRAY: u32         = 0x858D_A3FF;
+    pub const BRIGHT_RED: u32   = 0xFF84_93FF;
+    pub const BRIGHT_GREEN: u32 = 0x7BE8_BCFF;
+    pub const BRIGHT_YELLOW: u32 = 0xFFDA_85FF;
+    pub const BRIGHT_BLUE: u32  = 0x8BA3_FFFF;
+    pub const BRIGHT_MAGENTA: u32 = 0xD991_FFFF;
+    pub const BRIGHT_CYAN: u32  = 0x7AE7_F7FF;
+    pub const BRIGHT_WHITE: u32 = 0xFFFF_FFFF;
+
+    pub const DEFAULT_FG: u32   = WHITE;
+    pub const DEFAULT_BG: u32   = BLACK;
+}
+
+/// Una cella della griglia: il carattere e i colori truecolor.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Cell {
     /// Codepoint Unicode (0 = spazio).
     pub cp: u32,
-    /// Colore foreground (0-15, palette VGA).
-    pub fg: u8,
-    /// Colore background (0-15, palette VGA).
-    pub bg: u8,
+    /// Colore foreground truecolor (RGBA packed, `0xRRGGBBAA`).
+    /// Opaco per ora: alpha sui caratteri e' rinviata.
+    pub fg: u32,
+    /// Colore background truecolor (RGBA packed, `0xRRGGBBAA`).
+    /// Alpha < 0xFF = trasparente verso il layer 0 (sfondo immagine).
+    pub bg: u32,
 }
 
 impl Default for Cell {
     fn default() -> Self {
         Cell {
             cp: b' ' as u32,
-            fg: 0x0F,
-            bg: 0x00,
+            fg: color::DEFAULT_FG,
+            bg: color::DEFAULT_BG,
         }
     }
 }
@@ -45,6 +83,11 @@ impl Cell {
     /// La cella e' "vuota" (solo spazio: i colori non contano).
     pub fn is_blank(&self) -> bool {
         self.cp == b' ' as u32
+    }
+
+    /// Il background della cella e' trasparente (alpha < 0xFF).
+    pub fn bg_transparent(&self) -> bool {
+        (self.bg >> 24) & 0xFF < 0xFF
     }
 }
 
@@ -157,8 +200,9 @@ impl Grid {
         self.cells[row * self.cols + col]
     }
 
-    /// Scrive un codepoint nella cella (col,row) e segna la zona sporca.
-    pub fn put(&mut self, col: usize, row: usize, cp: u32, fg: u8, bg: u8) {
+    /// Scrive un codepoint nella cella (col,row) con colori truecolor e segna
+    /// la zona sporca.
+    pub fn put(&mut self, col: usize, row: usize, cp: u32, fg: u32, bg: u32) {
         if col >= self.cols || row >= self.rows {
             return;
         }
@@ -387,7 +431,7 @@ mod tests {
     /// Mette `s` nella riga `row` dalla colonna 0.
     fn put_str(g: &mut Grid, row: usize, s: &str) {
         for (i, b) in s.bytes().enumerate() {
-            g.put(i, row, b as u32, 0x0F, 0x00);
+            g.put(i, row, b as u32, color::WHITE, color::BLACK);
         }
     }
 

@@ -23,8 +23,8 @@ use alloc::boxed::Box;
 use civis;
 
 use term::font::Font;
-use term::grid::Grid;
-use term::surface::{Geom, Pixel, Surface, VgaText};
+use term::grid::{self, color, Grid};
+use term::surface::{self, Geom, Pixel, Surface, VgaText};
 use term::utf8::Decoder;
 
 // ── Ring I/O (Fase 10.2) ─────────────────────────────────────────
@@ -65,16 +65,20 @@ struct Term {
     decoder: Decoder,
     surface: Surface,
     font: Option<Font>,
-    /// Stato del parser ESC (0 = normale, 1 = ESC visto, 2 = ESC-[).
+    /// Stato del parser ESC/CSI:
+    /// 0 = normale, 1 = ESC visto, 2 = CSI entry (ESC-[ visto),
+    /// 3 = accumulo parametri CSI (numeri separati da `;`).
     esc: u8,
+    /// Parametri CSI accumulati (es. `"38;2;255;0;0"` o `"0"`).
+    csi_params: alloc::vec::Vec<u8>,
     /// Codepoint decodificati (buffer riusato).
     pending: alloc::vec::Vec<u32>,
     /// Ultima posizione del cursore disegnata (per ridisegnarla).
     cursor_drawn: (usize, usize),
-    /// Colore foreground corrente (indice VGA).
-    fg: u8,
-    /// Colore background corrente.
-    bg: u8,
+    /// Colore foreground corrente (truecolor RGBA packed).
+    fg: u32,
+    /// Colore background corrente (truecolor RGBA packed).
+    bg: u32,
     /// Canale del driver `gpu` (0 = nessun driver raggiungibile).
     driver_chan: u64,
     /// La risoluzione *desiderata* dal guest (D4): `None` = "segue l'host".
@@ -253,8 +257,17 @@ impl Term {
                 return;
             }
             2 => {
+                // CSI: accumuliamo i parametri (numeri e `;`) fino alla
+                // lettera finale del comando (es. `m`, `D`, `C`, `K`).
+                let c = cp as u8;
+                if c.is_ascii_digit() || c == b';' {
+                    self.csi_params.push(c);
+                    return;
+                }
+                let cmd = c;
                 self.esc = 0;
-                match cp as u8 {
+                let params = core::mem::take(&mut self.csi_params);
+                match cmd {
                     b'D' => {
                         // cursore a sinistra
                         if self.grid.cursor.0 > 0 {
@@ -273,6 +286,10 @@ impl Term {
                         for c in col..self.grid.cols() {
                             self.grid.put(c, self.grid.cursor.1, b' ' as u32, self.fg, self.bg);
                         }
+                    }
+                    b'm' => {
+                        // Select Graphic Rendition: colori truecolor e 256.
+                        self.handle_sgr(&params);
                     }
                     _ => {}
                 }
@@ -377,11 +394,104 @@ impl Term {
     }
 
     /// Disegna una cella sulla surface attiva.
-    fn draw_cell(&mut self, col: usize, row: usize, cp: u32, fg: u8, bg: u8, cursor: bool) {
+    fn draw_cell(&mut self, col: usize, row: usize, cp: u32, fg: u32, bg: u32, cursor: bool) {
         // Nel path VGA il font non serve (il BIOS disegna il carattere).
         let font = self.font.as_mut();
         self.surface
             .put_char(col, row, cp, fg, bg, cursor, font);
+    }
+
+    /// Select Graphic Rendition (ESC[...m): truecolor (`38;2` / `48;2`) e 256
+    /// colori (`38;5` / `48;5`). I parametri non riconosciuti vengono ignorati.
+    ///
+    /// Quando il backend e' VGA testuale (nessun alpha, 16 colori), il
+    /// truecolor viene scalato all'indice VGA piu' vicino da
+    /// `surface::nearest_vga`: non viene ignorato.
+    fn handle_sgr(&mut self, params: &[u8]) {
+        // Dividi per `;` e parse i numeri.
+        let mut nums: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
+        let mut cur: u32 = 0;
+        let mut has_num = false;
+        for &b in params {
+            if b == b';' {
+                if has_num {
+                    nums.push(cur);
+                    cur = 0;
+                    has_num = false;
+                }
+            } else if b.is_ascii_digit() {
+                cur = cur.saturating_mul(10).saturating_add((b - b'0') as u32);
+                has_num = true;
+            }
+        }
+        if has_num {
+            nums.push(cur);
+        }
+
+        let mut i = 0;
+        while i < nums.len() {
+            match nums[i] {
+                0 => {
+                    // Reset a default.
+                    self.fg = color::DEFAULT_FG;
+                    self.bg = color::DEFAULT_BG;
+                }
+                38 => {
+                    // Foreground: il token successivo specifica il tipo.
+                    if i + 1 < nums.len() {
+                        match nums[i + 1] {
+                            2 => {
+                                // truecolor: R G B seguono.
+                                if i + 4 < nums.len() {
+                                    self.fg = surface::rgba(
+                                        nums[i + 2] as u8,
+                                        nums[i + 3] as u8,
+                                        nums[i + 4] as u8,
+                                        0xFF,
+                                    );
+                                    i += 4;
+                                }
+                            }
+                            5 => {
+                                // 256 colori: un indice segue.
+                                if i + 2 < nums.len() {
+                                    self.fg = surface::color256(nums[i + 2] as u8);
+                                    i += 2;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                48 => {
+                    // Background: come 38 ma per bg.
+                    if i + 1 < nums.len() {
+                        match nums[i + 1] {
+                            2 => {
+                                if i + 4 < nums.len() {
+                                    self.bg = surface::rgba(
+                                        nums[i + 2] as u8,
+                                        nums[i + 3] as u8,
+                                        nums[i + 4] as u8,
+                                        0xFF,
+                                    );
+                                    i += 4;
+                                }
+                            }
+                            5 => {
+                                if i + 2 < nums.len() {
+                                    self.bg = surface::color256(nums[i + 2] as u8);
+                                    i += 2;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
     }
 }
 
@@ -479,10 +589,11 @@ fn real_main(_sp: u64) -> ! {
         surface,
         font,
         esc: 0,
+        csi_params: alloc::vec::Vec::new(),
         pending: alloc::vec::Vec::with_capacity(64),
         cursor_drawn: (0, 0),
-        fg: 0x0F,
-        bg: 0x00,
+        fg: color::DEFAULT_FG,
+        bg: color::DEFAULT_BG,
         driver_chan,
         desired: None,
         fb_slot: civis::DMA_SLOT_DEVICE,
