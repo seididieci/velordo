@@ -85,6 +85,12 @@ struct Term {
     /// Quando l'host insiste (config change) la console cede e passa a
     /// `None`.
     desired: Option<(u32, u32)>,
+    /// Copia del layer 0 (sfondo immagine) in formato BGRA, dimensione
+    /// `width × height × 4`. Usata per ripristinare lo sfondo sotto le
+    /// celle trasparenti o vuote senza ridisegnare tutto lo schermo.
+    layer0: Option<alloc::vec::Vec<u8>>,
+    /// Larghezza in pixel del layer 0 (stride = width * 4, nessun padding).
+    layer0_width: u32,
     /// Lo slot DMA del framebuffer corrente (D4: il riadattamento alloca
     /// l'altro slot e libera questo solo dopo che il nuovo e' presentato —
     /// un riadattamento fallito non deve lasciare la surface su un buffer
@@ -359,6 +365,10 @@ impl Term {
     }
 
     /// Ridisegna la zona sporca e il cursore.
+    ///
+    /// Ottimizzazione: solo le celle dirty vengono ritoccate. Per le celle
+    /// vuote (cp == 0) o con background trasparente, prima si ripristina lo
+    /// sfondo dal layer 0; poi si disegna il glifo (se presente).
     fn render(&mut self) {
         let dirty = self.grid.take_dirty();
         if dirty.any {
@@ -366,7 +376,23 @@ impl Term {
             for row in dirty.min_row..=dirty.max_row.min(rows.saturating_sub(1)) {
                 for col in dirty.min_col..=dirty.max_col.min(cols.saturating_sub(1)) {
                     let cell = self.grid.cell(col, row);
-                    let is_cursor = (col, row) == self.grid.cursor_clamped() && self.grid.cursor_visible;
+                    let is_cursor =
+                        (col, row) == self.grid.cursor_clamped() && self.grid.cursor_visible;
+
+                    // Celle vuote o bg trasparente: ripristina lo sfondo dal
+                    // layer 0 prima di disegnare (o niente, se vuota).
+                    if cell.cp == 0 || cell.bg_transparent() {
+                        if let Some(ref l0) = self.layer0 {
+                            self.restore_layer0_cell(col, row, l0);
+                        }
+                    }
+
+                    // Cell vuota: lo sfondo e' già stato ripristinato, niente
+                    // glifo da disegnare.
+                    if cell.cp == 0 {
+                        continue;
+                    }
+
                     self.draw_cell(col, row, cell.cp, cell.fg, cell.bg, is_cursor);
                 }
             }
@@ -377,6 +403,11 @@ impl Term {
             let (cc, cr) = self.cursor_drawn;
             if cc < self.grid.cols() && cr < self.grid.rows() {
                 let cell = self.grid.cell(cc, cr);
+                if cell.cp == 0 || cell.bg_transparent() {
+                    if let Some(ref l0) = self.layer0 {
+                        self.restore_layer0_cell(cc, cr, l0);
+                    }
+                }
                 self.draw_cell(cc, cr, cell.cp, cell.fg, cell.bg, false);
             }
             self.cursor_drawn = cur;
@@ -385,6 +416,11 @@ impl Term {
         let (cc, cr) = self.cursor_drawn;
         if cc < self.grid.cols() && cr < self.grid.rows() {
             let cell = self.grid.cell(cc, cr);
+            if cell.cp == 0 || cell.bg_transparent() {
+                if let Some(ref l0) = self.layer0 {
+                    self.restore_layer0_cell(cc, cr, l0);
+                }
+            }
             self.draw_cell(cc, cr, cell.cp, cell.fg, cell.bg, self.grid.cursor_visible);
         }
         // Nel fallback VGA il cursore e' quello hardware (CRTC).
@@ -596,8 +632,25 @@ fn real_main(_sp: u64) -> ! {
         bg: color::DEFAULT_BG,
         driver_chan,
         desired: None,
+        layer0: None,
+        layer0_width: 0,
+        desired: None,
         fb_slot: civis::DMA_SLOT_DEVICE,
+        layer0: None,
+        layer0_width: 0,
     };
+
+    // Carica lo sfondo immagine (layer 0) se disponibile. Deve essere fatto
+    // PRIMA del banner, altrimenti il testo lo coprirebbe.
+    if let Some((l0, w, h)) = load_bmp("/bg.bmp") {
+        let _ = civis::println!("[console] layer 0: {}x{} bg loaded", w, h);
+        if matches!(term.surface, Surface::Pixel(_)) {
+            term.draw_layer0_full(&l0);
+            term.flush_display();
+        }
+        term.layer0 = Some(l0);
+        term.layer0_width = w;
+    }
 
     // 5. Banner sul terminale (il framebuffer o la VGA) + il seriale (sink
     //    di debug): la console si annuncia come il vecchio console server.
@@ -833,6 +886,158 @@ fn setup_vga_text() -> Surface {
         cols: VGA_COLS,
         rows: VGA_ROWS,
     })
+}
+
+/// Carica un BMP 32-bit non compresso e lo restituisce in formato BGRA,
+/// con le righe ribaltate (il BMP è bottom-up, lo schermo è top-down).
+fn load_bmp(path: &str) -> Option<(alloc::vec::Vec<u8>, u32, u32)> {
+    let fd = civis::open(path, 0).ok()?;
+    let mut data = alloc::vec::Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = civis::read_fs(fd, &mut buf, 4096).ok()?;
+        if n == 0 {
+            break;
+        }
+        data.extend_from_slice(&buf[..n]);
+    }
+    let _ = civis::close(fd);
+
+    if data.len() < 14 {
+        return None;
+    }
+    if &data[0..2] != b"BM" {
+        return None;
+    }
+
+    let pixel_offset =
+        u32::from_le_bytes([data[10], data[11], data[12], data[13]]) as usize;
+    let dib_size =
+        u32::from_le_bytes([data[14], data[15], data[16], data[17]]) as usize;
+    if dib_size < 40 {
+        return None;
+    }
+
+    let width = u32::from_le_bytes([data[18], data[19], data[20], data[21]]);
+    let height = u32::from_le_bytes([data[22], data[23], data[24], data[25]]);
+    let bpp = u16::from_le_bytes([data[28], data[29]]);
+    let compression =
+        u32::from_le_bytes([data[30], data[31], data[32], data[33]]);
+
+    if bpp != 32 {
+        return None;
+    }
+    if compression != 0 && compression != 3 {
+        return None;
+    }
+
+    let row_size = width as usize * 4;
+    let total = width as usize * height as usize * 4;
+    if data.len() < pixel_offset + total {
+        return None;
+    }
+
+    let mut out = alloc::vec![0u8; total];
+    // Il BMP memorizza le righe bottom-up: la prima riga del file è la più
+    // in basso sullo schermo. Ribaltiamo durante la copia.
+    for y in 0..height {
+        let src_row = pixel_offset + (height - 1 - y) as usize * row_size;
+        let dst_row = y as usize * row_size;
+        out[dst_row..dst_row + row_size]
+            .copy_from_slice(&data[src_row..src_row + row_size]);
+    }
+
+    Some((out, width, height))
+}
+
+/// Disegna l'intero layer 0 nel framebuffer attivo (chiamato una volta
+/// all'avvio, prima di qualsiasi testo).
+fn draw_layer0_full(&mut self, layer0: &[u8]) {
+    let surface = match &mut self.surface {
+        Surface::Pixel(p) => p,
+        _ => return,
+    };
+    let w = self.layer0_width as usize;
+    let h = layer0.len() / (w * 4);
+    for yy in 0..h {
+        let src = layer0.as_ptr().add(yy * w * 4);
+        let dst = surface.ptr.add(yy * surface.stride as usize);
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, dst, w * 4);
+        }
+    }
+}
+
+/// Ripristina i pixel di una singola cella dal layer 0 nel framebuffer.
+/// Usato per le celle con background trasparente o vuote, così non serve
+/// ridisegnare tutto lo schermo. Se la cella cade fuori dai bounds del
+/// layer 0 (immagine più piccola dello schermo), viene riempita di nero.
+fn restore_layer0_cell(&mut self, col: usize, row: usize, layer0: &[u8]) {
+    let surface = match &mut self.surface {
+        Surface::Pixel(p) => p,
+        _ => return,
+    };
+    let cw = surface.geom.cell_w as u32;
+    let ch = surface.geom.cell_h as u32;
+    let x = surface.geom.origin_x + (col as u32) * cw;
+    let y = surface.geom.origin_y + (row as u32) * ch;
+    let w = self.layer0_width;
+    let h = layer0.len() as u64 / (w as u64 * 4) as u32;
+
+    // Se la cella e' completamente fuori dal layer 0, riempi di nero.
+    if x >= w || y >= h {
+        let black = color::BLACK;
+        for yy in 0..ch {
+            let sy = y + yy;
+            if sy >= surface.height {
+                continue;
+            }
+            let dst_off = ((sy as usize) * surface.stride as usize + (x as usize)) * 4;
+            for xx in 0..cw {
+                let sx = x + xx;
+                if sx >= surface.width {
+                    continue;
+                }
+                let d = dst_off + (xx as usize) * 4;
+                unsafe {
+                    core::ptr::write_volatile(surface.ptr.add(d) as *mut u32, surface::rgba_to_bgra(black));
+                }
+            }
+        }
+        return;
+    }
+
+    for yy in 0..ch {
+        let sy = y + yy;
+        if sy >= surface.height || sy >= h {
+            continue;
+        }
+        let src_off = ((sy as usize) * w as usize + (x as usize)) * 4;
+        let dst_off = ((sy as usize) * surface.stride as usize + (x as usize)) * 4;
+        // Quanti pixel di questa riga stanno dentro il layer 0.
+        let copy_w = cw.min(w - x) as usize;
+        if src_off + copy_w * 4 > layer0.len() {
+            continue;
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                layer0.as_ptr().add(src_off),
+                surface.ptr.add(dst_off) as *mut u8,
+                copy_w * 4,
+            );
+        }
+        // Resto della cella (fuori dal layer 0): nero.
+        for xx in copy_w..cw as usize {
+            let sx = x + xx as u32;
+            if sx >= surface.width {
+                continue;
+            }
+            let d = dst_off + xx * 4;
+            unsafe {
+                core::ptr::write_volatile(surface.ptr.add(d) as *mut u32, surface::rgba_to_bgra(color::BLACK));
+            }
+        }
+    }
 }
 
 /// Carica il font TrueType dal volume root (tutto in RAM: vedi `MemSource`).

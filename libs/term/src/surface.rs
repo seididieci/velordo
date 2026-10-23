@@ -83,6 +83,29 @@ pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | ((a as u32) << 24)
 }
 
+/// Copia un rettangolo di pixel BGRA da `src` a `dst`.
+///
+/// `src` e `dst` sono buffer lineari BGRA con i rispettivi stride (byte per
+/// riga). Il rettangolo è `(x, y, w, h)` in pixel.
+pub fn blit_bgra(
+    dst: *mut u8,
+    dst_stride: usize,
+    src: *const u8,
+    src_stride: usize,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) {
+    for yy in 0..h {
+        let src_row = src.add(((y + yy) as usize) * src_stride + (x as usize) * 4);
+        let dst_row = dst.add(((y + yy) as usize) * dst_stride + (x as usize) * 4);
+        unsafe {
+            core::ptr::copy_nonoverlapping(src_row, dst_row, w as usize * 4);
+        }
+    }
+}
+
 /// Palette xterm 256 colori: un indice (0..255) -> truecolor RGBA.
 ///
 /// - 0..=15: i 16 colori VGA standard.
