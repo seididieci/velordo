@@ -370,6 +370,11 @@ impl Term {
     /// vuote (cp == 0) o con background trasparente, prima si ripristina lo
     /// sfondo dal layer 0; poi si disegna il glifo (se presente).
     fn render(&mut self) {
+        // Estraggo i dati del layer 0 come puntatore+lunghezza (tipo Copy)
+        // PRIMA di qualsiasi mut-borrow su self, per evitare conflitti di
+        // borrow con restore_layer0_cell(&mut self, ...).
+        let l0_data = self.layer0.as_ref().map(|v| (v.as_ptr() as *const u8, v.len()));
+
         let dirty = self.grid.take_dirty();
         if dirty.any {
             let (cols, rows) = (self.grid.cols(), self.grid.rows());
@@ -382,8 +387,9 @@ impl Term {
                     // Celle vuote o bg trasparente: ripristina lo sfondo dal
                     // layer 0 prima di disegnare (o niente, se vuota).
                     if cell.cp == 0 || cell.bg_transparent() {
-                        if let Some(ref l0) = self.layer0 {
-                            self.restore_layer0_cell(col, row, l0);
+                        if let Some((ptr, len)) = l0_data {
+                            let l0_slice = unsafe { core::slice::from_raw_parts(ptr, len) };
+                            self.restore_layer0_cell(col, row, l0_slice);
                         }
                     }
 
@@ -404,8 +410,9 @@ impl Term {
             if cc < self.grid.cols() && cr < self.grid.rows() {
                 let cell = self.grid.cell(cc, cr);
                 if cell.cp == 0 || cell.bg_transparent() {
-                    if let Some(ref l0) = self.layer0 {
-                        self.restore_layer0_cell(cc, cr, l0);
+                    if let Some((ptr, len)) = l0_data {
+                        let l0_slice = unsafe { core::slice::from_raw_parts(ptr, len) };
+                        self.restore_layer0_cell(cc, cr, l0_slice);
                     }
                 }
                 self.draw_cell(cc, cr, cell.cp, cell.fg, cell.bg, false);
@@ -417,8 +424,9 @@ impl Term {
         if cc < self.grid.cols() && cr < self.grid.rows() {
             let cell = self.grid.cell(cc, cr);
             if cell.cp == 0 || cell.bg_transparent() {
-                if let Some(ref l0) = self.layer0 {
-                    self.restore_layer0_cell(cc, cr, l0);
+                if let Some((ptr, len)) = l0_data {
+                    let l0_slice = unsafe { core::slice::from_raw_parts(ptr, len) };
+                    self.restore_layer0_cell(cc, cr, l0_slice);
                 }
             }
             self.draw_cell(cc, cr, cell.cp, cell.fg, cell.bg, self.grid.cursor_visible);
@@ -529,6 +537,96 @@ impl Term {
             i += 1;
         }
     }
+
+    /// Disegna l'intero layer 0 nel framebuffer attivo (chiamato una volta
+    /// all'avvio, prima di qualsiasi testo).
+    fn draw_layer0_full(&mut self, layer0: &[u8]) {
+        let surface = match &mut self.surface {
+            Surface::Pixel(p) => p,
+            _ => return,
+        };
+        let w = self.layer0_width as usize;
+        let h = layer0.len() / (w * 4);
+        for yy in 0..h {
+            let src = unsafe { layer0.as_ptr().add(yy * w * 4) };
+            let dst = unsafe { surface.ptr.add(yy * surface.stride as usize) };
+            unsafe {
+                core::ptr::copy_nonoverlapping(src, dst, w * 4);
+            }
+        }
+    }
+
+    /// Ripristina i pixel di una singola cella dal layer 0 nel framebuffer.
+    /// Usato per le celle con background trasparente o vuote, così non serve
+    /// ridisegnare tutto lo schermo. Se la cella cade fuori dai bounds del
+    /// layer 0 (immagine più piccola dello schermo), viene riempita di nero.
+    fn restore_layer0_cell(&mut self, col: usize, row: usize, layer0: &[u8]) {
+        let surface = match &mut self.surface {
+            Surface::Pixel(p) => p,
+            _ => return,
+        };
+        let cw = surface.geom.cell_w as u32;
+        let ch = surface.geom.cell_h as u32;
+        let x = surface.geom.origin_x + (col as u32) * cw;
+        let y = surface.geom.origin_y + (row as u32) * ch;
+        let w = self.layer0_width;
+        let h = (layer0.len() / (w as usize * 4)) as u32;
+
+        // Se la cella e' completamente fuori dal layer 0, riempi di nero.
+        if x >= w || y >= h {
+            let black = color::BLACK;
+            for yy in 0..ch {
+                let sy = y + yy;
+                if sy >= surface.height {
+                    continue;
+                }
+                let dst_off = ((sy as usize) * surface.stride as usize + (x as usize)) * 4;
+                for xx in 0..cw {
+                    let sx = x + xx;
+                    if sx >= surface.width {
+                        continue;
+                    }
+                    let d = dst_off + (xx as usize) * 4;
+                    unsafe {
+                        core::ptr::write_volatile(surface.ptr.add(d) as *mut u32, surface::rgba_to_bgra(black));
+                    }
+                }
+            }
+            return;
+        }
+
+        for yy in 0..ch {
+            let sy = y + yy;
+            if sy >= surface.height || sy >= h {
+                continue;
+            }
+            let src_off = ((sy as usize) * w as usize + (x as usize)) * 4;
+            let dst_off = ((sy as usize) * surface.stride as usize + (x as usize)) * 4;
+            // Quanti pixel di questa riga stanno dentro il layer 0.
+            let copy_w = cw.min(w - x) as usize;
+            if src_off + copy_w * 4 > layer0.len() {
+                continue;
+            }
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    layer0.as_ptr().add(src_off),
+                    surface.ptr.add(dst_off) as *mut u8,
+                    copy_w * 4,
+                );
+            }
+            // Resto della cella (fuori dal layer 0): nero.
+            for xx in copy_w..cw as usize {
+                let sx = x + xx as u32;
+                if sx >= surface.width {
+                    continue;
+                }
+                let d = dst_off + xx * 4;
+                unsafe {
+                    core::ptr::write_volatile(surface.ptr.add(d) as *mut u32, surface::rgba_to_bgra(color::BLACK));
+                }
+            }
+        }
+    }
 }
 
 // ── Il font: lettura dal volume ────────────────────────────────────
@@ -634,10 +732,7 @@ fn real_main(_sp: u64) -> ! {
         desired: None,
         layer0: None,
         layer0_width: 0,
-        desired: None,
         fb_slot: civis::DMA_SLOT_DEVICE,
-        layer0: None,
-        layer0_width: 0,
     };
 
     // Carica lo sfondo immagine (layer 0) se disponibile. Deve essere fatto
@@ -948,96 +1043,6 @@ fn load_bmp(path: &str) -> Option<(alloc::vec::Vec<u8>, u32, u32)> {
     }
 
     Some((out, width, height))
-}
-
-/// Disegna l'intero layer 0 nel framebuffer attivo (chiamato una volta
-/// all'avvio, prima di qualsiasi testo).
-fn draw_layer0_full(&mut self, layer0: &[u8]) {
-    let surface = match &mut self.surface {
-        Surface::Pixel(p) => p,
-        _ => return,
-    };
-    let w = self.layer0_width as usize;
-    let h = layer0.len() / (w * 4);
-    for yy in 0..h {
-        let src = layer0.as_ptr().add(yy * w * 4);
-        let dst = surface.ptr.add(yy * surface.stride as usize);
-        unsafe {
-            core::ptr::copy_nonoverlapping(src, dst, w * 4);
-        }
-    }
-}
-
-/// Ripristina i pixel di una singola cella dal layer 0 nel framebuffer.
-/// Usato per le celle con background trasparente o vuote, così non serve
-/// ridisegnare tutto lo schermo. Se la cella cade fuori dai bounds del
-/// layer 0 (immagine più piccola dello schermo), viene riempita di nero.
-fn restore_layer0_cell(&mut self, col: usize, row: usize, layer0: &[u8]) {
-    let surface = match &mut self.surface {
-        Surface::Pixel(p) => p,
-        _ => return,
-    };
-    let cw = surface.geom.cell_w as u32;
-    let ch = surface.geom.cell_h as u32;
-    let x = surface.geom.origin_x + (col as u32) * cw;
-    let y = surface.geom.origin_y + (row as u32) * ch;
-    let w = self.layer0_width;
-    let h = layer0.len() as u64 / (w as u64 * 4) as u32;
-
-    // Se la cella e' completamente fuori dal layer 0, riempi di nero.
-    if x >= w || y >= h {
-        let black = color::BLACK;
-        for yy in 0..ch {
-            let sy = y + yy;
-            if sy >= surface.height {
-                continue;
-            }
-            let dst_off = ((sy as usize) * surface.stride as usize + (x as usize)) * 4;
-            for xx in 0..cw {
-                let sx = x + xx;
-                if sx >= surface.width {
-                    continue;
-                }
-                let d = dst_off + (xx as usize) * 4;
-                unsafe {
-                    core::ptr::write_volatile(surface.ptr.add(d) as *mut u32, surface::rgba_to_bgra(black));
-                }
-            }
-        }
-        return;
-    }
-
-    for yy in 0..ch {
-        let sy = y + yy;
-        if sy >= surface.height || sy >= h {
-            continue;
-        }
-        let src_off = ((sy as usize) * w as usize + (x as usize)) * 4;
-        let dst_off = ((sy as usize) * surface.stride as usize + (x as usize)) * 4;
-        // Quanti pixel di questa riga stanno dentro il layer 0.
-        let copy_w = cw.min(w - x) as usize;
-        if src_off + copy_w * 4 > layer0.len() {
-            continue;
-        }
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                layer0.as_ptr().add(src_off),
-                surface.ptr.add(dst_off) as *mut u8,
-                copy_w * 4,
-            );
-        }
-        // Resto della cella (fuori dal layer 0): nero.
-        for xx in copy_w..cw as usize {
-            let sx = x + xx as u32;
-            if sx >= surface.width {
-                continue;
-            }
-            let d = dst_off + xx * 4;
-            unsafe {
-                core::ptr::write_volatile(surface.ptr.add(d) as *mut u32, surface::rgba_to_bgra(color::BLACK));
-            }
-        }
-    }
 }
 
 /// Carica il font TrueType dal volume root (tutto in RAM: vedi `MemSource`).

@@ -97,10 +97,10 @@ pub fn blit_bgra(
     w: u32,
     h: u32,
 ) {
-    for yy in 0..h {
-        let src_row = src.add(((y + yy) as usize) * src_stride + (x as usize) * 4);
-        let dst_row = dst.add(((y + yy) as usize) * dst_stride + (x as usize) * 4);
-        unsafe {
+    unsafe {
+        for yy in 0..h {
+            let src_row = src.add(((y + yy) as usize) * src_stride + (x as usize) * 4);
+            let dst_row = dst.add(((y + yy) as usize) * dst_stride + (x as usize) * 4);
             core::ptr::copy_nonoverlapping(src_row, dst_row, w as usize * 4);
         }
     }
