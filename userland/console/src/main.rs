@@ -841,14 +841,9 @@ fn real_main(_sp: u64) -> ! {
 
     // Carica lo sfondo immagine (layer 0) se disponibile. Deve essere fatto
     // PRIMA del banner, altrimenti il testo lo coprirebbe.
-    // Se c'è un surface pixel, inizializza tutto il framebuffer a nero
-    // PRIMA di disegnare il layer 0 (cosi' l'area oltre l'immagine non
-    // mostra spazzatura di memoria).
-    if let Surface::Pixel(p) = &mut term.surface {
-        let black = surface::rgba_to_bgra(color::BLACK);
-        p.fill_rect(0, 0, p.width, p.height, black);
-        term.flush_display();
-    }
+    // Il buffer device alllocato da DMA_ALLOC e' gia' azzerato (nero), quindi
+    // l'area oltre l'immagine e' gia' pulita. Non serve un fill esplicito
+    // (evita di scrivere oltre il buffer mappato).
 
     // Carica lo sfondo immagine (layer 0) se disponibile. Deve essere fatto
     // PRIMA del banner, altrimenti il testo lo coprirebbe.
