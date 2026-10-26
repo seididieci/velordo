@@ -8,6 +8,7 @@
 //! vuoto non puo' appendere il boot.
 
 use civis::pio as io;
+use civis::{ATA_PRIMARY_CMD, ATA_PRIMARY_CTL, ATA_SECONDARY_CMD, ATA_SECONDARY_CTL};
 
 /// Timeout di polling in iterazioni (come `block.rs`).
 const TIMEOUT: u32 = 2_000_000;
@@ -20,8 +21,8 @@ pub struct AtaChannel {
     pub ctl: u16,
 }
 
-pub const PRIMARY: AtaChannel = AtaChannel { cmd: 0x1F0, ctl: 0x3F6 };
-pub const SECONDARY: AtaChannel = AtaChannel { cmd: 0x170, ctl: 0x376 };
+pub const PRIMARY: AtaChannel = AtaChannel { cmd: ATA_PRIMARY_CMD, ctl: ATA_PRIMARY_CTL };
+pub const SECONDARY: AtaChannel = AtaChannel { cmd: ATA_SECONDARY_CMD, ctl: ATA_SECONDARY_CTL };
 
 /// Disco rilevato: tutto cio' che serve ad aprirlo (`block::AtaDisk`).
 pub struct DiskInfo {

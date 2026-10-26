@@ -344,6 +344,40 @@ pub const USER_RESP_RING: u64 = FS_BLOCK + 0x210_000;
 pub const CLI_REQ_VA: u64 = FS_BLOCK + 0x220_000;
 /// Finestra response per i relay cardo→driver (vedi sopra).
 pub const CLI_RESP_VA: u64 = FS_BLOCK + 0x230_000;
+
+/// Finestre ring del data-plane DISK_* (Fase 16): single source condivisa da
+/// `block` e `cardo`. Prima duplicati in `userland/block/src/main.rs` e
+/// `userland/cardo/src/ipc_disk.rs`.
+pub const DISK_REQ_VA: u64 = 0x0000_4000_0024_0000;
+pub const DISK_RESP_VA: u64 = 0x0000_4000_0025_0000;
+
+/// Range porte I/O condivise kernel/userspace (TSS per-processo, ADR-0006).
+/// I valori erano duplicati in `kernel/src/user_binary.rs`,
+/// `userland/block/src/detect.rs` e `userland/rector/src/main.rs`.
+pub const ATA_PRIMARY_CMD: u16 = 0x1F0;
+pub const ATA_PRIMARY_CTL: u16 = 0x3F6;
+pub const ATA_PRIMARY_DATA_END: u16 = 0x1F7;
+pub const ATA_PRIMARY_CTL_END: u16 = 0x3F7;
+pub const ATA_SECONDARY_CMD: u16 = 0x170;
+pub const ATA_SECONDARY_CTL: u16 = 0x376;
+pub const ATA_SECONDARY_DATA_END: u16 = 0x177;
+pub const ATA_SECONDARY_CTL_END: u16 = 0x377;
+pub const PCI_CONF_ADDR: u16 = 0xCF8;
+pub const PCI_CONF_DATA: u16 = 0xCFC;
+pub const PCI_CONF_END: u16 = 0xCFF;
+pub const BM_BASE: u16 = 0xC000;
+pub const BM_END: u16 = 0xC00F;
+/// Dimensione in byte della regione Bus-Master PIIX (2 canali × 8).
+pub const PIIX_BAR4_SIZE: u16 = 16;
+/// VGA CRTC (fallback testo, console).
+pub const VGA_CRTC_INDEX: u16 = 0x3D4;
+pub const VGA_CRTC_DATA: u16 = 0x3D5;
+/// Tastiera PS/2.
+pub const KBD_DATA: u16 = 0x60;
+pub const KBD_CMD: u16 = 0x64;
+/// CMOS/RTC (fornitore data/ora).
+pub const RTC_INDEX: u16 = 0x70;
+pub const RTC_DATA: u16 = 0x71;
 /// Flag `SpawnMeta.flags` (Fase 22, detach): il figlio non partecipa alla
 /// cascata di morte del parent — alla morte del parent viene ri-parentato a
 /// init invece di terminare. Deciso dallo spawner (il figlio non puo'

@@ -232,7 +232,8 @@ fn real_main(_sp: u64) -> ! {
     // Handle del volume root (per rileggerne l'identita' v4: uuid+label).
     let mut root_handle: u32 = 0;
     if let Some(uuid) = root_uuid {
-        // Itera sda..sdh + partizioni sdXn (stesso pattern di scan_and_open).
+        // Itera sda..sdh + partizioni sdXn (pattern di auto-bind rimosso;
+        // il boot usa root=UUID).
         for disk in 0..8u8 {
             let letter = b'a' + disk;
             let mut path = [0u8; 16];

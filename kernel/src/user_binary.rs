@@ -34,6 +34,10 @@ use fs_bin::cardo_elf;
 use disk_bin::block_elf;
 use log_bin::vestigia_elf;
 
+use syscall_numbers::{ATA_PRIMARY_CMD, ATA_PRIMARY_CTL, ATA_PRIMARY_DATA_END, ATA_PRIMARY_CTL_END,
+                      ATA_SECONDARY_CMD, ATA_SECONDARY_CTL, ATA_SECONDARY_DATA_END, ATA_SECONDARY_CTL_END,
+                      PCI_CONF_ADDR, PCI_CONF_END, BM_BASE, BM_END};
+
 /// Spawna un processo user (gira in ring 3) dal binario ELF `elf`. `io_ranges`
 /// = porte I/O (inclusive) consentite a ring 3 (TSS per-processo, ADR-0006);
 /// vuoto = nessuna porta. Ritorna il pid assegnato, o `None` se l'ELF e'
@@ -126,23 +130,20 @@ struct NamedBinary {
 /// Porte dei controller ATA PIO primario + secondario per il disk driver
 /// (Fase 16, `block`: enumerazione master/slave su entrambi i canali).
 /// `cardo` non tocca piu' porte (Fase 16.2): qualunque `in/out` li' e' #GP.
-/// Fase 38.0d (ATA DMA): + spazio di configurazione PCI (`0xCF8-0xCFF`, per
-/// trovare il PIIX3-IDE e programmarne la BAR4 — col boot diretto PVH nessun
-/// BIOS lo fa) + finestra Bus-Master `0xC000-0xC00F` scelta da block
-/// (`civis::pci::BM_BASE`, QEMU-scoped: sopra il legacy nulla e' programmato).
-/// Il conf arriva a `0xCFF` (NON `0xCFC`): la CPU controlla TUTTE le porte
-/// della width e un DWORD a `0xCFC` tocca `CFD/CFE/CFF` — con fine `0xCFC`
-/// l'`inl` fa #GP (osservato: `out` a `CF8` ok, `in` a `CFC` kill). Stessa
+/// Fase 38.0d (ATA DMA): + spazio di configurazione PCI + finestra
+/// Bus-Master, valori in `syscall-numbers` (single source con `block` e
+/// `rector`). Il conf arriva a `PCI_CONF_END` (NON `PCI_CONF_DATA`): un DWORD
+/// a `0xCFC` tocca `CFD/CFE/CFF` — con fine `0xCFC` l'`inl` fa #GP. Stessa
 /// regola per la finestra BM: accessi allineati entro i 16 byte.
 /// Nota onesta (ADR-0026): il conf PCI permette di riprogrammare qualunque
 /// device — contenimento nullo senza IOMMU, dichiarato.
 const ATA_PIO_RANGES: &[(u16, u16)] = &[
-    (0x1F0, 0x1F7),
-    (0x3F6, 0x3F7),
-    (0x170, 0x177),
-    (0x376, 0x377),
-    (0xCF8, 0xCFF),
-    (0xC000, 0xC00F),
+    (ATA_PRIMARY_CMD, ATA_PRIMARY_DATA_END),
+    (ATA_PRIMARY_CTL, ATA_PRIMARY_CTL_END),
+    (ATA_SECONDARY_CMD, ATA_SECONDARY_DATA_END),
+    (ATA_SECONDARY_CTL, ATA_SECONDARY_CTL_END),
+    (PCI_CONF_ADDR, PCI_CONF_END),
+    (BM_BASE, BM_END),
 ];
 
 use crate::ordo::sched::Priority;

@@ -16,6 +16,9 @@ use civis::{println, print_str};
 // Tag di fine-test e servizio-pronto (DocsB): single source in
 // `syscall-numbers`, via `civis` (prima duplicati qui).
 use civis::{SVC_READY, TEST_DONE};
+// Range porte I/O (TSS per-processo): single source in `syscall-numbers` via
+// `civis` (prima duplicati tra kernel/user_binary, block/detect e rector).
+use civis::{VGA_CRTC_INDEX, VGA_CRTC_DATA, KBD_DATA, KBD_CMD, RTC_INDEX, RTC_DATA};
 
 // Manifest degli hash dei servizi (Fase 36, identita' misurata, Strato 2 di
 // ADR-0026): generato a build-time da scripts/gen-service-hashes.sh sui
@@ -167,21 +170,9 @@ struct SvcMeta {
     io: &'static [(u16, u16)],
 }
 
-/// Porte I/O per i manifest da disco (copia dei range kernel in
-/// `user_binary.rs`: init e' TCB e li dichiara al kernel via SpawnMeta).
-/// `gpu` (L0b, ADR-0057): spazio di configurazione PCI (`0xCF8-0xCFF`) per
-/// enumerare e programmare `virtio-gpu-pci`. Chi ha il conf PCI puo'
-/// riprogrammare qualunque device: contenimento scarso senza IOMMU
-/// (ADR-0026); il broker PCI arriva col secondo consumer PCI (audio).
-/// D3: il cursore VGA non e' piu' suo (vive nella console).
-const GPU_IO_RANGES: &[(u16, u16)] = &[(0xCF8, 0xCFF)];
-/// `console` (D3, ADR-0060): cursore hardware del fallback VGA (CRTC). Il
-/// path pixel non usa porte (cursore software).
-const CONSOLE_IO_RANGES: &[(u16, u16)] = &[(0x3D4, 0x3D5)];
-const KBD_PS2_RANGES: &[(u16, u16)] = &[(0x60, 0x64)];
-/// CMOS/RTC per il fornitore di data/ora (Fase 50, P1 orologio): indice
-/// `0x70` + dati `0x71` (accessi a byte, una sola entry).
-const TIME_CMOS_RANGES: &[(u16, u16)] = &[(0x70, 0x71)];
+/// Porte I/O per i manifest da disco: i valori sono in `syscall-numbers` via
+/// `civis` (single source con kernel e block); i manifest li costruiscono
+/// inline sotto.
 
 /// Spawna un servizio da ArcaFS via `obj_get()` (Fase 55, N0).
 fn spawn_object(bucket: &[u8], key: &[u8]) -> Option<alloc::vec::Vec<u8>> {
@@ -572,14 +563,15 @@ const SVC_GPU: SvcMeta = SvcMeta {
     bin: b"gpu",
     obj: Some((b"vela", b"bin/gpu.bin")),
     prio: 16,
-    io: GPU_IO_RANGES,
+    // spazio di configurazione PCI per enumerare/programmare virtio-gpu-pci
+    io: &[(civis::syscall_numbers::PCI_CONF_ADDR, civis::syscall_numbers::PCI_CONF_END)],
 };
 /// Console server (D3): modello a celle, font, surface; serve `/dev/console`.
 const SVC_CONSOLE: SvcMeta = SvcMeta {
     bin: b"console",
     obj: Some((b"sys", b"bin/console.bin")),
     prio: 16,
-    io: CONSOLE_IO_RANGES,
+    io: &[(VGA_CRTC_INDEX, VGA_CRTC_DATA)],
 };
 const SVC_UPTIME: SvcMeta = SvcMeta {
     bin: b"useruptime",
@@ -597,7 +589,7 @@ const SVC_KBD: SvcMeta = SvcMeta {
     bin: b"kbd",
     obj: Some((b"vela", b"bin/kbd.bin")),
     prio: 16,
-    io: KBD_PS2_RANGES,
+    io: &[(KBD_DATA, KBD_CMD)],
 };
 const SVC_PORTA: SvcMeta = SvcMeta {
     bin: b"porta",
@@ -630,7 +622,7 @@ const SVC_TIME: SvcMeta = SvcMeta {
     bin: b"usertime",
     obj: Some((b"vela", b"bin/time.bin")),
     prio: 16,
-    io: TIME_CMOS_RANGES,
+    io: &[(RTC_INDEX, RTC_DATA)],
 };
 /// Gateway centrale di logging L1 (Fase 57, ADR-0039, R8):
 /// EMBEDDED come block/cardo (deve partire prima che il FS esista — spawn

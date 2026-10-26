@@ -33,7 +33,17 @@ pub use syscall_numbers::MAP_TEST_PHYS;
 pub use syscall_numbers::USER_DMA_VA;
 /// Finestre ring/relay (request/response/proprie/relay): single source in
 /// `syscall-numbers` (S2.2).
-pub use syscall_numbers::{USER_FS_BUFFER, USER_RESP_RING, CLI_REQ_VA, CLI_RESP_VA};
+pub use syscall_numbers::{
+    USER_FS_BUFFER, USER_RESP_RING, CLI_REQ_VA, CLI_RESP_VA,
+    DISK_REQ_VA, DISK_RESP_VA,
+    ATA_PRIMARY_CMD, ATA_PRIMARY_CTL, ATA_PRIMARY_DATA_END, ATA_PRIMARY_CTL_END,
+    ATA_SECONDARY_CMD, ATA_SECONDARY_CTL, ATA_SECONDARY_DATA_END, ATA_SECONDARY_CTL_END,
+    PCI_CONF_ADDR, PCI_CONF_DATA, PCI_CONF_END,
+    BM_BASE, BM_END,
+    VGA_CRTC_INDEX, VGA_CRTC_DATA,
+    KBD_DATA, KBD_CMD,
+    RTC_INDEX, RTC_DATA,
+};
 /// Slot DMA (D3): `ANY` = primo libero; `USER_DMA_BASE` = base dell'arena
 /// degli slot (lo slot 0 resta a `USER_DMA_VA`). `DMA_DEVICE_PAGES_MAX` e' il
 /// bound dei device buffer (D4): chi chiede di allocare oltre lo sa **prima**

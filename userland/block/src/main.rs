@@ -88,8 +88,8 @@ use civis::DISK_WRITE;
 //   Mai iniettati da nessuno: niente remap, mai sovrascritti. Per i relay DEV
 //   in ingresso cardo mappa i ring del client nelle finestre CLI_* dedicate.
 // - DISK_REQ_VA/DISK_RESP_VA: data-plane DISK_* con cardo (fisso, noto a
-//   cardo via HELLO). Libere nella mappa user (CLI fino a +0x23..., heap da
-//   +0x400000).
+//   cardo via HELLO). VA single source in `syscall-numbers` via `civis`.
+//   Libere nella mappa user (CLI fino a +0x23..., heap da +0x400000).
 
 /// Request/response ring FS propri (stesse VA di civis: page table per-processo,
 /// nessun conflitto — e block non usa il machinery FS di civis).
@@ -97,11 +97,9 @@ const FS_REQ_VA: u64 = 0x0000_4000_0020_0000;
 const FS_RESP_VA: u64 = 0x0000_4000_0021_0000;
 const CLI_REQ: u64 = civis::CLI_REQ_VA;
 const CLI_RESP: u64 = civis::CLI_RESP_VA;
-const DISK_REQ_VA: u64 = 0x0000_4000_0024_0000;
-const DISK_RESP_VA: u64 = 0x0000_4000_0025_0000;
 // Geometria ring + errore IPC (A1) + frame helpers (A2): single source in `civis`.
 use civis::{ERR, RING_DATA_CAP, RING_HEAD, RING_TAIL};
-use civis::{req_frame_consume, resp_frame_write};
+use civis::{DISK_REQ_VA, DISK_RESP_VA, req_frame_consume, resp_frame_write};
 
 /// Tag IPC FS (DocsB: single source in `syscall-numbers`, via `civis`).
 use civis::{FS_BUF_REG, FS_REGISTER};

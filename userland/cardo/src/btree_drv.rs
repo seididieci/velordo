@@ -1088,40 +1088,6 @@ pub fn raw_open(path: &str) -> Option<VolumeStore> {
     Some(VolumeStore::new(vol))
 }
 
-/// Scansiona i device per un superblock ArcaFS (whole + partizioni 1-4,
-/// sda-sdh come `find_arca` in testsarca): primo volume valido vinto.
-/// Best-effort per l'auto-bind all'avvio (56.2c): assenza = None silenzioso
-/// (niente volume, niente motore — init ripiega su FAT); resolve bounded,
-/// mai wedge su nomi ignoti.
-/// `#[inline(never)]`: chiamato una volta da real_main, resta fuori dal suo
-/// frame (stessa ragione dei firewall btree con LTO).
-#[allow(dead_code)] // entry di auto-bind non ancora cablata (il boot usa root=UUID)
-#[inline(never)]
-pub fn scan_and_open() -> Option<VolumeStore> {
-    let mut path = [0u8; 16];
-    for disk in 0..8u8 {
-        let letter = b'a' + disk;
-        // Whole-disk: /dev/sdX
-        path[..5].copy_from_slice(b"/dev/");
-        path[5..8].copy_from_slice(&[b's', b'd', letter]);
-        if let Some(p) = core::str::from_utf8(&path[..8]).ok() {
-            if let Some(v) = raw_open(p) {
-                return Some(v);
-            }
-        }
-        // Partizioni: /dev/sdXn
-        for part in 1..=4u8 {
-            path[..5].copy_from_slice(b"/dev/");
-            path[5..9].copy_from_slice(&[b's', b'd', letter, b'0' + part]);
-            if let Some(p) = core::str::from_utf8(&path[..9]).ok() {
-                if let Some(v) = raw_open(p) {
-                    return Some(v);
-                }
-            }
-        }
-    }
-    None
-}
 
 /// Esito RAW: scalare (reply generica) o con frame dedicato (il chiamante
 /// scrive reply a due registri e fa `continue`, pattern PIPE). Blocco in

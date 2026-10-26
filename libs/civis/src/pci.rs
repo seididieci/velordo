@@ -17,16 +17,10 @@
 
 use crate::pio;
 
-/// Porte dello spazio di configurazione PCI (mecanismo 1).
-pub const PCI_CONF_ADDR: u16 = 0xCF8;
-pub const PCI_CONF_DATA: u16 = 0xCFC;
-
-/// Finestra I/O scelta per la BMIBA (38.0d): 16 byte (`PIIX_BAR4_SIZE`),
-/// sopra il legacy (libero col boot diretto: nessuna BAR programmata).
-/// QEMU-scoped per dichiarazione — fuori QEMU va rivalutata.
-pub const BM_BASE: u16 = 0xC000;
-/// Dimensione in byte della regione Bus-Master PIIX (2 canali × 8).
-pub const PIIX_BAR4_SIZE: u16 = 16;
+/// Porte dello spazio di configurazione PCI e finestra BM: valori in
+/// `syscall-numbers` (single source con kernel e rector).
+use syscall_numbers::{PCI_CONF_ADDR, PCI_CONF_DATA, BM_BASE};
+pub use syscall_numbers::PIIX_BAR4_SIZE;
 
 /// PIIX3 IDE di QEMU (`-drive if=ide`).
 pub const PIIX3_VENDOR: u16 = 0x8086;

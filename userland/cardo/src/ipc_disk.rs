@@ -32,12 +32,10 @@ use civis::{DISK_HELLO, DISK_OPEN, DISK_READ, DISK_RESOLVE, DISK_WRITE};
 /// Topologia P2 (Fase 51): LIST/INFO (single source in `syscall-numbers`).
 use civis::{DISK_INFO, DISK_LIST, DISK_FLUSH};
 
-/// Finestra del request ring di block (stessa VA del server: ogni processo
-/// ha le proprie page table, nessun conflitto). cardo e' l'unico writer.
-const DISK_REQ_VA: u64 = 0x0000_4000_0024_0000;
-/// Finestra del response ring di block (stessa VA del server: ogni processo
-/// ha le proprie page table, nessun conflitto).
-const DISK_RESP_VA: u64 = 0x0000_4000_0025_0000;
+/// Finestre ring del data-plane DISK_* con block: VA single source in
+/// `syscall-numbers` via `civis` (ogni processo ha le proprie page table,
+/// nessun conflitto). cardo e' l'unico writer.
+use civis::{DISK_REQ_VA, DISK_RESP_VA};
 /// Bound nomi di resolve (deve combaciare con `DISK_MAX_NAME` di block).
 const DISK_MAX_NAME: usize = 16;
 // Geometria ring + errore IPC (A1): single source in `civis`.
