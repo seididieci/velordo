@@ -228,7 +228,9 @@ log seriale.
   copertura dell'ultimo pixel, `ceil` della bbox, inchiostro = area,
   determinismo; **modello a celle**: il cursore **non salta in fondo** al
   re-adattamento, il testo non scivola, il reflow lascia il cursore sul
-  testo), `libs/valloc` e `blake2s` (19 test in tutto). Girano da una
+  testo; **surface**: il layer 0 viene composto riga per riga rispettando
+  l'alpha dell'immagine e i colori sono `0xRRGGBBAA`), `libs/valloc` e
+  `blake2s` (22 test in tutto). Girano da una
   **directory neutra**: il `.cargo/config.toml` del repo impone
   `build.target = x86_64-unknown-none` + `build-std` in base alla directory
   corrente, e da dentro il repo `cargo test` proverebbe a compilare l'harness

@@ -397,7 +397,7 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
 
 ```bash
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term (rasterizer + cursore), valloc, blake2s: 19 test
+./scripts/run-unit-tests.sh   # term (rasterizer + cursore + surface/layer 0), valloc, blake2s: 22 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh

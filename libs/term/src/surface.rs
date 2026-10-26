@@ -45,24 +45,24 @@ pub fn bgra(idx: u8) -> u32 {
 /// Converte un colore RGBA packed (`0xRRGGBBAA`) nel formato pixel BGRA
 /// del framebuffer (byte in memoria: B, G, R, A).
 pub fn rgba_to_bgra(c: u32) -> u32 {
-    let r = (c & 0xFF) as u8;
-    let g = ((c >> 8) & 0xFF) as u8;
-    let b = ((c >> 16) & 0xFF) as u8;
-    let a = ((c >> 24) & 0xFF) as u8;
+    let r = (c >> 24) as u8;
+    let g = ((c >> 16) & 0xFF) as u8;
+    let b = ((c >> 8) & 0xFF) as u8;
+    let a = (c & 0xFF) as u8;
     u32::from_le_bytes([b, g, r, a])
 }
 
 /// Estrae il canale alpha (0..255) da un colore RGBA packed.
 pub fn alpha(c: u32) -> u32 {
-    (c >> 24) & 0xFF
+    c & 0xFF
 }
 
 /// Trova l'indice VGA (0-15) piu' vicino a un colore truecolor RGB.
 /// Ignora l'alpha: per il fallback VGA testuale non esiste trasparenza.
 pub fn nearest_vga(c: u32) -> u8 {
-    let r = (c & 0xFF) as i32;
-    let g = ((c >> 8) & 0xFF) as i32;
-    let b = ((c >> 16) & 0xFF) as i32;
+    let r = (c >> 24) as i32;
+    let g = ((c >> 16) & 0xFF) as i32;
+    let b = ((c >> 8) & 0xFF) as i32;
     let mut best: u8 = 0;
     let mut best_dist: i32 = i32::MAX;
     for (i, (pr, pg, pb)) in PALETTE.iter().enumerate() {
@@ -80,7 +80,7 @@ pub fn nearest_vga(c: u32) -> u8 {
 
 /// Impacchetta RGBA in `0xRRGGBBAA`.
 pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
-    (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | ((a as u32) << 24)
+    ((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | (a as u32)
 }
 
 /// Copia un rettangolo di pixel BGRA da `src` a `dst`.
@@ -245,6 +245,44 @@ impl Pixel {
             }
         }
     }
+
+    /// Riempie **tutta** la superficie con un colore opaco (BGRA): il fondo
+    /// di pagina, compresi i margini fuori dalla griglia.
+    pub fn fill(&mut self, color: u32) {
+        let words = (self.stride as usize * self.height as usize) / 4;
+        for i in 0..words {
+            let off = i * 4;
+            unsafe { core::ptr::write_volatile(self.ptr.add(off) as *mut u32, color) };
+        }
+    }
+
+    /// Compone `n` pixel BGRA con alpha **non premoltiplicato** sopra la
+    /// superficie a partire da (x, y). L'alpha 0 lascia il pixel com'e': lo
+    /// sfondo trasparente dell'immagine non deve dipingere (il fondo di
+    /// pagina resta visibile).
+    pub fn blend_bgra_span(&mut self, x: u32, y: u32, n: u32, src: &[u8]) {
+        for i in 0..n {
+            let px = x + i;
+            if px >= self.width {
+                break;
+            }
+            let s = (i as usize) * 4;
+            if s + 4 > src.len() {
+                break;
+            }
+            let a = src[s + 3] as u32;
+            if a == 0 {
+                continue;
+            }
+            let rgb = u32::from_le_bytes([src[s], src[s + 1], src[s + 2], 0xFF]);
+            let v = if a == 0xFF {
+                rgb
+            } else {
+                blend(unsafe { self.get(px, y) }, rgb, a)
+            };
+            unsafe { self.put(px, y, v) };
+        }
+    }
 }
 
 /// Blend lineare fra background e foreground (copertura 0..255).
@@ -298,6 +336,10 @@ impl Surface {
     /// Mette un codepoint in una cella (col,row) con colori truecolor.
     /// `cursor` disegna il cursore software (sottolineatura). Nel path VGA
     /// testuale il cursore e' quello hardware (CRTC): il flag e' ignorato.
+    /// `l0` se presente è (dati, larghezza, altezza, offset_x, offset_y) del
+    /// layer 0 BMP: i pixel sovrapposti vengono composti sopra lo sfondo
+    /// (rispettandone l'alpha) prima di disegnare il glifo, cosi' il testo
+    /// resta sopra l'immagine.
     pub fn put_char(
         &mut self,
         col: usize,
@@ -307,6 +349,7 @@ impl Surface {
         bg: u32,
         cursor: bool,
         font: Option<&mut Font>,
+        l0: Option<(&[u8], u32, u32, u32, u32)>,
     ) {
         match self {
             Surface::Pixel(p) => {
@@ -318,12 +361,54 @@ impl Surface {
                 let bg_color = rgba_to_bgra(bg);
                 let fg_color = rgba_to_bgra(fg);
                 let bg_a = alpha(bg);
-                // Background: opaco -> fill diretto; trasparente -> blend
-                // con il pixel gia' presente (layer 0 / sfondo immagine).
+                // Background: opaco -> fill diretto; altrimenti la cella
+                // riparte dal **fondo di pagina** e ci si fonde sopra il bg
+                // richiesto (il terminale non ha altri layer sotto: partire
+                // dal pixel precedente lascerebbe il carattere vecchio).
                 if bg_a == 0xFF {
                     p.fill_rect(x, y, cw, ch, bg_color);
                 } else {
+                    p.fill_rect(x, y, cw, ch, rgba_to_bgra(crate::grid::color::BLACK));
                     p.fill_rect_blend(x, y, cw, ch, bg_color, bg_a);
+                }
+                // Copia i pixel del layer 0 sopra lo sfondo dove la cella
+                // sovrappone il BMP: cosi' l'immagine resta visibile dietro
+                // al testo (e il testo non cancella il BMP). L'alpha
+                // dell'immagine viene rispettato: lo sfondo trasparente del
+                // BMP lascia vedere lo sfondo della cella.
+                if let Some((l0_data, l0_w, l0_h, l0_ox, l0_oy)) = l0 {
+                    let img_left = l0_ox;
+                    let img_right = l0_ox + l0_w;
+                    let img_top = l0_oy;
+                    let img_bottom = l0_oy + l0_h;
+                    let overlap_x_start = x.max(img_left);
+                    let overlap_x_end = (x + cw).min(img_right);
+                    let overlap_y_start = y.max(img_top);
+                    let overlap_y_end = (y + ch).min(img_bottom);
+                    if overlap_x_start < overlap_x_end && overlap_y_start < overlap_y_end {
+                        let n = overlap_x_end - overlap_x_start;
+                        for sy in overlap_y_start..overlap_y_end {
+                            if sy >= p.height {
+                                break;
+                            }
+                            let sy0 = (sy - l0_oy) as usize;
+                            if sy0 >= l0_h as usize {
+                                break;
+                            }
+                            let src_off = sy0 * l0_w as usize * 4
+                                + ((overlap_x_start - l0_ox) as usize) * 4;
+                            let bytes = n as usize * 4;
+                            if src_off + bytes > l0_data.len() {
+                                break;
+                            }
+                            p.blend_bgra_span(
+                                overlap_x_start,
+                                sy,
+                                n,
+                                &l0_data[src_off..src_off + bytes],
+                            );
+                        }
+                    }
                 }
                 if let Some(bmp) = font.and_then(|f| f.glyph(cp)) {
                     let baseline = y as i32 + p.geom.ascent_px;
@@ -338,15 +423,12 @@ impl Surface {
                             if px >= p.width || py >= p.height {
                                 continue;
                             }
-                            // Se il bg era trasparente, il pixel di
-                            // destinazione e' già bg fuso col layer 0;
-                            // altrimenti e' bg_color. In entrambi i casi
-                            // blendiamo il foreground sopra.
-                            let dest = if bg_a == 0xFF {
-                                bg_color
-                            } else {
-                                unsafe { p.get(px, py) }
-                            };
+                            // Il pixel di destinazione e' quello realmente
+                            // presente: bg fuso, oppure il layer 0 copiato
+                            // sopra. Blendare su `bg_color` (invece del
+                            // pixel vero) lasciava un alone nero attorno ai
+                            // glifi sopra l'immagine.
+                            let dest = unsafe { p.get(px, py) };
                             let mixed = blend(dest, fg_color, cov);
                             unsafe { p.put(px, py, mixed) };
                         }
@@ -398,5 +480,118 @@ impl Surface {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regressioni invisibili a occhio, trovate sul framebuffer vero:
+    //! - la convenzione dei colori (`0xRRGGBBAA`) letta al contrario dava
+    //!   sfondi semi-trasparenti che si accumulavano (un rosso scuro);
+    //! - l'offset di riga del layer 0 senza `* 4` copiava bene la prima riga
+    //!   del BMP e sbavava tutte le successive (striscia verticale).
+
+    use super::*;
+    use crate::grid::color;
+
+    /// Framebuffer BGRA di prova 32x16 (griglia 4x2 di celle 8x8 a 0,0).
+    fn surface(buf: &mut [u32]) -> Surface {
+        Surface::Pixel(Pixel {
+            ptr: buf.as_mut_ptr() as *mut u8,
+            width: 32,
+            height: 16,
+            stride: 32 * 4,
+            geom: Geom {
+                cols: 4,
+                rows: 2,
+                cell_w: 8,
+                cell_h: 8,
+                ascent_px: 6,
+                origin_x: 0,
+                origin_y: 0,
+            },
+        })
+    }
+
+    /// Immagine 8x8 dove ogni pixel e' unico (riga nel B, colonna nel G):
+    /// qualunque offset sbagliato di riga o di colonna si vede subito.
+    /// Byte in memoria: B, G, R, A.
+    fn immagine() -> alloc::vec::Vec<u8> {
+        let mut img = alloc::vec::Vec::new();
+        for y in 0..8u32 {
+            for x in 0..8u32 {
+                img.extend_from_slice(&[y as u8, x as u8, 0x40 + y as u8, 0xFF]);
+            }
+        }
+        img
+    }
+
+    /// Un `put_char` di una cella sopra il layer 0 copia il BMP riga per riga
+    /// e lo lascia intatto (il testo non cancella l'immagine). Vale sia con
+    /// background opaco sia trasparente.
+    #[test]
+    fn layer0_copiato_riga_per_riga() {
+        let img = immagine();
+        for bg in [color::BLACK, rgba(0, 0, 0, 0)] {
+            let mut fb = alloc::vec![0u32; 32 * 16];
+            let mut s = surface(&mut fb);
+            // Cella (1,1) = pixel (8,8): l'immagine (8x8) la ricopre esatta.
+            s.put_char(1, 1, 0, color::WHITE, bg, false, None, Some((&img, 8, 8, 8, 8)));
+            for y in 0..8usize {
+                for x in 0..8usize {
+                    let got = fb[(8 + y) * 32 + (8 + x)];
+                    let want = u32::from_le_bytes([y as u8, x as u8, 0x40 + y as u8, 0xFF]);
+                    assert_eq!(
+                        got, want,
+                        "bg={:#010x} pixel ({},{}) del layer 0",
+                        bg, x, y
+                    );
+                }
+            }
+        }
+    }
+
+    /// L'alpha dell'immagine viene rispettato: lo sfondo trasparente del BMP
+    /// (`a = 0`) lascia il colore di pagina, i pixel opachi sono l'immagine, i
+    /// traslucidi sono il blend dei due.
+    #[test]
+    fn layer0_alpha_rispettato() {
+        // 8x8 bianchi con alpha 0, 0x40, 0x80, 0xFF (poi si ripete).
+        let alpha = [0u8, 0x40, 0x80, 0xFF];
+        let mut img = alloc::vec::Vec::new();
+        for _ in 0..8 {
+            for x in 0..8 {
+                img.extend_from_slice(&[0xFF, 0xFF, 0xFF, alpha[x % 4]]);
+            }
+        }
+        let mut fb = alloc::vec![0u32; 32 * 16];
+        let mut s = surface(&mut fb);
+        s.put_char(1, 1, 0, color::WHITE, color::BLACK, false, None, Some((&img, 8, 8, 8, 8)));
+
+        let bg = rgba_to_bgra(color::BLACK);
+        let white = 0xFFFF_FFFF;
+        for x in 0..8usize {
+            let got = fb[8 * 32 + 8 + x];
+            match alpha[x % 4] {
+                0 => assert_eq!(got, bg, "alpha 0: resta il fondo di pagina"),
+                0xFF => assert_eq!(got, white, "alpha 255: pixel dell'immagine"),
+                a => assert_eq!(got, blend(bg, white, a as u32), "alpha {}", a),
+            }
+        }
+    }
+
+    /// I colori sono `0xRRGGBBAA`: l'alpha e' il byte **basso**, il rosso
+    /// quello alto. Letto al contrario, `BLACK` risultava trasparente.
+    #[test]
+    fn colore_rrggbbaa() {
+        let c = rgba(0x0B, 0x0D, 0x14, 0xFF);
+        assert_eq!(c, 0x0B0D_14FF);
+        assert_eq!(alpha(c), 0xFF, "alpha nel byte basso");
+        assert_eq!(alpha(rgba(1, 2, 3, 0x80)), 0x80);
+        // BGRA in memoria: B, G, R, A.
+        assert_eq!(rgba_to_bgra(c), u32::from_le_bytes([0x14, 0x0D, 0x0B, 0xFF]));
+        // Il fallback VGA legge gli stessi canali (niente alpha).
+        assert_eq!(nearest_vga(rgba(0xFF, 0x5C, 0x70, 0xFF)), 1);
+        assert_eq!(nearest_vga(color::WHITE), 7);
     }
 }

@@ -209,11 +209,13 @@ impl Term {
             geom: grid_geom,
         });
         self.grid.resize(grid_geom.cols, grid_geom.rows);
-        // 5) ridisegna tutto (il resize ha segnato la zona sporca intera) e
+        // 5) il fondo del buffer nuovo (colore di pagina + immagine
+        //    ricentrata: gli offset sono relativi alla superficie) e
         //    **trasferisci i pixel all'host**: il PRESENT ha agganciato il
         //    buffer nuovo ma il device ha visto solo gli zeri dell'allocazione
         //    (il primo FLUSH, senza questo, arriverebbe al primo tasto:
         //    schermo nero fino a li').
+        self.draw_layer0_full();
         self.render();
         self.flush_display();
         true
@@ -390,46 +392,22 @@ impl Term {
                     let is_cursor =
                         (col, row) == self.grid.cursor_clamped() && self.grid.cursor_visible;
 
-                    // Celle vuote o bg trasparente: ripristina lo sfondo dal
-                    // layer 0. Se manca il layer 0, riempi col colore di
-                    // background corrente (opaco) per cancellare eventuali
-                    // pixel residui del carattere precedente.
-                    if cell.cp == 0 || cell.bg_transparent() {
+                    // Celle vuote (cp == 0): ripristina lo sfondo dal layer 0
+                    // (pixel BMP dove sovrappone, nero altrove). Niente glifo.
+                    // Senza layer 0 la cella va riempita col suo bg (una cella
+                    // "spazio" puo' avere un background colorato).
+                    if cell.cp == 0 {
                         if let Some((ptr, len)) = l0_data {
                             let l0_slice = unsafe { core::slice::from_raw_parts(ptr, len) };
                             self.restore_layer0_cell(col, row, l0_slice);
                         } else {
-                            // Nessun layer 0: riempi la cella con bg opaco.
-                            let surface = match &mut self.surface {
-                                Surface::Pixel(p) => p,
-                                _ => return,
-                            };
-                            let cw = surface.geom.cell_w as u32;
-                            let ch = surface.geom.cell_h as u32;
-                            let x = surface.geom.origin_x + (col as u32) * cw;
-                            let y = surface.geom.origin_y + (row as u32) * ch;
-                            let bg_color = surface::rgba_to_bgra(cell.bg);
-                            for yy in 0..ch {
-                                for xx in 0..cw {
-                                    let px = x + xx;
-                                    let py = y + yy;
-                                    if px >= surface.width || py >= surface.height {
-                                        continue;
-                                    }
-                                    unsafe {
-                                        surface.put(px, py, bg_color);
-                                    }
-                                }
-                            }
+                            self.paint_cell_bg(col, row, cell.bg);
                         }
-                    }
-
-                    // Cell vuota: lo sfondo e' già stato ripristinato, niente
-                    // glifo da disegnare.
-                    if cell.cp == 0 {
                         continue;
                     }
 
+                    // Celle con carattere: put_char gestisce layer 0 (BMP come
+                    // sfondo) + glifo in un colpo solo.
                     self.draw_cell(col, row, cell.cp, cell.fg, cell.bg, is_cursor);
                 }
             }
@@ -440,35 +418,16 @@ impl Term {
             let (cc, cr) = self.cursor_drawn;
             if cc < self.grid.cols() && cr < self.grid.rows() {
                 let cell = self.grid.cell(cc, cr);
-                if cell.cp == 0 || cell.bg_transparent() {
+                if cell.cp == 0 {
                     if let Some((ptr, len)) = l0_data {
                         let l0_slice = unsafe { core::slice::from_raw_parts(ptr, len) };
                         self.restore_layer0_cell(cc, cr, l0_slice);
                     } else {
-                        let surface = match &mut self.surface {
-                            Surface::Pixel(p) => p,
-                            _ => return,
-                        };
-                        let cw = surface.geom.cell_w as u32;
-                        let ch = surface.geom.cell_h as u32;
-                        let x = surface.geom.origin_x + (cc as u32) * cw;
-                        let y = surface.geom.origin_y + (cr as u32) * ch;
-                        let bg_color = surface::rgba_to_bgra(cell.bg);
-                        for yy in 0..ch {
-                            for xx in 0..cw {
-                                let px = x + xx;
-                                let py = y + yy;
-                                if px >= surface.width || py >= surface.height {
-                                    continue;
-                                }
-                                unsafe {
-                                    surface.put(px, py, bg_color);
-                                }
-                            }
-                        }
+                        self.paint_cell_bg(cc, cr, cell.bg);
                     }
+                } else {
+                    self.draw_cell(cc, cr, cell.cp, cell.fg, cell.bg, false);
                 }
-                self.draw_cell(cc, cr, cell.cp, cell.fg, cell.bg, false);
             }
             self.cursor_drawn = cur;
         }
@@ -476,35 +435,16 @@ impl Term {
         let (cc, cr) = self.cursor_drawn;
         if cc < self.grid.cols() && cr < self.grid.rows() {
             let cell = self.grid.cell(cc, cr);
-            if cell.cp == 0 || cell.bg_transparent() {
+            if cell.cp == 0 {
                 if let Some((ptr, len)) = l0_data {
                     let l0_slice = unsafe { core::slice::from_raw_parts(ptr, len) };
                     self.restore_layer0_cell(cc, cr, l0_slice);
                 } else {
-                    let surface = match &mut self.surface {
-                        Surface::Pixel(p) => p,
-                        _ => return,
-                    };
-                    let cw = surface.geom.cell_w as u32;
-                    let ch = surface.geom.cell_h as u32;
-                    let x = surface.geom.origin_x + (cc as u32) * cw;
-                    let y = surface.geom.origin_y + (cr as u32) * ch;
-                    let bg_color = surface::rgba_to_bgra(cell.bg);
-                    for yy in 0..ch {
-                        for xx in 0..cw {
-                            let px = x + xx;
-                            let py = y + yy;
-                            if px >= surface.width || py >= surface.height {
-                                continue;
-                            }
-                            unsafe {
-                                surface.put(px, py, bg_color);
-                            }
-                        }
-                    }
+                    self.paint_cell_bg(cc, cr, cell.bg);
                 }
+            } else {
+                self.draw_cell(cc, cr, cell.cp, cell.fg, cell.bg, self.grid.cursor_visible);
             }
-            self.draw_cell(cc, cr, cell.cp, cell.fg, cell.bg, self.grid.cursor_visible);
         }
         // Nel fallback VGA il cursore e' quello hardware (CRTC).
         if matches!(self.surface, Surface::VgaText(_)) {
@@ -512,12 +452,39 @@ impl Term {
         }
     }
 
+    /// Riempe una cella col suo background (nessun glifo). Usato per le celle
+    /// vuote quando non c'e' un layer 0 da ripristinare.
+    fn paint_cell_bg(&mut self, col: usize, row: usize, bg: u32) {
+        let surface = match &mut self.surface {
+            Surface::Pixel(p) => p,
+            _ => return,
+        };
+        let cw = surface.geom.cell_w as u32;
+        let ch = surface.geom.cell_h as u32;
+        let x = surface.geom.origin_x + (col as u32) * cw;
+        let y = surface.geom.origin_y + (row as u32) * ch;
+        let color = surface::rgba_to_bgra(bg);
+        for yy in 0..ch {
+            for xx in 0..cw {
+                unsafe { surface.put(x + xx, y + yy, color) };
+            }
+        }
+    }
+
     /// Disegna una cella sulla surface attiva.
     fn draw_cell(&mut self, col: usize, row: usize, cp: u32, fg: u32, bg: u32, cursor: bool) {
         // Nel path VGA il font non serve (il BIOS disegna il carattere).
         let font = self.font.as_mut();
+        // Passa il layer 0 a put_char: i pixel BMP sovrapposti vengono
+        // copiati sopra lo sfondo prima del glifo, cosi' il testo resta
+        // sopra l'immagine senza cancellarla.
+        let l0 = self.layer0.as_ref().map(|v| {
+            // Righe = byte / (larghezza * 4): il pixel e' BGRA.
+            let l0_h = (v.len() / (self.layer0_width.max(1) as usize * 4)) as u32;
+            (v.as_slice(), self.layer0_width, l0_h, self.layer0_offset_x, self.layer0_offset_y)
+        });
         self.surface
-            .put_char(col, row, cp, fg, bg, cursor, font);
+            .put_char(col, row, cp, fg, bg, cursor, font, l0);
     }
 
     /// Select Graphic Rendition (ESC[...m): truecolor (`38;2` / `48;2`) e 256
@@ -613,43 +580,71 @@ impl Term {
         }
     }
 
-    /// Disegna l'intero layer 0 nel framebuffer attivo, centrato.
-    /// Calcola e memorizza gli offset di centratura per `restore_layer0_cell`.
-    fn draw_layer0_full(&mut self, layer0: &[u8]) {
+    /// Ridisegna il fondo dell'intero framebuffer: il **colore di pagina**
+    /// (anche nei margini fuori dalla griglia), poi il layer 0 (BMP) centrato,
+    /// composto con il suo alpha — lo sfondo trasparente dell'immagine lascia
+    /// vedere il colore di pagina.
+    ///
+    /// Calcola e memorizza gli offset di centratura per `restore_layer0_cell`
+    /// (cambiano al resize: gli offset sono relativi alla superficie).
+    fn draw_layer0_full(&mut self) {
+        let bg = surface::rgba_to_bgra(color::BLACK);
+        if let Surface::Pixel(p) = &mut self.surface {
+            p.fill(bg);
+        }
+        // Puntatore+lunghezza PRIMA del mut-borrow della surface: `layer0` e'
+        // un campo di self (borrow disjoint, ma il prestito va chiuso).
+        let (ptr, len) = match self.layer0.as_ref() {
+            Some(v) => (v.as_ptr() as *const u8, v.len()),
+            None => return,
+        };
+        let layer0 = unsafe { core::slice::from_raw_parts(ptr, len) };
+        let w_img = self.layer0_width as usize;
+        if w_img == 0 {
+            return;
+        }
+        let h_img = len / (w_img * 4);
         let surface = match &mut self.surface {
             Surface::Pixel(p) => p,
             _ => return,
         };
-        let w_img = self.layer0_width as usize;
-        let h_img = layer0.len() / (w_img * 4);
         let w_fb = surface.width as usize;
         let h_fb = surface.height as usize;
 
         // Centra l'immagine nel framebuffer (D4).
         self.layer0_offset_x = ((w_fb.saturating_sub(w_img)) / 2) as u32;
         self.layer0_offset_y = ((h_fb.saturating_sub(h_img)) / 2) as u32;
-
-        let ox = self.layer0_offset_x as usize;
-        let oy = self.layer0_offset_y as usize;
+        let ox = self.layer0_offset_x;
+        let oy = self.layer0_offset_y;
+        let _ = civis::println!(
+            "[console] layer 0: fb={}x{} img={}x{} offset=({},{}) stride={}",
+            w_fb, h_fb, w_img, h_img, ox, oy, surface.stride
+        );
 
         for yy in 0..h_img {
-            let src = unsafe { layer0.as_ptr().add(yy * w_img * 4) };
-            let dst = unsafe {
-                surface
-                    .ptr
-                    .add(((oy + yy) * surface.stride as usize) + ox * 4)
-            };
-            unsafe {
-                core::ptr::copy_nonoverlapping(src, dst, w_img * 4);
-            }
+            let off = yy * w_img * 4;
+            surface.blend_bgra_span(
+                ox,
+                oy + yy as u32,
+                w_img as u32,
+                &layer0[off..off + w_img * 4],
+            );
         }
     }
 
-    /// Ripristina i pixel di una singola cella dal layer 0 nel framebuffer.
-    /// Usato per le celle con background trasparente o vuote, così non serve
-    /// ridisegnare tutto lo schermo. Se la cella cade fuori dai bounds del
-    /// layer 0 (immagine più piccola dello schermo), viene riempita di nero.
+    /// Ripristina una cella dal layer 0: prima il colore di pagina su tutta la
+    /// cella (cancella il carattere precedente e i margini fuori
+    /// dall'immagine), poi l'overlap del BMP composto con il suo alpha.
     fn restore_layer0_cell(&mut self, col: usize, row: usize, layer0: &[u8]) {
+        let bg = surface::rgba_to_bgra(color::BLACK);
+        let w_img = self.layer0_width;
+        let ox = self.layer0_offset_x;
+        let oy = self.layer0_offset_y;
+        let h_img = if w_img == 0 {
+            0
+        } else {
+            (layer0.len() / (w_img as usize * 4)) as u32
+        };
         let surface = match &mut self.surface {
             Surface::Pixel(p) => p,
             _ => return,
@@ -658,74 +653,37 @@ impl Term {
         let ch = surface.geom.cell_h as u32;
         let x = surface.geom.origin_x + (col as u32) * cw;
         let y = surface.geom.origin_y + (row as u32) * ch;
-        let w_img = self.layer0_width;
-        let h_img = (layer0.len() / (w_img as usize * 4)) as u32;
-        let ox = self.layer0_offset_x;
-        let oy = self.layer0_offset_y;
 
-        // Converti coordinate framebuffer -> coordinate layer 0.
-        let x0 = x.saturating_sub(ox);
-        let y0 = y.saturating_sub(oy);
+        // Fondo di pagina (clippato alla superficie).
+        let w = cw.min(surface.width.saturating_sub(x));
+        let h = ch.min(surface.height.saturating_sub(y));
+        surface.fill_rect(x, y, w, h, bg);
 
-        // Se la cella e' completamente fuori dal layer 0, riempi di nero.
-        if x0 >= w_img || y0 >= h_img {
-            let black = color::BLACK;
-            for yy in 0..ch {
-                let sy = y + yy;
+        // Overlap con il BMP, riga per riga (l'offset sorgente e' in BYTE:
+        // `w_img * 4` per riga — senza il `* 4` si copiava bene solo la prima
+        // riga e il resto sbavava in verticale).
+        let overlap_x_start = x.max(ox);
+        let overlap_x_end = (x + cw).min(ox + w_img);
+        let overlap_y_start = y.max(oy);
+        let overlap_y_end = (y + ch).min(oy + h_img);
+        if overlap_x_start < overlap_x_end && overlap_y_start < overlap_y_end {
+            let n = overlap_x_end - overlap_x_start;
+            for sy in overlap_y_start..overlap_y_end {
                 if sy >= surface.height {
-                    continue;
+                    break;
                 }
-                let dst_off = ((sy as usize) * surface.stride as usize + (x as usize)) * 4;
-                for xx in 0..cw {
-                    let sx = x + xx;
-                    if sx >= surface.width {
-                        continue;
-                    }
-                    let d = dst_off + (xx as usize) * 4;
-                    unsafe {
-                        core::ptr::write_volatile(
-                            surface.ptr.add(d) as *mut u32,
-                            surface::rgba_to_bgra(black),
-                        );
-                    }
+                let sy0 = (sy - oy) as usize;
+                let src_off = sy0 * w_img as usize * 4 + ((overlap_x_start - ox) as usize) * 4;
+                let bytes = n as usize * 4;
+                if src_off + bytes > layer0.len() {
+                    break;
                 }
-            }
-            return;
-        }
-
-        for yy in 0..ch {
-            let sy = y + yy;
-            let sy0 = sy.saturating_sub(oy);
-            if sy >= surface.height || sy0 >= h_img {
-                continue;
-            }
-            let src_off = ((sy0 as usize) * w_img as usize + (x0 as usize)) * 4;
-            let dst_off = ((sy as usize) * surface.stride as usize + (x as usize)) * 4;
-            // Quanti pixel di questa riga stanno dentro il layer 0.
-            let copy_w = cw.min(w_img - x0) as usize;
-            if src_off + copy_w * 4 > layer0.len() {
-                continue;
-            }
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    layer0.as_ptr().add(src_off),
-                    surface.ptr.add(dst_off) as *mut u8,
-                    copy_w * 4,
+                surface.blend_bgra_span(
+                    overlap_x_start,
+                    sy,
+                    n,
+                    &layer0[src_off..src_off + bytes],
                 );
-            }
-            // Resto della cella (fuori dal layer 0): nero.
-            for xx in copy_w..cw as usize {
-                let sx = x + xx as u32;
-                if sx >= surface.width {
-                    continue;
-                }
-                let d = dst_off + xx * 4;
-                unsafe {
-                    core::ptr::write_volatile(
-                        surface.ptr.add(d) as *mut u32,
-                        surface::rgba_to_bgra(color::BLACK),
-                    );
-                }
             }
         }
     }
@@ -839,27 +797,23 @@ fn real_main(_sp: u64) -> ! {
         fb_slot: civis::DMA_SLOT_DEVICE,
     };
 
-    // Carica lo sfondo immagine (layer 0) se disponibile. Deve essere fatto
-    // PRIMA del banner, altrimenti il testo lo coprirebbe.
-    // Il buffer device alllocato da DMA_ALLOC e' gia' azzerato (nero), quindi
-    // l'area oltre l'immagine e' gia' pulita. Non serve un fill esplicito
-    // (evita di scrivere oltre il buffer mappato).
-
-    // Carica lo sfondo immagine (layer 0) se disponibile. Deve essere fatto
-    // PRIMA del banner, altrimenti il testo lo coprirebbe.
-    if let Some((l0, w, h)) = load_bmp("/bg.bmp") {
-        let _ = civis::println!("[console] layer 0: {}x{} bg loaded OK", w, h);
-        // Imposta layer0_width PRIMA di draw_layer0_full: la funzione lo usa
-        // per calcolare le righe da copiare (divisione per zero se e' 0).
-        term.layer0_width = w;
-        if matches!(term.surface, Surface::Pixel(_)) {
-            term.draw_layer0_full(&l0);
-            term.flush_display();
+    // Lo sfondo e' un layer: caricato PRIMA del banner, altrimenti il testo
+    // resterebbe sotto l'immagine. Senza `/bg.bmp` resta il colore di pagina.
+    match load_bmp("/bg.bmp") {
+        Some((l0, w, h)) => {
+            let _ = civis::println!("[console] layer 0: {}x{} bg loaded OK", w, h);
+            term.layer0_width = w;
+            term.layer0 = Some(l0);
         }
-        term.layer0 = Some(l0);
-    } else {
-        let _ = civis::println!("[console] layer 0: /bg.bmp non trovato o non valido, sfondo nero");
+        None => {
+            let _ = civis::println!(
+                "[console] layer 0: /bg.bmp non trovato o non valido, solo colore di pagina"
+            );
+        }
     }
+    // Fondo: colore di pagina + immagine centrata (se c'e').
+    term.draw_layer0_full();
+    term.flush_display();
 
     // 5. Banner sul terminale (il framebuffer o la VGA) + il seriale (sink
     //    di debug): la console si annuncia come il vecchio console server.

@@ -86,8 +86,10 @@ impl Cell {
     }
 
     /// Il background della cella e' trasparente (alpha < 0xFF).
+    /// La cella ha un background non del tutto opaco (alpha < 255)? Il colore
+    /// e' packed `0xRRGGBBAA`: l'alpha e' il byte **basso**.
     pub fn bg_transparent(&self) -> bool {
-        (self.bg >> 24) & 0xFF < 0xFF
+        (self.bg & 0xFF) < 0xFF
     }
 }
 

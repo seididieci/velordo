@@ -88,5 +88,6 @@
 - [ADR-0060: Console virtuale — il driver `gpu` e il servizio `console` (D3)](./adr/0060-console-virtuale-driver-display.md)
 - [ADR-0061: Modeset e host-sync — chi comanda la risoluzione del display (D4)](./adr/0061-modeset-host-sync.md)
 - [ADR-0062: Il display di default (terminale pixel) e il login come gate (Fase 59)](./adr/0062-display-default-e-login-gate.md)
+- [ADR-0063: Lo sfondo immagine del terminale (layer 0) (Fase 60)](./adr/0063-sfondo-immagine-terminale.md)
 - [ADR-0058: Creazione utenti, token di sessione e protocollo Identis (Fase 3.1)](./adr/0058-creazione-utenti-token-sessione.md)
 - [ADR-0059: Il FAT esce dal boot e dalla suite — ArcaFS unico filesystem di sistema](./adr/0059-fat-fuori-boot-arcafs-unico.md)

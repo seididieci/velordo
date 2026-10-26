@@ -184,6 +184,24 @@ Voci con scope e vittoria dichiarati (non date).
       FAIL/PANIC/FAULT) e i **casi nuovi del terminale** (cursore che
       non salta in fondo al resize, eco del backspace) sono coperti dai
       **unit test host** di `libs/term` (fuori dal gate).
+- [x] **D6 — sfondo immagine del terminale (layer 0)** (completata,
+      ADR-0063): `/bg.bmp` (585x135, BITMAPV5 BGRA con alpha) e' uno
+      **strato sotto il testo**, non un'immagine incollata sopra. Lo stack
+      e' fondo di pagina `#0B0D14` (su **tutta** la superficie, margini
+      della griglia compresi) → immagine centrata **composta con il suo
+      alpha** (lo sfondo trasparente del BMP lascia il colore di pagina:
+      la banda dell'immagine non si vede come rettangolo) → glifo blendato
+      sul pixel vero. Una sola primitiva (`Pixel::blend_bgra_span`) serve i
+      tre percorsi (fondo pieno, cella vuota, cella con carattere): il
+      testo ricompone la cella e disegna sopra, senza ridisegnare lo
+      schermo. Gli offset si ricalcolano all'avvio **e a ogni resize**
+      (D4). Tre bug trovati sul framebuffer vero e coperti da unit test
+      host: righe del BMP senza `* 4` (solo la riga 0 tornava),
+      convenzione colore `0xRRGGBBAA` letta al contrario (fondo che
+      accumulava verso il rosso), blend del glifo su `bg_color` invece del
+      pixel di destinazione (alone nero). Vittoria: frame identico al BMP
+      composto (0 pixel diversi su 78.975) e gate invariato (6 righe, zero
+      FAIL/PANIC).
 - [ ] **S3.2 — Shell nativa** (dopo la Fase 3.1): programma interattivo
       **nativo** (meccanismo, niente POSIX) che prende il posto dello
       spin-loop del login: dispatcher di comandi su `/dev/input/keyboard` +
