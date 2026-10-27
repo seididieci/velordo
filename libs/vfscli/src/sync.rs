@@ -30,6 +30,9 @@ fn pipe_throttle() {
 /// frame (re-handshake). Ritorna `(result, w1, payload_len)` della reply o
 /// `Err(NotReady)` se cardo non e' raggiungibile.
 ///
+/// Il tag IPC notificato a cardo e' SEMPRE `FS_NOTIFY`: il tipo di operazione
+/// (`tag`) viaggia dentro il frame del ring, non nel tag IPC.
+///
 /// NON consuma il frame di risposta: spetta al chiamante
 /// `resp_ring_consume(16)` (nessun payload) o `resp_ring_read_payload`
 /// (con payload), poi interpretare `result` via `fs_reply_check`.
@@ -45,7 +48,7 @@ fn fs_notify<S: Sys>(
     if !ring::req_ring_write(tag, w0, w1, payload) {
         return Err(Error::RingFull);
     }
-    match session::fs_notify_result(st, tag as u64, || {
+    match session::fs_notify_result(st, FS_NOTIFY, || {
         ring::req_ring_write(tag, w0, w1, payload)
     }) {
         Some(r) => Ok(r),
