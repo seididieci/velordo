@@ -628,6 +628,6 @@ pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
     // Assolutizza senza normalizzare `..` (testuale come ovunque in Velordo).
     let s = path_str(p)?;
     let abs = cwd::resolve::<VelordoSys>(s).map_err(io_err)?;
-    let os: &OsStr = OsStrExt::from_bytes(&abs);
+    let os: &OsStr = OsStrExt::from_bytes(abs.as_ref());
     Ok(Path::new(os).to_path_buf())
 }

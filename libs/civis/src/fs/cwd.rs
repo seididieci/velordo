@@ -3,6 +3,7 @@
 //! a mano (fonte in `libs/vfscli/src/cwd.rs`).
 
 use crate::Error;
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
 
@@ -11,7 +12,7 @@ pub fn getcwd() -> Result<Vec<u8>, Error> {
 }
 
 
-pub fn resolve(path: &str) -> Result<Vec<u8>, Error> {
+pub fn resolve(path: &str) -> Result<Cow<[u8]>, Error> {
     vfscli::cwd::resolve::<super::CivisSys>(path)
 }
 

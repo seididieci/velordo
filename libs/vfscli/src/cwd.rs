@@ -12,6 +12,7 @@ use super::abi::*;
 use super::{State, Sys};
 use super::error::Error;
 use super::sync;
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
 /// `getcwd()`: directory di lavoro del gruppo (sempre assoluta, `/` default).
@@ -27,9 +28,13 @@ pub fn getcwd<S: Sys>() -> Result<Vec<u8>, Error> {
 
 /// Unisce `path` alla cwd se relativo (assoluti invariati). Vuoto = invariato
 /// (i chiamanti mantengono la semantica empty-path di prima).
-pub fn resolve<S: Sys>(path: &str) -> Result<Vec<u8>, Error> {
+///
+/// Per i percorsi assoluti ritorna un prestito su `path` (zero allocazione
+/// heap); solo i relativi allacciano un `Vec`. `Cow::Borrowed` per assoluti,
+/// `Cow::Owned` per relativi.
+pub fn resolve<S: Sys>(path: &str) -> Result<Cow<[u8]>, Error> {
     if path.is_empty() || path.starts_with('/') {
-        return Ok(path.as_bytes().to_vec());
+        return Ok(Cow::Borrowed(path.as_bytes()));
     }
     let cwd = getcwd::<S>()?;
     let mut out = Vec::with_capacity(cwd.len() + 1 + path.len());
@@ -41,7 +46,7 @@ pub fn resolve<S: Sys>(path: &str) -> Result<Vec<u8>, Error> {
     if out.len() > CWD_MAX {
         return Err(Error::Invalid);
     }
-    Ok(out)
+    Ok(Cow::Owned(out))
 }
 
 /// `chdir(path)`: cambia la cwd del gruppo. Relativi uniti alla cwd corrente;
@@ -52,14 +57,14 @@ pub fn resolve<S: Sys>(path: &str) -> Result<Vec<u8>, Error> {
 /// Errori: NotFound/NotDir/Invalid dal kernel o dallo stat.
 pub fn chdir<S: Sys>(st: &'static State<S>, path: &str) -> Result<(), Error> {
     let abs = resolve::<S>(path)?;
-    let abs_str = core::str::from_utf8(&abs).map_err(|_| Error::Invalid)?;
+    let abs_str = core::str::from_utf8(abs.as_ref()).map_err(|_| Error::Invalid)?;
     // Il target deve esistere ed essere dir (il kernel non ha FS: stat qui).
     let mut meta = sync::Stat { size: 0, kind: 0, readonly: false, mtime: 0 };
     sync::stat(st, abs_str, &mut meta)?;
     if !meta.is_dir() {
         return Err(Error::NotDir);
     }
-    let r = unsafe { S::chdir_raw(abs.as_ptr(), abs.len()) };
+    let r = unsafe { S::chdir_raw(abs.as_ref().as_ptr(), abs.len()) };
     if r < 0 {
         Err(Error::Invalid)
     } else {
