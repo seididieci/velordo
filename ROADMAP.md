@@ -202,15 +202,47 @@ Voci con scope e vittoria dichiarati (non date).
       pixel di destinazione (alone nero). Vittoria: frame identico al BMP
       composto (0 pixel diversi su 78.975) e gate invariato (6 righe, zero
       FAIL/PANIC).
-- [ ] **S3.2 — Shell nativa** (dopo la Fase 3.1): programma interattivo
-      **nativo** (meccanismo, niente POSIX) che prende il posto dello
-      spin-loop del login: dispatcher di comandi su `/dev/input/keyboard` +
-      `/dev/console` (`help`, `users`, `create-user <nome>`, `logout`,
-      `exit`). Il token di sessione passa dal login alla shell via env
-      (`VELORDO_SESSION`) e da li' ai programmi che lo chiedono: cosi'
+- [x] **S3.2a — Shell nativa REPL minima + gestione utenti** (completata, 2026-10): programma interattivo
+      **nativo** (meccanismo, niente POSIX) su `/dev/input/keyboard` +
+      `/dev/console`. Comandi: `help`, `users`, `create-user <nome>`,
+      `logout`/`exit`. Il token di sessione passa dal login alla shell via
+      env (`VELORDO_SESSION`) e da li' ai programmi che lo chiedono: cosi'
       `create-user` (oggi creato ma non lanciato da nessuno) diventa un
-      comando. Vittoria: dalla console si crea un utente e l'utente nuovo si
-      autentica con la sua password.
+      comando. `exit` esegue il logout se non ha altri padri (login ->
+      shell -> exit -> login); solo quando sara' lanciata da un DE si
+      aggiungera' il logout per chiudere la sessione del DE. La shell e'
+      userspace (ring 3) e linka la std Velordo: niente obbligo di `no_std`.
+      Identis-login spawna ora `sys/bin/shell.bin` invece della shell POSIX.
+      Vittoria: dalla console si crea un utente e l'utente nuovo si autentica
+      con la sua password. File: `userland/shell/` (nuovo), `userland/identis-login/` (modificato).
+
+- [ ] **S3.2b — Valori e capability**: i comandi restituiscono
+            valori/strutture (`File`, `Directory`, `Channel`, `Process`,
+            `Socket`, `Device`), non solo byte. Se l'output non e' catturato
+            in una variabile (`let f = ...`), il valore viene stampato
+            serializzato. La shell tiene una tabella di handle in memoria.
+      - **S3.2c — Pipeline di valori**: operatori `|>`, `filter`, `map`,
+            `each` che compongono valori (non byte attraverso parser).
+            Esempio: `fs.list("/src") |> filter(.extension == "rs") |>
+            map(fs.read) |> each(print)`.
+      - **S3.2d — Interprete Rust-like**: `let`, `for`, `if`, blocchi,
+            tipi basilari. Esempio:
+            `let files = fs.list("/tmp"); for f in files { if f.size >
+            1MiB { fs.remove(f) } }`.
+      - **Std**: non e' necessario `no_std`. La shell e' userspace (ring 3),
+            non un modulo kernel, quindi puo' linkare la **std Velordo**
+            (target `x86_64-unknown-velordo`, S1.3/S2.x gią chiuse): `println`,
+            `Vec`, `String`, `HashMap`, `std::fs` sopra cardo, argv/env,
+            thread/futex. La convenzione `#![no_std]` vale per il kernel e
+            per `libs/civis`, non per i binari userspace.
+      - **Dipendenze aperte**: `build ./kernel` richiede la toolchain
+            nativa (S2.5, aperta); `net.connect` richiede lo stack rete
+            (stub, non previsto). Gli esempi `build` / `net.connect` sono
+            illustrazione dell'interattivita', non requisiti di S3.2.
+
+      Vittoria: S3.2a chiude il debito di `create-user` non lanciato da
+      nessuno (Fase 3.1); S3.2b/S3.2c/S3.2d portano la shell verso la REPL
+      tipizzata capability-oriented.
 - [ ] **Multi-engine + auto-mount dichiarativo** (ADR-0059 §6): oggi un
       solo `DiskEngine` globale e' legato al volume root, quindi un **secondo
       volume ArcaFS si monta ma e' uno stub non leggibile** (la directory

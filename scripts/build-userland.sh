@@ -63,6 +63,8 @@ build_one userland/identis-login userland/identis-login/src/login.ld identis-log
 # (token di sessione + nome + hash BLAKE2s-256). Non e' ancora lanciato da
 # nessuno: la shell nativa (Fase 3.2) lo invocera' come comando.
 build_one userland/create-user userland/create-user/src/create-user.ld create-user.bin create-user
+# Shell nativa (Fase 3.2, S3.2a): REPL minima post-login, comandi help/users/create-user/logout/exit.
+build_one userland/shell userland/shell/src/shell.ld shell.bin shell
 # Fornitore di data/ora (Fase 50, P1 orologio): prima di gen-service-hashes
 # cosi' il manifest Strato 2 lo copre (HASH_USERTIME).
 build_one userland/time     userland/time/src/time.ld       usertime.bin    usertime

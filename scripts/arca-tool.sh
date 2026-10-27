@@ -88,6 +88,8 @@ seed_bin userland/build/userarca.bin usr/bin/arca.bin usr usr/bin/arca.bin
 # create-user (ADR-0055): programma utente (la shell nativa lo invoca come
 # comando, Fase 3.2).
 seed_bin userland/build/create-user.bin usr/bin/cuuser.bin usr usr/bin/cuuser.bin
+# Shell nativa (Fase 3.2, S3.2a): REPL minima, spawnata dal login (identis-login).
+seed_bin userland/build/shell.bin bin/shell.bin sys bin/shell.bin
 # Test suite /test (stessi dest 8.3 di inject-bins.sh). D2: le 6 suite che
 # init carica per object_id hanno anche l'oggetto in `tst`; gli helper
 # (testcli, testspin, …) vivono solo come path (dogfood VFS, D2.4).

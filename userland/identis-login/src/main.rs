@@ -14,6 +14,7 @@
 #![no_main]
 
 extern crate alloc;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -120,10 +121,9 @@ fn real_main(_sp: u64) -> ! {
                 unsafe { SESSION_TOKEN = r.w1; }
                 console_write(b"[login] SUCCESS\n");
                 // La shell prende il posto del login: il login e' il programma
-                // di autenticazione, non il terminale. Oggi e' la shell
-                // **POSIX** (la personalita' ha la sua shell:
-                // `bin/posix/shell.bin` nel bucket `sys`); la shell **nativa**
-                // — che eredita anche la sessione — arriva con la Fase 3.2.
+                // di autenticazione, non il terminale. La shell e' la **nativa**
+                // (Fase 3.2, S3.2a): eredita la sessione da `VELORDO_SESSION`
+                // e offre `help`, `users`, `create-user`, `logout`, `exit`.
                 // Il binario e' spawnato *detached*: quando il login esce, la
                 // shell viene ri-parentata a init (senza, la cascata della
                 // morte del parent la ucciderebbe).
@@ -152,22 +152,45 @@ fn real_main(_sp: u64) -> ! {
 /// la password: il login riprova, non chiude).
 const MAX_ATTEMPTS: u32 = 3;
 
-/// Spawla la shell POSIX dall'oggetto ArcaFS (`sys:bin/posix/shell.bin`).
+/// Spawla la shell nativa dall'oggetto ArcaFS (`sys:bin/shell.bin`).
+/// Passa il token di sessione come variabile d'ambiente `VELORDO_SESSION`
+/// (formato hex a 16 cifre): senza questo, la shell non trova mai il token.
 fn spawn_shell() {
-    let img = match civis::obj_get(b"sys", b"bin/posix/shell.bin") {
+    let img = match civis::obj_get(b"sys", b"bin/shell.bin") {
         Ok(v) if !v.is_empty() => v,
         _ => {
-            console_write(b"[login] shell POSIX non trovata su ArcaFS\n");
+            console_write(b"[login] shell nativa non trovata su ArcaFS\n");
             return;
         }
     };
-    let Some(meta) = civis::SpawnMeta::new("usershell", 16, &[]) else {
-        console_write(b"[login] SpawnMeta non valido\n");
-        return;
+
+    // Costruisce il token hex (16 cifre) e lo passa all'ambiente della shell.
+    let token = unsafe { SESSION_TOKEN };
+    let token_hex = format!("{:016x}", token);
+    let env_str = alloc::format!("VELORDO_SESSION={}", token_hex);
+
+    // Costruisce i metadati, l'env block e spawn. L'env block deve restare
+    // vivo fino a dopo lo spawn (il kernel copia il blocco dentro la syscall).
+    let mut meta = match civis::SpawnMeta::new("shell", 16, &[]) {
+        Some(m) => m,
+        None => {
+            console_write(b"[login] SpawnMeta non valido\n");
+            return;
+        }
     };
-    match civis::spawn_image(&img, &meta.detached()) {
-        Ok(_chan) => console_write(b"[login] shell POSIX avviata\n"),
-        Err(_) => console_write(b"[login] spawn della shell fallito\n"),
+
+    if let Some(packed) = civis::pack_args(&[], &[&env_str.as_bytes()]) {
+        meta = meta.argv(&packed);
+        match civis::spawn_image(&img, &meta.detached()) {
+            Ok(_chan) => console_write(b"[login] shell nativa avviata\n"),
+            Err(_) => console_write(b"[login] spawn della shell fallito\n"),
+        }
+    } else {
+        // pack_args fallisce: spawn senza env (la shell dira' "nessuna sessione")
+        match civis::spawn_image(&img, &meta.detached()) {
+            Ok(_chan) => console_write(b"[login] shell nativa avviata\n"),
+            Err(_) => console_write(b"[login] spawn della shell fallito\n"),
+        }
     }
 }
 

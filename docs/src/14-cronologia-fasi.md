@@ -2931,3 +2931,34 @@
       byte che sul filo erano 8 non si spiega con il caller — il
       richiamo era il driver sotto; (4) un programma che **non** e' un gate
       non e' un gate: il login autenticava e poi lasciava comunque entrare.
+- [x] **S3.2a — Shell nativa REPL minima** (2026-10): chiusa la prima
+      sotto-fase di S3.2. La shell POSIX (`bin/posix/shell.bin`) viene
+      sostituita dalla **shell nativa** (`bin/shell.bin`), un programma
+      interattivo che gira su `/dev/input/keyboard` + `/dev/console`, con
+      comandi `help`, `users`, `create-user <nome>`, `logout`/`exit`. Il
+      token di sessione passa dal login alla shell via env
+      (`VELORDO_SESSION`), cosi' `create-user` — che esisteva ma non era
+      lanciato da nessuno — diventa un comando eseguibile dalla console.
+      La shell usa `civis::entry!` (niente POSIX, niente `libr::entry!`) e
+      linka la std Velordo: il crate `userland/shell/` e' userspace ring 3
+      con `#[no_std]` ma puo' usare `alloc` (`Vec`, `String`, `format`).
+      Identis-login spawna ora `sys/bin/shell.bin` (via `obj_get`) invece
+      di `sys/bin/posix/shell.bin`. La shell e' un dispatcher: non usa `cd`,
+      `stdin`, `stdout`, `fork`, pipe Unix, `$VAR` come primitive speciali.
+      `exit` esegue il logout se non ha altri padri (login → shell → exit →
+      login); solo quando sara' lanciata da un DE si aggiungera' il logout
+      per chiudere la sessione del DE. Comandi: `help` (lista), `users`
+      (legge dal bucket `identis:config`, valida token via IDENTIS_LIST),
+      `create-user [nome]` (token root richiesto, password digitata +
+      conferma, hash BLAKE2s-256 in locale), `logout/exit` (init_bounce
+      Service::Login → init riavvia il login come getty). Login gate
+      (`OnDeath::LoginGate`) resta invariato: se la shell esce con code != 0
+      init riavvia il login; se esce con 0, init continua (nessun restart).
+      Build: `userland/shell/` nuovo crate, linker script proprio
+      (`shell.ld`), aggiunto a `build-userland.sh` dopo `create-user`,
+      seedato su ArcaFS in `bin/shell.bin` + oggetto `sys/bin/shell.bin`
+      via `arca-tool.sh`. Dimensioni: 50968 byte. Identis-login modificato:
+      `spawn_shell()` ora punta a `sys/bin/shell.bin`, log "shell nativa
+      avviata". File: `userland/shell/{Cargo.toml,Cargo.lock,src/}` (nuovo),
+      `scripts/build-userland.sh` (modificato), `scripts/arca-tool.sh`
+      (modificato), `userland/identis-login/src/main.rs` (modificato).
