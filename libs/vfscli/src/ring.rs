@@ -59,20 +59,50 @@ pub fn ring_free_space(head: u32, tail: u32) -> usize {
 
 /// Scrive `data` nel ring a `ring_va` partendo dalla posizione `head`.
 /// Avanza head di `data.len()`. Non verifica lo spazio (chiamante deve farlo).
+///
+/// I dati sono copiati in due span contigui (senza wrap, poi wrap) invece
+/// che byte-per-byte con `% RING_DATA_CAP`: elimina la divisione per ogni
+/// byte sulla hot path di tutti i frame FS/DISK.
 pub unsafe fn ring_write_at(ring_va: u64, head: u32, data: &[u8]) {
     let dst: *mut u8 = core::ptr::with_exposed_provenance_mut(ring_va as usize);
-    for (i, byte) in data.iter().enumerate() {
-        let pos = ((head as usize) + i) % RING_DATA_CAP;
-        unsafe { core::ptr::write_volatile(dst.add(pos), *byte); }
+    // Un singolo modulo per chiamata (non per byte): rende la funzione
+    // robusta anche se `head` arriva fuori range (il vecchio `%` per byte
+    // avvolgeva silenziosamente). Dopo questo, `head` e' sempre < RING_DATA_CAP.
+    let head = head as usize % RING_DATA_CAP;
+    let n = data.len();
+    if n == 0 {
+        return;
+    }
+    // Span 1: da `head` fino al limite del ring (niente wrap).
+    let first = n.min(RING_DATA_CAP - head);
+    for i in 0..first {
+        unsafe { core::ptr::write_volatile(dst.add(head + i), data[i]); }
+    }
+    // Span 2: avvolgimento dall'inizio dell'area dati del ring.
+    for i in first..n {
+        unsafe { core::ptr::write_volatile(dst.add(i - first), data[i]); }
     }
 }
 
 /// Legge `count` byte dal ring a `ring_va` partendo dalla posizione `tail`.
+///
+/// Come `ring_write_at`: un modulo per chiamata + due span contigui,
+/// niente modulo per byte.
 pub unsafe fn ring_read_at(ring_va: u64, tail: u32, dst: &mut [u8], count: usize) {
     let src: *const u8 = core::ptr::with_exposed_provenance(ring_va as usize);
-    for i in 0..count.min(dst.len()) {
-        let pos = ((tail as usize) + i) % RING_DATA_CAP;
-        dst[i] = unsafe { core::ptr::read_volatile(src.add(pos)) };
+    let tail = tail as usize % RING_DATA_CAP;
+    let n = count.min(dst.len());
+    if n == 0 {
+        return;
+    }
+    // Span 1: da `tail` fino al limite del ring (niente wrap).
+    let first = n.min(RING_DATA_CAP - tail);
+    for i in 0..first {
+        dst[i] = unsafe { core::ptr::read_volatile(src.add(tail + i)) };
+    }
+    // Span 2: avvolgimento dall'inizio dell'area dati del ring.
+    for i in first..n {
+        dst[i] = unsafe { core::ptr::read_volatile(src.add(i - first)) };
     }
 }
 

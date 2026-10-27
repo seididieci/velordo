@@ -1,4 +1,7 @@
 use super::*;
+// Copia anello (no-wrap/wrap, niente modulo per byte): single source in
+// `vfscli::ring`, riesportata da `civis`.
+use civis::{ring_read_at, ring_write_at};
 
 /// Scrive un response frame `[result:8][w1:8][payload]` nel ring DISK.
 pub(crate) unsafe fn disk_resp_write(result: u64, w1: u64, payload: &[u8]) {
@@ -8,14 +11,9 @@ pub(crate) unsafe fn disk_resp_write(result: u64, w1: u64, payload: &[u8]) {
         let mut hdr = [0u8; 16];
         hdr[0..8].copy_from_slice(&result.to_le_bytes());
         hdr[8..16].copy_from_slice(&w1.to_le_bytes());
-        let dst = DISK_RESP_VA as *mut u8;
-        for (i, byte) in hdr.iter().enumerate() {
-            let p = ((head as usize) + i) % RING_DATA_CAP;
-            core::ptr::write_volatile(dst.add(p), *byte);
-        }
-        for (i, byte) in payload.iter().enumerate() {
-            let p = ((head as usize) + 16 + i) % RING_DATA_CAP;
-            core::ptr::write_volatile(dst.add(p), *byte);
+        ring_write_at(DISK_RESP_VA, head, &hdr);
+        if !payload.is_empty() {
+            ring_write_at(DISK_RESP_VA, (head + 16) % RING_DATA_CAP as u32, payload);
         }
         let new_head = ((head as usize) + frame_len) % RING_DATA_CAP;
         core::ptr::write_volatile((DISK_RESP_VA + RING_HEAD as u64) as *mut u32, new_head as u32);
@@ -35,21 +33,16 @@ pub(crate) fn disk_req_read_name() -> Option<String> {
         if avail < 8 {
             return None;
         }
-        let src = DISK_REQ_VA as *const u8;
         let t = tail as usize;
         let mut len_b = [0u8; 8];
-        for i in 0..8 {
-            len_b[i] = core::ptr::read_volatile(src.add((t + i) % RING_DATA_CAP));
-        }
+        ring_read_at(DISK_REQ_VA, tail, &mut len_b, 8);
         let len = u64::from_le_bytes(len_b) as usize;
         if len == 0 || len > nodes::DISK_MAX_NAME || avail < (8 + len) as u32 {
             core::ptr::write_volatile((DISK_REQ_VA + RING_TAIL as u64) as *mut u32, head);
             return None;
         }
         let mut name_b = [0u8; nodes::DISK_MAX_NAME];
-        for i in 0..len {
-            name_b[i] = core::ptr::read_volatile(src.add((t + 8 + i) % RING_DATA_CAP));
-        }
+        ring_read_at(DISK_REQ_VA, (tail + 8) % RING_DATA_CAP as u32, &mut name_b[..len], len);
         let new_tail = (t + 8 + len) % RING_DATA_CAP;
         core::ptr::write_volatile((DISK_REQ_VA + RING_TAIL as u64) as *mut u32, new_tail as u32);
         core::str::from_utf8(&name_b[..len]).ok().map(String::from)
@@ -68,12 +61,9 @@ pub(crate) fn disk_req_read_count() -> Option<usize> {
         if avail < 8 {
             return None;
         }
-        let src = DISK_REQ_VA as *const u8;
         let t = tail as usize;
         let mut count_b = [0u8; 8];
-        for i in 0..8 {
-            count_b[i] = core::ptr::read_volatile(src.add((t + i) % RING_DATA_CAP));
-        }
+        ring_read_at(DISK_REQ_VA, tail, &mut count_b, 8);
         let count = u64::from_le_bytes(count_b) as usize;
         let new_tail = (t + 8) % RING_DATA_CAP;
         core::ptr::write_volatile((DISK_REQ_VA + RING_TAIL as u64) as *mut u32, new_tail as u32);
@@ -98,20 +88,15 @@ pub(crate) fn disk_req_read_multi(out: &mut [u8]) -> Option<usize> {
         if avail < 8 {
             return None;
         }
-        let src = DISK_REQ_VA as *const u8;
         let t = tail as usize;
         let mut count_b = [0u8; 8];
-        for i in 0..8 {
-            count_b[i] = core::ptr::read_volatile(src.add((t + i) % RING_DATA_CAP));
-        }
+        ring_read_at(DISK_REQ_VA, tail, &mut count_b, 8);
         let count = u64::from_le_bytes(count_b) as usize;
         if count == 0 || count > nodes::DISK_MAX_SECTORS || avail < (8 + count * 512) as u32 {
             core::ptr::write_volatile((DISK_REQ_VA + RING_TAIL as u64) as *mut u32, head);
             return None;
         }
-        for i in 0..count * 512 {
-            out[i] = core::ptr::read_volatile(src.add((t + 8 + i) % RING_DATA_CAP));
-        }
+        ring_read_at(DISK_REQ_VA, (tail + 8) % RING_DATA_CAP as u32, &mut out[..count * 512], count * 512);
         let new_tail = (t + 8 + count * 512) % RING_DATA_CAP;
         core::ptr::write_volatile((DISK_REQ_VA + RING_TAIL as u64) as *mut u32, new_tail as u32);
         Some(count)
@@ -129,18 +114,13 @@ pub(crate) fn fs_req_write(tag: u32, w0: u64, w1: u64, payload: &[u8]) -> bool {
         if (RING_DATA_CAP as u32) - used < frame_len as u32 + 1 {
             return false;
         }
-        let dst = FS_REQ_VA as *mut u8;
         let mut hdr = [0u8; 20];
         hdr[0..4].copy_from_slice(&tag.to_le_bytes());
         hdr[4..12].copy_from_slice(&w0.to_le_bytes());
         hdr[12..20].copy_from_slice(&w1.to_le_bytes());
-        for (i, byte) in hdr.iter().enumerate() {
-            let p = ((head as usize) + i) % RING_DATA_CAP;
-            core::ptr::write_volatile(dst.add(p), *byte);
-        }
-        for (i, byte) in payload.iter().enumerate() {
-            let p = ((head as usize) + 20 + i) % RING_DATA_CAP;
-            core::ptr::write_volatile(dst.add(p), *byte);
+        ring_write_at(FS_REQ_VA, head, &hdr);
+        if !payload.is_empty() {
+            ring_write_at(FS_REQ_VA, (head + 20) % RING_DATA_CAP as u32, payload);
         }
         let new_head = ((head as usize) + frame_len) % RING_DATA_CAP;
         core::ptr::write_volatile((FS_REQ_VA + RING_HEAD as u64) as *mut u32, new_head as u32);
@@ -164,11 +144,8 @@ pub(crate) fn fs_resp_read() -> Option<u64> {
         if head == tail {
             return None;
         }
-        let src = FS_RESP_VA as *const u8;
         let mut hdr = [0u8; 16];
-        for i in 0..16 {
-            hdr[i] = core::ptr::read_volatile(src.add(((head as usize) + i) % RING_DATA_CAP));
-        }
+        ring_read_at(FS_RESP_VA, head, &mut hdr, 16);
         let result = u64::from_le_bytes(hdr[0..8].try_into().unwrap_or([0xFF; 8]));
         let new_tail = ((head as usize) + 16) % RING_DATA_CAP;
         core::ptr::write_volatile((FS_RESP_VA + RING_TAIL as u64) as *mut u32, new_tail as u32);

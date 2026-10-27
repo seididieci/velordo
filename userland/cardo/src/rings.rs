@@ -5,25 +5,10 @@ use super::*;
 pub use civis::{USER_FS_BUFFER as REQ_RING_VA, USER_RESP_RING as RESP_RING_VA};
 
 // ── Ring I/O (Fase 10.2) ─────────────────────────────────────────
-// `ring_positions`/`ring_available` da `civis` (import sopra, A1).
-
-/// Legge `count` byte dal ring a `ring_va` dalla posizione `pos`.
-unsafe fn ring_read_at(ring_va: u64, pos: u32, dst: &mut [u8], count: usize) {
-    let src = ring_va as *const u8;
-    for i in 0..count.min(dst.len()) {
-        let p = ((pos as usize) + i) % RING_DATA_CAP;
-        dst[i] = unsafe { core::ptr::read_volatile(src.add(p)) };
-    }
-}
-
-/// Scrive `data` nel ring a `ring_va` dalla posizione `pos`.
-unsafe fn ring_write_at(ring_va: u64, pos: u32, data: &[u8]) {
-    let dst = ring_va as *mut u8;
-    for (i, byte) in data.iter().enumerate() {
-        let p = ((pos as usize) + i) % RING_DATA_CAP;
-        unsafe { core::ptr::write_volatile(dst.add(p), *byte); }
-    }
-}
+// `ring_positions`/`ring_available` da `civis` (import sopra, A1);
+// `ring_read_at`/`ring_write_at` da `civis::ring` (single source, vfscli),
+// ottimizzate a due span (no-wrap/wrap) senza modulo per byte.
+use civis::{ring_read_at, ring_write_at};
 
 /// Legge un request frame dal request ring. Formato: [tag:4][w0:8][w1:8][payload].
 /// Ritorna (tag, w0, w1, payload_len) o None se il ring e' vuoto.
