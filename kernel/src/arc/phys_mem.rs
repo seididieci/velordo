@@ -27,6 +27,13 @@ static mut REFCOUNT_PTR: *mut u8 = core::ptr::null_mut();
 /// l'incremento atomico.
 static COW_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Cursore di allocazione (hint): `alloc()` inizia la scansione da qui invece
+/// che da frame 1, evitando la riscansione ripetuta dei frame usati in basso.
+/// Wrap-around a frame 1 quando raggiunge `total`. Invariante: sempre in
+/// [1, total). Aggiornato solo da `alloc()` (non da `free()` per semplicità
+/// e sicurezza).
+static NEXT_FREE: AtomicU64 = AtomicU64::new(1);
+
 static LOCK: Mutex<()> = Mutex::new(());
 
 // ── Funzioni bitmap ─────────────────────────────────────────────────
@@ -246,14 +253,38 @@ pub fn alloc() -> Option<u64> {
     let _lock = LOCK.lock();
     let total = TOTAL.load(Ordering::Relaxed) as usize;
 
-    // Salta frame 0 (BIOS IVT, real-mode IDT): mai usabile come pagina utente.
-    for i in 1..total {
+    if total <= 1 {
+        return None;
+    }
+
+    // Inizia dal cursore con wrap-around: evita di riscansionare da frame 1
+    // i frame usati in basso a ogni allocazione (lezione: O(n²) su RAM grande).
+    let mut start = NEXT_FREE.load(Ordering::Relaxed) as usize;
+    if start < 1 || start >= total {
+        start = 1;
+    }
+
+    // Scansione completa del bitmap: da `start` a `total`, poi da 1 a `start`.
+    let mut i = start;
+    let mut scanned = 0usize;
+    while scanned < total - 1 {
         if !is_used(i) {
             mark_used(i);
             set_ref(i, 1);
             FREE.fetch_sub(1, Ordering::Relaxed);
+            // Avanza il cursore oltre il frame appena allocato.
+            let mut next = i + 1;
+            if next >= total {
+                next = 1;
+            }
+            NEXT_FREE.store(next as u64, Ordering::Relaxed);
             return Some((i as u64) * FRAME_SIZE);
         }
+        i += 1;
+        if i >= total {
+            i = 1;
+        }
+        scanned += 1;
     }
     None
 }
