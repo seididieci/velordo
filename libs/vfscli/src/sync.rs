@@ -9,20 +9,10 @@ use super::error::Error;
 /// Ritorna il fd (>=0) o l'errore nativo (Fase 39).
 #[inline]
 pub fn open<S: Sys>(st: &'static State<S>, path: &str, flags: u32) -> Result<i64, Error> {
-    session::fs_gate(st)?;
     let rp = cwd::resolve::<S>(path)?;
-    if !ring::req_ring_write(R_OPEN, rp.len() as u64, flags as u64, &rp) {
-        return Err(Error::RingFull);
-    }
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_OPEN, rp.len() as u64, flags as u64, &rp)
-    }) {
-        Some((result, _, _)) => {
-            ring::resp_ring_consume(16);
-            session::fs_reply_check(result).map(|v| v as i64)
-        }
-        None => Err(Error::NotReady),
-    }
+    let (result, _, _) = fs_notify(st, R_OPEN, rp.len() as u64, flags as u64, rp.as_ref())?;
+    ring::resp_ring_consume(16);
+    session::fs_reply_check(result).map(|v| v as i64)
 }
 
 /// Throttle tra retry su pipe (Fase 42): solo spin puri (IF=1, mai `get_ticks`
@@ -32,6 +22,34 @@ pub fn open<S: Sys>(st: &'static State<S>, path: &str, flags: u32) -> Result<i64
 fn pipe_throttle() {
     for _ in 0..200_000 {
         core::hint::spin_loop();
+    }
+}
+
+/// Invia un frame request (`tag`, `w0`, `w1`, `payload`) e notifica cardo:
+/// `fs_gate`, scrittura request ring, `FS_NOTIFY`, retry con riscrittura del
+/// frame (re-handshake). Ritorna `(result, w1, payload_len)` della reply o
+/// `Err(NotReady)` se cardo non e' raggiungibile.
+///
+/// NON consuma il frame di risposta: spetta al chiamante
+/// `resp_ring_consume(16)` (nessun payload) o `resp_ring_read_payload`
+/// (con payload), poi interpretare `result` via `fs_reply_check`.
+#[inline(always)]
+fn fs_notify<S: Sys>(
+    st: &'static State<S>,
+    tag: u32,
+    w0: u64,
+    w1: u64,
+    payload: &[u8],
+) -> Result<(u64, u64, usize), Error> {
+    session::fs_gate(st)?;
+    if !ring::req_ring_write(tag, w0, w1, payload) {
+        return Err(Error::RingFull);
+    }
+    match session::fs_notify_result(st, tag as u64, || {
+        ring::req_ring_write(tag, w0, w1, payload)
+    }) {
+        Some(r) => Ok(r),
+        None => Err(Error::NotReady),
     }
 }
 
@@ -160,17 +178,9 @@ pub fn write_fs<S: Sys>(st: &'static State<S>, fd: i64, src: &[u8], count: usize
 /// `close(fd)`: chiude un file descriptor.
 #[inline]
 pub fn close<S: Sys>(st: &'static State<S>, fd: i64) -> Result<(), Error> {
-    session::fs_gate(st)?;
-    if !ring::req_ring_write(R_CLOSE, fd as u64, 0, &[]) {
-        return Err(Error::RingFull);
-    }
-    match session::fs_notify_result(st, FS_NOTIFY, || ring::req_ring_write(R_CLOSE, fd as u64, 0, &[])) {
-        Some((result, _, _)) => {
-            ring::resp_ring_consume(16);
-            session::fs_reply_check(result).map(|_| ())
-        }
-        None => Err(Error::NotReady),
-    }
+    let (result, _, _) = fs_notify(st, R_CLOSE, fd as u64, 0, &[])?;
+    ring::resp_ring_consume(16);
+    session::fs_reply_check(result).map(|_| ())
 }
 
 /// `readdir(path, entries_buf, buf_len)`: legge le entry di una directory.
@@ -179,66 +189,36 @@ pub fn close<S: Sys>(st: &'static State<S>, fd: i64) -> Result<(), Error> {
 /// entry (Fase 39).
 #[inline]
 pub fn readdir<S: Sys>(st: &'static State<S>, path: &str, entries_buf: &mut [u8], buf_len: usize) -> Result<usize, Error> {
-    session::fs_gate(st)?;
     let rp = cwd::resolve::<S>(path)?;
-    if !ring::req_ring_write(R_READDIR, rp.len() as u64, 0, &rp) {
-        return Err(Error::RingFull);
+    let (result, _, payload_len) = fs_notify(st, R_READDIR, rp.len() as u64, 0, rp.as_ref())?;
+    // Disciplina ring (Fase 17): il response frame si consuma SEMPRE (anche a
+    // diniego), POI si interpreta — mai early-return prima.
+    let count = session::fs_reply_check(result);
+    if count.is_ok() && payload_len > 0 {
+        ring::resp_ring_read_payload(entries_buf, payload_len.min(buf_len));
+    } else {
+        ring::resp_ring_consume(16);
     }
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_READDIR, rp.len() as u64, 0, &rp)
-    }) {
-        Some((result, _, payload_len)) => {
-            // Disciplina ring (Fase 17): il response frame si consuma SEMPRE
-            // (anche a diniego), POI si interpreta — mai early-return prima.
-            let count = session::fs_reply_check(result);
-            if count.is_ok() && payload_len > 0 {
-                ring::resp_ring_read_payload(entries_buf, payload_len.min(buf_len));
-            } else {
-                ring::resp_ring_consume(16);
-            }
-            count.map(|c| c as usize)
-        }
-        None => Err(Error::NotReady),
-    }
+    count.map(|c| c as usize)
 }
 
 /// `mkdir(path)`: crea una directory tramite il fs server (Fase 39).
 #[inline]
 pub fn mkdir<S: Sys>(st: &'static State<S>, path: &str) -> Result<(), Error> {
-    session::fs_gate(st)?;
     let rp = cwd::resolve::<S>(path)?;
-    if !ring::req_ring_write(R_MKDIR, rp.len() as u64, 0, &rp) {
-        return Err(Error::RingFull);
-    }
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_MKDIR, rp.len() as u64, 0, &rp)
-    }) {
-        Some((result, _, _)) => {
-            ring::resp_ring_consume(16);
-            session::fs_reply_check(result).map(|_| ())
-        }
-        None => Err(Error::NotReady),
-    }
+    let (result, _, _) = fs_notify(st, R_MKDIR, rp.len() as u64, 0, rp.as_ref())?;
+    ring::resp_ring_consume(16);
+    session::fs_reply_check(result).map(|_| ())
 }
 
 /// `remove(path)`: cancella un file o una directory VUOTA (Fase 18.2).
 /// Solo ramfs: FAT read-only e device remoti rifiutano (Fase 39).
 #[inline]
 pub fn remove<S: Sys>(st: &'static State<S>, path: &str) -> Result<(), Error> {
-    session::fs_gate(st)?;
     let rp = cwd::resolve::<S>(path)?;
-    if !ring::req_ring_write(R_DELETE, rp.len() as u64, 0, &rp) {
-        return Err(Error::RingFull);
-    }
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_DELETE, rp.len() as u64, 0, &rp)
-    }) {
-        Some((result, _, _)) => {
-            ring::resp_ring_consume(16);
-            session::fs_reply_check(result).map(|_| ())
-        }
-        None => Err(Error::NotReady),
-    }
+    let (result, _, _) = fs_notify(st, R_DELETE, rp.len() as u64, 0, rp.as_ref())?;
+    ring::resp_ring_consume(16);
+    session::fs_reply_check(result).map(|_| ())
 }
 
 /// S1.1 — rinomina `old` in `new` sullo STESSO mount (payload `old\0new\0`).
@@ -246,7 +226,6 @@ pub fn remove<S: Sys>(st: &'static State<S>, path: &str) -> Result<(), Error> {
 /// nome vanno stale (NotFound al prossimo uso). Errori tipizzati dal server
 /// (NotFound/IsDir/NotDir/Exists/ReadOnly/Invalid).
 pub fn rename<S: Sys>(st: &'static State<S>, old: &str, new: &str) -> Result<(), Error> {
-    session::fs_gate(st)?;
     let old = cwd::resolve::<S>(old)?;
     let new = cwd::resolve::<S>(new)?;
     let mut p = alloc::vec::Vec::with_capacity(old.len() + new.len() + 2);
@@ -254,45 +233,24 @@ pub fn rename<S: Sys>(st: &'static State<S>, old: &str, new: &str) -> Result<(),
     p.push(0);
     p.extend_from_slice(&new);
     p.push(0);
-    if !ring::req_ring_write(R_RENAME, p.len() as u64, 0, &p) {
-        return Err(Error::RingFull);
-    }
-    let len = p.len();
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_RENAME, len as u64, 0, &p)
-    }) {
-        Some((result, _, _)) => {
-            ring::resp_ring_consume(16);
-            session::fs_reply_check(result).map(|_| ())
-        }
-        None => Err(Error::NotReady),
-    }
+    let (result, _, _) = fs_notify(st, R_RENAME, p.len() as u64, 0, &p)?;
+    ring::resp_ring_consume(16);
+    session::fs_reply_check(result).map(|_| ())
 }
 
 /// S1.1 — `symlink(target, link)`: crea un link simbolico (payload
 /// `link\0target\0`). Il target non e' risolto (dangling ammessi);
 /// FAT/remoti = errore. Errori tipizzati (Exists/NotFound/Invalid/ReadOnly).
 pub fn symlink<S: Sys>(st: &'static State<S>, link: &str, target: &str) -> Result<(), Error> {
-    session::fs_gate(st)?;
     let link = cwd::resolve::<S>(link)?;
     let mut p = alloc::vec::Vec::with_capacity(link.len() + target.len() + 2);
     p.extend_from_slice(&link);
     p.push(0);
     p.extend_from_slice(target.as_bytes());
     p.push(0);
-    if !ring::req_ring_write(R_SYMLINK, p.len() as u64, 0, &p) {
-        return Err(Error::RingFull);
-    }
-    let len = p.len();
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_SYMLINK, len as u64, 0, &p)
-    }) {
-        Some((result, _, _)) => {
-            ring::resp_ring_consume(16);
-            session::fs_reply_check(result).map(|_| ())
-        }
-        None => Err(Error::NotReady),
-    }
+    let (result, _, _) = fs_notify(st, R_SYMLINK, p.len() as u64, 0, &p)?;
+    ring::resp_ring_consume(16);
+    session::fs_reply_check(result).map(|_| ())
 }
 
 /// S1.1 — `readlink(path)`: legge il target del link (reply w0 = len +
@@ -331,21 +289,10 @@ pub fn readlink<S: Sys>(st: &'static State<S>, path: &str) -> Result<alloc::vec:
 /// enforcement fino ad A4. Accetta su esistente (i build non falliscono),
 /// NOTFOUND su mancante. FAT/remoti accettano/rifiutano come rename.
 pub fn chmod<S: Sys>(st: &'static State<S>, path: &str, mode: u32) -> Result<(), Error> {
-    session::fs_gate(st)?;
     let rp = cwd::resolve::<S>(path)?;
-    if !ring::req_ring_write(R_CHMOD, rp.len() as u64, mode as u64, &rp) {
-        return Err(Error::RingFull);
-    }
-    let len = rp.len();
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_CHMOD, len as u64, mode as u64, &rp)
-    }) {
-        Some((result, _, _)) => {
-            ring::resp_ring_consume(16);
-            session::fs_reply_check(result).map(|_| ())
-        }
-        None => Err(Error::NotReady),
-    }
+    let (result, _, _) = fs_notify(st, R_CHMOD, rp.len() as u64, mode as u64, rp.as_ref())?;
+    ring::resp_ring_consume(16);
+    session::fs_reply_check(result).map(|_| ())
 }
 
 /// Fase 19.2 — metadati di un path (zero kernel: frame R_STAT a cardo, nessun
@@ -380,37 +327,27 @@ impl Stat {
 /// Fase 40, oggi `Failed`).
 #[inline]
 pub fn stat<S: Sys>(st: &'static State<S>, path: &str, out: &mut Stat) -> Result<(), Error> {
-    session::fs_gate(st)?;
     let rp = cwd::resolve::<S>(path)?;
-    if !ring::req_ring_write(R_STAT, rp.len() as u64, 0, &rp) {
-        return Err(Error::RingFull);
-    }
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_STAT, rp.len() as u64, 0, &rp)
-    }) {
-        // Risposta self-written `[size:8][kind:8][mtime:8]` (Fase 50):
-        // result=size, w1=kind, payload=mtime (LE64). Disciplina obj_get
-        // (test-6): prima si interpreta il result, il payload si legge solo
-        // a successo; a errore si consuma il deny-frame da 16 e si ritorna
-        // il codice tipizzato (mai overshoot nel frame dopo).
-        Some((result, w1, _)) => {
-            let size = match session::fs_reply_check(result) {
-                Ok(v) => v,
-                Err(e) => {
-                    ring::resp_ring_consume(16);
-                    return Err(e);
-                }
-            };
-            let mut mt = [0u8; 8];
-            ring::resp_ring_read_payload(&mut mt, 8);
-            out.size = size;
-            out.kind = w1 & 0x3;
-            out.readonly = w1 & STAT_READONLY != 0;
-            out.mtime = u64::from_le_bytes(mt);
-            Ok(())
+    let (result, w1, _) = fs_notify(st, R_STAT, rp.len() as u64, 0, rp.as_ref())?;
+    // Risposta self-written `[size:8][kind:8][mtime:8]` (Fase 50):
+    // result=size, w1=kind, payload=mtime (LE64). Disciplina obj_get
+    // (test-6): prima si interpreta il result, il payload si legge solo
+    // a successo; a errore si consuma il deny-frame da 16 e si ritorna
+    // il codice tipizzato (mai overshoot nel frame dopo).
+    let size = match session::fs_reply_check(result) {
+        Ok(v) => v,
+        Err(e) => {
+            ring::resp_ring_consume(16);
+            return Err(e);
         }
-        None => Err(Error::NotReady),
-    }
+    };
+    let mut mt = [0u8; 8];
+    ring::resp_ring_read_payload(&mut mt, 8);
+    out.size = size;
+    out.kind = w1 & 0x3;
+    out.readonly = w1 & STAT_READONLY != 0;
+    out.mtime = u64::from_le_bytes(mt);
+    Ok(())
 }
 
 /// Fase 51 (P2 vocabolario disco) — descrittore disco da `R_DISK_INFO`
@@ -471,35 +408,25 @@ impl DiskDesc {
 /// Usato dai test (t32) e da `arca list` (P5).
 #[inline]
 pub fn disk_list<S: Sys>(st: &'static State<S>) -> Result<alloc::vec::Vec<(u64, u64)>, Error> {
-    session::fs_gate(st)?;
-    if !ring::req_ring_write(R_DISK_LIST, 0, 0, &[]) {
-        return Err(Error::RingFull);
-    }
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_DISK_LIST, 0, 0, &[])
-    }) {
-        // Risposta `[count:8][0:8][entry...]`: result=count, payload N×16 B.
-        // Disciplina obj_get (test-6): a errore si consuma il deny-frame.
-        Some((result, _, _)) => {
-            let n = match session::fs_reply_check(result) {
-                Ok(v) => (v as usize).min(16),
-                Err(e) => {
-                    ring::resp_ring_consume(16);
-                    return Err(e);
-                }
-            };
-            let mut buf = [0u8; 16 * 16];
-            ring::resp_ring_read_payload(&mut buf, n * 16);
-            let mut out = alloc::vec::Vec::new();
-            for k in 0..n {
-                let s = u64::from_le_bytes(buf[k * 16..k * 16 + 8].try_into().unwrap_or([0; 8]));
-                let f = u64::from_le_bytes(buf[k * 16 + 8..k * 16 + 16].try_into().unwrap_or([0; 8]));
-                out.push((s, f));
-            }
-            Ok(out)
+    let (result, _, _) = fs_notify(st, R_DISK_LIST, 0, 0, &[])?;
+    // Risposta `[count:8][0:8][entry...]`: result=count, payload N×16 B.
+    // Disciplina obj_get (test-6): a errore si consuma il deny-frame.
+    let n = match session::fs_reply_check(result) {
+        Ok(v) => (v as usize).min(16),
+        Err(e) => {
+            ring::resp_ring_consume(16);
+            return Err(e);
         }
-        None => Err(Error::NotReady),
+    };
+    let mut buf = [0u8; 16 * 16];
+    ring::resp_ring_read_payload(&mut buf, n * 16);
+    let mut out = alloc::vec::Vec::new();
+    for k in 0..n {
+        let s = u64::from_le_bytes(buf[k * 16..k * 16 + 8].try_into().unwrap_or([0; 8]));
+        let f = u64::from_le_bytes(buf[k * 16 + 8..k * 16 + 16].try_into().unwrap_or([0; 8]));
+        out.push((s, f));
     }
+    Ok(out)
 }
 
 /// `disk_info(idx)`: dettaglio disco `idx` (sda=0, ...) — relay `R_DISK_INFO`
@@ -507,36 +434,26 @@ pub fn disk_list<S: Sys>(st: &'static State<S>) -> Result<alloc::vec::Vec<(u64, 
 /// frame fisso 76 B (il client sa sempre cosa leggere).
 #[inline]
 pub fn disk_info<S: Sys>(st: &'static State<S>, idx: u32) -> Result<DiskDesc, Error> {
-    session::fs_gate(st)?;
-    if !ring::req_ring_write(R_DISK_INFO, idx as u64, 0, &[]) {
-        return Err(Error::RingFull);
-    }
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_DISK_INFO, idx as u64, 0, &[])
-    }) {
-        Some((result, w1, _)) => {
-            let sectors = match session::fs_reply_check(result) {
-                Ok(v) => v,
-                Err(e) => {
-                    ring::resp_ring_consume(16);
-                    return Err(e);
-                }
-            };
-            let mut buf = [0u8; 76];
-            ring::resp_ring_read_payload(&mut buf, 76);
-            let ml = u64::from_le_bytes(buf[..8].try_into().unwrap_or([0xFF; 8])) as usize;
-            let sl = u64::from_le_bytes(buf[48..56].try_into().unwrap_or([0xFF; 8])) as usize;
-            if ml > 40 || sl > 20 {
-                return Err(Error::Failed);
-            }
-            let mut model = [0u8; 40];
-            model[..ml].copy_from_slice(&buf[8..8 + ml]);
-            let mut serial = [0u8; 20];
-            serial[..sl].copy_from_slice(&buf[56..56 + sl]);
-            Ok(DiskDesc { sectors, flags: w1, model, model_len: ml, serial, serial_len: sl })
+    let (result, w1, _) = fs_notify(st, R_DISK_INFO, idx as u64, 0, &[])?;
+    let sectors = match session::fs_reply_check(result) {
+        Ok(v) => v,
+        Err(e) => {
+            ring::resp_ring_consume(16);
+            return Err(e);
         }
-        None => Err(Error::NotReady),
+    };
+    let mut buf = [0u8; 76];
+    ring::resp_ring_read_payload(&mut buf, 76);
+    let ml = u64::from_le_bytes(buf[..8].try_into().unwrap_or([0xFF; 8])) as usize;
+    let sl = u64::from_le_bytes(buf[48..56].try_into().unwrap_or([0xFF; 8])) as usize;
+    if ml > 40 || sl > 20 {
+        return Err(Error::Failed);
     }
+    let mut model = [0u8; 40];
+    model[..ml].copy_from_slice(&buf[8..8 + ml]);
+    let mut serial = [0u8; 20];
+    serial[..sl].copy_from_slice(&buf[56..56 + sl]);
+    Ok(DiskDesc { sectors, flags: w1, model, model_len: ml, serial, serial_len: sl })
 }
 
 /// Fase 52 (P3 durabilita') — `disk_sync(mode)`: imposta l'aspettativa di
@@ -546,22 +463,12 @@ pub fn disk_info<S: Sys>(st: &'static State<S>, idx: u32) -> Result<DiskDesc, Er
 /// senza diritto SYNC.
 #[inline]
 pub fn disk_sync<S: Sys>(st: &'static State<S>, mode: u32) -> Result<u64, Error> {
-    session::fs_gate(st)?;
-    if !ring::req_ring_write(R_SYNC, mode as u64, 0, &[]) {
-        return Err(Error::RingFull);
-    }
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_SYNC, mode as u64, 0, &[])
-    }) {
-        // Solo risultato (modo precedente): consuma l'header 16 B come ogni
-        // op senza payload (senza, la coda RESP slitta e l'op successiva
-        // legge questo risultato stale — osservato in t32).
-        Some((result, _, _)) => {
-            ring::resp_ring_consume(16);
-            session::fs_reply_check(result)
-        }
-        None => Err(Error::NotReady),
-    }
+    let (result, _, _) = fs_notify(st, R_SYNC, mode as u64, 0, &[])?;
+    // Solo risultato (modo precedente): consuma l'header 16 B come ogni
+    // op senza payload (senza, la coda RESP slitta e l'op successiva
+    // legge questo risultato stale — osservato in t32).
+    ring::resp_ring_consume(16);
+    session::fs_reply_check(result)
 }
 
 /// Fase 52 — spazio del mount di `path` (statvfs, zero kernel come `stat`).
@@ -580,30 +487,20 @@ pub struct StatVfs {
 /// (nessun device da contabilizzare) e mount inattivi.
 #[inline]
 pub fn statvfs<S: Sys>(st: &'static State<S>, path: &str, out: &mut StatVfs) -> Result<(), Error> {
-    session::fs_gate(st)?;
     let rp = cwd::resolve::<S>(path)?;
-    if !ring::req_ring_write(R_STATVFS, rp.len() as u64, 0, &rp) {
-        return Err(Error::RingFull);
-    }
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_STATVFS, rp.len() as u64, 0, &rp)
-    }) {
-        Some((result, _, _)) => {
-            // Disciplina obj_get (test-6): check-first, payload solo a Ok.
-            session::fs_reply_check(result).map_err(|e| {
-                ring::resp_ring_consume(16);
-                e
-            })?;
-            let mut buf = [0u8; 32];
-            ring::resp_ring_read_payload(&mut buf, 32);
-            out.bsize = u64::from_le_bytes(buf[..8].try_into().unwrap_or([0; 8]));
-            out.blocks = u64::from_le_bytes(buf[8..16].try_into().unwrap_or([0; 8]));
-            out.bfree = u64::from_le_bytes(buf[16..24].try_into().unwrap_or([0; 8]));
-            out.bavail = u64::from_le_bytes(buf[24..32].try_into().unwrap_or([0; 8]));
-            Ok(())
-        }
-        None => Err(Error::NotReady),
-    }
+    let (result, _, _) = fs_notify(st, R_STATVFS, rp.len() as u64, 0, rp.as_ref())?;
+    // Disciplina obj_get (test-6): check-first, payload solo a Ok.
+    session::fs_reply_check(result).map_err(|e| {
+        ring::resp_ring_consume(16);
+        e
+    })?;
+    let mut buf = [0u8; 32];
+    ring::resp_ring_read_payload(&mut buf, 32);
+    out.bsize = u64::from_le_bytes(buf[..8].try_into().unwrap_or([0; 8]));
+    out.blocks = u64::from_le_bytes(buf[8..16].try_into().unwrap_or([0; 8]));
+    out.bfree = u64::from_le_bytes(buf[16..24].try_into().unwrap_or([0; 8]));
+    out.bavail = u64::from_le_bytes(buf[24..32].try_into().unwrap_or([0; 8]));
+    Ok(())
 }
 
 /// Fase 54 (P5 integrita') — `get_hash(path, out)`: BLAKE2s-256 del contenuto
@@ -611,25 +508,15 @@ pub fn statvfs<S: Sys>(st: &'static State<S>, path: &str, out: &mut StatVfs) -> 
 /// `out` = 32 byte. `Err` per device/path senza contenuto o mount inattivi.
 #[inline]
 pub fn get_hash<S: Sys>(st: &'static State<S>, path: &str, out: &mut [u8; 32]) -> Result<(), Error> {
-    session::fs_gate(st)?;
     let rp = cwd::resolve::<S>(path)?;
-    if !ring::req_ring_write(R_GET_HASH, rp.len() as u64, 0, &rp) {
-        return Err(Error::RingFull);
-    }
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_GET_HASH, rp.len() as u64, 0, &rp)
-    }) {
-        Some((result, _, _)) => {
-            // Disciplina obj_get (test-6): check-first, payload solo a Ok.
-            session::fs_reply_check(result).map_err(|e| {
-                ring::resp_ring_consume(16);
-                e
-            })?;
-            ring::resp_ring_read_payload(out, 32);
-            Ok(())
-        }
-        None => Err(Error::NotReady),
-    }
+    let (result, _, _) = fs_notify(st, R_GET_HASH, rp.len() as u64, 0, rp.as_ref())?;
+    // Disciplina obj_get (test-6): check-first, payload solo a Ok.
+    session::fs_reply_check(result).map_err(|e| {
+        ring::resp_ring_consume(16);
+        e
+    })?;
+    ring::resp_ring_read_payload(out, 32);
+    Ok(())
 }
 
 /// Scrive un frame "source\0target\0" e lo notifica (helper di `mount`).
@@ -669,19 +556,9 @@ pub fn mount<S: Sys>(st: &'static State<S>, source: &str, target: &str) -> Resul
 /// aperti sotto il target (Fase 39; `Busy` tipizzato in Fase 40).
 #[inline]
 pub fn umount<S: Sys>(st: &'static State<S>, target: &str) -> Result<(), Error> {
-    session::fs_gate(st)?;
-    if !ring::req_ring_write(R_UMOUNT, target.len() as u64, 0, target.as_bytes()) {
-        return Err(Error::RingFull);
-    }
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_UMOUNT, target.len() as u64, 0, target.as_bytes())
-    }) {
-        Some((result, _, _)) => {
-            ring::resp_ring_consume(16);
-            session::fs_reply_check(result).map(|_| ())
-        }
-        None => Err(Error::NotReady),
-    }
+    let (result, _, _) = fs_notify(st, R_UMOUNT, target.len() as u64, 0, target.as_bytes())?;
+    ring::resp_ring_consume(16);
+    session::fs_reply_check(result).map(|_| ())
 }
 
 /// `lseek(fd, off, whence)`: sposta l'offset di un fd LOCALE (Fase 40, P1).
@@ -692,20 +569,10 @@ pub fn umount<S: Sys>(st: &'static State<S>, target: &str) -> Result<(), Error> 
 /// offset. A rifiuto l'offset resta quello di prima (two-phase server-side).
 #[inline]
 pub fn lseek<S: Sys>(st: &'static State<S>, fd: i64, off: i64, whence: u64) -> Result<u64, Error> {
-    session::fs_gate(st)?;
     let w = [whence as u8];
-    if !ring::req_ring_write(R_LSEEK, fd as u64, off as u64, &w) {
-        return Err(Error::RingFull);
-    }
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_LSEEK, fd as u64, off as u64, &w)
-    }) {
-        Some((result, _, _)) => {
-            ring::resp_ring_consume(16);
-            session::fs_reply_check(result)
-        }
-        None => Err(Error::NotReady),
-    }
+    let (result, _, _) = fs_notify(st, R_LSEEK, fd as u64, off as u64, &w)?;
+    ring::resp_ring_consume(16);
+    session::fs_reply_check(result)
 }
 
 /// `dup_grant(fd)`: registra un grant single-use per handoff al figlio
@@ -715,19 +582,9 @@ pub fn lseek<S: Sys>(st: &'static State<S>, fd: i64, off: i64, whence: u64) -> R
 /// parent muore (purge server-side: mai grant orfani riusabili).
 #[inline]
 pub fn dup_grant<S: Sys>(st: &'static State<S>, fd: i64) -> Result<u64, Error> {
-    session::fs_gate(st)?;
-    if !ring::req_ring_write(R_DUP_GRANT, fd as u64, 0, &[]) {
-        return Err(Error::RingFull);
-    }
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_DUP_GRANT, fd as u64, 0, &[])
-    }) {
-        Some((result, _, _)) => {
-            ring::resp_ring_consume(16);
-            session::fs_reply_check(result)
-        }
-        None => Err(Error::NotReady),
-    }
+    let (result, _, _) = fs_notify(st, R_DUP_GRANT, fd as u64, 0, &[])?;
+    ring::resp_ring_consume(16);
+    session::fs_reply_check(result)
 }
 
 /// `dup_claim(nonce)`: riscuote un grant (Fase 40). Solo il FIGLIO del
@@ -736,18 +593,10 @@ pub fn dup_grant<S: Sys>(st: &'static State<S>, fd: i64) -> Result<u64, Error> {
 /// (semantica handoff). Single-use: il grant viene consumato.
 #[inline]
 pub fn dup_claim<S: Sys>(st: &'static State<S>, nonce: u64) -> Result<i64, Error> {
-    session::fs_gate(st)?;
     let n = nonce.to_le_bytes();
-    if !ring::req_ring_write(R_DUP_CLAIM, 0, 0, &n) {
-        return Err(Error::RingFull);
-    }
-    match session::fs_notify_result(st, FS_NOTIFY, || ring::req_ring_write(R_DUP_CLAIM, 0, 0, &n)) {
-        Some((result, _, _)) => {
-            ring::resp_ring_consume(16);
-            session::fs_reply_check(result).map(|v| v as i64)
-        }
-        None => Err(Error::NotReady),
-    }
+    let (result, _, _) = fs_notify(st, R_DUP_CLAIM, 0, 0, &n)?;
+    ring::resp_ring_consume(16);
+    session::fs_reply_check(result).map(|v| v as i64)
 }
 
 /// `dup_cancel(nonce)`: cancella un grant pendente (Fase 40, cleanup parent).
@@ -755,20 +604,10 @@ pub fn dup_claim<S: Sys>(st: &'static State<S>, nonce: u64) -> Result<i64, Error
 /// qui si mappa comunque la reply (morte server → `Err`, mai `Ok` bugiardo).
 #[inline]
 pub fn dup_cancel<S: Sys>(st: &'static State<S>, nonce: u64) -> Result<(), Error> {
-    session::fs_gate(st)?;
     let n = nonce.to_le_bytes();
-    if !ring::req_ring_write(R_DUP_CANCEL, 0, 0, &n) {
-        return Err(Error::RingFull);
-    }
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(R_DUP_CANCEL, 0, 0, &n)
-    }) {
-        Some((result, _, _)) => {
-            ring::resp_ring_consume(16);
-            session::fs_reply_check(result).map(|_| ())
-        }
-        None => Err(Error::NotReady),
-    }
+    let (result, _, _) = fs_notify(st, R_DUP_CANCEL, 0, 0, &n)?;
+    ring::resp_ring_consume(16);
+    session::fs_reply_check(result).map(|_| ())
 }
 
 /// `pipe()` (Fase 42): crea una pipe nel fs server. Ritorna `(read_fd,
@@ -807,7 +646,6 @@ pub fn pipe<S: Sys>(st: &'static State<S>) -> Result<(i64, i64), Error> {
 /// Irrevocabile per disegno (nessun GRANT: i canali non sono trasferibili).
 #[inline]
 pub fn rights_drop<S: Sys>(st: &'static State<S>, keep_mask: u32, subtree: Option<&str>) -> Result<(), Error> {
-    session::fs_gate(st)?;
     let sub_bytes: &[u8] = match subtree {
         Some(s) => s.as_bytes(),
         None => &[],
@@ -815,28 +653,15 @@ pub fn rights_drop<S: Sys>(st: &'static State<S>, keep_mask: u32, subtree: Optio
     if sub_bytes.len() > 256 {
         return Err(Error::Invalid);
     }
-    if !ring::req_ring_write(
+    let (result, _, _) = fs_notify(
+        st,
         R_RIGHTS_DROP,
         keep_mask as u64,
         sub_bytes.len() as u64,
         sub_bytes,
-    ) {
-        return Err(Error::RingFull);
-    }
-    match session::fs_notify_result(st, FS_NOTIFY, || {
-        ring::req_ring_write(
-            R_RIGHTS_DROP,
-            keep_mask as u64,
-            sub_bytes.len() as u64,
-            sub_bytes,
-        )
-    }) {
-        Some((result, _, _)) => {
-            ring::resp_ring_consume(16);
-            session::fs_reply_check(result).map(|_| ())
-        }
-        None => Err(Error::NotReady),
-    }
+    )?;
+    ring::resp_ring_consume(16);
+    session::fs_reply_check(result).map(|_| ())
 }
 
 /// `rights_get(buf)`: legge i propri diritti (Fase 17). Scrive il subtree
