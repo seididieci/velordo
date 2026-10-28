@@ -418,10 +418,17 @@ fn read_line_from_keyboard(mask: bool) -> String {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
 
+    // Futex word locale per il wait: zero-initialized nel BSS, mai toccata da altri.
+    static FUTEX_WORD: u32 = 0;
+
     loop {
         let n = civis::read_fs(fd, &mut byte, 1).unwrap_or(0);
         if n == 0 {
-            core::hint::spin_loop();
+            // Niente di nuovo: prima controlla la coda IPC (non-blocking)
+            // per eventuali eventi in arrivo, poi dormi 1 tick. Se c'e'
+            // qualcos'altro nel ring buffer lo legge subito — zero latenza.
+            let _ = civis::recv_poll();
+            let _ = civis::futex_wait(&FUTEX_WORD as *const u32 as usize, 0, (civis::get_ticks() + 1) as u64);
             continue;
         }
         let b = byte[0];
