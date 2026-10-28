@@ -14,6 +14,11 @@
 
 extern crate alloc;
 
+// Allocator per i test host (non usato nel build freestanding).
+#[cfg(test)]
+#[global_allocator]
+static A: std::alloc::System = std::alloc::System;
+
 pub mod disp;
 pub mod font;
 pub mod grid;
