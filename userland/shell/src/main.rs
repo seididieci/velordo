@@ -470,23 +470,37 @@ fn get_time_str() -> &'static str {
     unsafe { core::str::from_utf8(&*(&raw const BUF)).unwrap_or("") }
 }
 
-/// Costruisce il prompt con glifi Nerd Font.
-/// Format: `⚡ user@hostname HH:MM:SS status > `
-/// `status` = ✓ se last_exit == 0, ✗ altrimenti.
+/// Costruisce il prompt con glifi Nerd Font e colori truecolor.
+/// Format: `⚡ root@velordo ⏰ 14:32:07 ✓ > `
+///   ⚡ + user@hostname → Electric Blue (#5B7CFF)
+///   ⏰ + time          → Slate (#8D96A8)
+///   ✓/✗ + >            → Ice (#E8EBF2, default)
 fn build_prompt(last_exit: u8) -> &'static [u8] {
-    static mut BUF: [u8; 128] = [0u8; 128];
+    static mut BUF: [u8; 256] = [0u8; 256];
     static mut LEN: usize = 0;
 
     let user = read_user();
     let time_str = get_time_str();
 
     // Status glifo: ✓ se ultimo comando OK, ✗ altrimenti.
-    // Uso letterali UTF-8 nel codice (non escape bytes).
     let status_gliph = if last_exit == 0 { "✓" } else { "✗" };
+
+    // ANSI truecolor escape codes (RGB 24-bit).
+    // Electric Blue #5B7CFF → RGB(91, 124, 255)
+    const BLUE: &[u8] = b"\x1b[38;2;91;124;255m";
+    // Slate #8D96A8 → RGB(141, 150, 168)
+    const SLATE: &[u8] = b"\x1b[38;2;141;150;168m";
+    // Reset
+    const RESET: &[u8] = b"\x1b[0m";
 
     unsafe {
         let mut off = 0usize;
-        // ⚡ (HIGH VOLTAGE) — simbolo Unicode base.
+
+        // Colore Electric Blue per ⚡ + user@hostname
+        BUF[off..off+BLUE.len()].copy_from_slice(BLUE);
+        off += BLUE.len();
+
+        // ⚡ (HIGH VOLTAGE)
         let bolt: &[u8] = b"\xe2\x9a\xa1";
         BUF[off..off+bolt.len()].copy_from_slice(bolt);
         off += bolt.len();
@@ -503,14 +517,31 @@ fn build_prompt(last_exit: u8) -> &'static [u8] {
         BUF[off..off+host.len()].copy_from_slice(host);
         off += host.len();
 
-        // spazio + time
+        // Colore Slate per ⏰ + time
+        BUF[off..off+SLATE.len()].copy_from_slice(SLATE);
+        off += SLATE.len();
+
+        // spazio + ⏰ (U+23F0 BLACK CLOCK FACE)
         let space = b" ";
+        BUF[off..off+space.len()].copy_from_slice(space);
+        off += space.len();
+
+        // ⏰ (U+23F0 BLACK CLOCK FACE)
+        let clock: &[u8] = b"\xe2\x8f\xb0";
+        BUF[off..off+clock.len()].copy_from_slice(clock);
+        off += clock.len();
+
+        // spazio + time
         BUF[off..off+space.len()].copy_from_slice(space);
         off += space.len();
         BUF[off..off+time_str.len()].copy_from_slice(time_str.as_bytes());
         off += time_str.len();
 
-        // spazio + status glifo (UTF-8 letterale)
+        // Reset al colore Ice (default)
+        BUF[off..off+RESET.len()].copy_from_slice(RESET);
+        off += RESET.len();
+
+        // spazio + status glifo
         let sp = b" ";
         BUF[off..off+sp.len()].copy_from_slice(sp);
         off += sp.len();
