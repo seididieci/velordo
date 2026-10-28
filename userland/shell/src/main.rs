@@ -43,6 +43,12 @@ const IDENTIS_BUCKET: &str = "identis:config";
 /// Variabile d'ambiente con il token di sessione (hex).
 const ENV_SESSION: &str = "VELORDO_SESSION";
 
+/// Variabile d'ambiente con il nome utente.
+const ENV_USER: &str = "USER";
+
+/// Hostname fisso (per ora).
+const HOSTNAME: &str = "velordo";
+
 /// Tentativi in caso di servizio occupato (`R_BUSY`).
 const RETRIES: u32 = 20;
 
@@ -51,6 +57,9 @@ const IDENTIS_RESOLVE_RETRIES: u32 = 50;
 
 /// Scrive su console (VGA + serial).
 static mut CONSOLE_FD: i64 = -1;
+
+/// Stack pointer iniziale (per leggere VELORDO_USER dall'env).
+static mut SHELL_SP: u64 = 0;
 
 fn console_write(data: &[u8]) {
     unsafe {
@@ -76,6 +85,9 @@ fn real_main(_sp: u64) -> ! {
     };
     unsafe { CONSOLE_FD = console_fd; }
 
+    // Salva lo stack pointer per la lettura dell'env (VELORDO_USER).
+    unsafe { SHELL_SP = _sp; }
+
     // READY a init: il login ha gia' fatto il suo, noi segnaliamo di essere
     // vivi (utile se init ci supervisionasse in futuro).
     civis::signal_ready(1);
@@ -90,8 +102,12 @@ fn real_main(_sp: u64) -> ! {
     }
     console_write_str("[shell] Scrivi `help` per i comandi.\n");
 
+    // Exit code dell'ultimo comando (0 = successo).
+    let mut last_exit: u8 = 0;
+
     loop {
-        console_write_str("os> ");
+        // Costruisci il prompt con glifi Nerd Font.
+        console_write(build_prompt(last_exit));
         let line = read_line_from_keyboard(false);
         let line = trim_str(&line);
         console_write_str("\n");
@@ -105,15 +121,14 @@ fn real_main(_sp: u64) -> ! {
 
         // Se un comando autenticato fallisce per token scaduto, il loop
         // chiede all'utente di reinserire le credenziali e poi ritenta.
-        loop {
-            match execute_command(cmd, &args, session_token) {
-                CmdResult::Ok => break,
-                CmdResult::TokenExpired => {
-                    console_write_str("Token scaduto, reinserire le credenziali\n");
-                    match auth_and_get_token() {
-                        Some(t) => { session_token = Some(t); continue; } // retry with new token
-                        None => break, // auth failed, stop retrying
-                    }
+        last_exit = 0; // reset su successo (default)
+        match execute_command(cmd, &args, session_token) {
+            CmdResult::Ok => { last_exit = 0; }
+            CmdResult::TokenExpired => {
+                console_write_str("Token scaduto, reinserire le credenziali\n");
+                match auth_and_get_token() {
+                    Some(t) => { session_token = Some(t); }
+                    None => { last_exit = 1; } // auth failed
                 }
             }
         }
@@ -391,6 +406,130 @@ fn parse_hex_u64(raw: &[u8]) -> Option<u64> {
         v = (v << 4) | d as u64;
     }
     Some(v)
+}
+
+/// Legge il nome utente dall'ambiente (`USER`). Ritorna `""` se non
+/// presente. Il nome viene copiato in un buffer statico (max 32 byte).
+fn read_user() -> &'static str {
+    // Buffer statico per il nome utente — sicuro: un solo processo shell alla volta.
+    static mut USER: [u8; 33] = [0u8; 33];
+    static mut LEN: usize = 0;
+
+    if unsafe { LEN == 0 } {
+        let sp = unsafe { SHELL_SP };
+        if let Some(env) = civis::env_from_stack(sp) {
+            if let Some(data) = env.get(ENV_USER) {
+                let n = data.len().min(32);
+                unsafe {
+                    USER[..n].copy_from_slice(&data[..n]);
+                    USER[n] = 0;
+                    LEN = n;
+                }
+            }
+        }
+    }
+
+    unsafe {
+        if LEN == 0 { "" } else {
+            core::str::from_utf8(&USER[..LEN]).unwrap_or("")
+        }
+    }
+}
+
+/// Restituisce l'ora corrente come `HH:MM:SS` (24h). Richiede il servizio Time.
+fn get_time_str() -> &'static str {
+    static mut BUF: [u8; 9] = [0u8; 9]; // "HH:MM:SS\0"
+    static mut VALID: bool = false;
+
+    if unsafe { !VALID } {
+        let chan = match civis::service_lookup(civis::Service::Time) {
+            Ok(c) => c as u64,
+            Err(_) => return "",
+        };
+        let r = civis::ipc::send(chan, civis::TIME_NOW, 0, 0);
+        if let Ok(rep) = r {
+            let sec = rep.w0 % 86400;
+            let hour = (sec / 3600) as u8;
+            let min = ((sec % 3600) / 60) as u8;
+            let s = (sec % 60) as u8;
+            unsafe {
+                BUF[0] = b'0' + hour / 10;
+                BUF[1] = b'0' + hour % 10;
+                BUF[2] = b':';
+                BUF[3] = b'0' + min / 10;
+                BUF[4] = b'0' + min % 10;
+                BUF[5] = b':';
+                BUF[6] = b'0' + s / 10;
+                BUF[7] = b'0' + s % 10;
+                BUF[8] = 0;
+            }
+        } else {
+            return "";
+        }
+        unsafe { VALID = true; }
+    }
+
+    // safe: VALID == true significa che BUF e' stato scritto in modo completo
+    // da questo stesso processo, nessun altro lo modifica.
+    unsafe { core::str::from_utf8(&*(&raw const BUF)).unwrap_or("") }
+}
+
+/// Costruisce il prompt con glifi Nerd Font.
+/// Format: `⚡ user@hostname HH:MM:SS status > `
+/// `status` = ✓ (verde) se last_exit == 0, ✗ (rosso) altrimenti.
+fn build_prompt(last_exit: u8) -> &'static [u8] {
+    static mut BUF: [u8; 128] = [0u8; 128];
+    static mut LEN: usize = 0;
+
+    let user = read_user();
+    let time_str = get_time_str();
+
+    // Status glifo: ✓ (U+2713) per exit 0, ✗ (U+2717) per exit != 0.
+    let status_gliph = if last_exit == 0 { b"\xe2\x9c\x93" } else { b"\xe2\x9c\x97" };
+
+    unsafe {
+        let mut off = 0usize;
+        // ⚡ (U+26A1 HIGH VOLTAGE = 3 byte UTF-8) — simbolo Unicode base, sempre renderizzato.
+        BUF[off..off+3].copy_from_slice(b"\xe2\x9a\xa1");
+        off += 3;
+
+        // spazio + user
+        BUF[off] = b' ';
+        off += 1;
+        let user_bytes = user.as_bytes();
+        BUF[off..off+user_bytes.len()].copy_from_slice(user_bytes);
+        off += user_bytes.len();
+
+        // @hostname
+        let host = b"@velordo";
+        BUF[off..off+host.len()].copy_from_slice(host);
+        off += host.len();
+
+        // spazio + time
+        let space = b" ";
+        BUF[off..off+space.len()].copy_from_slice(space);
+        off += space.len();
+        BUF[off..off+time_str.len()].copy_from_slice(time_str.as_bytes());
+        off += time_str.len();
+
+        // spazio + status gliph (✓ = U+2713, 3 byte UTF-8)
+        let sp = b" ";
+        BUF[off..off+sp.len()].copy_from_slice(sp);
+        off += sp.len();
+        BUF[off..off+status_gliph.len()].copy_from_slice(status_gliph);
+
+        // spazio + >
+        BUF[off] = b' ';
+        off += 1;
+        BUF[off] = b'>';
+        off += 1;
+        BUF[off] = b' ';
+        off += 1;
+
+        LEN = off;
+    }
+
+    unsafe { &BUF[..LEN] }
 }
 
 /// Rimuove spazi bianchi iniziali e finali (trim minimale, no alloc).
