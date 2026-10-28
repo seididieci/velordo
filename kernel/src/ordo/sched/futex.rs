@@ -103,18 +103,10 @@ pub fn futex_wait(addr: u64, expected: u32, deadline: u64) -> i64 {
         sched.processes[cur].futex_woken = None;
         sched.processes[cur].state = State::Blocked;
         sched.clear_ready(cur);
-        match sched.pick_next() {
-            Some(n) if n != cur => Some((Some(cur), n, 0)),
-            _ => {
-                // Solo runnable: nessuno potra' mai svegliarci (single-core,
-                // siamo gli unici vivi) — torna subito spuria.
-                sched.processes[cur].state = State::Ready;
-                sched.set_ready(cur);
-                sched.processes[cur].futex_woken = None;
-                sched.futex_waiters[slot].used = false;
-                Some((None, cur, 1))
-            }
-        }
+        // Blocca sempre — gli interrupt hardware (PIT a 100 Hz) continuano a
+        // girare anche con un solo processo bloccato: `tick_deadlines` nel
+        // timer interrupt risveglia il waiter alla scadenza. Niente deadlock.
+        Some((Some(cur), sched.pick_next().unwrap_or(cur), 0))
     };
     match action {
         Some((prev, next, ret)) => {
