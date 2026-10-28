@@ -5,9 +5,9 @@
 //! unsupported (niente `/proc/self/exe`, niente concetto di home — rustc
 //! usa `--sysroot` esplicito).
 
-use crate::ffi::{OsStr, OsString};
+use crate::ffi::OsStr;
 use crate::io;
-use crate::os::velordo::ffi::{OsStrExt, OsStringExt};
+use crate::os::velordo::ffi::OsStrExt;
 use crate::path::{Path, PathBuf};
 use crate::sys::pal::velordo::numbers::{SYS_CHDIR, SYS_GETCWD};
 use crate::sys::pal::{syscall4, unsupported_err};
@@ -58,9 +58,6 @@ impl<'a> Iterator for SplitPaths<'a> {
     type Item = PathBuf;
 
     fn next(&mut self) -> Option<PathBuf> {
-        self.0.next().map(|b| {
-            let os = OsStr::from_bytes(b);
-            PathBuf::from(OsString::from_vec(b.to_vec()))
-        })
+        self.0.next().map(|b| PathBuf::from(OsStrExt::from_bytes(b)))
     }
 }
