@@ -29,6 +29,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::format;
 
+use core::sync::atomic::AtomicU32;
+
 use blake2s::blake2s;
 use civis;
 use civis::println;
@@ -39,6 +41,12 @@ civis::entry!(real_main);
 const CONSOLE_PATH: &str = "/dev/console";
 const KEYBOARD_PATH: &str = "/dev/input/keyboard";
 const IDENTIS_BUCKET: &str = "identis:config";
+
+/// Futex per attendere senza busy-wait quando la tastiera non ha input.
+static KEYBOARD_FUTEX: AtomicU32 = AtomicU32::new(0);
+
+/// Futex per attendere senza busy-wait durante la risoluzione di Identis.
+static IDENTIS_FUTEX: AtomicU32 = AtomicU32::new(0);
 
 /// Variabile d'ambiente con il token di sessione (hex).
 const ENV_SESSION: &str = "VELORDO_SESSION";
@@ -421,7 +429,14 @@ fn read_line_from_keyboard(mask: bool) -> String {
     loop {
         let n = civis::read_fs(fd, &mut byte, 1).unwrap_or(0);
         if n == 0 {
-            core::hint::spin_loop();
+            // Attendi senza busy-wait: dormi fino al prossimo tick o wake.
+            // ~100 ms di deadline; il processo va in Blocked nel kernel scheduler.
+            let deadline = civis::get_ticks() as u64 + 10;
+            let _ = civis::futex_wait(
+                &KEYBOARD_FUTEX as *const AtomicU32 as usize,
+                0,
+                deadline,
+            );
             continue;
         }
         let b = byte[0];
@@ -453,7 +468,13 @@ fn resolve_identis() -> Result<u64, &'static str> {
         match civis::service_lookup(civis::Service::Identis) {
             Ok(c) => return Ok(c as u64),
             Err(_) => {
-                core::hint::spin_loop();
+                // Attendi senza busy-wait: dormi fino al prossimo tick o wake.
+                let deadline = civis::get_ticks() as u64 + 10;
+                let _ = civis::futex_wait(
+                    &IDENTIS_FUTEX as *const AtomicU32 as usize,
+                    0,
+                    deadline,
+                );
             }
         }
     }
