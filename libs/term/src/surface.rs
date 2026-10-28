@@ -420,19 +420,9 @@ impl Surface {
                             }
                             let px = (x as i32 + bmp.xoff + c as i32) as u32;
                             let py = (baseline + bmp.yoff + r as i32) as u32;
-                            // Clip ai confini della cella: se il glifo e' piu'
-                            // largo/alto della cella, non overfloware.
-                            if px < x || px >= x + cw {
-                                continue;
-                            }
-                            if py < y || py >= y + ch {
-                                continue;
-                            }
-                            // Il pixel di destinazione e' quello realmente
-                            // presente: bg fuso, oppure il layer 0 copiato
-                            // sopra. Blendare su `bg_color` (invece del
-                            // pixel vero) lasciava un alone nero attorno ai
-                            // glifi sopra l'immagine.
+                            // Clip al framebuffer: i glifi wide (Nerd Fonts)
+                            // possono occupare piu' celle — il console server
+                            // gestisce l'avanzamento corretto del cursore.
                             let dest = unsafe { p.get(px, py) };
                             let mixed = blend(dest, fg_color, cov);
                             unsafe { p.put(px, py, mixed) };
@@ -440,7 +430,9 @@ impl Surface {
                     }
                 }
                 if cursor {
-                    p.fill_rect(x, y + ch - 2, cw, 2, fg_color);
+                    // Cursore a blocco pieno: riempie la cella con il colore
+                    // foreground (come i terminali moderni).
+                    p.fill_rect(x, y, cw, ch, fg_color);
                 }
             }
             Surface::VgaText(v) => {
