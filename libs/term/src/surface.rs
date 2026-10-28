@@ -420,7 +420,12 @@ impl Surface {
                             }
                             let px = (x as i32 + bmp.xoff + c as i32) as u32;
                             let py = (baseline + bmp.yoff + r as i32) as u32;
-                            if px >= p.width || py >= p.height {
+                            // Clip ai confini della cella: se il glifo e' piu'
+                            // largo/alto della cella, non overfloware.
+                            if px < x || px >= x + cw {
+                                continue;
+                            }
+                            if py < y || py >= y + ch {
                                 continue;
                             }
                             // Il pixel di destinazione e' quello realmente
