@@ -185,6 +185,26 @@ impl Font {
         })
     }
 
+    /// Calcola la larghezza di un glifo in termini di celle della griglia.
+    pub fn glyph_width_cells(&self, cp: u32) -> usize {
+        let gid = self.glyph_index(cp);
+        if gid == 0 {
+            return 1;
+        }
+        let advance = self.advance_units(gid) as i64;
+        // Usiamo lo scaling del font (similmente a metrics()) per trovare l'advance in pixel.
+        let advance_px = (advance * self.scale as i64 + 0xFFFF) >> 16;
+        // La cella base è derivata dall'advance dello spazio (GID 0).
+        let space_advance = self.advance_units(0) as i64;
+        let cell_w = ((space_advance * self.scale as i64 + 0xFFFF) >> 16) as i64;
+        
+        if advance_px <= 0 || cell_w <= 0 {
+            return 1;
+        }
+        // Usiamo il ceil per coprire interamente l'advance in pixel.
+        (((advance_px + cell_w - 1) / cell_w) as usize).max(1)
+    }
+
     /// Metriche in pixel (la cella deriva dal font: larghezza = advance,
     /// altezza = ascender - descender).
     pub fn metrics(&self) -> Metrics {

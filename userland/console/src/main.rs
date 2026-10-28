@@ -336,27 +336,19 @@ impl Term {
                 self.grid.clear();
                 self.grid.cursor = (0, 0);
             }
-            0x20..=0x7E => {
-                let (col, row) = self.grid.cursor;
-                self.grid.put(col, row, cp, self.fg, self.bg);
-                if col + 1 >= self.grid.cols() {
-                    // fine riga: va a capo (e scrolla se necessario)
-                    self.grid.cursor.0 = 0;
-                    if row + 1 >= self.grid.rows() {
-                        self.grid.scroll_up();
-                    } else {
-                        self.grid.cursor.1 = row + 1;
-                    }
-                } else {
-                    self.grid.cursor.0 = col + 1;
-                }
-            }
             _ => {
-                // Stampabile ma fuori ASCII (icone Nerd, accenti): la
-                // superficie pixel lo sa disegnare, la VGA no (diventa '?').
+                // Caratteri stampabili o glifi Nerd Font (wide).
                 let (col, row) = self.grid.cursor;
                 self.grid.put(col, row, cp, self.fg, self.bg);
-                if col + 1 >= self.grid.cols() {
+
+                // Calcolo l'avanzamento basato sulla larghezza del glifo.
+                let mut advance = 1;
+                if let Some(ref font) = self.font {
+                    advance = font.glyph_width_cells(cp);
+                }
+
+                if col + advance >= self.grid.cols() {
+                    // fine riga o overflow: va a capo (e scrolla se necessario)
                     self.grid.cursor.0 = 0;
                     if row + 1 >= self.grid.rows() {
                         self.grid.scroll_up();
@@ -364,7 +356,7 @@ impl Term {
                         self.grid.cursor.1 = row + 1;
                     }
                 } else {
-                    self.grid.cursor.0 = col + 1;
+                    self.grid.cursor.0 = col + advance;
                 }
             }
         }
