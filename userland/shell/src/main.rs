@@ -526,8 +526,8 @@ fn build_prompt(last_exit: u8) -> &'static [u8] {
         BUF[off..off+space.len()].copy_from_slice(space);
         off += space.len();
 
-        // ⏰ (U+23F0 BLACK CLOCK FACE)
-        let clock: &[u8] = b"\xe2\x8f\xb0";
+        // ⏱ (U+231B STOPWATCH — presente in Maple Mono NF)
+        let clock: &[u8] = b"\xe2\x8c\x9b";
         BUF[off..off+clock.len()].copy_from_slice(clock);
         off += clock.len();
 
