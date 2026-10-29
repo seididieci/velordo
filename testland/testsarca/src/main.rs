@@ -68,6 +68,7 @@ use alloc::format;
 use alloc::string::String;
 
 use civis;
+use civis::hex;
 use civis::println;
 
 /// Conta pass/total e stampa la riga di gate `[testsarca] PASS n/n`.
@@ -292,9 +293,9 @@ fn real_main(_sp: u64) -> ! {
     let v_abc = blake2s::blake2s(b"abc");
     let long = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
     let v_long = blake2s::blake2s(long);
-    let want_empty = hex32("69217a3079908094e11121d042354a7c1f55b6482ca1a51e1b250dfd1ed0eef9");
-    let want_abc = hex32("508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982");
-    let want_long = hex32("6f4df5116a6f332edab1d9e10ee87df6557beab6259d7663f3bcd5722c13f189");
+    let want_empty = hex::decode_hex_fixed::<32>("69217a3079908094e11121d042354a7c1f55b6482ca1a51e1b250dfd1ed0eef9").expect("hex invalida");
+    let want_abc = hex::decode_hex_fixed::<32>("508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982").expect("hex invalida");
+    let want_long = hex::decode_hex_fixed::<32>("6f4df5116a6f332edab1d9e10ee87df6557beab6259d7663f3bcd5722c13f189").expect("hex invalida");
     c.ok(
         "blake2s vectors",
         v_empty == want_empty && v_abc == want_abc && v_long == want_long,
@@ -1582,29 +1583,6 @@ fn real_main(_sp: u64) -> ! {
     println!("[testsarca] all tests done");
     let _ = civis::send(civis::CHANNEL_PARENT, civis::TEST_DONE, 0, 0);
     civis::exit(if c.pass == c.total { 0 } else { 1 });
-}
-
-/// Decodifica 64 hex in `[u8; 32]` (const in test).
-fn hex32(s: &str) -> [u8; 32] {
-    let b = s.as_bytes();
-    let mut out = [0u8; 32];
-    let mut i = 0;
-    while i < 32 {
-        let hi = hexval(b[i * 2]);
-        let lo = hexval(b[i * 2 + 1]);
-        out[i] = (hi << 4) | lo;
-        i += 1;
-    }
-    out
-}
-
-fn hexval(c: u8) -> u8 {
-    match c {
-        b'0'..=b'9' => c - b'0',
-        b'a'..=b'f' => c - b'a' + 10,
-        b'A'..=b'F' => c - b'A' + 10,
-        _ => 0,
-    }
 }
 
 #[panic_handler]

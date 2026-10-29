@@ -19,6 +19,7 @@ use alloc::string::String;
 
 use blake2s::blake2s;
 use civis;
+use civis::hex;
 use civis::println;
 use identis_proto as proto;
 
@@ -146,7 +147,7 @@ fn real_main(_sp: u64) -> ! {
     // NOTA: legge diretta del bucket — valida finche' il bucket non e'
     // protetto (debito dichiarato in ADR-0056, chiusura Fase 3.3: da li'
     // questo caso passa per LIST).
-    let expected = format!("{}:{}", NEW_USER, hex_encode(&hash));
+    let expected = format!("{}:{}", NEW_USER, hex::encode(&hash));
     all_ok &= check(
         11,
         "bucket contiene alice",
@@ -201,20 +202,6 @@ fn bucket_contains(expected: &str) -> bool {
     }
     let _ = civis::close(fd);
     out.lines().any(|l| l == expected)
-}
-
-/// Codifica esadecimale minuscola.
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = [0u8; 64];
-    for (i, &b) in bytes.iter().enumerate() {
-        if i * 2 + 1 >= out.len() {
-            break;
-        }
-        out[i * 2] = HEX[(b >> 4) as usize];
-        out[i * 2 + 1] = HEX[(b & 0xF) as usize];
-    }
-    String::from(core::str::from_utf8(&out).unwrap_or(""))
 }
 
 #[panic_handler]

@@ -21,6 +21,7 @@
 extern crate alloc;
 use alloc::boxed::Box;
 use civis;
+use civis::hex;
 
 use term::font::Font;
 use term::grid::{color, Grid};
@@ -1041,17 +1042,12 @@ fn log_render_marker(term: &Term) {
         let digest = blake2s::blake2s(buf);
         let mut hex = [0u8; 64];
         for i in 0..32 {
-            hex[i * 2] = hex_digit(digest[i] >> 4);
-            hex[i * 2 + 1] = hex_digit(digest[i] & 0x0F);
+            hex[i * 2] = hex::encode_nibble(digest[i] >> 4);
+            hex[i * 2 + 1] = hex::encode_nibble(digest[i] & 0x0F);
         }
         let s = core::str::from_utf8(&hex).unwrap_or("?");
         civis::println!("[console] fb blake2s={}", s);
     }
-}
-
-/// Un nibble come carattere esadecimale.
-fn hex_digit(n: u8) -> u8 {
-    if n < 10 { b'0' + n } else { b'a' + n - 10 }
 }
 
 /// La surface di fallback: il buffer testo della VGA (80x25).

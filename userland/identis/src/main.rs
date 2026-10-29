@@ -31,6 +31,7 @@ use alloc::format;
 use alloc::string::String;
 
 use civis;
+use civis::hex;
 use identis_proto as proto;
 
 civis::entry!(real_main);
@@ -228,7 +229,7 @@ fn do_verify(buf: &[u8]) -> (u64, u64) {
     };
 
     let ok = match load_bucket_entry(&name) {
-        Some(stored) => stored == hex_encode(&hash),
+        Some(stored) => stored == hex::encode(&hash),
         None => false,
     };
 
@@ -282,7 +283,7 @@ fn do_add_user(buf: &[u8]) -> (u64, u64) {
     }
 
     // 5. Scrittura nel bucket (solo Identis scrive qui).
-    match append_bucket_entry(&name, &hex_encode(&hash)) {
+    match append_bucket_entry(&name, &hex::encode(&hash)) {
         Ok(()) => {
             civis::println!("[identis] utente '{}' creato", name);
             (proto::R_OK, 0)
@@ -517,20 +518,6 @@ fn reply(tag: u64, w0: u64, w1: u64) {
 fn now_tick() -> u64 {
     let t = civis::get_ticks();
     if t < 0 { 0 } else { t as u64 }
-}
-
-/// Codifica un array di byte in stringa esadecimale (minuscole).
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = [0u8; 64];
-    for (i, &b) in bytes.iter().enumerate() {
-        if i * 2 + 1 >= out.len() {
-            break;
-        }
-        out[i * 2] = HEX[(b >> 4) as usize];
-        out[i * 2 + 1] = HEX[(b & 0xF) as usize];
-    }
-    String::from(core::str::from_utf8(&out).unwrap_or(""))
 }
 
 #[panic_handler]

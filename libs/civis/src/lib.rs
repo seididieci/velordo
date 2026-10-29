@@ -244,6 +244,7 @@ pub mod time;
 /// record condiviso col server. Meccanismo neutro (mai POSIX).
 pub mod vestigia;
 pub mod tsc;
+pub mod hex;
 
 /// Convenzione argv sullo stack iniziale (Fase 37.1): macro `entry!` (CRT
 /// minimale) + parser `args_from_stack`. Layout stile Linux come convenzione

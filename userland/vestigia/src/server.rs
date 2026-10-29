@@ -21,7 +21,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use civis::{
     EXIT_NOTIFY, LOG_APPEND, LOG_FLUSH, LOG_RAM_TAIL, LOG_READ, LOG_REG,
-    LOG_SEAL, LOG_SRC_MAX, LOG_STATS,
+    LOG_SEAL, LOG_SRC_MAX, LOG_STATS, hex,
 };
 
 /// Registrazione di un client: canale → phys dei suoi ring LOG + attribuzione
@@ -414,7 +414,7 @@ fn key_hash(key: &[u8]) -> Option<u64> {
     }
     let mut h: u64 = 0;
     for &c in &key[..16] {
-        h = (h << 4) | hexval(c)? as u64;
+        h = (h << 4) | hex::decode_nibble(c)? as u64;
     }
     Some(h)
 }
@@ -426,7 +426,7 @@ fn old_day(key: &[u8]) -> u64 {
     }
     let mut d: u64 = 0;
     for &c in &key[17..25] {
-        match hexval(c) {
+        match hex::decode_nibble(c) {
             Some(v) => d = (d << 4) | v as u64,
             None => return 0,
         }
@@ -441,20 +441,12 @@ fn key_seq(key: &[u8]) -> u64 {
     }
     let mut s: u64 = 0;
     for &c in &key[key.len() - 16..] {
-        match hexval(c) {
+        match hex::decode_nibble(c) {
             Some(v) => s = (s << 4) | v as u64,
             None => return 0,
         }
     }
     s
-}
-
-fn hexval(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        _ => None,
-    }
 }
 
 /// Drena fino a 4 record pendenti verso il volume (chiamato a ogni giro di

@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 
 use blake2s::blake2s;
 use civis;
+use civis::hex;
 use civis::println;
 use identis_proto as proto;
 
@@ -145,7 +146,7 @@ fn read_session_token(sp: u64) -> Result<u64, &'static str> {
     let raw = env
         .get(ENV_SESSION)
         .ok_or("nessuna sessione: login non riuscito o VELORDO_SESSION assente")?;
-    parse_hex_u64(raw).ok_or("token di sessione malformato")
+    hex::parse_u64(raw).ok_or("token di sessione malformato")
 }
 
 /// Nome utente da argv[1] (se presente e non vuoto).
@@ -156,24 +157,6 @@ fn argv_name(sp: u64) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(raw).into_owned())
-}
-
-/// Parsa una stringa esadecimale in u64 (`None` se malformata).
-fn parse_hex_u64(raw: &[u8]) -> Option<u64> {
-    if raw.is_empty() || raw.len() > 16 {
-        return None;
-    }
-    let mut v = 0u64;
-    for &b in raw {
-        let d = match b {
-            b'0'..=b'9' => b - b'0',
-            b'a'..=b'f' => b - b'a' + 10,
-            b'A'..=b'F' => b - b'A' + 10,
-            _ => return None,
-        };
-        v = (v << 4) | d as u64;
-    }
-    Some(v)
 }
 
 /// Legge una riga terminata da newline dalla tastiera. Con `mask` l'eco e'
