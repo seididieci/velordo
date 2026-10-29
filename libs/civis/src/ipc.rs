@@ -189,33 +189,35 @@ pub fn reply(tag: u64, w0: u64, w1: u64) -> Result<(), Error> {
 pub const CHANNEL_PARENT: u64 = syscall_numbers::CHANNEL_PARENT;
 
 /// S3.2b — Richiede a cardo la lista dei bucket di tipo "bin" (eseguibili).
-/// Cardo risponde scrivendo i nomi separati da `\n` nel response ring del
-/// client (protocollo BIN_LIST, tag 0x41: nessun payload, w0=w1=0).
+/// Protocollo FS: scrivi frame vuoto nel request ring con tag BIN_LIST,
+/// invia FS_NOTIFY, leggi risposta dal response ring.
+/// Cardo risponde scrivendo i nomi separati da `\n` nel response ring.
 /// Ritorna il vettore dei bucket (byte); `NotFound` se cardo non e' disponibile.
 pub fn bin_list() -> Result<alloc::vec::Vec<alloc::vec::Vec<u8>>, Error> {
-    // Risolve il canale verso cardo.
-    let chan = match service_lookup(Service::Cardo) {
-        Ok(c) => c as u64,
-        Err(_) => return Err(Error::NotFound),
-    };
+    // Cancello ring: senza, un processo che non ha mai fatto FS scriverebbe
+    // su VA mai mappate (#PF) o interleaverebbe un async in volo.
+    crate::fs_gate()?;
 
     // Invia richiesta BIN_LIST: tag 0x41, w0=w1=0 (nessun payload).
-    let _ = ipc::send(chan, BIN_LIST, 0, 0);
+    let frame = || crate::fs::ring::req_ring_write(BIN_LIST as u32, 0, 0, &[]);
+    if !frame() {
+        return Err(Error::RingFull);
+    }
 
     // Legge la risposta dal response ring del client.
     // Formato: [count:8][w1:8][payload: bucket names separated by '\n']
-    use crate::fs::ring::{resp_ring_read, resp_ring_consume};
+    use crate::{fs_notify_result, fs_reply_check};
+    use crate::fs::ring::{resp_ring_consume, resp_ring_read_payload};
     let mut buckets = alloc::vec::Vec::new();
 
     loop {
-        match resp_ring_read() {
+        match fs_notify_result(crate::FS_NOTIFY, frame) {
             Some((size, _w1, payload_len)) => {
                 // Consuma l'intestazione (16 byte) per liberare il ring.
                 resp_ring_consume(16);
                 // Leggo il payload: e' una stringa con nomi separati da '\n'.
                 let mut buf = alloc::vec::Vec::new();
                 if payload_len > 0 {
-                    use crate::fs::ring::resp_ring_read_payload;
                     let to_read = payload_len.min(crate::fs::ring::RING_MAX_PAYLOAD as usize);
                     resp_ring_read_payload(&mut buf, to_read);
                 }
@@ -231,7 +233,7 @@ pub fn bin_list() -> Result<alloc::vec::Vec<alloc::vec::Vec<u8>>, Error> {
                     break;
                 }
             }
-            None => break, // Niente nella coda: tutto ok, lista vuota o non ancora arrivata.
+            None => return Err(Error::NotReady),
         }
     }
 

@@ -583,6 +583,25 @@ fn real_main(_sp: u64) -> ! {
             continue;
         }
 
+        // Ogni altra operazione deve essere un FS_NOTIFY.
+        if tag != FS_NOTIFY {
+            // Tag ignoto: ERR come prima (nessun cambio semantico).
+            let _ = civis::reply(0, ERR, 0);
+            continue;
+        }
+        // Client senza handshake ring (es. server riavviato dopo la sua
+        // registrazione, t28): segnale dedicato cosi' il client rifa
+        // FS_BUF_REG e ripete l'op UNA volta (civis, Fase 14).
+        if !rings.contains_key(&chan) {
+            let _ = civis::reply(0, ERR_NOHANDSHAKE, 0);
+            continue;
+        }
+        // Mappa i ring del client nello spazio di cardo.
+        if !rings::map_client_req_ring(&rings, chan) || !rings::map_client_resp_ring(&rings, chan) {
+            let _ = civis::reply(0, ERR, 0);
+            continue;
+        }
+
         // Lista bucket eseguibili (S3.2b-2): nessun payload, w0=w1=0. Cardo
         // filtra i bucket di tipo `Bin` e restituisce i nomi separati da `\n`.
         if tag == BIN_LIST {
@@ -612,27 +631,8 @@ fn real_main(_sp: u64) -> ! {
                 resp.push(b'\n');
             }
             let count = bin_buckets.len() as u64;
-            // Scrive la risposta nel response ring del client.
+            // Scrive la risposta nel response ring del client (ora mappato).
             rings::resp_ring_write(count, 0, &resp);
-            continue;
-        }
-
-        // Ogni altra operazione deve essere un FS_NOTIFY.
-        if tag != FS_NOTIFY {
-            // Tag ignoto: ERR come prima (nessun cambio semantico).
-            let _ = civis::reply(0, ERR, 0);
-            continue;
-        }
-        // Client senza handshake ring (es. server riavviato dopo la sua
-        // registrazione, t28): segnale dedicato cosi' il client rifa
-        // FS_BUF_REG e ripete l'op UNA volta (civis, Fase 14).
-        if !rings.contains_key(&chan) {
-            let _ = civis::reply(0, ERR_NOHANDSHAKE, 0);
-            continue;
-        }
-        // Mappa i ring del client nello spazio di cardo.
-        if !rings::map_client_req_ring(&rings, chan) || !rings::map_client_resp_ring(&rings, chan) {
-            let _ = civis::reply(0, ERR, 0);
             continue;
         }
 
