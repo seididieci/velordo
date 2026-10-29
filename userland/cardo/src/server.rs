@@ -602,40 +602,6 @@ fn real_main(_sp: u64) -> ! {
             continue;
         }
 
-        // Lista bucket eseguibili (S3.2b-2): nessun payload, w0=w1=0. Cardo
-        // filtra i bucket di tipo `Bin` e restituisce i nomi separati da `\n`.
-        if tag == BIN_LIST {
-            // Filtra bucket_types per quelli con valore "bin".
-            let mut bin_buckets: Vec<&str> = Vec::new();
-            for (name, btype) in bucket_types.iter() {
-                if *btype == "bin" {
-                    bin_buckets.push(name.as_str());
-                }
-            }
-            // Se nessun bucket e' stato dichiarato esplicitamente come "bin",
-            // usa il seed SYS_SEED: i bucket con eseguibili sono quelli che
-            // contengono .bin nel path del seed (es. "sys" per sys/bin/*).
-            if bin_buckets.is_empty() {
-                for (_path, bucket, _key) in SYS_SEED.iter() {
-                    let b = core::str::from_utf8(*bucket).unwrap_or("");
-                    // Controlla se il bucket e' gia' nella lista (evita duplicati).
-                    if !bin_buckets.contains(&b) {
-                        bin_buckets.push(b);
-                    }
-                }
-            }
-            // Costruisce la risposta: nomi separati da '\n'.
-            let mut resp = alloc::vec::Vec::new();
-            for bucket in &bin_buckets {
-                resp.extend_from_slice(bucket.as_bytes());
-                resp.push(b'\n');
-            }
-            let count = bin_buckets.len() as u64;
-            // Scrive la risposta nel response ring del client (ora mappato).
-            rings::resp_ring_write(count, 0, &resp);
-            continue;
-        }
-
         // Leggi l'header del request frame (senza consumare: la lunghezza vera
         // e' dichiarata in w0/w1, vedi sotto).
         let (op_tag, w0, w1, avail) = match rings::req_ring_read() {
@@ -692,6 +658,8 @@ fn real_main(_sp: u64) -> ! {
             R_SNAP_CREATE | R_SNAP_ROLLBACK | R_SNAP_CLONE | R_OBJ_DELETE | R_OBJ_STAT => w0 as usize,
             R_SNAP_DELETE | R_OBJ_GET_ID | R_OBJ_STAT_ID => 8,
             R_READ | R_CLOSE | R_RIGHTS_GET | R_DUP_GRANT => 0,
+            // BIN_LIST (S3.2b): nessun payload, w0=w1=0.
+            0x41u32 => 0,
             _ => {
                 // Tag impossibile: scarta tutto e riallinea (vedi req_resync).
                 rings::req_resync();
@@ -937,6 +905,33 @@ fn real_main(_sp: u64) -> ! {
 
             R_DISK_LIST => {
                 handlers::handle_disk_list(&topo_disk, &rings, chan)
+            }
+
+            // BIN_LIST (S3.2b): nessun payload, w0=w1=0. Risposta: lista bucket
+            // "bin" separati da '\n' nel response ring. Skip frame+reply generico.
+            0x41u32 => {
+                let mut bin_buckets: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+                for (name, btype) in bucket_types.iter() {
+                    if *btype == "bin" {
+                        bin_buckets.push(name.as_str());
+                    }
+                }
+                if bin_buckets.is_empty() {
+                    for (_path, bucket, _key) in SYS_SEED.iter() {
+                        let b = core::str::from_utf8(*bucket).unwrap_or("");
+                        if !bin_buckets.contains(&b) {
+                            bin_buckets.push(b);
+                        }
+                    }
+                }
+                let mut resp = alloc::vec::Vec::new();
+                for bucket in &bin_buckets {
+                    resp.extend_from_slice(bucket.as_bytes());
+                    resp.push(b'\n');
+                }
+                let count = bin_buckets.len() as u64;
+                rings::resp_ring_write(count, 0, &resp);
+                continue;
             }
 
             R_DISK_INFO => {
