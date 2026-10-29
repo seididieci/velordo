@@ -8,6 +8,7 @@ edition = "2024"
 [dependencies]
 civis = { path = "../../libs/civis" }
 libr = { path = "../../flavours/posix/libr" }
+testproto = { path = "../../libs/testproto" }
 
 [profile.dev]
 panic = "abort"

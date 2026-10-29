@@ -78,78 +78,19 @@ extern crate alloc;
 use alloc::vec;
 
 use civis::{print_str, println};
+use testproto::*;
 
-const T_ACK: u64 = 101;
-const T_REQ: u64 = 102;
-const T_DONE: u64 = 103;
-const T_STOP: u64 = 104;
-const T_OPENED: u64 = 105;
-const T_GO: u64 = 106;
-const T_READY: u64 = 107;
-const T_FORKREP: u64 = 108;
-const T_CFG: u64 = 100;
 
-const MODE_ECHO: u64 = 0;
-const MODE_ZEROREAD: u64 = 1;
+
 const MODE_NULLW: u64 = 2;
-const MODE_SRV: u64 = 3;
-const MODE_CHURN: u64 = 4;
-const MODE_KILLME: u64 = 5;
-const MODE_SRVDIE: u64 = 6;
-const MODE_SYNCWAIT: u64 = 7;
-const MODE_MNTDIE: u64 = 8;
-const MODE_OPENDIE: u64 = 9;
-const MODE_MAPHAMMER: u64 = 10;
-const MODE_FLOOD: u64 = 11;
-const MODE_NEST: u64 = 12;
+
 // Fase 29: fault di protezione (il kernel deve terminare il processo).
-const MODE_FAULT_RO: u64 = 13;
-const MODE_FAULT_NONE: u64 = 14;
-const MODE_FAULT_NX: u64 = 15;
-const MODE_FAULT_GUARD: u64 = 16;
-const MODE_FAULT_GPF: u64 = 17;
-const MODE_SHMDEMO: u64 = 18;
-const MODE_FAULT_CODE: u64 = 19;
-const MODE_COWDEMO: u64 = 20;
-const MODE_FORKDEMO: u64 = 21;
-// Fase 35 (hardening, t40): come KILLME ma alla morte del parent (EXIT_NOTIFY
-// sul canale di nascita) attende ~100 tick ed esce 0 da solo — igiene senza
-// kill (il kill diretto e' parent-scoped: nessuno puo' pulirlo da fuori dopo
-// il reparent a init).
-const MODE_ORPHAN: u64 = 22;
-// Fase 35 (hardening, t50): tentativi ostili che DEVONO fallire — kill di un
-// pid non-figlio (w1) e register di un servizio di sistema (`Init`) da un
-// processo non figlio di init. Riporta T_DONE(ok, detail) coi due esiti.
-const MODE_HARDEN: u64 = 23;
-// Fase 36 (identita' misurata, t51): driver sacrificale sul prefix dedicato
-// "/dev/t51" (come MNTDIE su /dev/tdie). Due istanze = stesso binario.
-const MODE_REG51: u64 = 24;
+
+
 // Fase 37 (exec in-place, t52): attende T_GO, poi exec_into testspin.bin.
 // Successo = mai ritorno (si diventa spin); fallimento = T_DONE(w0=0) + exit.
-const MODE_EXECDEMO: u64 = 25;
-// Fase 40 (fd virtuali + redirect, t54): handoff grant/claim modello B.
-// w1 (rounds) = nonce del grant da riscuotere (26/28) o ignorato (27/29).
-// - 26 DUPCLAIM: claim, verifica contenuto+offset copiato, secondo claim
-//   stesso nonce = Invalid (single-use). T_DONE(ok, detail).
-// - 27 DUPGRANT: apre /t54sib.txt, grant, riporta il nonce in T_DONE(w1).
-// - 28 DUPSIBCLAIM: claim di grant altrui (registrante = altro helper) =
-//   Invalid (attestazione parentela). T_DONE(ok, detail).
-// - 29 SEEKDENY: droppa RIGHTS_SEEK sul proprio canale, poi lseek = Failed.
-const MODE_DUPCLAIM: u64 = 26;
-const MODE_DUPGRANT: u64 = 27;
-const MODE_DUPSIBCLAIM: u64 = 28;
-const MODE_SEEKDENY: u64 = 29;
-// Fase 44a (t55): sonda suspend/resume ostili (target = pid non-figlio in
-// `rounds`): entrambi DEVONO essere rifiutati (parent-scoped, come kill).
-const MODE_SUSPENDENY: u64 = 30;
-// Fase 44b (t56): catcher cooperativo del cancel job control: bloccato in
-// recv, al messaggio `JOB_CANCEL` esce con code dedicato (prova di catch:
-// un kill non potrebbe produrre questo code).
-const MODE_SIGCATCH: u64 = 31;
-// Fase 45 (t57): sonda diritti GRANT+PIPE sul proprio canale (testcli ha
-// riga test-policy ALL: il GET default lo prova). Drop GRANT → grant negato;
-// drop PIPE → pipe_create negata; read valida dopo (anti-wedge).
-const MODE_GRANTDENY: u64 = 32;
+
+
 
 // Tag DEV_* + errore IPC (A1): single source in `civis` (prima letterali qui).
 use civis::{DEV_CLOSE, DEV_OPEN, ERR};
@@ -209,13 +150,13 @@ fn real_main(sp: u64) -> ! {
     println!("[utcli] pid={} acked, sending done...", my_pid);
 
     match mode {
-        MODE_CHURN => {
+        M_CHURN => {
             // Lifecycle (Fase 14): materializza `rounds` KiB di heap e termina
             // SENZA T_DONE: il parent segue la notifica EXIT_NOTIFY.
             let ok = churn_heap(rounds);
             civis::exit(if ok { 0 } else { 1 });
         }
-        MODE_KILLME => {
+        M_KILLME => {
             // Lifecycle (Fase 14): dorme in recv finche' il parent lo kill().
             // (Prima: busy-spin a pari priorita' — ogni round-trip FS degli
             // altri processi aspettava i nostri quanti: load da 15t a 3500t
@@ -226,7 +167,7 @@ fn real_main(sp: u64) -> ! {
                 let _ = civis::recv();
             }
         }
-        MODE_SIGCATCH => {
+        M_SIGCATCH => {
             // Fase 44b (t56): catcher cooperativo — come KILLME (costo zero)
             // ma al cancel job control esce con code dedicato (42, scelto per
             // distinguersi dal 130 dell'escalation via kill: la prova del
@@ -242,7 +183,7 @@ fn real_main(sp: u64) -> ! {
                 }
             }
         }
-        MODE_ORPHAN => {
+        M_ORPHAN => {
             // Parcheggiato come KILLME (stesso costo zero), ma autonomo nella
             // morte: alla prima EXIT_NOTIFY (il parent e' morto: unico peer
             // possibile) attende ~100 tick (finestra di osservazione per chi
@@ -260,7 +201,7 @@ fn real_main(sp: u64) -> ! {
                 }
             }
         }
-        MODE_SRVDIE => {
+        M_SRVDIE => {
             // Server sacrificale (t24, notifica unificata): registra `Test`
             // e dorme in recv SENZA MAI RISPONDERE (i sender restano bloccati
             // come col vecchio spin; i messaggi vengono consumati ma senza
@@ -277,7 +218,7 @@ fn real_main(sp: u64) -> ! {
                 let _ = civis::recv();
             }
         }
-        MODE_SYNCWAIT => {
+        M_SYNCWAIT => {
             // Client sync sacrificale (t24): risolve `Test`, handshake T_READY
             // al parent, poi send SYNC verso il server (che non risponde mai).
             // Sbloccato con Err alla morte del server, attende l'EXIT_NOTIFY
@@ -334,7 +275,7 @@ fn real_main(sp: u64) -> ! {
             let _ = civis::send(parent, T_DONE, 1, code);
             civis::exit(0);
         }
-        MODE_EXECDEMO => {
+        M_EXECDEMO => {
             // Demo exec (t52, Fase 37): attende il via T_GO, poi exec. `rounds`
             // (cfg.w1) seleziona il target: 0 = testspin senza argv (nucleo
             // 37.0: stesso PID, hash rimisurato); 1 = testcli con argv
@@ -400,7 +341,7 @@ fn real_main(sp: u64) -> ! {
                 }
             }
         }
-        MODE_MNTDIE => {
+        M_MNTDIE => {
             // Driver sacrificale (t25): registra "/dev/tdie", handshake T_READY e
             // serve il minimo. Se la registrazione fallisce: T_READY(w0=0) +
             // exit(1) — il test fallisce rumoroso, mai hang.
@@ -430,7 +371,7 @@ fn real_main(sp: u64) -> ! {
                 }
             }
         }
-        MODE_REG51 => {
+        M_REG51 => {
             // Driver sacrificale (t51, Fase 36): identico a MNTDIE ma sul
             // prefix dedicato "/dev/t51" (nessuna interferenza con t25).
             if civis::fs_register(b"/dev/t51").is_err() {
@@ -459,7 +400,7 @@ fn real_main(sp: u64) -> ! {
                 }
             }
         }
-        MODE_OPENDIE => {
+        M_OPENDIE => {
             // Client sacrificale (t26): apre e muore senza close.
             if civis::open("/dev/null", 0).is_err()
                 || civis::open("/dev/zero", 0).is_err()
@@ -470,21 +411,21 @@ fn real_main(sp: u64) -> ! {
             }
             civis::exit(0);
         }
-        MODE_NEST => {
+        M_NEST => {
             // Genitore intermedio (Fase 22, t40): spawna due foglie parcheggiate
             // (detached in ORPHAN, normale in KILLME), le riporta al parent e
             // poi ESCE: la sua morte fa scattare il caso (cascata sul normale,
             // reparent a init della detached, che poi esce da sola su notify).
             // Qualunque spaw fallito: T_READY(w0=0) + exit(1), mai hang (il
             // test fallisce rumoroso).
-            let det = match spawn_killme(true, MODE_ORPHAN) {
+            let det = match spawn_killme(true, M_ORPHAN) {
                 Some(c) => c,
                 None => {
                     let _ = civis::send(parent, T_READY, 0, 0);
                     civis::exit(1);
                 }
             };
-            let norm = match spawn_killme(false, MODE_KILLME) {
+            let norm = match spawn_killme(false, M_KILLME) {
                 Some(c) => c,
                 None => {
                     let _ = civis::send(parent, T_READY, 0, 0);
@@ -495,27 +436,27 @@ fn real_main(sp: u64) -> ! {
             let _ = civis::send(parent, T_READY, det, norm);
             civis::exit(0);
         }
-        MODE_FAULT_RO | MODE_FAULT_NONE | MODE_FAULT_NX | MODE_FAULT_GUARD | MODE_FAULT_GPF | MODE_FAULT_CODE => {
+        M_FAULT_RO | M_FAULT_NONE | M_FAULT_NX | M_FAULT_GUARD | M_FAULT_GPF | M_FAULT_CODE => {
             run_fault(mode);
         }
         _ => {
             let (ok, detail) = match mode {
-                MODE_ECHO => run_echo(parent, rounds),
-                MODE_ZEROREAD => run_zeroread(parent, rounds),
+                M_ECHO => run_echo(parent, rounds),
+                M_ZERO => run_zeroread(parent, rounds),
                 MODE_NULLW => run_nullw(),
-                MODE_SRV => run_srv(),
-                MODE_MAPHAMMER => run_maphammer(rounds),
-                MODE_FLOOD => run_flood(parent),
-                MODE_SHMDEMO => run_shmdemo(rounds as u32),
-                MODE_COWDEMO => run_cowdemo(rounds as u32),
-                MODE_FORKDEMO => run_forkdemo(),
-                MODE_HARDEN => run_harden(rounds as i64),
-                MODE_DUPCLAIM => run_dupclaim(rounds as u64),
-                MODE_DUPGRANT => run_dupgrant(),
-                MODE_DUPSIBCLAIM => run_dupsibclaim(rounds as u64),
-                MODE_SEEKDENY => run_seekdeny(),
-                MODE_GRANTDENY => run_grantdeny(),
-                MODE_SUSPENDENY => run_suspenddeny(rounds as i64),
+                M_SRV => run_srv(),
+                M_MAPHAMMER => run_maphammer(rounds),
+                M_FLOOD => run_flood(parent),
+                M_SHMDEMO => run_shmdemo(rounds as u32),
+                M_COWDEMO => run_cowdemo(rounds as u32),
+                M_FORKDEMO => run_forkdemo(),
+                M_HARDEN => run_harden(rounds as i64),
+                M_DUPCLAIM => run_dupclaim(rounds as u64),
+                M_DUPGRANT => run_dupgrant(),
+                M_DUPSIBCLAIM => run_dupsibclaim(rounds as u64),
+                M_SEEKDENY => run_seekdeny(),
+                M_GRANTDENY => run_grantdeny(),
+                M_SUSPENDENY => run_suspenddeny(rounds as i64),
                 _ => (false, 1),
             };
             let _ = civis::send(parent, T_DONE, ok as u64, detail as u64);
@@ -799,34 +740,34 @@ fn run_suspenddeny(target: i64) -> (bool, usize) {
 /// intercettato: exit(1) → il test fallisce rumoroso.
 fn run_fault(mode: u64) -> ! {
     match mode {
-        MODE_FAULT_RO => {
+        M_FAULT_RO => {
             let p = civis::mmap(0, 4096).expect("mmap");
             unsafe { core::ptr::write_volatile(p as *mut u8, 0x41); }
             let _ = civis::mprotect(p, 4096, civis::PROT_READ);
             unsafe { core::ptr::write_volatile(p as *mut u8, 0x42); } // #PF
         }
-        MODE_FAULT_NONE => {
+        M_FAULT_NONE => {
             let p = civis::mmap(0, 4096).expect("mmap");
             unsafe { core::ptr::write_volatile(p as *mut u8, 0x41); }
             let _ = civis::mprotect(p, 4096, civis::PROT_NONE);
             let _ = unsafe { core::ptr::read_volatile(p as *const u8) }; // #PF
         }
-        MODE_FAULT_NX => {
+        M_FAULT_NX => {
             let p = civis::mmap(0, 4096).expect("mmap");
             unsafe { core::ptr::write_volatile(p as *mut u8, 0xC3); } // ret
             let f: extern "C" fn() = unsafe { core::mem::transmute(p) };
             f(); // fetch su pagina NX → #PF
         }
-        MODE_FAULT_GUARD => {
+        M_FAULT_GUARD => {
             let g = civis::USER_STACK_GUARD as *mut u8;
             unsafe { core::ptr::write_volatile(g, 0x41); } // #PF (guard)
         }
-        MODE_FAULT_GPF => {
+        M_FAULT_GPF => {
             // Nessuna porta concessa a questo helper (io_count == 0): `in` su
             // una porta qualsiasi → #GP → il kernel termina il processo.
             unsafe { civis::pio::inb(0x80); }
         }
-        MODE_FAULT_CODE => {
+        M_FAULT_CODE => {
             // Fase 31: il codice e' mappato RX (W^X): scrivere all'indirizzo
             // del codice (USER_CODE) → #PF protection-violation → kill.
             unsafe { core::ptr::write_volatile(civis::USER_CODE as *mut u8, 0x41); }

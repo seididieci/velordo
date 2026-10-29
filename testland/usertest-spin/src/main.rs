@@ -15,22 +15,7 @@
 #![no_main]
 
 use civis::println;
-
-const T_ACK: u64 = 101;
-const T_DONE: u64 = 103;
-const T_READY: u64 = 107;
-
-// Fase 36 (t51): `w0` magico = sonda di squat. Binario DIVERSO da testcli
-// (hash diverso per costruzione): tenta FS_REGISTER su "/dev/t51" — deve
-// essere RIFIUTATO (prefix vivo di un altro binario, noi non figli di init)
-// — e serve DEV_OPEN al minimo, cosi' il test distingue "rifiutato" (il mount
-// resta di X) da "accettato" (staremmo servendo noi). Poi parcheggiato in
-// recv finche' il parent killa (costo zero, come KILLME).
-const SQUAT_MAGIC: u64 = 0x5351_5541_5435_31; // "SQUAT51" ASCII
-
-/// VA della pagina scratch nel processo (stessa per parent e figli: ogni
-/// processo ha il proprio spazio, il VA non collide con heap/codice).
-const SPIN_VA: u64 = 0x0000_4000_003C_0000;
+use testproto::*;
 
 unsafe fn counter_ptr() -> *mut u64 {
     SPIN_VA as *mut u64
@@ -44,7 +29,7 @@ fn real_main(_sp: u64) -> ! {
         Err(_) => civis::exit(1),
     };
     let parent = civis::CHANNEL_PARENT;
-    if cfg.w0 == SQUAT_MAGIC {
+    if cfg.w0 == SPIN_SQUAT_MAGIC {
         let _ = civis::reply(T_ACK, 1, 0);
         // Esito ignorato di proposito: lo squat DEVE fallire (il test lo
         // osserva dal routing, la reply di FS_REGISTER e' sempre ok).

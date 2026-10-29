@@ -1,0 +1,20 @@
+[package]
+name = "testproto"
+version = "0.1.0"
+edition = "2024"
+
+# Crate condiviso per le costanti e gli helper delle suite di test
+# (testland/usertests, flavours/posix/tests, testland/usertest-client,
+# testland/usertest-spin). no_std + alloc (niente #[global_allocator] qui:
+# l'allocatore lo da' il consumatore, civis).
+[workspace]
+
+[dependencies]
+civis = { path = "../civis" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
