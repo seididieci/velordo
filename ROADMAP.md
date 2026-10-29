@@ -76,6 +76,30 @@ zero FAIL/PANIC/FAULT. La suite FAT32 e' **fuori dal gate** (ADR-0059:
 | 56 | Gestione utenti — Fase 3.1: protocollo Identis (`libs/identis-proto`: framing, magic, codici), **token di sessione** emesso da Identis al login, `IDENTIS_ADD_USER` (0x71) con validazione server-side del nome, `IDENTIS_LIST` (0x72), transazione **legata al canale** (BUSY + retry: il secondo client non corrompe piu' il buffer), client `create-user` (hash in locale, token da env `VELORDO_SESSION`), gate `identistest` 11/11 (ADR-0058) | ✅ Completata |
 | 57 | **FAT fuori dal boot e dalla suite** (ADR-0059): ArcaFS unico filesystem di sistema (init carica **tutto** da ArcaFS: `SvcMeta.path` sparisce, `inject-bins.sh` cancellato, `identis`/`login` ora pinnati come gli altri), suite FAT32 **fuori dal gate** (run dedicato `scripts/run-fat-tests.sh`), test migrati su ArcaFS con device **scoperti** per magic/UUID (mai per lettera), superblock **v4** (192 B: `label` + `mountpoint` dichiarato, il campo mountpoint era morto), tool host `arca create --label/--mountpoint` + `arca set`, uuid ArcaFS esposto dal driver disco (by-uuid 16 hex), gate 6 righe + shell 10/10 | ✅ Completata |
 
+## Lavoro recente (commit più recenti)
+
+> Il lavoro si e' spostato da S2.5 (rustc nativo) sulla shell nativa e sui
+> miglioramenti del terminale. Ecco cosa e' cambiato negli ultimi commit:
+
+- **Shell nativa — UI/UX** (`userland/shell/`): prompt truecolor con palette
+  personalizzata (Electric Blue per user@hostname, Slate per orologio), glifi
+  Nerd Font (⚡ HIGH VOLTAGE + USER env, 🕐 U+F520 CLOCK, ✓/✗ status),
+  sostituzione glifi (`U+23F0` → `U+F520` → `U+231B STOPWATCH`)
+- **Shell nativa — Input fluido** (`userland/shell/src/main.rs`): lettura da
+  `/dev/input/keyboard` con `recv_poll()` + futex wait (1 tick deadline) per
+  evitare busy-wait; refresh token automatico su `R_TOKEN_INVALID`; password
+  mascherata con eco sicura
+- **Term — Glyph rendering** (`libs/term/`): wide characters support,
+  glyph-aware cursor advancement, cell clipping per Nerd Font icons (evita
+  overflow), placeholder tests per `glyph_width_cells` logic
+- **Futex — Fix CPU 100%** (`kernel/src/ordo/sched/futex.rs`,
+  `userland/uptime/src/main.rs`): rimosso early-return quando l'unico processo
+  ready chiama `futex_wait`; gli interrupt hardware (PIT a 100 Hz) continuano
+  a girare e risvegliano i waiter alla scadenza; `ticks_used` di pid=8 (useruptime)
+  sceso da 230 a 0
+- **Console — Layer 0 sfondo** (`userland/console/`): immagine bitmap centrata
+  con composizione alpha (ADR-0063), margini griglia, fallback colore pagina
+
 ## Pianificate
 
 Voci con scope e vittoria dichiarati (non date).
@@ -213,8 +237,22 @@ Voci con scope e vittoria dichiarati (non date).
       aggiungera' il logout per chiudere la sessione del DE. La shell e'
       userspace (ring 3) e linka la std Velordo: niente obbligo di `no_std`.
       Identis-login spawna ora `sys/bin/shell.bin` invece della shell POSIX.
+      **Implementazione corrente** (`userland/shell/src/main.rs`, ~640 righe):
+        - **Prompt truecolor** con palette personalizzata (Electric Blue per
+          user@hostname, Slate per orologio, Ice per default)
+        - **Glifi Nerd Font**: ⚡ (HIGH VOLTAGE + USER), 🕐 (U+F520 CLOCK),
+          ✓/✗ (status ultimo comando)
+        - **Orologio in tempo reale** dal servizio Time (`TIME_NOW` IPC)
+        - **Refresh token automatico**: su `R_TOKEN_INVALID` la shell richiede
+          nuovamente credenziali senza perdere il contesto
+        - **Input fluido**: `/dev/input/keyboard` con `recv_poll()` + futex
+          wait (1 tick deadline) per evitare busy-wait; backspace con eco
+          mascherata per password
+        - **Autenticazione sicura**: BLAKE2s-256 calcolato in locale, la
+          password non lascia mai il processo shell
       Vittoria: dalla console si crea un utente e l'utente nuovo si autentica
-      con la sua password. File: `userland/shell/` (nuovo), `userland/identis-login/` (modificato).
+      con la sua password. File: `userland/shell/` (nuovo),
+      `userland/identis-login/` (modificato).
 
 - [ ] **S3.2b — Valori e capability**: i comandi restituiscono
             valori/strutture (`File`, `Directory`, `Channel`, `Process`,
@@ -422,7 +460,7 @@ Voci con scope e vittoria dichiarati (non date).
        11/11 (create/stack/TLS/joins/timeout/wake/IPC/fd/stress-32).
        Vittoria conseguita: programmi multithread nativi + gate invariato.
        Prossimo: S1.
-- [ ] **S2.5 rustc nativo** (aperta, in corso): S2.5a spike+decisioni
+- [ ] **S2.5 rustc nativo** (PAUSA — lavoro spostato su shell nativa): S2.5a spike+decisioni
        (ADR-0048: staticone Cranelift, target singolo, scala graduata) e
        S2.5b FPU eager (ADR-0049, threadtest 12/12) chiuse; S2.5c layout VA
        (stack +512M, FS +1T, MAX_PAGES 64K, W+X a coppie) + exec streaming
