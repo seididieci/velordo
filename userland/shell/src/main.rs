@@ -46,11 +46,8 @@ const CONSOLE_PATH: &str = "/dev/console";
 const KEYBOARD_PATH: &str = "/dev/input/keyboard";
 const IDENTIS_BUCKET: &str = "identis:config";
 
-/// S3.2b — opcode BIN_LIST per scoprire i bucket eseguibili.
+/// S3.2b — opcode BIN_LIST per scoprire i bucket eseguibili (importato da civis).
 use civis::BIN_LIST;
-
-/// S3.2b — tag per verificare EXECUTE su un oggetto ArcaFS (importato da civis).
-use civis::R_RIGHTS_EXECUTE;
 
 /// Variabile d'ambiente con il token di sessione (hex).
 const ENV_SESSION: &str = "VELORDO_SESSION";
@@ -391,29 +388,21 @@ fn try_execute_external(program: &str, args: &[&str]) -> bool {
         console_write_str(&alloc::format!("{}", obj.len()));
         console_write_str(" byte)\n");
 
-        // 4. Verifica EXECUTE con cardo (R_RIGHTS_EXECUTE).
-        let chan = match civis::service_lookup(civis::Service::Cardo) {
-            Ok(c) => c as u64,
-            Err(_) => {
-                console_write_str("ERRORE: cardo non disponibile\n");
+        // 4. Verifica EXECUTE con cardo (R_RIGHTS_EXECUTE) tramite FS protocol.
+        match civis::fs::rights::rights_execute(bucket.as_slice(), key_bytes) {
+            Ok(true) => {} // Autorizzato, procedi
+            Ok(false) => {
+                console_write_str("ERRORE: EXECUTE negato per '");
+                console_write_str(program);
+                console_write_str("'\n");
                 return false;
             }
-        };
-        let reply = match civis::ipc::send(chan, R_RIGHTS_EXECUTE as u64, 0, 0) {
-            Ok(r) => r,
-            Err(_) => {
-                console_write_str("ERRORE: comunicazione con cardo fallita\n");
+            Err(e) => {
+                console_write_str("ERRORE rights_execute: ");
+                console_write_str(&alloc::format!("{:?}", e));
+                console_write_str("\n");
                 return false;
             }
-        };
-
-        // La reply di R_RIGHTS_EXECUTE ritorna w0 = risultato.
-        // 0 = permesso, ERR_DENIED (!0u64 - 12) = negato.
-        if reply.w0 == civis::ERR_DENIED {
-            console_write_str("ERRORE: EXECUTE negato per '");
-            console_write_str(program);
-            console_write_str("'\n");
-            return false;
         }
 
         // 5. Esegui l'immagine con spawn_image (il meta e' Option, unwrap).

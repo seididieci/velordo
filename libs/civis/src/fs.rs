@@ -4,6 +4,7 @@ pub mod session;
 pub mod sync;
 pub mod obj;
 pub mod cwd;
+pub mod rights;
 
 use vfscli::{State, Sys};
 
