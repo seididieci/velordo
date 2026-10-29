@@ -745,6 +745,11 @@ pub const R_RIGHTS_DROP: u32 = 0x18;
 /// Legge i propri diritti (Fase 17): niente payload; risposta self-written
 /// `[ops:8][sublen:8][subtree]` (subtree normalizzato, "" = root).
 pub const R_RIGHTS_GET: u32 = 0x19;
+/// Verifica EXECUTE su un oggetto ArcaFS (S3.2b-1): payload `[bucket\0key\0]`;
+/// reply w0 = 0 OK / ERR_DENIED se il canale non ha RIGHTS_EXECUTE + READ per
+/// quel bucket. Usato dalla shell prima dello spawn per verificare che l'utente
+/// abbia il permesso di eseguire un binario dal filesystem.
+pub const R_RIGHTS_EXECUTE: u32 = 0x26;
 
 // ── Bit dei diritti per-canale lato cardo (Fase 17, 18.2) ───────────────
 // Solo riduzione (DROP fa AND), default ALL. CLOSE sempre consentito (rilascia
@@ -773,6 +778,11 @@ pub const RIGHTS_PIPE: u32 = 0x400;
 /// di un FLUSH pilotato — anti sync-storm). Bit 11: primo oltre lo storico
 /// 0x7FF (discriminanti 0-10 intoccati).
 pub const RIGHTS_SYNC: u32 = 0x800;
+/// Esecuzione di binari da ArcaFS (S3.2b-1): senza, lo spawn di un oggetto
+/// dal filesystem e' negato. Il bit si combina con READ (serve READ per
+/// leggere il binario + EXECUTE per autorizzarne l'esecuzione). Bit 12: primo
+/// oltre lo storico. Zero nuove syscall — e' solo un bit nella bitmask esistente.
+pub const RIGHTS_EXECUTE: u32 = 0x1000;
 pub const RIGHTS_ALL: u32 = 0xFFF;
 
 // ── Sentinelle di errore FS (Fase 40, P1) ─────────────────────────────
@@ -805,6 +815,9 @@ pub const ERR_CLOSED: u64 = !0u64 - 10;
 /// `quota_blocks` del bucket. Il client la mappa in `Error::NoSpace` (ENOSPC
 /// al bordo). Mai oltre il bound prima di allocare: niente mezze scritte.
 pub const ERR_NOSPC: u64 = !0u64 - 11;
+/// Permesso negato (S3.2b-1): il canale non ha RIGHTS_EXECUTE + READ per il
+/// bucket richiesto. Il client la mappa in `Error::Denied`.
+pub const ERR_DENIED: u64 = !0u64 - 12;
 
 // ── Costanti condivise kernel/userland ─────────────────────────────────────
 // Pagina fisica scratch riservata dal kernel all'avvio (phys_mem::reserve):

@@ -90,7 +90,7 @@ pub use syscall_numbers::{DISK_LIST, DISK_INFO, R_DISK_LIST, R_DISK_INFO};
 // cardo e (R_REGISTER) block.
 pub use syscall_numbers::{
     R_CLOSE, R_DELETE, R_MKDIR, R_MOUNT, R_OPEN, R_READ, R_READDIR, R_REGISTER, R_UMOUNT,
-    R_WRITE, R_RIGHTS_DROP, R_RIGHTS_GET, R_STAT, R_LSEEK, R_DUP_GRANT, R_DUP_CLAIM,
+    R_WRITE, R_RIGHTS_DROP, R_RIGHTS_GET, R_RIGHTS_EXECUTE, R_STAT, R_LSEEK, R_DUP_GRANT, R_DUP_CLAIM,
     R_DUP_CANCEL, R_PIPE_CREATE, R_SYNC, R_STATVFS, R_GET_HASH, R_RENAME,
     R_SYMLINK, R_READLINK, R_CHMOD,
 };
@@ -113,12 +113,12 @@ pub use arcafs::format::{
     ARCA_NODE_PAYLOAD_LEN, ARCA_NODE_CHECK,
 };
 /// Bit dei diritti per-canale (Fase 17, self-restriction; DELETE in 18.2;
-/// SEEK in 40; GRANT/PIPE in 45; SYNC in 52): mask per `rights_drop`, valore
-/// di ritorno di `rights_get`.
+/// SEEK in 40; GRANT/PIPE in 45; SYNC in 52; EXECUTE in S3.2b-1): mask per
+/// `rights_drop`, valore di ritorno di `rights_get`.
 pub use syscall_numbers::{
     RIGHTS_ALL, RIGHTS_DELETE, RIGHTS_GRANT, RIGHTS_MKDIR, RIGHTS_MOUNT, RIGHTS_OPEN,
     RIGHTS_PIPE, RIGHTS_READ, RIGHTS_READDIR, RIGHTS_SEEK, RIGHTS_SYNC, RIGHTS_UMOUNT,
-    RIGHTS_WRITE,
+    RIGHTS_WRITE, RIGHTS_EXECUTE,
 };
 /// `kind` per R_STAT (Fase 19.2): bit 0-1 tipo + bit 7 readonly.
 pub use syscall_numbers::{STAT_DEVICE, STAT_DIR, STAT_FILE, STAT_READONLY};
@@ -129,7 +129,7 @@ pub use syscall_numbers::{STAT_DEVICE, STAT_DIR, STAT_FILE, STAT_READONLY};
 pub use syscall_numbers::{
     OPEN_APPEND, OPEN_CREATE, OPEN_TRUNC, SEEK_CURRENT, SEEK_END, SEEK_START, ERR_BUSY,
     ERR_EXISTS, ERR_INVALID, ERR_ISDIR, ERR_NOTDIR, ERR_NOTFOUND, ERR_READONLY, ERR_EMPTY,
-    ERR_CLOSED, ERR_NOSPC,
+    ERR_CLOSED, ERR_NOSPC, ERR_DENIED,
 };
 /// Modi `R_SYNC` (Fase 52, P3 durabilita'): nessuna garanzia / barriera con
 /// flush / ogni write stabile (single source in `syscall-numbers`).

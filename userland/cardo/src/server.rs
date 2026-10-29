@@ -1192,6 +1192,12 @@ fn real_main(_sp: u64) -> ! {
 
             R_RIGHTS_GET => rights::handle_rights_get(&rights, &rings, chan, ceiling).ok_or(ERR),
 
+            // Verifica EXECUTE su un oggetto ArcaFS (S3.2b-1): il canale ha
+            // sia READ che EXECUTE per il bucket specificato? Payload
+            // `[bucket\0key\0]`; reply 0 OK / ERR_DENIED. Scrive la reply nel
+            // response ring dell'handler stesso (non passa dal dispatch gen.).
+            R_RIGHTS_EXECUTE => rights::handle_rights_execute(&rights, &rings, chan, &payload).ok_or(ERR),
+
             _ => {
                 // Tag sconosciuto: frame gia' consumato sopra, ritorna errore.
                 Err(ERR)
