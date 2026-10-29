@@ -350,6 +350,11 @@ fn real_main(_sp: u64) -> ! {
     // Client registrati: pid → (req_ring_phys, resp_ring_phys).
     let mut rings: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
 
+    // Tipi di bucket (S3.2b-2): bucket → {Object, Block, Bin}. Il tipo si
+    // dichiara al momento della creazione con nuovo tag IPC R_BUCKET_CREATE;
+    // qui e' popolato solo dal seed statico. Default: Object.
+    let mut bucket_types: BTreeMap<String, &'static str> = BTreeMap::new();
+
     // Diritti per-canale (Fase 17): entry assente = {ALL, root}.
     let mut rights: BTreeMap<u64, rights::ChanRights> = BTreeMap::new();
     // Tetto policy su identita' (Fase 45): chan → mask massima, classificato
@@ -373,6 +378,15 @@ fn real_main(_sp: u64) -> ! {
     // R_SYNC (default SYNC_NONE = nessuna pretesa registrata). Effimere
     // come rights/policy: col peer muore la riga (purge su EXIT_NOTIFY).
     let mut sync_expect: BTreeMap<u64, u32> = BTreeMap::new();
+
+    // Popola bucket_types dal seed SYS_SEED (S3.2b-2): tutti i bucket che
+    // contengono eseguibili (.bin nel path) sono di tipo "bin".
+    for (_path, bucket, _key) in SYS_SEED.iter() {
+        let b = core::str::from_utf8(*bucket).unwrap_or("");
+        if !bucket_types.contains_key(b) {
+            bucket_types.insert(String::from(b), "bin");
+        }
+    }
 
     // Fase A: niente piu' populate della ramfs radice — `/` e' il volume
     // ArcaFS (hello.txt/test.txt seedati a build-time, Fase C) e ramfs vive
@@ -566,6 +580,40 @@ fn real_main(_sp: u64) -> ! {
             if epoch_dropped {
                 fat_gen = fat_gen.wrapping_add(1);
             }
+            continue;
+        }
+
+        // Lista bucket eseguibili (S3.2b-2): nessun payload, w0=w1=0. Cardo
+        // filtra i bucket di tipo `Bin` e restituisce i nomi separati da `\n`.
+        if tag == BIN_LIST {
+            // Filtra bucket_types per quelli con valore "bin".
+            let mut bin_buckets: Vec<&str> = Vec::new();
+            for (name, btype) in bucket_types.iter() {
+                if *btype == "bin" {
+                    bin_buckets.push(name.as_str());
+                }
+            }
+            // Se nessun bucket e' stato dichiarato esplicitamente come "bin",
+            // usa il seed SYS_SEED: i bucket con eseguibili sono quelli che
+            // contengono .bin nel path del seed (es. "sys" per sys/bin/*).
+            if bin_buckets.is_empty() {
+                for (_path, bucket, _key) in SYS_SEED.iter() {
+                    let b = core::str::from_utf8(*bucket).unwrap_or("");
+                    // Controlla se il bucket e' gia' nella lista (evita duplicati).
+                    if !bin_buckets.contains(&b) {
+                        bin_buckets.push(b);
+                    }
+                }
+            }
+            // Costruisce la risposta: nomi separati da '\n'.
+            let mut resp = alloc::vec::Vec::new();
+            for bucket in &bin_buckets {
+                resp.extend_from_slice(bucket.as_bytes());
+                resp.push(b'\n');
+            }
+            let count = bin_buckets.len() as u64;
+            // Scrive la risposta nel response ring del client.
+            rings::resp_ring_write(count, 0, &resp);
             continue;
         }
 

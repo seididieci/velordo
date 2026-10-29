@@ -80,7 +80,7 @@ use civis::{
     DEV_READDIR, DEV_WRITE, DEV_ZERO,
 };
 // Tag IPC FS/boot (DocsB): single source in `syscall-numbers`, via `civis`.
-use civis::{FS_BUF_REG, FS_NOTIFY, FS_REGISTER};
+use civis::{BIN_LIST, FS_BUF_REG, FS_NOTIFY, FS_REGISTER};
 
 // Manifest degli hash dei servizi (Fase 36, identita' misurata, Strato 2 di
 // ADR-0026): generato a build-time da scripts/gen-service-hashes.sh, incluso

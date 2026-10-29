@@ -152,7 +152,7 @@ pub use syscall_numbers::{CONSOLE_ERR, CONSOLE_OUT};
 /// duplicati qui, in cardo/block/init/tty/kbd e come letterali nei test).
 /// `civis` li riesporta: i server/test usano i path `civis::`, mai i valori.
 pub use syscall_numbers::{
-    FS_BUF_REG, FS_NOTIFY, FS_REGISTER, INIT_BOUNCE, KBD_NOTIFY, SVC_READY, TEST_DONE,
+    BIN_LIST, FS_BUF_REG, FS_NOTIFY, FS_REGISTER, INIT_BOUNCE, KBD_NOTIFY, SVC_READY, TEST_DONE,
 };
 /// Tag DEV_* op + device type (DocsD): stesso pattern, prima duplicati in
 /// cardo/block/vela/gpu/kbd/tty.

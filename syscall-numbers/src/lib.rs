@@ -418,6 +418,9 @@ pub const FS_NOTIFY: u64 = 0x32;
 //   direttamente; init risponde con reply (0 = pid ucciso, ERR = ignoto)).
 pub const FS_REGISTER: u64 = 0x30;
 pub const FS_BUF_REG: u64 = 0x31;
+/// Richiesta lista bucket eseguibili (S3.2b-2): nessun payload, w0=w1=0.
+/// Cardo filtra i bucket di tipo `Bin` e restituisce i nomi separati da `\n`.
+pub const BIN_LIST: u64 = 0x41;
 pub const KBD_NOTIFY: u64 = 0x40;
 pub const JOB_CANCEL: u64 = 0x43;
 pub const SVC_READY: u64 = 0x7D;
