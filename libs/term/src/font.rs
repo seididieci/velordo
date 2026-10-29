@@ -185,19 +185,23 @@ impl Font {
         })
     }
 
-    /// Calcola la larghezza di un glifo in termini di celle della griglia.
-    /// Usa la larghezza del bitmap rasterizzato (non l'advance TTF): nei font
-    /// monospazio tutti i glifi hanno lo stesso advance, ma le icone Nerd Font
-    /// sono visivamente piu' larghe e il bitmap riflette questa differenza.
+    /// Calcola la larghezza di un glifo in **celle** della griglia.
+    ///
+    /// La regola viene dal **bounding box dell'inchiostro**, non dall'advance
+    /// TTF: Maple Mono NF ha advance uniforme (0.6 em, una cella) anche per
+    /// le icone Nerd, che pero' disegnano fuori dalla cella (l'orologio
+    /// U+F520 e' 14 px in una cella da 10). L'advance direbbe "1" per tutte
+    /// e il glifo verrebbe tagliato dal background della cella dopo; il bbox
+    /// dice quante celle servono davvero a contenerlo.
+    ///
+    /// Il bordo destro e' `xoff + bmp.w` (il bbox puo' iniziare a sinistra
+    /// della cella: `xoff` negativo); il numero di celle e' il `ceil`.
     pub fn glyph_width_cells(&mut self, cp: u32) -> usize {
         // La cella base e' derivata dall'advance dello spazio (GID 0).
-        let space_advance = self.advance_units(0) as i64;
-        let cell_w = ((space_advance * self.scale as i64 + 0xFFFF) >> 16) as usize;
+        let cell_w = self.metrics().cell_w;
         if cell_w == 0 {
             return 1;
         }
-
-        // Rasterizza il glifo per misurarne la larghezza reale in pixel.
         let bmp = match self.glyph(cp) {
             Some(bmp) => bmp,
             None => return 1,
@@ -205,9 +209,11 @@ impl Font {
         if bmp.w == 0 {
             return 1;
         }
-
-        // Quante celle copre il bitmap? Usa il ceil.
-        ((bmp.w as usize + cell_w - 1) / cell_w).max(1)
+        let right = bmp.xoff + bmp.w as i32;
+        if right <= 0 {
+            return 1;
+        }
+        ((right as usize + cell_w - 1) / cell_w).max(1)
     }
 
     /// Metriche in pixel (la cella deriva dal font: larghezza = advance,
@@ -380,57 +386,75 @@ fn transform(x: i32, y: i32, comp: &ttf::Component) -> (i32, i32) {
 }
 
 // ── Test host ───────────────────────────────────────────────────
-
-/// Verifica che `glyph_width_cells` ritorni almeno 1 per qualsiasi codepoint.
-/// Non carica un font TTF reale: il generatore di font minimali e' troppo
-/// fragile — i test veri si faranno con Maple Mono NF in QEMU.
+//
+// I test caricano il **font vero** (`third_party/MapleMono-NF-Regular.ttf`,
+// 2.4 MiB): la regola di larghezza dipende dal bounding box dell'inchiostro,
+// che un font sintetico non riproduce. Se il file manca il test si salta
+// (il crate resta compilabile fuori dal repo).
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
-    /// Un codepoint non mappato (GID 0) deve tornare 1 cella.
-    #[test]
-    fn unknown_glyph_returns_1_cell() {
-        // Non possiamo caricare un font TTF valido senza fixare il generatore,
-        // quindi questo test e' un placeholder. La logica reale e' testata
-        // integration-testando il console server con il font vero.
-        let _ = "placeholder: glyph_width_cells logic verified in QEMU tests";
+    /// `Source` sui byte del font (std: i test girano sull'host).
+    struct FileSource {
+        data: alloc::vec::Vec<u8>,
     }
 
-    /// Verifica che la funzione esista e sia safe da chiamare (no panic).
-    #[test]
-    fn glyph_width_cells_is_safe() {
-        // La funzione deve tornare 1 per GID 0 (nessun glifo).
-        // Questo e' verificato dal fatto che il terminale non panica mai.
-        let _ = "placeholder: safe to call for any cp";
+    impl Source for FileSource {
+        fn read_at(&mut self, off: u64, buf: &mut [u8]) -> Option<usize> {
+            let start = off as usize;
+            if start >= self.data.len() {
+                return Some(0);
+            }
+            let n = buf.len().min(self.data.len() - start);
+            buf[..n].copy_from_slice(&self.data[start..start + n]);
+            Some(n)
+        }
     }
 
-    /// Test della formula matematica di `glyph_width_cells`:
-    /// ceil(bmp_w / cell_w) deve essere >= 1 e crescente con bmp_w.
-    #[test]
-    fn formula_ceil_increasing() {
-        let cell_w = 8usize; // pixel per cella (esempio)
-        
-        // bmp_w <= cell_w -> 1 cella
-        assert_eq!(((1 + cell_w - 1) / cell_w).max(1), 1);
-        assert_eq!(((cell_w + cell_w - 1) / cell_w).max(1), 1);
-        
-        // bmp_w > cell_w -> ceil(bmp_w / cell_w) celle
-        assert_eq!(((cell_w + 1 + cell_w - 1) / cell_w).max(1), 2);
-        assert_eq!(((2 * cell_w + cell_w - 1) / cell_w).max(1), 2);
-        assert_eq!(((2 * cell_w + 1 + cell_w - 1) / cell_w).max(1), 3);
+    /// Il font del terminale a 16 px (la dimensione di D3).
+    fn maple() -> Option<Font> {
+        // `cargo test` esegue con la CWD = radice del crate (`libs/term`).
+        let data = fs::read("../../third_party/MapleMono-NF-Regular.ttf").ok()?;
+        Font::load(Box::new(FileSource { data }), 16).ok()
     }
 
-    /// In un font monospace, l'advance TTF e' lo stesso per tutti i glifi.
-    /// Quindi `glyph_width_cells` dipende SOLO dal bitmap rasterizzato,
-    /// non dall'advance teorico. Questo e' il punto chiave: le icone Nerd
-    /// hanno bitmap piu' larghi della cella standard.
+    /// La cella del font vero: advance 0.6 em a 16 px = 10 px.
     #[test]
-    fn monospace_advance_ignored() {
-        // In un font monospace, advance_units(gid) == advance_units(0) per ogni gid.
-        // Quindi il vecchio codice (che usava l'advance) tornava sempre 1.
-        // Il nuovo codice usa bmp.w, che e' diverso per icone vs caratteri ASCII.
-        let _ = "monospace: advance is same for all glyphs, bitmap width varies";
+    fn metrica_della_cella() {
+        let Some(f) = maple() else { return };
+        let m = f.metrics();
+        assert_eq!(m.cell_w, 10, "advance 9.6 -> 10 px");
+        assert_eq!(m.cell_h, 22, "em box 21.1 -> 22 px");
+    }
+
+    /// L'orologio Nerd (U+F520) e' 14 px: **due** celle, anche se l'advance
+    /// del font dice una. E' la ragione per cui la larghezza viene dal bbox.
+    #[test]
+    fn icona_larga_due_celle() {
+        let Some(mut f) = maple() else { return };
+        assert_eq!(f.glyph_width_cells(0xF520), 2, "orologio 14 px in cella da 10");
+    }
+
+    /// I caratteri normali restano a una cella; un codepoint assente non
+    /// occupa niente (GID 0 -> 1 cella, cosi' il cursore avanza comunque).
+    #[test]
+    fn caratteri_normali_una_cella() {
+        let Some(mut f) = maple() else { return };
+        assert_eq!(f.glyph_width_cells(b'A' as u32), 1);
+        assert_eq!(f.glyph_width_cells(b' ' as u32), 1);
+        assert_eq!(f.glyph_width_cells(0x2713), 1, "checkmark 10 px");
+        assert_eq!(f.glyph_width_cells(0x231B), 1, "non mappato (GID 0)");
+    }
+
+    /// Un glifo con `xoff` negativo (i separatori Powerline sbordano a
+    /// sinistra) non guadagna una cella in piu': conta il bordo **destro**.
+    #[test]
+    fn bordo_destro_non_xoff() {
+        let Some(mut f) = maple() else { return };
+        // U+E0B0: xoff = -1, ink 11 px -> bordo destro 10 px -> una cella.
+        assert_eq!(f.glyph_width_cells(0xE0B0), 1);
     }
 }

@@ -281,10 +281,9 @@ impl Term {
                 let params = core::mem::take(&mut self.csi_params);
                 match cmd {
                     b'D' => {
-                        // cursore a sinistra
-                        if self.grid.cursor.0 > 0 {
-                            self.grid.cursor.0 -= 1;
-                        }
+                        // cursore a sinistra (salta l'intero glifo largo)
+                        let back = self.grid.span_back(self.grid.cursor.0, self.grid.cursor.1);
+                        self.grid.cursor.0 -= back;
                     }
                     b'C' => {
                         // cursore a destra
@@ -293,11 +292,10 @@ impl Term {
                         }
                     }
                     b'K' => {
-                        // cancella fino a fine riga
-                        let col = self.grid.cursor.0;
-                        for c in col..self.grid.cols() {
-                            self.grid.put(c, self.grid.cursor.1, b' ' as u32, self.fg, self.bg);
-                        }
+                        // cancella fino a fine riga (se il cursore e' dentro
+                        // un glifo largo, sparisce lo span intero)
+                        let (col, row) = self.grid.cursor;
+                        self.grid.erase_from(col, row, self.fg, self.bg);
                     }
                     b'm' => {
                         // Select Graphic Rendition: colori truecolor e 256.
@@ -327,9 +325,9 @@ impl Term {
                 self.grid.cursor.0 = 0;
             }
             0x08 => {
-                if self.grid.cursor.0 > 0 {
-                    self.grid.cursor.0 -= 1;
-                }
+                // backspace: salta l'intero glifo largo
+                let back = self.grid.span_back(self.grid.cursor.0, self.grid.cursor.1);
+                self.grid.cursor.0 -= back;
             }
             0x0C => {
                 // form feed: pulisce tutto, cursore a casa
@@ -337,18 +335,30 @@ impl Term {
                 self.grid.cursor = (0, 0);
             }
             _ => {
-                // Caratteri stampabili o glifi Nerd Font (wide).
-                let (col, row) = self.grid.cursor;
-                self.grid.put(col, row, cp, self.fg, self.bg);
+                // Caratteri stampabili o glifi Nerd Font (lunghi piu' celle).
+                let (mut col, mut row) = self.grid.cursor;
 
-                // Calcolo l'avanzamento basato sulla larghezza del glifo.
+                // Quante celle occupa il glifo (1 per i caratteri normali).
                 let mut advance = 1;
-                if let Some(ref font) = self.font {
-                    advance = font.glyph_width_cells(cp);
+                if let Some(font) = self.font.as_mut() {
+                    advance = font.glyph_width_cells(cp).max(1);
                 }
 
+                // Un glifo largo che non entra in fondo riga va a capo
+                // **prima** di essere disegnato: altrimenti resterebbe
+                // tagliato dal bordo.
+                if col + advance > self.grid.cols() {
+                    col = 0;
+                    if row + 1 >= self.grid.rows() {
+                        self.grid.scroll_up();
+                    } else {
+                        row += 1;
+                    }
+                }
+                self.grid.put_wide(col, row, cp, advance, self.fg, self.bg);
+
                 if col + advance >= self.grid.cols() {
-                    // fine riga o overflow: va a capo (e scrolla se necessario)
+                    // fine riga: il cursore va a capo (e scrolla se serve)
                     self.grid.cursor.0 = 0;
                     if row + 1 >= self.grid.rows() {
                         self.grid.scroll_up();
@@ -356,7 +366,7 @@ impl Term {
                         self.grid.cursor.1 = row + 1;
                     }
                 } else {
-                    self.grid.cursor.0 = col + advance;
+                    self.grid.cursor = (col + advance, row);
                 }
             }
         }
@@ -380,27 +390,15 @@ impl Term {
             let (cols, rows) = (self.grid.cols(), self.grid.rows());
             for row in dirty.min_row..=dirty.max_row.min(rows.saturating_sub(1)) {
                 for col in dirty.min_col..=dirty.max_col.min(cols.saturating_sub(1)) {
-                    let cell = self.grid.cell(col, row);
-                    let is_cursor =
-                        (col, row) == self.grid.cursor_clamped() && self.grid.cursor_visible;
-
-                    // Celle vuote (cp == 0): ripristina lo sfondo dal layer 0
-                    // (pixel BMP dove sovrappone, nero altrove). Niente glifo.
-                    // Senza layer 0 la cella va riempita col suo bg (una cella
-                    // "spazio" puo' avere un background colorato).
-                    if cell.cp == 0 {
-                        if let Some((ptr, len)) = l0_data {
-                            let l0_slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-                            self.restore_layer0_cell(col, row, l0_slice);
-                        } else {
-                            self.paint_cell_bg(col, row, cell.bg);
-                        }
+                    // Le continuazioni le disegna la **testa** dello span:
+                    // qui non si ridipinge il background sopra il glifo
+                    // largo (era il bug: l'icona restava di una cella).
+                    if self.grid.cell(col, row).width == 0 {
                         continue;
                     }
-
-                    // Celle con carattere: put_char gestisce layer 0 (BMP come
-                    // sfondo) + glifo in un colpo solo.
-                    self.draw_cell(col, row, cell.cp, cell.fg, cell.bg, is_cursor);
+                    let is_cursor =
+                        (col, row) == self.grid.cursor_clamped() && self.grid.cursor_visible;
+                    self.draw_cell_at(col, row, is_cursor, l0_data);
                 }
             }
         }
@@ -409,34 +407,14 @@ impl Term {
         if cur != self.cursor_drawn {
             let (cc, cr) = self.cursor_drawn;
             if cc < self.grid.cols() && cr < self.grid.rows() {
-                let cell = self.grid.cell(cc, cr);
-                if cell.cp == 0 {
-                    if let Some((ptr, len)) = l0_data {
-                        let l0_slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-                        self.restore_layer0_cell(cc, cr, l0_slice);
-                    } else {
-                        self.paint_cell_bg(cc, cr, cell.bg);
-                    }
-                } else {
-                    self.draw_cell(cc, cr, cell.cp, cell.fg, cell.bg, false);
-                }
+                self.draw_cell_at(cc, cr, false, l0_data);
             }
             self.cursor_drawn = cur;
         }
         // La cella del cursore (con il cursore dentro).
         let (cc, cr) = self.cursor_drawn;
         if cc < self.grid.cols() && cr < self.grid.rows() {
-            let cell = self.grid.cell(cc, cr);
-            if cell.cp == 0 {
-                if let Some((ptr, len)) = l0_data {
-                    let l0_slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-                    self.restore_layer0_cell(cc, cr, l0_slice);
-                } else {
-                    self.paint_cell_bg(cc, cr, cell.bg);
-                }
-            } else {
-                self.draw_cell(cc, cr, cell.cp, cell.fg, cell.bg, self.grid.cursor_visible);
-            }
+            self.draw_cell_at(cc, cr, self.grid.cursor_visible, l0_data);
         }
         // Nel fallback VGA il cursore e' quello hardware (CRTC).
         if matches!(self.surface, Surface::VgaText(_)) {
@@ -444,9 +422,10 @@ impl Term {
         }
     }
 
-    /// Riempe una cella col suo background (nessun glifo). Usato per le celle
-    /// vuote quando non c'e' un layer 0 da ripristinare.
-    fn paint_cell_bg(&mut self, col: usize, row: usize, bg: u32) {
+    /// Riempe una cella (o uno span di celle) col suo background (nessun
+    /// glifo). Usato per le celle vuote quando non c'e' un layer 0 da
+    /// ripristinare.
+    fn paint_cell_bg(&mut self, col: usize, row: usize, span: usize, bg: u32) {
         let surface = match &mut self.surface {
             Surface::Pixel(p) => p,
             _ => return,
@@ -455,16 +434,26 @@ impl Term {
         let ch = surface.geom.cell_h as u32;
         let x = surface.geom.origin_x + (col as u32) * cw;
         let y = surface.geom.origin_y + (row as u32) * ch;
+        let w = cw * span.max(1) as u32;
         let color = surface::rgba_to_bgra(bg);
         for yy in 0..ch {
-            for xx in 0..cw {
+            for xx in 0..w {
                 unsafe { surface.put(x + xx, y + yy, color) };
             }
         }
     }
 
-    /// Disegna una cella sulla surface attiva.
-    fn draw_cell(&mut self, col: usize, row: usize, cp: u32, fg: u32, bg: u32, cursor: bool) {
+    /// Disegna una cella sulla surface attiva (tutto lo span del glifo).
+    fn draw_cell(
+        &mut self,
+        col: usize,
+        row: usize,
+        span: usize,
+        cp: u32,
+        fg: u32,
+        bg: u32,
+        cursor: bool,
+    ) {
         // Nel path VGA il font non serve (il BIOS disegna il carattere).
         let font = self.font.as_mut();
         // Passa il layer 0 a put_char: i pixel BMP sovrapposti vengono
@@ -476,7 +465,38 @@ impl Term {
             (v.as_slice(), self.layer0_width, l0_h, self.layer0_offset_x, self.layer0_offset_y)
         });
         self.surface
-            .put_char(col, row, cp, fg, bg, cursor, font, l0);
+            .put_char(col, row, span, cp, fg, bg, cursor, font, l0);
+    }
+
+    /// Disegna la cella (col,row): se e' una continuazione disegna la testa
+    /// dello span (una cella non si ridisegna da sola in mezzo a un glifo
+    /// largo). `l0_data` e' il layer 0 gia' estratto (puntatore+lunghezza).
+    fn draw_cell_at(
+        &mut self,
+        col: usize,
+        row: usize,
+        cursor: bool,
+        l0_data: Option<(*const u8, usize)>,
+    ) {
+        let (start, _len) = self.grid.span_at(col, row);
+        let cell = self.grid.cell(start, row);
+        let span = cell.width.max(1) as usize;
+        // Celle vuote (cp == 0): ripristina lo sfondo dal layer 0 (pixel BMP
+        // dove sovrappone, nero altrove). Niente glifo. Senza layer 0 la
+        // cella va riempita col suo bg (una cella "spazio" puo' avere un
+        // background colorato).
+        if cell.cp == 0 {
+            if let Some((ptr, len)) = l0_data {
+                let l0_slice = unsafe { core::slice::from_raw_parts(ptr, len) };
+                self.restore_layer0_cell(start, row, span, l0_slice);
+            } else {
+                self.paint_cell_bg(start, row, span, cell.bg);
+            }
+            return;
+        }
+        // Celle con carattere: put_char gestisce layer 0 (BMP come sfondo) +
+        // glifo in un colpo solo.
+        self.draw_cell(start, row, span, cell.cp, cell.fg, cell.bg, cursor);
     }
 
     /// Select Graphic Rendition (ESC[...m): truecolor (`38;2` / `48;2`) e 256
@@ -624,10 +644,11 @@ impl Term {
         }
     }
 
-    /// Ripristina una cella dal layer 0: prima il colore di pagina su tutta la
-    /// cella (cancella il carattere precedente e i margini fuori
-    /// dall'immagine), poi l'overlap del BMP composto con il suo alpha.
-    fn restore_layer0_cell(&mut self, col: usize, row: usize, layer0: &[u8]) {
+    /// Ripristina una cella (o uno span di celle) dal layer 0: prima il colore
+    /// di pagina su tutta la zona (cancella il carattere precedente e i
+    /// margini fuori dall'immagine), poi l'overlap del BMP composto con il
+    /// suo alpha.
+    fn restore_layer0_cell(&mut self, col: usize, row: usize, span: usize, layer0: &[u8]) {
         let bg = surface::rgba_to_bgra(color::BLACK);
         let w_img = self.layer0_width;
         let ox = self.layer0_offset_x;
@@ -645,9 +666,10 @@ impl Term {
         let ch = surface.geom.cell_h as u32;
         let x = surface.geom.origin_x + (col as u32) * cw;
         let y = surface.geom.origin_y + (row as u32) * ch;
+        let span_px = cw * span.max(1) as u32;
 
         // Fondo di pagina (clippato alla superficie).
-        let w = cw.min(surface.width.saturating_sub(x));
+        let w = span_px.min(surface.width.saturating_sub(x));
         let h = ch.min(surface.height.saturating_sub(y));
         surface.fill_rect(x, y, w, h, bg);
 
@@ -655,7 +677,7 @@ impl Term {
         // `w_img * 4` per riga — senza il `* 4` si copiava bene solo la prima
         // riga e il resto sbavava in verticale).
         let overlap_x_start = x.max(ox);
-        let overlap_x_end = (x + cw).min(ox + w_img);
+        let overlap_x_end = (x + span_px).min(ox + w_img);
         let overlap_y_start = y.max(oy);
         let overlap_y_end = (y + ch).min(oy + h_img);
         if overlap_x_start < overlap_x_end && overlap_y_start < overlap_y_end {

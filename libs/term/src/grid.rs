@@ -67,6 +67,14 @@ pub struct Cell {
     /// Colore background truecolor (RGBA packed, `0xRRGGBBAA`).
     /// Alpha < 0xFF = trasparente verso il layer 0 (sfondo immagine).
     pub bg: u32,
+    /// Quante celle occupa il glifo: `1` = normale, `2` (o piu') = **testa**
+    /// di un glifo largo, `0` = **continuazione** della testa a sinistra.
+    ///
+    /// La continuazione non ha un glifo proprio (il suo `cp` resta lo
+    /// spazio): la disegna la testa, che sborda su tutto lo span. Serve al
+    /// renderer per non ridipingere il background sopra il glifo largo e al
+    /// cursore per non fermarsi in mezzo a un glifo.
+    pub width: u8,
 }
 
 impl Default for Cell {
@@ -75,6 +83,7 @@ impl Default for Cell {
             cp: b' ' as u32,
             fg: color::DEFAULT_FG,
             bg: color::DEFAULT_BG,
+            width: 1,
         }
     }
 }
@@ -83,6 +92,16 @@ impl Cell {
     /// La cella e' "vuota" (solo spazio: i colori non contano).
     pub fn is_blank(&self) -> bool {
         self.cp == b' ' as u32
+    }
+
+    /// La cella e' la continuazione di un glifo largo (nessun glifo proprio).
+    pub fn is_cont(&self) -> bool {
+        self.width == 0
+    }
+
+    /// Celle occupate dal glifo (1 per una cella normale).
+    pub fn span(&self) -> usize {
+        (self.width as usize).max(1)
     }
 
     /// Il background della cella e' trasparente (alpha < 0xFF).
@@ -203,16 +222,135 @@ impl Grid {
     }
 
     /// Scrive un codepoint nella cella (col,row) con colori truecolor e segna
-    /// la zona sporca.
+    /// la zona sporca. Un carattere normale occupa una cella.
     pub fn put(&mut self, col: usize, row: usize, cp: u32, fg: u32, bg: u32) {
+        self.put_wide(col, row, cp, 1, fg, bg);
+    }
+
+    /// Scrive un codepoint **largo** `width` celle: la testa in (col,row) e
+    /// `width-1` continuazioni a destra, tutte segnate sporche (il glifo si
+    /// disegna una volta sola, ma occupa l'intero span).
+    ///
+    /// Prima pulisce ogni span che si sovrappone alla zona: scrivere dentro
+    /// una continuazione (o sopra la testa di un glifo largo) non deve
+    /// lasciare meta' glifo orfana.
+    pub fn put_wide(&mut self, col: usize, row: usize, cp: u32, width: usize, fg: u32, bg: u32) {
         if col >= self.cols || row >= self.rows {
             return;
         }
-        let cell = Cell { cp, fg, bg };
+        let width = width.max(1).min(self.cols - col);
+
+        // 1) Via gli span sovrapposti (teste e continuazioni che cadono
+        //    nella zona che stiamo per scrivere).
+        let mut c = col;
+        while c < col + width {
+            let (start, len) = self.span_at(c, row);
+            if len > 0 && start < col + width && start + len > col {
+                self.clear_span(start, len, row);
+            }
+            c = (start + len).max(c + 1);
+        }
+
+        // 2) La testa e le continuazioni.
+        let lead = Cell {
+            cp,
+            fg,
+            bg,
+            width: width as u8,
+        };
         let idx = row * self.cols + col;
-        if self.cells[idx] != cell {
-            self.cells[idx] = cell;
+        if self.cells[idx] != lead {
+            self.cells[idx] = lead;
             self.dirty.mark(col, row);
+        }
+        for k in 1..width {
+            let cont = Cell {
+                cp: b' ' as u32,
+                fg,
+                bg,
+                width: 0,
+            };
+            let i = row * self.cols + col + k;
+            if self.cells[i] != cont {
+                self.cells[i] = cont;
+                self.dirty.mark(col + k, row);
+            }
+        }
+    }
+
+    /// Lo span che contiene la cella (col,row): `(testa, celle occupate)`.
+    ///
+    /// Una cella normale risponde `(col, 1)`; la testa di un glifo largo
+    /// `(col, width)`; una continuazione risale alla sua testa.
+    pub fn span_at(&self, col: usize, row: usize) -> (usize, usize) {
+        if col >= self.cols || row >= self.rows {
+            return (col, 0);
+        }
+        let idx = row * self.cols + col;
+        let w = self.cells[idx].width;
+        if w >= 1 {
+            return (col, w as usize);
+        }
+        // Continuazione: risali alle continuazioni precedenti, la testa e'
+        // la cella prima della prima continuazione.
+        let mut first = col;
+        while first > 0 && self.cells[row * self.cols + first - 1].width == 0 {
+            first -= 1;
+        }
+        let start = first.saturating_sub(1);
+        let lead_w = self.cells[row * self.cols + start].width.max(1) as usize;
+        (start, lead_w)
+    }
+
+    /// Quante celle indietreggiare dal cursore in (col,row): 1 davanti a una
+    /// cella normale, l'intero span davanti a una continuazione (backspace e
+    /// CSI D non si fermano in mezzo a un glifo largo).
+    pub fn span_back(&self, col: usize, row: usize) -> usize {
+        if col == 0 {
+            return 0;
+        }
+        let prev = col - 1;
+        let (start, len) = self.span_at(prev, row);
+        if len > 1 && start < prev {
+            col - start
+        } else {
+            1
+        }
+    }
+
+    /// Pulisce uno span (testa compresa) riportandolo a celle vuote, ognuna
+    /// con i propri colori.
+    fn clear_span(&mut self, start: usize, len: usize, row: usize) {
+        for c in start..(start + len).min(self.cols) {
+            let idx = row * self.cols + c;
+            let old = self.cells[idx];
+            if old.cp != b' ' as u32 || old.width != 1 {
+                self.cells[idx] = Cell {
+                    cp: b' ' as u32,
+                    fg: old.fg,
+                    bg: old.bg,
+                    width: 1,
+                };
+                self.dirty.mark(c, row);
+            }
+        }
+    }
+
+    /// Cancella da (col,row) a fine riga (CSI K). Se il cursore cade dentro
+    /// un glifo largo, sparisce lo span intero (niente meta' glifi).
+    pub fn erase_from(&mut self, col: usize, row: usize, fg: u32, bg: u32) {
+        if row >= self.rows {
+            return;
+        }
+        let mut c = col.min(self.cols);
+        let (start, len) = self.span_at(c, row);
+        if start < c && len > 0 {
+            self.clear_span(start, len, row);
+            c = start + len;
+        }
+        while c < self.cols {
+            self.put_wide(c, row, b' ' as u32, 1, fg, bg);
+            c += 1;
         }
     }
 
@@ -251,12 +389,14 @@ impl Grid {
         d
     }
 
-    /// Riga e colonna del cursore, limitati alla griglia.
+    /// Riga e colonna del cursore, limitati alla griglia e **agganciati alla
+    /// testa** dello span: il cursore non si ferma in mezzo a un glifo largo
+    /// (disegnerebbe il blocco sopra meta' icona).
     pub fn cursor_clamped(&self) -> (usize, usize) {
-        (
-            self.cursor.0.min(self.cols.saturating_sub(1)),
-            self.cursor.1.min(self.rows.saturating_sub(1)),
-        )
+        let col = self.cursor.0.min(self.cols.saturating_sub(1));
+        let row = self.cursor.1.min(self.rows.saturating_sub(1));
+        let (start, _) = self.span_at(col, row);
+        (start, row)
     }
 
     /// Numero di celle non vuote (il contenuto del terminale).
@@ -353,7 +493,13 @@ impl Grid {
             }
             let mut i = 0;
             while i < line.len() {
-                let end = (i + new_cols).min(line.len());
+                let mut end = (i + new_cols).min(line.len());
+                // Mai spezzare una testa dalle sue continuazioni: se il
+                // taglio cadrebbe dentro un glifo largo, il glifo intero va
+                // alla riga successiva.
+                if end < line.len() && line[end].is_cont() && end > i + 1 {
+                    end -= 1;
+                }
                 flat.push(line[i..end].to_vec());
                 if cursor_live && src_idx == cursor_src {
                     // Il cursore puo' essere oltre la fine del testo della
@@ -386,10 +532,30 @@ impl Grid {
             .min(max_start);
         let mut cells = alloc::vec![Cell::default(); new_cols * new_rows];
         for (dst_row, src) in flat[start..].iter().enumerate() {
-            for (c, cell) in src.iter().enumerate() {
-                if c < new_cols {
-                    cells[dst_row * new_cols + c] = *cell;
+            let base = dst_row * new_cols;
+            let mut c = 0;
+            while c < src.len() && c < new_cols {
+                let cell = src[c];
+                if cell.is_cont() {
+                    // Continuazione orfana (il taglio l'ha separata dalla
+                    // testa): non ha niente da disegnare.
+                    c += 1;
+                    continue;
                 }
+                let span = cell.span();
+                if span > 1 && c + span > new_cols {
+                    // Il glifo largo non entra nella nuova larghezza: resta
+                    // la sola testa (una griglia da 1 colonna non puo'
+                    // mostrare icone da 2).
+                    cells[base + c] = Cell { width: 1, ..cell };
+                } else {
+                    for k in 0..span {
+                        if c + k < src.len() {
+                            cells[base + c + k] = src[c + k];
+                        }
+                    }
+                }
+                c += span;
             }
         }
 
@@ -405,14 +571,22 @@ impl Grid {
             cursor_col.min(new_cols.saturating_sub(1)),
             flat_cursor - start,
         );
+        // Se il reflow ha lasciato il cursore dentro un glifo largo, si
+        // aggancia alla testa: il prossimo carattere non deve nascere in
+        // mezzo a un'icona.
+        let (lead, _) = self.span_at(self.cursor.0, self.cursor.1);
+        self.cursor.0 = lead;
         self.dirty.mark_all(new_cols, new_rows);
     }
 }
 
 /// La riga tagliata all'ultimo carattere non vuoto.
+///
+/// Una continuazione non e' "spazio": e' la coda di un glifo largo, e
+/// tagliarla lascerebbe la testa senza span.
 fn trim_row(row: &[Cell]) -> Vec<Cell> {
     let mut end = row.len();
-    while end > 0 && row[end - 1].is_blank() {
+    while end > 0 && row[end - 1].is_blank() && !row[end - 1].is_cont() {
         end -= 1;
     }
     row[..end].to_vec()
@@ -518,5 +692,90 @@ mod tests {
         assert!(g.cursor.1 < g.rows(), "il cursore deve restare nella griglia");
         assert_eq!(g.cursor, (2, 3), "il cursore finisce sull'ultima riga");
         assert_eq!(row_str(&g, 3), "0123456789");
+    }
+
+    // ── Glifi larghi (celle di continuazione) ───────────────────────
+    //
+    // Un glifo che sborda dalla cella (le icone Nerd Font: l'orologio
+    // U+F520 e' 14 px in una cella da 10) occupa due celle. La seconda e'
+    // una **continuazione** (`width = 0`): la disegna la testa, il renderer
+    // non ci passa sopra col background. Senza questo, la cella dopo
+    // cancellava i pixel del glifo (verificato sul framebuffer QEMU).
+
+    /// La testa occupa `width` celle e le continuazioni non hanno un glifo.
+    #[test]
+    fn glifo_largo_occupa_due_celle() {
+        let mut g = Grid::new(10, 2);
+        g.put_wide(3, 0, 0xF520, 2, color::WHITE, color::BLACK);
+        assert_eq!(g.cell(3, 0).cp, 0xF520);
+        assert_eq!(g.cell(3, 0).width, 2, "la testa dichiara lo span");
+        assert_eq!(g.cell(4, 0).width, 0, "la seconda cella e' continuazione");
+        assert!(g.cell(4, 0).is_cont());
+        assert_eq!(g.span_at(4, 0), (3, 2), "la continuazione risale alla testa");
+        // Il testo e le celle non vuote contano il glifo **una** volta.
+        assert_eq!(g.non_empty(), 1);
+        let crc = g.text_crc();
+        let mut g2 = Grid::new(10, 2);
+        g2.put(3, 0, 0xF520, color::WHITE, color::BLACK);
+        assert_eq!(crc, g2.text_crc());
+    }
+
+    /// Entrambe le celle dello span sono sporche: il renderer ridisegna
+    /// tutta l'icona anche quando cambia solo una delle due.
+    #[test]
+    fn lo_span_intero_e_sporco() {
+        let mut g = Grid::new(10, 2);
+        g.put_wide(3, 0, 0xF520, 2, color::WHITE, color::BLACK);
+        let d = g.take_dirty();
+        assert!(d.min_col <= 3 && d.max_col >= 4, "dirty {}..{}", d.min_col, d.max_col);
+    }
+
+    /// Scrivere dentro una continuazione pulisce l'intera testa: non deve
+    /// restare meta' icona orfana.
+    #[test]
+    fn scrivere_su_una_continuazione_pulisce_la_testa() {
+        let mut g = Grid::new(10, 2);
+        g.put_wide(3, 0, 0xF520, 2, color::WHITE, color::BLACK);
+        g.put(4, 0, b'a' as u32, color::WHITE, color::BLACK);
+        assert_eq!(g.cell(3, 0).cp, b' ' as u32, "la testa e' stata pulita");
+        assert_eq!(g.cell(3, 0).width, 1);
+        assert_eq!(g.cell(4, 0).cp, b'a' as u32);
+        assert_eq!(g.cell(4, 0).width, 1);
+    }
+
+    /// Il reflow non spezza la coppia testa+continuazione: il glifo va
+    /// intero alla riga dopo.
+    #[test]
+    fn resize_non_spezza_la_coppia() {
+        let mut g = Grid::new(10, 3);
+        put_str(&mut g, 0, "abcd");
+        g.put_wide(4, 0, 0xF520, 2, color::WHITE, color::BLACK);
+        g.cursor = (6, 0);
+        g.resize(5, 3);
+        // "abcd" sta nella prima riga, l'icona intera nella seconda.
+        assert_eq!(row_str(&g, 0), "abcd");
+        assert_eq!(g.cell(0, 1).width, 2, "la testa e' intera sulla riga dopo");
+        assert_eq!(g.cell(1, 1).width, 0, "con la sua continuazione");
+    }
+
+    /// Backspace/CSI D davanti a una continuazione saltano tutto lo span.
+    #[test]
+    fn backspace_salta_la_continuazione() {
+        let mut g = Grid::new(10, 2);
+        g.put_wide(3, 0, 0xF520, 2, color::WHITE, color::BLACK);
+        assert_eq!(g.span_back(5, 0), 2, "da dopo l'icona si torna alla testa");
+        assert_eq!(g.span_back(4, 0), 1, "da dentro la continuazione si torna alla testa");
+        assert_eq!(g.span_back(3, 0), 1, "davanti a una cella normale: 1");
+    }
+
+    /// CSI K che parte dentro un glifo largo cancella lo span intero.
+    #[test]
+    fn erase_from_dentro_un_glifo_largo() {
+        let mut g = Grid::new(10, 2);
+        g.put_wide(3, 0, 0xF520, 2, color::WHITE, color::BLACK);
+        g.erase_from(4, 0, color::WHITE, color::BLACK);
+        assert_eq!(g.cell(3, 0).cp, b' ' as u32);
+        assert_eq!(g.cell(3, 0).width, 1);
+        assert_eq!(g.cell(4, 0).width, 1);
     }
 }

@@ -334,8 +334,15 @@ impl Surface {
     }
 
     /// Mette un codepoint in una cella (col,row) con colori truecolor.
-    /// `cursor` disegna il cursore software (sottolineatura). Nel path VGA
-    /// testuale il cursore e' quello hardware (CRTC): il flag e' ignorato.
+    ///
+    /// `span` e' quante celle occupa il glifo (1 per un carattere normale,
+    /// 2+ per un'icona Nerd che sborda): background, layer 0, glifo e
+    /// cursore coprono tutte `span` celle. Il renderer chiama `put_char`
+    /// **solo sulla testa** dello span (le continuazioni le disegna questa
+    /// chiamata), cosi' nessuno ridipinge il background sopra il glifo.
+    ///
+    /// `cursor` disegna il cursore software (blocco). Nel path VGA testuale
+    /// il cursore e' quello hardware (CRTC): il flag e' ignorato.
     /// `l0` se presente è (dati, larghezza, altezza, offset_x, offset_y) del
     /// layer 0 BMP: i pixel sovrapposti vengono composti sopra lo sfondo
     /// (rispettandone l'alpha) prima di disegnare il glifo, cosi' il testo
@@ -344,6 +351,7 @@ impl Surface {
         &mut self,
         col: usize,
         row: usize,
+        span: usize,
         cp: u32,
         fg: u32,
         bg: u32,
@@ -355,6 +363,8 @@ impl Surface {
             Surface::Pixel(p) => {
                 let cw = p.geom.cell_w;
                 let ch = p.geom.cell_h;
+                let span = span.max(1) as u32;
+                let w = cw * span;
                 // L'origine centra la griglia nel framebuffer (D4).
                 let x = p.geom.origin_x + (col as u32) * cw;
                 let y = p.geom.origin_y + (row as u32) * ch;
@@ -366,12 +376,12 @@ impl Surface {
                 // richiesto (il terminale non ha altri layer sotto: partire
                 // dal pixel precedente lascerebbe il carattere vecchio).
                 if bg_a == 0xFF {
-                    p.fill_rect(x, y, cw, ch, bg_color);
+                    p.fill_rect(x, y, w, ch, bg_color);
                 } else {
-                    p.fill_rect(x, y, cw, ch, rgba_to_bgra(crate::grid::color::BLACK));
-                    p.fill_rect_blend(x, y, cw, ch, bg_color, bg_a);
+                    p.fill_rect(x, y, w, ch, rgba_to_bgra(crate::grid::color::BLACK));
+                    p.fill_rect_blend(x, y, w, ch, bg_color, bg_a);
                 }
-                // Copia i pixel del layer 0 sopra lo sfondo dove la cella
+                // Copia i pixel del layer 0 sopra lo sfondo dove lo span
                 // sovrappone il BMP: cosi' l'immagine resta visibile dietro
                 // al testo (e il testo non cancella il BMP). L'alpha
                 // dell'immagine viene rispettato: lo sfondo trasparente del
@@ -382,7 +392,7 @@ impl Surface {
                     let img_top = l0_oy;
                     let img_bottom = l0_oy + l0_h;
                     let overlap_x_start = x.max(img_left);
-                    let overlap_x_end = (x + cw).min(img_right);
+                    let overlap_x_end = (x + w).min(img_right);
                     let overlap_y_start = y.max(img_top);
                     let overlap_y_end = (y + ch).min(img_bottom);
                     if overlap_x_start < overlap_x_end && overlap_y_start < overlap_y_end {
@@ -412,17 +422,31 @@ impl Surface {
                 }
                 if let Some(bmp) = font.and_then(|f| f.glyph(cp)) {
                     let baseline = y as i32 + p.geom.ascent_px;
+                    // Centra il glifo nello span: il bitmap (larghezza bmp.w)
+                    // e' centrato dentro i `w` px dello span. L'xoff non
+                    // sposta l'inchiostro: un separatore Powerline (xoff<0)
+                    // sborda comunque a sinistra nella cella precedente,
+                    // che e' il comportamento voluto. start_x e' clampato a
+                    // >= 0 per evitare underflow su `px` (u32) quando lo span
+                    // e' piu' stretto del glifo (caso non reale: il console
+                    // server assegna sempre span >= glyph_width_cells).
+                    let start_x =
+                        (x as i32 + (w as i32 - bmp.w as i32) / 2).max(0);
                     for r in 0..bmp.h {
                         for c in 0..bmp.w {
                             let cov = bmp.bits[r * bmp.w + c] as u32;
                             if cov == 0 {
                                 continue;
                             }
-                            let px = (x as i32 + bmp.xoff + c as i32) as u32;
+                            let px = (start_x + c as i32) as u32;
                             let py = (baseline + bmp.yoff + r as i32) as u32;
-                            // Clip al framebuffer: i glifi wide (Nerd Fonts)
-                            // possono occupare piu' celle — il console server
-                            // gestisce l'avanzamento corretto del cursore.
+                            // Il glifo e' disegnato dentro il suo span:
+                            // oltre il bordo destro la cella e' di un altro
+                            // carattere. Il bordo sinistro resta libero per
+                            // gli sbordi intenzionali (Powerline).
+                            if px >= x + w {
+                                continue;
+                            }
                             let dest = unsafe { p.get(px, py) };
                             let mixed = blend(dest, fg_color, cov);
                             unsafe { p.put(px, py, mixed) };
@@ -430,9 +454,9 @@ impl Surface {
                     }
                 }
                 if cursor {
-                    // Cursore a blocco pieno: riempie la cella con il colore
+                    // Cursore a blocco pieno: riempie lo span con il colore
                     // foreground (come i terminali moderni).
-                    p.fill_rect(x, y, cw, ch, fg_color);
+                    p.fill_rect(x, y, w, ch, fg_color);
                 }
             }
             Surface::VgaText(v) => {
@@ -445,10 +469,20 @@ impl Surface {
                 let bg_vga = nearest_vga(bg);
                 let ch = if cp <= 0xFF { cp as u8 } else { b'?' };
                 let attr = (fg_vga & 0x0F) | ((bg_vga & 0x0F) << 4);
-                let off = (row * v.cols + col) * 2;
-                unsafe {
-                    core::ptr::write_volatile(v.ptr.add(off), ch);
-                    core::ptr::write_volatile(v.ptr.add(off + 1), attr);
+                // Il carattere nella testa, spazi nelle continuazioni: la
+                // VGA testuale non ha glifi larghi (un codepoint > 0xFF e'
+                // gia' un `?`).
+                for k in 0..span.max(1) {
+                    let c = col + k;
+                    if c >= v.cols {
+                        break;
+                    }
+                    let off = (row * v.cols + c) * 2;
+                    let glyph = if k == 0 { ch } else { b' ' };
+                    unsafe {
+                        core::ptr::write_volatile(v.ptr.add(off), glyph);
+                        core::ptr::write_volatile(v.ptr.add(off + 1), attr);
+                    }
                 }
             }
         }
@@ -533,7 +567,7 @@ mod tests {
             let mut fb = alloc::vec![0u32; 32 * 16];
             let mut s = surface(&mut fb);
             // Cella (1,1) = pixel (8,8): l'immagine (8x8) la ricopre esatta.
-            s.put_char(1, 1, 0, color::WHITE, bg, false, None, Some((&img, 8, 8, 8, 8)));
+            s.put_char(1, 1, 1, 0, color::WHITE, bg, false, None, Some((&img, 8, 8, 8, 8)));
             for y in 0..8usize {
                 for x in 0..8usize {
                     let got = fb[(8 + y) * 32 + (8 + x)];
@@ -563,7 +597,7 @@ mod tests {
         }
         let mut fb = alloc::vec![0u32; 32 * 16];
         let mut s = surface(&mut fb);
-        s.put_char(1, 1, 0, color::WHITE, color::BLACK, false, None, Some((&img, 8, 8, 8, 8)));
+        s.put_char(1, 1, 1, 0, color::WHITE, color::BLACK, false, None, Some((&img, 8, 8, 8, 8)));
 
         let bg = rgba_to_bgra(color::BLACK);
         let white = 0xFFFF_FFFF;
@@ -590,5 +624,133 @@ mod tests {
         // Il fallback VGA legge gli stessi canali (niente alpha).
         assert_eq!(nearest_vga(rgba(0xFF, 0x5C, 0x70, 0xFF)), 1);
         assert_eq!(nearest_vga(color::WHITE), 7);
+    }
+
+    // ── Glifi larghi: lo span di celle ──────────────────────────────
+    //
+    // La regressione vera (trovata sul framebuffer QEMU): il glifo largo
+    // veniva disegnato, poi la cella successiva ci ridipingeva sopra il
+    // background e ne restava una cella sola. Ora `put_char` disegna tutto
+    // lo span e il renderer non tocca le continuazioni.
+
+    /// `Source` sui byte del font (i test caricano il font vero).
+    struct FileSource {
+        data: alloc::vec::Vec<u8>,
+    }
+
+    impl crate::font::Source for FileSource {
+        fn read_at(&mut self, off: u64, buf: &mut [u8]) -> Option<usize> {
+            let start = off as usize;
+            if start >= self.data.len() {
+                return Some(0);
+            }
+            let n = buf.len().min(self.data.len() - start);
+            buf[..n].copy_from_slice(&self.data[start..start + n]);
+            Some(n)
+        }
+    }
+
+    /// Il font del terminale a 16 px (cella 10x22), se il file c'e'.
+    fn maple() -> Option<crate::font::Font> {
+        let data = std::fs::read("../../third_party/MapleMono-NF-Regular.ttf").ok()?;
+        crate::font::Font::load(Box::new(FileSource { data }), 16).ok()
+    }
+
+    /// Una surface 40x44 (4x2 celle da 10x22) con il font vero.
+    fn surface_16px(fb: &mut [u32]) -> Surface {
+        Surface::Pixel(Pixel {
+            ptr: fb.as_mut_ptr() as *mut u8,
+            width: 40,
+            height: 44,
+            stride: 40 * 4,
+            geom: Geom {
+                cols: 4,
+                rows: 2,
+                cell_w: 10,
+                cell_h: 22,
+                ascent_px: 16,
+                origin_x: 0,
+                origin_y: 0,
+            },
+        })
+    }
+
+    /// Il framebuffer di prova parte gia' col fondo di pagina: un pixel a
+    /// `0` non e' "background" (il nero vero e' `0x0B0D14FF`), e un test che
+    /// confronta col nero senza averlo mai dipinto vede inchiostro ovunque.
+    fn fb_di_pagina(w: usize, h: usize) -> alloc::vec::Vec<u32> {
+        alloc::vec![rgba_to_bgra(color::BLACK); w * h]
+    }
+
+    /// L'orologio Nerd (14 px) con `span = 2` disegna inchiostro **anche
+    /// nella seconda cella**: e' quello che la cella successiva cancellava.
+    #[test]
+    fn glifo_largo_su_due_celle() {
+        let Some(mut font) = maple() else { return };
+        let mut fb = fb_di_pagina(40, 44);
+        let mut s = surface_16px(&mut fb);
+        let bg = rgba_to_bgra(color::BLACK);
+        s.put_char(0, 0, 2, 0xF520, color::WHITE, color::BLACK, false, Some(&mut font), None);
+        let mut ink = 0;
+        for y in 0..22 {
+            for x in 10..20 {
+                if fb[y * 40 + x] != bg {
+                    ink += 1;
+                }
+            }
+        }
+        assert!(ink > 0, "la seconda cella dello span deve avere inchiostro");
+        // Il controllo di sanita': la prima cella ha inchiostro davvero (se
+        // no il test sopra misurerebbe il nulla).
+        let mut ink0 = 0;
+        for y in 0..22 {
+            for x in 0..10 {
+                if fb[y * 40 + x] != bg {
+                    ink0 += 1;
+                }
+            }
+        }
+        assert!(ink0 > 0, "la testa dello span deve avere inchiostro");
+    }
+
+    /// Con `span = 1` lo stesso glifo non sborda: il disegno e' clippato
+    /// alla cella (una cella non deve dipingere sopra la vicina).
+    #[test]
+    fn glifo_largo_clippato_a_una_cella() {
+        let Some(mut font) = maple() else { return };
+        let mut fb = fb_di_pagina(40, 44);
+        let mut s = surface_16px(&mut fb);
+        let bg = rgba_to_bgra(color::BLACK);
+        s.put_char(0, 0, 1, 0xF520, color::WHITE, color::BLACK, false, Some(&mut font), None);
+        // La prima cella e' dipinta (il glifo c'e'), la seconda e' intatta.
+        let mut ink0 = 0;
+        for y in 0..22 {
+            for x in 0..10 {
+                if fb[y * 40 + x] != bg {
+                    ink0 += 1;
+                }
+            }
+        }
+        assert!(ink0 > 0, "la testa deve avere inchiostro");
+        for y in 0..22 {
+            for x in 10..20 {
+                assert_eq!(fb[y * 40 + x], bg, "pixel ({},{}) oltre la cella", x, y);
+            }
+        }
+    }
+
+    /// Il background dello span copre tutte le celle: una cella vuota con
+    /// `span = 2` (nessun glifo) riempie 20 px.
+    #[test]
+    fn background_dello_span() {
+        let mut fb = alloc::vec![0u32; 40 * 44];
+        let mut s = surface_16px(&mut fb);
+        let red = rgba_to_bgra(color::RED);
+        s.put_char(1, 0, 2, 0, color::WHITE, color::RED, false, None, None);
+        for y in 0..22 {
+            for x in 10..30 {
+                assert_eq!(fb[y * 40 + x], red, "pixel ({},{}) del background", x, y);
+            }
+        }
     }
 }

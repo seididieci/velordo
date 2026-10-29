@@ -527,7 +527,7 @@ fn build_prompt(last_exit: u8) -> &'static [u8] {
         off += space.len();
 
         // ⏰ (U+F520 CLOCK — Nerd Font icon)
-        let clock: &[u8] = b"\xe0\x94\x80";
+        let clock: &[u8] = b"\xef\x94\xA0";
         BUF[off..off+clock.len()].copy_from_slice(clock);
         off += clock.len();
 
