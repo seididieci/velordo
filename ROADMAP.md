@@ -282,21 +282,23 @@ Voci con scope e vittoria dichiarati (non date).
       nessuno (Fase 3.1); S3.2b/S3.2c/S3.2d portano la shell verso la REPL
       tipizzata capability-oriented.
 
-- [ ] **S3.2b — Bucket eseguibili + diritti EXECUTE** (in corso): la shell
+- [x] **S3.2b — Bucket eseguibili + diritti EXECUTE** (chiusa Fase 1, aperta Fase 2): la shell
       lancia programmi esterni cercandoli in bucket ArcaFS di tipo `bin`, non
       tramite PATH hardcodato. Tre sottofasi:
 
-  - **[ ] S3.2b-1 — Bit `RIGHTS_EXECUTE`** (Fase 1, prerequisio): aggiungere
-        il nuovo bit `RIGHTS_EXECUTE = 0x40` alla bitmask dei diritti per-canale
-        (`cardo/src/rights.rs`). Il bit e' controllato quando la shell tenta lo
-        spawn di un binario da ArcaFS (prima dello `spawn_image`). Se il canale
-        non ha EXECUTE per il bucket → `ERR_DENIED`. Modifiche:
-        - `syscall-numbers/src/lib.rs`: nuovo cost `RIGHTS_EXECUTE`
-        - `libs/civis/src/lib.rs`: riesporta del nuovo bit
-        - `cardo/src/rights.rs`: handler `R_RIGHTS_EXECUTE` in `op_bit()`
-          + controllo nello spawn handler (verifica EXECUTE + READ per canale)
-        - `cardo/src/server.rs`: seed SYS_SEED dichiara i diritti EXECUTE per
-          init/shell nativa
+  - **[x] S3.2b-1 — Bit `RIGHTS_EXECUTE`** (Fase 1, completata): aggiungere
+        il nuovo bit `RIGHTS_EXECUTE = 0x1000` (bit 12) alla bitmask dei diritti per-canale.
+        Il bit e' controllato quando la shell tenta lo spawn di un binario da
+        ArcaFS (prima dello `spawn_image`). Se il canale non ha EXECUTE per il
+        bucket → `ERR_DENIED`. Modifiche:
+        - `syscall-numbers/src/lib.rs`: nuovo cost `RIGHTS_EXECUTE = 0x1000`,
+          opcode `R_RIGHTS_EXECUTE = 0x26` (payload `[bucket\0key\0]`),
+          errore `ERR_DENIED = !0u64 - 12`
+        - `libs/civis/src/lib.rs`: riesporta `RIGHTS_EXECUTE`, `R_RIGHTS_EXECUTE`, `ERR_DENIED`
+        - `cardo/src/rights.rs`: `handle_rights_execute()` — verifica READ +
+          EXECUTE per il canale, scrive reply nel response ring
+        - `cardo/src/server.rs`: dispatch `R_RIGHTS_EXECUTE` →
+          `handle_rights_execute()`
         Vittoria: la shell puo' verificare se un utente ha il permesso di
         eseguire un binario da ArcaFS. Zero nuove syscall, zero regressioni.
 
