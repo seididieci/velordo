@@ -187,3 +187,53 @@ pub fn reply(tag: u64, w0: u64, w1: u64) -> Result<(), Error> {
 /// Canale di nascita: il figlio lo usa come destinazione per parlare col parent
 /// (ADR-0008). `spawn` ritorna il channel id (lato parent) verso il figlio.
 pub const CHANNEL_PARENT: u64 = syscall_numbers::CHANNEL_PARENT;
+
+/// S3.2b — Richiede a cardo la lista dei bucket di tipo "bin" (eseguibili).
+/// Cardo risponde scrivendo i nomi separati da `\n` nel response ring del
+/// client (protocollo BIN_LIST, tag 0x41: nessun payload, w0=w1=0).
+/// Ritorna il vettore dei bucket (byte); `NotFound` se cardo non e' disponibile.
+pub fn bin_list() -> Result<alloc::vec::Vec<alloc::vec::Vec<u8>>, Error> {
+    // Risolve il canale verso cardo.
+    let chan = match service_lookup(Service::Cardo) {
+        Ok(c) => c as u64,
+        Err(_) => return Err(Error::NotFound),
+    };
+
+    // Invia richiesta BIN_LIST: tag 0x41, w0=w1=0 (nessun payload).
+    let _ = ipc::send(chan, BIN_LIST, 0, 0);
+
+    // Legge la risposta dal response ring del client.
+    // Formato: [count:8][w1:8][payload: bucket names separated by '\n']
+    use crate::fs::ring::{resp_ring_read, resp_ring_consume};
+    let mut buckets = alloc::vec::Vec::new();
+
+    loop {
+        match resp_ring_read() {
+            Some((size, _w1, payload_len)) => {
+                // Consuma l'intestazione (16 byte) per liberare il ring.
+                resp_ring_consume(16);
+                // Leggo il payload: e' una stringa con nomi separati da '\n'.
+                let mut buf = alloc::vec::Vec::new();
+                if payload_len > 0 {
+                    use crate::fs::ring::resp_ring_read_payload;
+                    let to_read = payload_len.min(crate::fs::ring::RING_MAX_PAYLOAD as usize);
+                    resp_ring_read_payload(&mut buf, to_read);
+                }
+                // Suddividi per '\n' e aggiungi solo i nomi non vuoti.
+                let s = core::str::from_utf8(&buf).unwrap_or("");
+                for part in s.split('\n') {
+                    if !part.is_empty() {
+                        buckets.push(part.as_bytes().to_vec());
+                    }
+                }
+                // Se count (size) e' 0 o la lista e' vuota, esci.
+                if size == 0 || buckets.is_empty() {
+                    break;
+                }
+            }
+            None => break, // Niente nella coda: tutto ok, lista vuota o non ancora arrivata.
+        }
+    }
+
+    Ok(buckets)
+}

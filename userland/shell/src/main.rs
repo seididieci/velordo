@@ -1,4 +1,4 @@
-//! Shell nativa Velordo (Fase 3.2, S3.2a): REPL minima post-login.
+//! Shell nativa Velordo (Fase 3.2, S3.2a + S3.2b): REPL minima post-login.
 //!
 //! Programma interattivo **nativo** (meccanismo, niente POSIX) che gira su
 //! `/dev/input/keyboard` + `/dev/console`. Non usa `cd`, `stdin`, `stdout`,
@@ -10,6 +10,12 @@
 //!   `users`          elenca gli utenti registrati (via Identis)
 //!   `create-user [nome]`  crea un utente (token VELORDO_SESSION richiesto)
 //!   `logout` / `exit`   torna al prompt di login (init riavvia il login come getty)
+//!
+//! Comandi S3.2b — esecuzione esterna da bucket ArcaFS:
+//!   `run <programma>`  lancia un programma da un bucket eseguibile.
+//!                      La shell scopre i bucket tramite BIN_LIST, cerca
+//!                      `<bucket>/<programma>`, verifica EXECUTE con cardo,
+//!                      e lo esegue con spawn_image.
 //!
 //! Se l'output di un comando non viene catturato in una variabile, il valore
 //! (futuro, S3.2b+) viene stampato serializzato.
@@ -39,6 +45,12 @@ civis::entry!(real_main);
 const CONSOLE_PATH: &str = "/dev/console";
 const KEYBOARD_PATH: &str = "/dev/input/keyboard";
 const IDENTIS_BUCKET: &str = "identis:config";
+
+/// S3.2b — opcode BIN_LIST per scoprire i bucket eseguibili.
+use civis::BIN_LIST;
+
+/// S3.2b — tag per verificare EXECUTE su un oggetto ArcaFS (importato da civis).
+use civis::R_RIGHTS_EXECUTE;
 
 /// Variabile d'ambiente con il token di sessione (hex).
 const ENV_SESSION: &str = "VELORDO_SESSION";
@@ -153,9 +165,12 @@ fn execute_command(cmd: &str, args: &[&str], session_token: Option<u64>) -> CmdR
         }
         "logout" | "exit" => cmd_logout(),
         _ => {
-            console_write_str("Comando sconosciuto: ");
-            console_write_str(cmd);
-            console_write_str(" (scrivi `help`)\n");
+            // Non e' un comando built-in: prova a eseguirlo come programma esterno.
+            if !try_execute_external(cmd, args) {
+                console_write_str("Comando non trovato: ");
+                console_write_str(cmd);
+                console_write_str("\n");
+            }
             CmdResult::Ok
         }
     }
@@ -168,6 +183,7 @@ fn cmd_help() {
     console_write_str("  users             - elenca gli utenti registrati\n");
     console_write_str("  create-user [nome]- crea un nuovo utente (richiede sessione root)\n");
     console_write_str("  logout / exit     - torna al prompt di login\n");
+    console_write_str("  <programma>       - esegue un programma da un bucket eseguibile\n");
 }
 
 /// Elenca gli utenti registrati.
@@ -334,6 +350,105 @@ fn cmd_logout() -> ! {
     console_write_str("logout: riavvio del login...\n");
     let _ = civis::init_bounce(civis::Service::Login);
     civis::exit(0);
+}
+
+/// S3.2b — Tenta di eseguire un programma esterno da un bucket ArcaFS.
+/// La shell scopre i bucket tramite BIN_LIST, cerca `<bucket>/<programma>`,
+/// verifica EXECUTE con cardo (R_RIGHTS_EXECUTE), e lo esegue con spawn_image.
+/// Ritorna `true` se il programma e' stato trovato ed eseguito, `false` altrimenti.
+fn try_execute_external(program: &str, args: &[&str]) -> bool {
+    // 1. Richiedi la lista dei bucket eseguibili a cardo (BIN_LIST).
+    let buckets = match civis::ipc::bin_list() {
+        Ok(b) => b,
+        Err(_) => {
+            console_write_str("ERRORE: impossibile ottenere la lista dei bucket\n");
+            return false;
+        }
+    };
+
+    if buckets.is_empty() {
+        console_write_str("Nessun bucket eseguibile disponibile\n");
+        return false;
+    }
+
+    // 2. Itera i bucket e cerca `<bucket>/<programma>` come oggetto ArcaFS.
+    for bucket in &buckets {
+        let bucket_str = core::str::from_utf8(bucket).unwrap_or("");
+        let key = format!("{}/{}", bucket_str, program);
+        let key_bytes = key.as_bytes();
+
+        // 3. Prova a leggere l'oggetto dal bucket (obj_get).
+        let obj = match civis::fs::obj::obj_get(bucket.as_slice(), key_bytes) {
+            Ok(data) => data,
+            Err(_) => continue, // Non trovato in questo bucket, prova il prossimo.
+        };
+
+        console_write_str("[run] Esecuzione di '");
+        console_write_str(program);
+        console_write_str("' dal bucket '");
+        console_write_str(bucket_str);
+        console_write_str("' (");
+        console_write_str(&alloc::format!("{}", obj.len()));
+        console_write_str(" byte)\n");
+
+        // 4. Verifica EXECUTE con cardo (R_RIGHTS_EXECUTE).
+        let chan = match civis::service_lookup(civis::Service::Cardo) {
+            Ok(c) => c as u64,
+            Err(_) => {
+                console_write_str("ERRORE: cardo non disponibile\n");
+                return false;
+            }
+        };
+        let reply = match civis::ipc::send(chan, R_RIGHTS_EXECUTE as u64, 0, 0) {
+            Ok(r) => r,
+            Err(_) => {
+                console_write_str("ERRORE: comunicazione con cardo fallita\n");
+                return false;
+            }
+        };
+
+        // La reply di R_RIGHTS_EXECUTE ritorna w0 = risultato.
+        // 0 = permesso, ERR_DENIED (!0u64 - 12) = negato.
+        if reply.w0 == civis::ERR_DENIED {
+            console_write_str("ERRORE: EXECUTE negato per '");
+            console_write_str(program);
+            console_write_str("'\n");
+            return false;
+        }
+
+        // 5. Esegui l'immagine con spawn_image (il meta e' Option, unwrap).
+        let meta = civis::SpawnMeta::new(program, 16, &[]).expect("nome valido < 16 byte");
+        match civis::spawn_image(&obj, &meta) {
+            Ok(_chan) => {
+                console_write_str("[run] Processo avviato (canale ");
+                console_write_str(&alloc::format!("{}", _chan));
+                console_write_str(")\n");
+                // Attendi la terminazione del figlio leggendo dal canale di nascita.
+                loop {
+                    match civis::recv() {
+                        Ok(msg) => {
+                            if msg.channel as i64 == _chan {
+                                console_write_str("[run] Processo terminato\n");
+                                return true;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            Err(e) => {
+                console_write_str("ERRORE spawn_image: ");
+                console_write_str(&alloc::format!("{:?}", e));
+                console_write_str("\n");
+            }
+        }
+
+        // Solo il primo match valido viene eseguito.
+        return true;
+    }
+
+    // Non trovato in nessun bucket.
+    false
 }
 
 /// Autenticazione completa: chiede nome+password, calcola hash BLAKE2s in

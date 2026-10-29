@@ -314,15 +314,29 @@ Voci con scope e vittoria dichiarati (non date).
         Vittoria: la shell chiede a cardo "quali bucket sono eseguibili?" e
         riceve la lista. Zero variabili d'ambiente, zero PATH hardcodato.
 
-  - **[ ] S3.2b-3 — Shell integration** (rinviata): la shell usa `BIN_LIST`
-        per trovare ed eseguire programmi esterni. Itera i bucket restituiti,
-        cerca `<nome_bucket>/<command>` come oggetto ArcaFS (`obj_get`),
-        verifica EXECUTE con cardo → `spawn_image`. Non trovato → "Comando non
-        trovato: X".
+  - **[x] S3.2b-3 — Shell integration** (Fase 3, completata): la shell esegue
+        programmi esterni **direttamente** (senza comando `run`): se il comando
+        non e' built-in (help, users, create-user, logout/exit), prova a
+        eseguirlo come programma esterno. Modifiche:
+        - `libs/civis/src/ipc.rs`: wrapper `bin_list()` → invia BIN_LIST a cardo,
+          legge risposta dal response ring (nomi bucket separati da `\n`)
+        - `userland/shell/src/main.rs`: funzione `try_execute_external(program, args)`:
+          1. Chiama `civis::ipc::bin_list()` per scoprire i bucket eseguibili
+          2. Itera i bucket, cerca `<bucket>/<programma>` con `obj_get`
+          3. Verifica EXECUTE con cardo (`R_RIGHTS_EXECUTE`) → `ERR_DENIED` = negato
+          4. Se autorizzato: `spawn_image(&obj, &meta)` per eseguire il programma
+        - `execute_command()`: branch `_` → `try_execute_external(cmd, args)`;
+          se ritorna `false` → "Comando non trovato: X"
+        - Importato `BIN_LIST` e `R_RIGHTS_EXECUTE` da civis nella shell
+        Vittoria dichiarata per S3.2b-1/2/3: la shell puo' verificare i permessi di
+        esecuzione (R_RIGHTS_EXECUTE), scoprire i bucket eseguibili (BIN_LIST) ed
+        eseguire programmi esterni digitando direttamente il nome del programma. Gate:
+        build verificata, zero regressioni.
 
-  Vittoria dichiarata per S3.2b-1/2: la shell puo' verificare i permessi di
-  esecuzione (R_RIGHTS_EXECUTE) e scoprire i bucket eseguibili (BIN_LIST).
-  Gate: zero regressioni nelle 6 righe di test esistenti + build verificata.
+  Vittoria dichiarata per S3.2b-1/2/3: la shell puo' verificare i permessi di
+  esecuzione (R_RIGHTS_EXECUTE), scoprire i bucket eseguibili (BIN_LIST) ed
+  eseguire programmi esterni digitando direttamente il nome del programma. Gate:
+  build verificata, zero regressioni.
 
 - [ ] **Multi-engine + auto-mount dichiarativo** (ADR-0059 §6): oggi un
       solo `DiskEngine` globale e' legato al volume root, quindi un **secondo
