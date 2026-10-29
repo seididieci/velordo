@@ -35,6 +35,16 @@ per le idee senza trigger); la storia dettagliata in
 NB: `vga.rs`/`serial.rs` sono DEBUG FACILITY temporanee in-kernel; migreranno
 al console server userspace quando esiste l'IPC (ADR-0005 §3).
 
+### File di contesto per agenti AI
+
+- **`CONTEXT.md`** — mappa completa del progetto: struttura crate, ABI syscall,
+  meccanismi IPC, architetture chiave, servizi utenti, vincoli critici, gate test.
+  Leggere questo file prima dei sorgenti riduce drasticamente il consumo di token
+  e contesto in nuove sessioni.
+- **`AGENTS.md`** (questo file) — istruzioni operative: convenzioni, stato corrente,
+  testing, pitfall, checklist fase.
+- **`ROADMAP.md`** — stato fasi + pianificate + parcheggiate.
+
 ## Build Commands
 
 ```bash
