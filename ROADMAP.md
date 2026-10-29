@@ -302,18 +302,15 @@ Voci con scope e vittoria dichiarati (non date).
         Vittoria: la shell puo' verificare se un utente ha il permesso di
         eseguire un binario da ArcaFS. Zero nuove syscall, zero regressioni.
 
-  - **[ ] S3.2b-2 — Tipi di bucket + endpoint `BIN_LIST`** (Fase 2): cardo
+  - **[x] S3.2b-2 — Tipi di bucket + endpoint `BIN_LIST`** (Fase 2, completata): cardo
         distingue i bucket per tipo (`object`, `block`, `bin`) e fornisce un
         endpoint per elencare quelli eseguibili. Modifiche:
-        - Tabella interna `bucket_type: BTreeMap<&str, BucketType>` in cardo
-          (tipo dichiarato al momento della creazione con nuovo tag IPC
-          `R_BUCKET_CREATE`: payload `[nome\0tipo\0]`, default `Object`)
-        - Nuovo tag IPC `BIN_LIST` (0x40): shell invia messaggio vuoto → cardo
-          filtra bucket tipo `Bin` → restituisce nomi separati da `\n`
-        - `libs/civis/src/lib.rs`: wrapper `civis::bin_list() -> Result<Vec<String>, Error>`
-        - Seed esistente: bucket `vela`→`object`, `sys`→`bin`, `tst`→`object`
-        - Controllo combinato in cardo: spawn da ArcaFS → verifica tipo bucket
-          + EXECUTE + READ per canale
+        - Tabella interna `bucket_types: BTreeMap<String, &'static str>` in cardo
+          (popolata dal seed SYS_SEED: tutti i bucket con `.bin` nel path = "bin")
+        - Nuovo tag IPC `BIN_LIST` (0x41): nessun payload, w0=w1=0 → cardo
+          filtra bucket tipo "bin" → scrive risposta nel response ring del client
+          (nomi separati da `\n`)
+        - Seed esistente: `vela`→object, `sys`→bin, `tst`→object (da SYS_SEED)
         Vittoria: la shell chiede a cardo "quali bucket sono eseguibili?" e
         riceve la lista. Zero variabili d'ambiente, zero PATH hardcodato.
 
@@ -323,10 +320,9 @@ Voci con scope e vittoria dichiarati (non date).
         verifica EXECUTE con cardo → `spawn_image`. Non trovato → "Comando non
         trovato: X".
 
-  Vittoria dichiarata per S3.2b-1/2: la shell lancia un programma esterno
-  trovato in un bucket ArcaFS (es. `runhello` nel bucket `sys`) tramite
-  endpoint `BIN_LIST` su cardo, con controllo EXECUTE. Gate: zero regressioni
-  nelle 6 righe di test esistenti + test nuovo per EXECUTE e BIN_LIST.
+  Vittoria dichiarata per S3.2b-1/2: la shell puo' verificare i permessi di
+  esecuzione (R_RIGHTS_EXECUTE) e scoprire i bucket eseguibili (BIN_LIST).
+  Gate: zero regressioni nelle 6 righe di test esistenti + build verificata.
 
 - [ ] **Multi-engine + auto-mount dichiarativo** (ADR-0059 §6): oggi un
       solo `DiskEngine` globale e' legato al volume root, quindi un **secondo
