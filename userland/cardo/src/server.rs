@@ -1219,10 +1219,12 @@ fn real_main(_sp: u64) -> ! {
             R_PIPE_CREATE => {
                 match handlers::handle_pipe_create(&mut ftable, &mut pipes, chan, w0 as usize) {
                     Ok((r, w)) => {
+                        let _ = civis::print_string(b"[cardo] PIPE_CREATE OK\n");
                         rings::resp_ring_write(r, w, &[]);
-                        let _ = civis::reply(0, r, 0);
+                        let _ = civis::reply(r, w, 0);
                     }
                     Err(e) => {
+                        let _ = civis::print_string(b"[cardo] PIPE_CREATE ERR\n");
                         let res = mount::to_reply_res(Err(e));
                         rings::resp_ring_write(res, 0, &[]);
                         let _ = civis::reply(0, res, 0);

@@ -170,7 +170,13 @@ fn main() {
     println!("[stdhello] fs DONE");
     // S2.4c1: pipe anonima STABILE (std::io::pipe sopra vfscli/Fase 42).
     {
-        let (mut pr, mut pw) = std::io::pipe().unwrap();
+        let (mut pr, mut pw) = match std::io::pipe() {
+            Ok(p) => p,
+            Err(e) => {
+                println!("[stdhello] pipe err={:?}", e);
+                std::process::exit(1);
+            }
+        };
         std::io::Write::write_all(&mut pw, b"pipe-1234").unwrap();
         drop(pw);
         let mut got = Vec::new();
