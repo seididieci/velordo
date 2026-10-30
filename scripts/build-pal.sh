@@ -179,13 +179,13 @@ fn main() {
     }
     // S2.4c2: Command su runhello (spawn+argv+exit-code, niente capture).
     {
-        let st = std::process::Command::new("/fat/bin/runhello.bin")
+        let st = std::process::Command::new("/usr/bin/runhello.bin")
             .arg("foo")
             .arg("bar")
             .status()
             .unwrap();
         println!("[stdhello] cmd status ok={} code={:?}", st.success(), st.code());
-        let st2 = std::process::Command::new("/fat/bin/runhello.bin")
+        let st2 = std::process::Command::new("/usr/bin/runhello.bin")
             .arg("fail")
             .status()
             .unwrap();

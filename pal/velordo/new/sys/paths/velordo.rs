@@ -58,6 +58,9 @@ impl<'a> Iterator for SplitPaths<'a> {
     type Item = PathBuf;
 
     fn next(&mut self) -> Option<PathBuf> {
-        self.0.next().map(|b| PathBuf::from(OsStrExt::from_bytes(b)))
+        self.0.next().map(|b| {
+            let s: &OsStr = OsStrExt::from_bytes(b);
+            PathBuf::from(s)
+        })
     }
 }
