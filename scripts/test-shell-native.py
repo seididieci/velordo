@@ -78,6 +78,40 @@ def main():
         # un falso positivo ne' un hang.
         out = run_cmd(sh, "nosuchprog", b"Comando non trovato")
         c.check("programma ignoto", b"Comando non trovato: nosuchprog" in out)
+        # ----------------------------
+        # INTERPRETER TESTS
+        # ----------------------------
+        # Persistenza variabile
+        out = run_cmd(sh, "let a = 1;", b"")
+        c.check("persistenza a", b"" in out)  # no output
+        out = run_cmd(sh, "dump(a)", b"1")
+        c.check("dump a", b"1" in out)
+
+        # Aritmetica
+        out = run_cmd(sh, "let x = 1; let y = 2; dump(x + y)", b"3")
+        c.check("aritmetica", b"3" in out)
+
+        # Concatenazione stringhe usando variabili
+        out = run_cmd(sh, 'let a = "hello" + " world"', b"")
+        c.check("concat stringa assign", b"" in out)
+        out = run_cmd(sh, 'dump(a)', b'\"hello world\"')
+        c.check("concat stringa dump", b'\"hello world\"' in out)
+
+        # If/else
+        out = run_cmd(sh, "if 1 < 2 { dump(\"yes\") } else { dump(\"no\") }", b"\"yes\"")
+        c.check("if/else", b"yes" in out)
+
+        # While loop (timeout 60s)
+        out = run_cmd(sh, "let i = 0; while i < 3 { dump(i); i = i + 1; }", b"\"0\"", timeout=60)
+        c.check("while", b"0" in out and b"1" in out and b"2" in out)
+
+        # Error handling (unknown var)
+        out = run_cmd(sh, "dump(unknown)", b"variabile non trovata")
+        c.check("errore variabile", b"variabile non trovata" in out)
+
+        # Block assignment
+        out = run_cmd(sh, "let a = 1; { a = a + 1; }; dump(a)", b"2")
+        c.check("assign block", b"2" in out)
 
         return 0 if c.ok else 1
     except RuntimeError as e:
