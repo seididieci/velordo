@@ -250,14 +250,16 @@ fn try_parse_assign(state: &mut ParserState) -> Result<Option<Stmt>, ParseError>
 fn parse_block(state: &mut ParserState) -> Result<Stmt, ParseError> {
     state.advance(); // consume '{'
     let mut stmts = Vec::new();
+    // Skip any newline semicolons after the opening '{'
+    while state.try_consume(Token::Delim(';')) {}
     while !state.try_consume(Token::Delim('}')) {
         if state.peek() == &Token::Eof {
             return Err(ParseError { pos: state.pos, msg: "unclosed block".into() });
         }
         let stmt = parse_stmt(state)?;
         stmts.push(stmt);
-        // Consuma il `;` opzionale dopo ogni statement (dentro blocchi).
-        state.try_consume(Token::Delim(';'));
+        // Skip any semicolons/newlines after statement
+        while state.try_consume(Token::Delim(';')) {}
     }
     Ok(Stmt::Block(stmts))
 }
