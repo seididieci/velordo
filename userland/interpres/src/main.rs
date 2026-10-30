@@ -26,6 +26,9 @@
 //! **Refresh del token**: quando un comando autenticato riceve `R_TOKEN_INVALID`
 //! (scadenza TTL 300s), la shell richiede nuovamente nome+password e ottiene
 //! un nuovo token da Identis — l'utente non perde mai il contesto.
+//!
+//! **Fase X (ADR-0065)**: interprete Rust-like con `let`, assegnamento, blocchi,
+//! `if/else`, operatori binari, chiamate funzione e builtin (`dump`, `type`).
 
 #![no_std]
 #![no_main]
@@ -39,6 +42,10 @@ use blake2s::blake2s;
 use civis;
 use civis::println;
 use identis_proto as proto;
+
+// Moduli interprete (ADR-0065).
+mod lexer;
+mod parser;
 
 civis::entry!(real_main);
 
@@ -121,6 +128,31 @@ fn real_main(_sp: u64) -> ! {
             continue;
         }
 
+        // ADR-0065 Fase 1: interprete Rust-like prima del dispatcher.
+        // Se la riga è syntax-valida, viene valutata dall'interprete.
+        // Altrimenti fallback al dispatcher esistente (help, users, ecc.).
+        let mut interpreted = false;
+        match parser::parse(&line) {
+            Ok(stmts) => {
+                // Parsing riuscito — per ora stampiamo l'AST come debug.
+                // La valutazione vera e propria viene nella Fase 2.
+                if !stmts.is_empty() {
+                    console_write_str("[ast] ");
+                    for stmt in &stmts {
+                        console_write_str(&format!("{:?} ", stmt));
+                    }
+                    console_write_str("\n");
+                    interpreted = true;
+                }
+            }
+            Err(e) => {
+                // Parsing fallito: non è syntax Rust-like, fallback dispatcher.
+                console_write_str("[ast] skip: ");
+                console_write_str(&format!("{}", e));
+                console_write_str("\n");
+            }
+        }
+
         let parts: Vec<&str> = line.split_whitespace().collect();
         let cmd = parts.first().copied().unwrap_or("");
         let args: Vec<&str> = parts[1..].to_vec();
@@ -128,13 +160,17 @@ fn real_main(_sp: u64) -> ! {
         // Se un comando autenticato fallisce per token scaduto, il loop
         // chiede all'utente di reinserire le credenziali e poi ritenta.
         last_exit = 0; // reset su successo (default)
-        match execute_command(cmd, &args, session_token) {
-            CmdResult::Ok => { last_exit = 0; }
-            CmdResult::TokenExpired => {
-                console_write_str("Token scaduto, reinserire le credenziali\n");
-                match auth_and_get_token() {
-                    Some(t) => { session_token = Some(t); }
-                    None => { last_exit = 1; } // auth failed
+        if interpreted {
+            // L'interprete ha gestito la riga — nessun comando built-in.
+        } else {
+            match execute_command(cmd, &args, session_token) {
+                CmdResult::Ok => { last_exit = 0; }
+                CmdResult::TokenExpired => {
+                    console_write_str("Token scaduto, reinserire le credenziali\n");
+                    match auth_and_get_token() {
+                        Some(t) => { session_token = Some(t); }
+                        None => { last_exit = 1; } // auth failed
+                    }
                 }
             }
         }
