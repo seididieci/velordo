@@ -28,6 +28,8 @@ fn real_main(_sp: u64) -> ! {
         let now = civis::get_ticks();
 
         if now >= deadline {
+            // Disabilitato temporaneamente per output seriale pulito.
+            /*
             let secs = now / 100;
             let cents = now % 100;
             if cents < 10 {
@@ -35,7 +37,8 @@ fn real_main(_sp: u64) -> ! {
             } else {
                 println!("[uptime] {}.{} s", secs, cents);
             }
-            deadline = now + PERIOD_TICKS;
+            */
+            deadline = now + PERIOD_TICKS; // Mantiene il timer attivo anche senza print.
         }
 
         // Blocco cooperativo: dorme fino a deadline o risveglio spurio.
