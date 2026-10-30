@@ -87,6 +87,11 @@ seed_bin flavours/posix/build/userposix.bin bin/posix/posix.bin sys bin/posix/po
 # niente sottocartelle. Le chiavi oggetto NON hanno suffisso `.bin`; il mirror
 # `ns` mantiene i path VFS (`usr/bin/...`).
 seed_bin flavours/posix/build/userrunhello.bin usr/bin/runhello.bin usr runhello
+# Personalita' POSIX come PROGRAMMA (ADR-0064 addendum): la shell nativa la
+# esegue dalla chiave piatta `usershell`. Il nome processo resta `usershell`
+# (meta name = chiave): il `ps` della POSIX se stessa vede ancora `usershell`,
+# come quando la spawava init.
+seed_bin flavours/posix/build/usershell.bin usr/bin/usershell.bin usr usershell
 seed_bin userland/build/userarca.bin usr/bin/arca.bin usr arca
 # create-user (ADR-0055): programma utente (la shell nativa lo invoca come
 # comando, Fase 3.2).

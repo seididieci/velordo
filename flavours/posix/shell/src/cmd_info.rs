@@ -216,7 +216,7 @@ pub(crate) fn cmd_wc(args: &[&str]) -> i64 {
 
 fn push_hex_byte(s: &mut String, b: u8) {
     s.push(civis::hex::encode_nibble(b >> 4) as char);
-    s.push(civis::hex::encode_nibble(b) as char);
+    s.push(civis::hex::encode_nibble(b & 0xF) as char);
 }
 
 pub(crate) fn cmd_hexdump(args: &[&str]) -> i64 {
@@ -231,7 +231,7 @@ pub(crate) fn cmd_hexdump(args: &[&str]) -> i64 {
         for chunk in data.chunks(16) {
             let mut s = String::new();
             for shift in (0..8).rev() {
-                s.push(civis::hex::encode_nibble((off >> (shift * 4)) as u8) as char);
+                s.push(civis::hex::encode_nibble(((off >> (shift * 4)) & 0xF) as u8) as char);
             }
             s.push_str(": ");
             for &b in chunk {
@@ -264,7 +264,7 @@ pub(crate) fn cmd_hexdump(args: &[&str]) -> i64 {
         // Una sola write per riga (vedi cmd_echo: timestamp per write).
         let mut s = String::new();
         for shift in (0..8).rev() {
-            s.push(civis::hex::encode_nibble((off >> (shift * 4)) as u8) as char);
+            s.push(civis::hex::encode_nibble(((off >> (shift * 4)) & 0xF) as u8) as char);
         }
         s.push_str(": ");
         for i in 0..n {

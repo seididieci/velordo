@@ -29,8 +29,18 @@ mod redirect;
 mod repl;
 mod term;
 
+struct PanicSink;
+
+impl core::fmt::Write for PanicSink {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let _ = civis::print_string(s.as_bytes());
+        Ok(())
+    }
+}
+
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    let _ = civis::print_string(b"[shell] panic\n");
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    use core::fmt::Write;
+    let _ = write!(PanicSink, "[shell] panic: {}\n", info);
     civis::exit(1)
 }

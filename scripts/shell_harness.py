@@ -324,14 +324,39 @@ class Shell:
         self.type_text(pwd + "\n")
 
     def boot(self, timeout=60):
-        """Avvia QEMU, fa il login e attende la shell **POSIX** pronta
-        (personality: prompt `$ `). Ritorna il Popen (anche in self.q)."""
+        """Avvia QEMU, fa il login, lancia la **personalita' POSIX** come
+        programma dal bucket `usr` (chiave piatta `usershell`, ADR-0064) e
+        attende il prompt `$ ` del suo REPL. Ritorna il Popen (anche in
+        self.q).
+
+        Dal login parte la shell **nativa** (ADR-0062): le fasi POSIX sono
+        storiche e girano sul REPL POSIX, quindi il boot digita `usershell`
+        al primo prompt nativo. La nativa chiude la tastiera prima dello
+        spawn e si blocca in `recv()` sul figlio: lettore unico, nessuno
+        scambio di byte. I marker POSIX (`[shell] starting`, `$ `) si cercano
+        SOLO dopo lo spawn: il log e' cumulativo e prima c'e' il boot nativo."""
         self._boot_start()
-        deadline = time.time() + timeout
+        t0 = time.time()
+        deadline = t0 + timeout
+        ready_native = False
         while time.time() < deadline:
             data = self.read_log()
+            if (b"[shell] Velordo shell nativa" in data
+                    and b"> " in data):
+                ready_native = True
+                break
+            time.sleep(T_BOOT_POLL)
+        if not ready_native:
+            raise RuntimeError("shell nativa non pronta")
+        time.sleep(T_WAIT_TAIL)
+        mark = len(self.read_log())
+        self.type_text("usershell")
+        self.send_mon("sendkey ret")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            data = self.read_log()[mark:]
             if (b"[shell] starting" in data
-                    and b"registered mount '/dev/input'" in data
+                    and b"registered mount '/dev/input'" in self.read_log()
                     and b"$ " in data):
                 self.wait_prompt()
                 return self.q
