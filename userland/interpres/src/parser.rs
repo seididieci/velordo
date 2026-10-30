@@ -72,6 +72,8 @@ pub enum Stmt {
     Block(Vec<Stmt>),
     /// `if cond { then } else { otherwise }`.
     If(Box<Expr>, Vec<Stmt>, Vec<Stmt>),
+    /// `while cond { stmts... }`.
+    While(Box<Expr>, Vec<Stmt>),
     /// `for name in start..end { stmts... }` — placeholder per Fase 2+.
     For(String, Expr, Expr, Vec<Stmt>),
 }
@@ -194,6 +196,7 @@ fn parse_stmt(state: &mut ParserState) -> Result<Stmt, ParseError> {
         Some("let") => return parse_let(state),
         Some("if")  => return parse_if(state),
         Some("for") => return parse_for(state), // placeholder per Fase 2+
+        Some("while") => return parse_while(state),
         _ => {} // continua con il match principale
     }
     match state.peek() {
@@ -281,6 +284,19 @@ fn then_stmts(block: Stmt) -> Vec<Stmt> {
     match block {
         Stmt::Block(s) => s,
         other => vec![other],
+    }
+}
+
+/// `while expr { stmts... }`.
+fn parse_while(state: &mut ParserState) -> Result<Stmt, ParseError> {
+    state.advance(); // consume "while"
+    let cond = parse_expr(state)?;
+    let body = parse_block(state)?;
+    // body must be a Block
+    if let Stmt::Block(stmts) = body {
+        Ok(Stmt::While(Box::new(cond), stmts))
+    } else {
+        Err(ParseError { pos: state.pos, msg: "expected block after while".into() })
     }
 }
 

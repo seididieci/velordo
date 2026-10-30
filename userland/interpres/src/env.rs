@@ -205,6 +205,22 @@ impl Env {
                     Ok(None)
                 }
             }
+            Stmt::While(cond, stmts) => {
+                loop {
+                    let cv = self.eval_expr(cond)?;
+                    let truthy = match cv {
+                        Value::Bool(b) => b,
+                        Value::Number(n) => n != 0.0,
+                        _ => false,
+                    };
+                    if !truthy {
+                        break Ok(None);
+                    }
+                    // evaluate block; discard result
+                    let _ = self.eval_block(stmts)?;
+                }
+            }
+
             Stmt::For(..) => {
                 // Placeholder per Fase 2+.
                 Err(RuntimeError("for non ancora implementato".into()))
@@ -256,7 +272,15 @@ impl Env {
 /// Valuta un operatore binario su due valori.
 fn eval_binop(op: &BinOp, lv: Value, rv: Value) -> Result<Value, RuntimeError> {
     match op {
-        BinOp::Add => numeric_binop(lv, rv, |a, b| Ok(a + b)),
+        BinOp::Add => {
+            // Concatenazione stringhe se entrambi gli operandi sono Str.
+            if let (Value::Str(a), Value::Str(b)) = (&lv, &rv) {
+                let mut out = a.clone();
+                out.extend_from_slice(b);
+                return Ok(Value::Str(out));
+            }
+            numeric_binop(lv, rv, |a, b| Ok(a + b))
+        }
         BinOp::Sub => numeric_binop(lv, rv, |a, b| Ok(a - b)),
         BinOp::Mul => numeric_binop(lv, rv, |a, b| Ok(a * b)),
         BinOp::Div => numeric_binop(lv, rv, |a, b| {
