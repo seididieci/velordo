@@ -126,9 +126,24 @@ fn real_main(_sp: u64) -> ! {
     loop {
         // Costruisci il prompt con glifi Nerd Font.
         console_write(build_prompt(last_exit));
-        let line = read_line_from_keyboard(false);
-        let line = trim_str(&line);
-        console_write_str("\n");
+        // Read a line, supporting multi‑line blocks.
+        let mut accumulated = String::new();
+        let mut brace_depth: i32 = 0;
+        loop {
+            let raw_line = read_line_from_keyboard(false);
+            let trimmed = trim_str(&raw_line);
+            console_write_str("\n");
+            // Append to buffer.
+            accumulated.push_str(&raw_line);
+            accumulated.push('\n');
+
+            // Count braces for very simple matching.
+            brace_depth += raw_line.matches('{').count() as i32 - raw_line.matches('}').count() as i32;
+            if brace_depth <= 0 {
+                break;
+            }
+        }
+        let line = trim_str(&accumulated);
         if line.is_empty() {
             continue;
         }
