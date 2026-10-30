@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "arcafs"
+version = "0.1.0"
+dependencies = [
+ "syscall-numbers",
+]
+
+[[package]]
 name = "bit_field"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -21,10 +28,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
+name = "blake2s"
+version = "0.1.0"
+
+[[package]]
+name = "civis"
+version = "0.1.0"
+dependencies = [
+ "arcafs",
+ "syscall-numbers",
+ "vfscli",
+]
+
+[[package]]
 name = "const_fn"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "413d67b29ef1021b4d60f4aa1e925ca031751e213832b4b1d588fae623c05c60"
+
+[[package]]
+name = "identis-proto"
+version = "0.1.0"
+dependencies = [
+ "civis",
+]
+
+[[package]]
+name = "interpres"
+version = "0.1.0"
+dependencies = [
+ "blake2s",
+ "civis",
+ "identis-proto",
+]
 
 [[package]]
 name = "linked_list_allocator"
@@ -117,6 +153,13 @@ dependencies = [
  "syscall-numbers",
  "uart_16550",
  "x86_64",
+]
+
+[[package]]
+name = "vfscli"
+version = "0.1.0"
+dependencies = [
+ "syscall-numbers",
 ]
 
 [[package]]

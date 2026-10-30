@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 # Crate fuori dal workspace del kernel: build freestanding separata.
-[workspace]
+
 
 [dependencies]
 civis = { path = "../civis" }

@@ -8,7 +8,7 @@ edition = "2021"
 # `#[global_allocator]` qui: l'allocatore lo da' il consumatore). Backing
 # syscall astratto via `Sys` (civis e PAL std lo implementano). Crate fuori
 # dal workspace del kernel: build freestanding separata / vendored in std.
-[workspace]
+
 
 [dependencies]
 syscall-numbers = { path = "../../syscall-numbers" }

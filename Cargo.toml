@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["kernel"]
+members = ["kernel", "userland/interpres"]
 
 [profile.release]
 panic = "abort"

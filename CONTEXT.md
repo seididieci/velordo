@@ -161,7 +161,7 @@ velordo/
 │   ├── identis/             # User identity service — Service::Identis = 11
 │   ├── identis-login/       # Login gate (3 attempts, shell only on success)
 │   ├── create-user/         # User creation tool
-│   ├── shell/               # Native shell (not POSIX)
+│   ├── interpres/           # Native interpreter (not POSIX)
 │   ├── rector/              # Binary verification/rebuild tool
 │   └── arca/                # ArcaFS tool: `arca create`
 │

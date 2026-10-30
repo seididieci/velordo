@@ -122,5 +122,5 @@ Decisioni collegate:
 - `userland/cardo/src/rights.rs` — `handle_rights_execute`
 - `libs/civis/src/ipc.rs` — `bin_list`; `libs/civis/src/fs/rights.rs` —
   `rights_execute`
-- `userland/shell/src/main.rs` — `try_execute_external`
+- `userland/interpres/src/main.rs` — `try_execute_external`
 - `scripts/arca-tool.sh` — seed del bucket `usr` piatto

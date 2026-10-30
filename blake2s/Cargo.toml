@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 # Crate fuori dal workspace del kernel: build freestanding/testabile separata.
-[workspace]
+
 
 [dependencies]

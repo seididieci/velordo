@@ -126,6 +126,6 @@ convenzioni POSIX che non devono diventare struttura (ADR-0025).
   `exec_clear_user`, `layout_argv`), `kernel/src/syscall/exec.rs`,
   `libs/libr/src/args.rs` (`entry!`, `args_from_stack`),
   `libs/libr/src/spawn.rs` (`exec*`, `serialize_argv`),
-  `userland/shell/src/cmd_run.rs`, `userland/runhello/`
+  `userland/interpres/src/cmd_run.rs`, `userland/runhello/`
 - Fase 37 (37.0 syscall+loader, 37.1 stack-argv, 37.2 shell, 37.3 chiusura),
   t52 (`testland/usertests/src/t_lifecycle.rs`), `test-shell.py` 37/37

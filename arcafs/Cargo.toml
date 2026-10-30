@@ -8,7 +8,7 @@ edition = "2021"
 # e tool host. no_std+alloc come `blake2s` (solo `core`+`alloc` qui dentro;
 # l'I/O vive nei crate che usano questa lib).
 # Crate fuori dal workspace del kernel: build freestanding separata.
-[workspace]
+
 
 [dependencies]
 syscall-numbers = { path = "../syscall-numbers" }

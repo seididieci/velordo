@@ -1,7 +1,7 @@
 //! ArcaFS vista POSIX (56.3): namespace emergente + set transient in RAM.
 //!
 //! Mappatura: bucket `ns` di `btree_drv` (chiavi = path relativi opachi per
-//! il motore, es. `bin/shell.bin`). Le directory sono EMERGENTI (esistono ⟺
+//! il motore, es. `bin/interpres.bin`). Le directory sono EMERGENTI (esistono ⟺
 //! chiavi col prefisso) + set transient in RAM per le `mkdir` esplicite:
 //! `mkdir` non scrive mai su disco (niente commit); il set si perde a
 //! restart/remount (le vuote spariscono, le piene riemergono dalle chiavi).

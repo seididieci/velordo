@@ -169,12 +169,12 @@ fn real_main(_sp: u64) -> ! {
 /// la password: il login riprova, non chiude).
 const MAX_ATTEMPTS: u32 = 3;
 
-/// Spawla la shell nativa dall'oggetto ArcaFS (`sys:bin/shell.bin`).
+/// Spawla l'interprete nativa dall'oggetto ArcaFS (`sys:bin/interpres.bin`).
 /// Passa le variabili d'ambiente `VELORDO_SESSION` (token hex) e
 /// `VELORDO_USER` (nome utente): servono alla shell per il prompt con
 /// glifi Nerd Font.
 fn spawn_shell() {
-    let img = match civis::obj_get(b"sys", b"bin/shell.bin") {
+    let img = match civis::obj_get(b"sys", b"bin/interpres.bin") {
         Ok(v) if !v.is_empty() => v,
         _ => {
             console_write(b"[login] shell nativa non trovata su ArcaFS\n");
@@ -191,7 +191,7 @@ fn spawn_shell() {
 
     // Costruisce i metadati, l'env block e spawn. L'env block deve restare
     // vivo fino a dopo lo spawn (il kernel copia il blocco dentro la syscall).
-    let mut meta = match civis::SpawnMeta::new("shell", 16, &[]) {
+    let mut meta = match civis::SpawnMeta::new("interpres", 16, &[]) {
         Some(m) => m,
         None => {
             console_write(b"[login] SpawnMeta non valido\n");
@@ -200,7 +200,7 @@ fn spawn_shell() {
     };
 
     // Env: VELORDO_SESSION + USER. pack_args accetta un array
-    // di slice (più env). La shell li legge con env_from_stack().
+    // di slice (più env). L'interprete li legge con env_from_stack().
     let session_env = alloc::format!("VELORDO_SESSION={}", token_hex);
     let user_env = alloc::format!("USER={}", user_str);
 

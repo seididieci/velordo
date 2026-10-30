@@ -81,11 +81,11 @@ zero FAIL/PANIC/FAULT. La suite FAT32 e' **fuori dal gate** (ADR-0059:
 > Il lavoro si e' spostato da S2.5 (rustc nativo) sulla shell nativa e sui
 > miglioramenti del terminale. Ecco cosa e' cambiato negli ultimi commit:
 
-- **Shell nativa — UI/UX** (`userland/shell/`): prompt truecolor con palette
+- **Interprete nativo — UI/UX** (`userland/interpres/`): prompt truecolor con palette
   personalizzata (Electric Blue per user@hostname, Slate per orologio), glifi
   Nerd Font (⚡ HIGH VOLTAGE + USER env, 🕐 U+F520 CLOCK, ✓/✗ status),
   sostituzione glifi (`U+23F0` → `U+F520` → `U+231B STOPWATCH`)
-- **Shell nativa — Input fluido** (`userland/shell/src/main.rs`): lettura da
+- **Interprete nativa — Input fluido** (`userland/interpres/src/main.rs`): lettura da
   `/dev/input/keyboard` con `recv_poll()` + futex wait (1 tick deadline) per
   evitare busy-wait; refresh token automatico su `R_TOKEN_INVALID`; password
   mascherata con eco sicura
@@ -236,8 +236,8 @@ Voci con scope e vittoria dichiarati (non date).
       shell -> exit -> login); solo quando sara' lanciata da un DE si
       aggiungera' il logout per chiudere la sessione del DE. La shell e'
       userspace (ring 3) e linka la std Velordo: niente obbligo di `no_std`.
-      Identis-login spawna ora `sys/bin/shell.bin` invece della shell POSIX.
-      **Implementazione corrente** (`userland/shell/src/main.rs`, ~640 righe):
+      Identis-login spawna ora `sys/bin/interpres.bin` invece della shell POSIX.
+      **Implementazione corrente** (`userland/interpres/src/main.rs`, ~640 righe):
         - **Prompt truecolor** con palette personalizzata (Electric Blue per
           user@hostname, Slate per orologio, Ice per default)
         - **Glifi Nerd Font**: ⚡ (HIGH VOLTAGE + USER), 🕐 (U+F520 CLOCK),
@@ -251,7 +251,7 @@ Voci con scope e vittoria dichiarati (non date).
         - **Autenticazione sicura**: BLAKE2s-256 calcolato in locale, la
           password non lascia mai il processo shell
       Vittoria: dalla console si crea un utente e l'utente nuovo si autentica
-      con la sua password. File: `userland/shell/` (nuovo),
+      con la sua password. File: `userland/interpres/` (nuovo),
       `userland/identis-login/` (modificato).
 
 - [ ] **S3.2b — Valori e capability**: i comandi restituiscono
@@ -323,7 +323,7 @@ Voci con scope e vittoria dichiarati (non date).
         eseguirlo come programma esterno. Modifiche:
         - `libs/civis/src/ipc.rs`: wrapper `bin_list()` → invia BIN_LIST a cardo,
           legge risposta dal response ring (nomi bucket separati da `\n`)
-        - `userland/shell/src/main.rs`: funzione `try_execute_external(program, args)`:
+        - `userland/interpres/src/main.rs`: funzione `try_execute_external(program, args)`:
           1. Chiama `civis::ipc::bin_list()` per scoprire i bucket eseguibili
           2. Itera i bucket, cerca `<bucket>/<programma>` con `obj_get`
           3. Verifica EXECUTE con cardo (`R_RIGHTS_EXECUTE`) → `ERR_DENIED` = negato
