@@ -64,7 +64,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
                 tokens.push(Token::Delim(';')); // newline → statement separator
             }
             c if c.is_ascii_alphabetic() || c == '_' => {
-                let ident = read_ident(&mut chars);
+                let ident = read_ident(&mut chars, c);
                 // Check keyword
                 match ident.as_str() {
                     "let"     => tokens.push(Token::Keyword("let".into())),
@@ -80,7 +80,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
                 }
             }
             c if c.is_ascii_digit() => {
-                let num = read_number(&mut chars);
+                let num = read_number(&mut chars, c);
                 tokens.push(Token::Number(num));
             }
             '"' => {
@@ -155,8 +155,10 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
 }
 
 /// Legge un identificatore (lettere, cifre, underscore).
-fn read_ident(chars: &mut core::iter::Peekable<core::str::Chars>) -> String {
+/// `first` e' il primo carattere gia' consumato dal lexer.
+fn read_ident(chars: &mut core::iter::Peekable<core::str::Chars>, first: char) -> String {
     let mut s = String::new();
+    s.push(first); // Include il primo carattere perso dal lexer
     while let Some(&c) = chars.peek() {
         if c.is_ascii_alphanumeric() || c == '_' {
             s.push(c);
@@ -169,8 +171,10 @@ fn read_ident(chars: &mut core::iter::Peekable<core::str::Chars>) -> String {
 }
 
 /// Legge un numero (intero o float).
-fn read_number(chars: &mut core::iter::Peekable<core::str::Chars>) -> f64 {
+/// `first` e' il primo carattere gia' consumato dal lexer.
+fn read_number(chars: &mut core::iter::Peekable<core::str::Chars>, first: char) -> f64 {
     let mut int_part = String::new();
+    int_part.push(first); // Include il primo carattere perso dal lexer
     while let Some(&c) = chars.peek() {
         if c.is_ascii_digit() || c == '.' {
             int_part.push(c);
