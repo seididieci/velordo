@@ -396,11 +396,10 @@ fn env_fn_clear(_env: &Env, args: &[Expr]) -> Result<Value, RuntimeError> {
 
 // ── Entry point pubblico ──────────────────────────────────────────
 
-/// Valuta una lista di statement con un nuovo ambiente.
+/// Valuta una lista di statement con un ambiente persistente.
 /// Ritorna l'ultimo valore prodotto (se presente).
-pub fn evaluate(stmts: &[Stmt]) -> Result<Option<Value>, RuntimeError> {
-    let mut env = Env::new();
-    // Per `clear` senza scope: usa root env.
+pub fn evaluate(env: &mut Env, stmts: &[Stmt]) -> Result<Option<Value>, RuntimeError> {
+    let mut last: Option<Value> = None;
     for stmt in stmts {
         match env.eval_stmt(stmt) {
             Ok(val) => {
@@ -410,9 +409,10 @@ pub fn evaluate(stmts: &[Stmt]) -> Result<Option<Value>, RuntimeError> {
                         env.clear_var(&args[0])?;
                     }
                 }
+                last = val;
             }
             Err(e) => return Err(e),
         }
     }
-    Ok(None) // Per ora non restituiamo valori — stampati nel REPL.
+    Ok(last) // Restituisce l'ultimo valore per la stampa nel REPL.
 }

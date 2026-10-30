@@ -119,6 +119,10 @@ fn real_main(_sp: u64) -> ! {
     // Exit code dell'ultimo comando (0 = successo).
     let mut last_exit: u8 = 0;
 
+    // Ambiente persistente per l'interprete: le variabili sopravvivono tra
+    // una riga e l'altra del REPL.
+    let mut interp_env = env::Env::new();
+
     loop {
         // Costruisci il prompt con glifi Nerd Font.
         console_write(build_prompt(last_exit));
@@ -138,12 +142,24 @@ fn real_main(_sp: u64) -> ! {
                 if !stmts.is_empty() {
                     // Valuta con l'interprete. Se fallisce, è probabilmente un
                     // comando shell (es. `help`) → fallback al dispatcher.
-                    match env::evaluate(&stmts) {
-                        Ok(_) => { interpreted = true; }
-                        Err(e) => {
-                            console_write_str("[ast] skip: ");
-                            console_write_str(&format!("{}", e));
+                    match env::evaluate(&mut interp_env, &stmts) {
+                        Ok(Some(val)) => {
+                            console_write_str(&format!("{}", val));
                             console_write_str("\n");
+                            interpreted = true;
+                        }
+                        Ok(None) => {
+                            // Statement senza valore (es. `let a = 1`).
+                            interpreted = true;
+                        }
+                        Err(e) => {
+                            let err_msg = format!("{}", e);
+                            // Non stampare i skip per errori attesi (variabile/funzione non trovata).
+                            if !err_msg.contains("non trovato") && !err_msg.contains("non ancora implementato") {
+                                console_write_str("[ast] skip: ");
+                                console_write_str(&err_msg);
+                                console_write_str("\n");
+                            }
                         }
                     }
                 }

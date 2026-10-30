@@ -253,6 +253,8 @@ fn parse_block(state: &mut ParserState) -> Result<Stmt, ParseError> {
         }
         let stmt = parse_stmt(state)?;
         stmts.push(stmt);
+        // Consuma il `;` opzionale dopo ogni statement (dentro blocchi).
+        state.try_consume(Token::Delim(';'));
     }
     Ok(Stmt::Block(stmts))
 }
