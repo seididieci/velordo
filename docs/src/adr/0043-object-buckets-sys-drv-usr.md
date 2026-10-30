@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted
+Accepted — la parte `usr` (chiavi `usr/bin/*.bin`, bucket reserved senza
+reader) e' superata da [ADR-0064](0064-bucket-binari-piatti.md): `usr` e' il
+bucket `binary` piatto (`runhello`, `arca`, `cuuser`). `sys`/`vela`/`tst`
+restano come qui descritto.
 
 ## Context
 

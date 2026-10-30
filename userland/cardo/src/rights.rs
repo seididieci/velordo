@@ -90,6 +90,9 @@ pub fn op_bit(op_tag: u32) -> Option<u32> {
         // (negabile), PIPE crea stato condiviso nel server (negabile).
         R_DUP_GRANT => Some(civis::RIGHTS_GRANT),
         R_PIPE_CREATE => Some(civis::RIGHTS_PIPE),
+        // Verifica EXECUTE (S3.2b): chi ha perso EXECUTE non puo' nemmeno
+        // chiedere il permesso (il controllo fine e' nell'handler).
+        R_RIGHTS_EXECUTE => Some(civis::RIGHTS_EXECUTE),
         _ => None,
     }
 }
@@ -158,49 +161,34 @@ pub fn handle_rights_get(
 }
 
 /// Verifica EXECUTE su un oggetto ArcaFS (S3.2b-1): il canale ha sia READ
-/// che EXECUTE per il bucket specificato? Payload `[bucket\0key\0]` nel ring;
-/// reply w0 = 0 OK / ERR_DENIED. Zero allocazioni — usa buffer stack da 64 B
-/// (bucket + key non superano mai i bound civis: 32+32).
+/// che EXECUTE per il bucket specificato? Payload `[bucket_len][bucket]\0
+/// [key_len][key]\0` nel ring (formato condiviso `arcafs::wire`, lo stesso di
+/// R_OBJ_GET/PUT); reply w0 = 0 OK / ERR_DENIED, scritta dal dispatch generico
+/// (un solo frame per op: qui NON si scrive, o resterebbe un frame stale nel
+/// response ring). Zero allocazioni.
 pub fn handle_rights_execute(
     rights: &BTreeMap<u64, ChanRights>,
-    rings: &BTreeMap<u64, (u64, u64)>,
     chan: u64,
     payload: &[u8],
+    ceiling: u32,
 ) -> Option<u64> {
-    // Parse payload: `[bucket_len:1][bucket\0][key_len:1][key\0]` (formato
-    // identico a R_OBJ_GET/PUT, single source in `arcafs::wire`).
-    if payload.is_empty() || payload.len() > 64 {
+    // Parse condiviso con R_OBJ_GET/PUT: qualunque malformazione → INVALID.
+    let (_bucket, key, _rest) = match arcafs::wire::parse_obj_prefix(payload) {
+        Some(v) => v,
+        None => return Some(civis::ERR_INVALID),
+    };
+    if key.is_empty() {
         return Some(civis::ERR_INVALID);
     }
-    let mut off = 0usize;
-    let bucket_len = payload[off] as usize;
-    off += 1;
-    if bucket_len == 0 || bucket_len >= off + 1 || off + bucket_len > payload.len() {
-        return Some(civis::ERR_INVALID);
-    }
-    let _bucket = core::str::from_utf8(&payload[off..off + bucket_len]).ok()?;
-    off += bucket_len + 1; // skip NUL delimiter
-    if off >= payload.len() {
-        return Some(civis::ERR_INVALID);
-    }
-    let key_len = payload[off] as usize;
-    off += 1;
-    if key_len == 0 || off + key_len > payload.len() {
-        return Some(civis::ERR_INVALID);
-    }
-    // Non serve parsare il key: il controllo e' per-bucket (EXECUTE + READ).
-    // Il key viene validato dallo spawn handler dopo questo check.
 
-    // Controlla i diritti del canale: deve avere sia READ che EXECUTE.
-    let ops = rights.get(&chan).map_or(civis::RIGHTS_ALL, |r| r.ops);
+    // Diritti EFFETTIVI del canale: serve READ + EXECUTE. Per un canale
+    // senza entry il default e' il tetto policy della classe (mai ALL
+    // implicito: fail-closed per hash ignoto); per le entry il check
+    // centrale ha gia' applicato `ops & ceiling` con lo stesso bit.
+    let ops = rights.get(&chan).map_or(ceiling, |r| r.ops);
     let has_read = ops & civis::RIGHTS_READ != 0;
     let has_execute = ops & civis::RIGHTS_EXECUTE != 0;
     if has_read && has_execute {
-        // OK: scrive reply nel response ring del client.
-        if rings.contains_key(&chan) {
-            rings::map_client_resp_ring(rings, chan);
-            rings::resp_ring_write(0, 0, &[]); // w0=0 = OK, nessun payload
-        }
         Some(0)
     } else {
         Some(civis::ERR_DENIED)

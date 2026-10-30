@@ -104,11 +104,12 @@ for p in bins:
     lines.append("pub const %s: [u8; 32] = [%s]; // blake2s(%s)" % (
         bconst, ", ".join("0x%02X" % b for b in digest), os.path.basename(p)))
 
-# Mask per-binario (Fase 45, SYNC in 52): nome stem -> mask ops (bit RIGHTS_*
-# di syscall-numbers: OPEN=0x1 READ=0x2 WRITE=0x4 READDIR=0x8 MKDIR=0x10
-# MOUNT=0x20 UMOUNT=0x40 DELETE=0x80 SEEK=0x100 GRANT=0x200 PIPE=0x400
-# SYNC=0x800, ALL=0xFFF). Default ALL (servizi TCB); programmi di terzi
-# restrittivi.
+# Mask per-binario (Fase 45, SYNC in 52, EXECUTE in S3.2b): nome stem -> mask
+# dei bit RIGHTS_* di syscall-numbers: OPEN=0x1 READ=0x2 WRITE=0x4
+# READDIR=0x8 MKDIR=0x10 MOUNT=0x20 UMOUNT=0x40 DELETE=0x80 SEEK=0x100
+# GRANT=0x200 PIPE=0x400 SYNC=0x800 EXECUTE=0x1000, ALL=0x1FFF. Default ALL
+# (servizi TCB, inclusa la shell nativa che deve poter eseguire i bucket
+# binary); programmi di terzi restrittivi.
 # NOTA: `run`+redirect scrive su fd concessi (il check WRITE scatta sul
 # canale del FIGLIO) e legge stdin ridiretta: runhello ha bisogno di
 # OPEN+READ+WRITE+READDIR (0x00F). Senza WRITE `run ./x > /o` si rompe (Fase
@@ -118,13 +119,13 @@ POLICY = {
     # arca (Fase 54): legge /dev/* e la topologia; niente scritture/mount.
     "userarca": 0x00B,      # OPEN|READ|READDIR
 }
-DEFAULT_MASK = 0xFFF  # ALL (servizi TCB)
+DEFAULT_MASK = 0x1FFF  # ALL (servizi TCB, incluso EXECUTE)
 
 pol = [
     "// Generato da scripts/gen-service-hashes.sh — MAI modificare a mano.",
     "// Sandbox build (Fase 45): tetto ops per hash noto, applicato da cardo",
     "// (`userland/cardo/src/policy.rs`) come `drop_mask & policy_mask`. Le mask",
-    "// usano i bit RIGHTS_* di syscall-numbers (ALL=0xFFF con GRANT+PIPE+SYNC).",
+    "// usano i bit RIGHTS_* di syscall-numbers (ALL=0x1FFF con GRANT+PIPE+SYNC+EXECUTE).",
     "// Consumato via `include!(env!(\"VELORDO_SERVICE_POLICY\"))` SOLO da",
     "// cardo (dopo service_hashes: referenzia le HASH_*). Rigenerato a build.",
     "pub const SERVICE_POLICY: &[(u64, u32)] = &[",

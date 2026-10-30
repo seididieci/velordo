@@ -748,11 +748,14 @@ pub const R_RIGHTS_DROP: u32 = 0x18;
 /// Legge i propri diritti (Fase 17): niente payload; risposta self-written
 /// `[ops:8][sublen:8][subtree]` (subtree normalizzato, "" = root).
 pub const R_RIGHTS_GET: u32 = 0x19;
-/// Verifica EXECUTE su un oggetto ArcaFS (S3.2b-1): payload `[bucket\0key\0]`;
-/// reply w0 = 0 OK / ERR_DENIED se il canale non ha RIGHTS_EXECUTE + READ per
-/// quel bucket. Usato dalla shell prima dello spawn per verificare che l'utente
-/// abbia il permesso di eseguire un binario dal filesystem.
-pub const R_RIGHTS_EXECUTE: u32 = 0x26;
+/// Verifica EXECUTE su un oggetto ArcaFS (S3.2b-1): payload
+/// `[bucket_len][bucket]\0[key_len][key]\0` (`arcafs::wire`), lunghezza in
+/// `w0`; reply w0 = 0 OK / ERR_DENIED se il canale non ha RIGHTS_EXECUTE +
+/// READ per quel bucket. Usato dalla shell prima dello spawn per verificare
+/// che l'utente abbia il permesso di eseguire un binario dal filesystem.
+/// Numero 0x37: il valore iniziale 0x26 collideva con `R_OBJ_PUT` (arcafs),
+/// che nel dispatch di cardo lo rendeva irraggiungibile (arm morto).
+pub const R_RIGHTS_EXECUTE: u32 = 0x37;
 
 // ── Bit dei diritti per-canale lato cardo (Fase 17, 18.2) ───────────────
 // Solo riduzione (DROP fa AND), default ALL. CLOSE sempre consentito (rilascia
@@ -786,7 +789,10 @@ pub const RIGHTS_SYNC: u32 = 0x800;
 /// leggere il binario + EXECUTE per autorizzarne l'esecuzione). Bit 12: primo
 /// oltre lo storico. Zero nuove syscall — e' solo un bit nella bitmask esistente.
 pub const RIGHTS_EXECUTE: u32 = 0x1000;
-pub const RIGHTS_ALL: u32 = 0xFFF;
+/// Tutti i bit definiti (0..12). Deve includere EXECUTE: con 0xFFF il bit 12
+/// non era in ALL, quindi nessun canale non-drogato poteva mai eseguire
+/// (nemmeno i servizi TCB) e DROP non poteva conservarlo.
+pub const RIGHTS_ALL: u32 = 0x1FFF;
 
 // ── Sentinelle di errore FS (Fase 40, P1) ─────────────────────────────
 // cardo distingue i rifiuti invece del generico ERR: il client li mappa

@@ -181,20 +181,25 @@ comandi in script via `source` (1 riga digitata per gruppo, script in
 la riga `source`, backspace/clear VGA e i pid di kill/wait — KEYMAP
 verificata su QEMU 10.2.2), assert sul log seriale (la shell specchia
 l'output; `source` e' silenzioso: niente eco, gli assert di assenza restano
-validi). Harness comune in `scripts/shell_harness.py`; runner
-`scripts/test-shell-all.sh` (sequenziale o `--jobs N` con overlay qcow2
-privati per istanza — due QEMU sullo stesso raw read-write si
-corromperebbero):
+validi). La fase `native` e' l'eccezione: guida la **shell nativa** (entry
+point del login, ADR-0062) digitando i comandi uno per uno, senza `source`
+(che e' un builtin POSIX) e senza il prompt `$ ` (`boot_native` si sincronizza
+sul banner `[shell] Velordo shell nativa`). Harness comune in
+`scripts/shell_harness.py`; runner `scripts/test-shell-all.sh` (sequenziale o
+`--jobs N` con overlay qcow2 privati per istanza — due QEMU sullo stesso raw
+read-write si corromperebbero):
 
 ```bash
-./scripts/test-shell-all.sh            # seq: base run redirect 41 42 source 43 43b
+./scripts/test-shell-all.sh            # seq (le fasi POSIX sono storiche, vedi sotto)
 ./scripts/test-shell-all.sh --jobs 5   # parallelo, un overlay per fase
-./scripts/test-shell-all.sh source     # gate veloce: solo `source` (1 boot)
+./scripts/test-shell-all.sh native     # shell nativa + bucket binary (1 boot) — fase corrente
+./scripts/test-shell-all.sh source     # legacy (richiede il login POSIX)
 ```
 
 | File | Fase | Check |
 |------|------|-------|
 | `test-shell-base.py` | 9.4/18/19/20 (ls/cat/mkdir, backspace, builtin, cd/pwd, ls -l, kill, ps, rm/cp/mv, FAT scrivibile, clear) | 29 |
+| `test-shell-native.py` | S3.2b-4/ADR-0064 (shell nativa: `BIN_LIST` → oggetto piatto `usr` → EXECUTE → spawn con argv → exit, ring sincronizzato, comando ignoto) | 9 |
 | `test-shell-run.py` | 37.2 (run fg/bg, argv, exit-code, jobs/wait) | 8 |
 | `test-shell-redirect.py` | 40.4 (`> >> < 2> 2>&1` + run redirectato) | 20 |
 | `test-shell-41.py` | 41 (quoting/escape, `$VAR/$?/~/$$`, `; && \|\|`, commenti, glob) | 37 |
@@ -206,10 +211,15 @@ corromperebbero):
 | `test-shell-44b.py` | 44b (Ctrl-C → 130 su fg non cooperante, selettivita', cleanup) | 5 |
 | `foreign.bin`     | t57: attore "ignoto" fuori tabella policy — default fail-closed   | — |
 
-Totale **179 check** verdi in seq e con `--jobs 5` (stesso kernel produzione
-del gate: il kernel embedda init/fs/disk, quindi va ricompilato DOPO
-`build-userland.sh` — ordine di `run.sh` — altrimenti il manifest Strato 2
-di init non matcha i binari su disco e il boot fallisce loud).
+La fase `native` e' **9/9 verde**. Le 10 fasi POSIX (179 check) sono
+**storiche**: dal login nativo (ADR-0062) `boot()` — che attende
+`[shell] starting` e il prompt `$ ` della personalita' POSIX — non completa,
+quindi non girano nel boot di default (serve un knob per avviare
+`bin/posix/shell.bin` come entry point). Restano la specifica eseguibile del
+parser/redirect/pipe POSIX. Stesso kernel produzione del gate: il kernel
+embedda init/fs/disk, quindi va ricompilato DOPO `build-userland.sh` — ordine
+di `run.sh` — altrimenti il manifest Strato 2 di init non matcha i binari su
+disco e il boot fallisce loud.
 
 > Timing adattivi (`shell_harness.py`): su KVM (`/dev/kvm`) gli sleep sono
 > corti (tasti 0.06s, drain 0.25s, run 0.4s), su TCG restano i valori storici

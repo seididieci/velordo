@@ -292,8 +292,10 @@ Voci con scope e vittoria dichiarati (non date).
         ArcaFS (prima dello `spawn_image`). Se il canale non ha EXECUTE per il
         bucket → `ERR_DENIED`. Modifiche:
         - `syscall-numbers/src/lib.rs`: nuovo cost `RIGHTS_EXECUTE = 0x1000`,
-          opcode `R_RIGHTS_EXECUTE = 0x26` (payload `[bucket\0key\0]`),
-          errore `ERR_DENIED = !0u64 - 12`
+          opcode `R_RIGHTS_EXECUTE` (iniziale `0x26`, **spostato a `0x37` in
+          S3.2b-4**: collideva con `R_OBJ_PUT`; payload
+          `[bucket_len][bucket]\0[key_len][key]\0`), errore
+          `ERR_DENIED = !0u64 - 12`
         - `libs/civis/src/lib.rs`: riesporta `RIGHTS_EXECUTE`, `R_RIGHTS_EXECUTE`, `ERR_DENIED`
         - `cardo/src/rights.rs`: `handle_rights_execute()` — verifica READ +
           EXECUTE per il canale, scrive reply nel response ring
@@ -306,7 +308,8 @@ Voci con scope e vittoria dichiarati (non date).
         distingue i bucket per tipo (`object`, `block`, `bin`) e fornisce un
         endpoint per elencare quelli eseguibili. Modifiche:
         - Tabella interna `bucket_types: BTreeMap<String, &'static str>` in cardo
-          (popolata dal seed SYS_SEED: tutti i bucket con `.bin` nel path = "bin")
+          (popolata dal seed SYS_SEED: tutti i bucket con `.bin` nel path = "bin";
+          **superato da S3.2b-4**: tabella esplicita, solo `usr` = `binary`)
         - Nuovo tag IPC `BIN_LIST` (0x41): nessun payload, w0=w1=0 → cardo
           filtra bucket tipo "bin" → scrive risposta nel response ring del client
           (nomi separati da `\n`)
@@ -337,6 +340,21 @@ Voci con scope e vittoria dichiarati (non date).
   esecuzione (R_RIGHTS_EXECUTE), scoprire i bucket eseguibili (BIN_LIST) ed
   eseguire programmi esterni digitando direttamente il nome del programma. Gate:
   build verificata, zero regressioni.
+
+  - **[x] S3.2b-4 — Bucket `binary` piatti + `runhello` end-to-end** (chiusa,
+        ADR-0064): il tipo `binary` e' un namespace **piatto** di soli
+        eseguibili (niente sottocartelle, niente `PATH`). Solo `usr` e'
+        `binary` (`runhello`, `arca`, `cuuser`, chiavi senza `.bin`);
+        `sys`/`vela`/`tst` restano `object`. Fix del percorso completo:
+        reply obbligatoria in `BIN_LIST` (la shell restava in
+        `BlockedOnReply`), `bin_list` single-shot (niente doppio consumo),
+        `RIGHTS_ALL = 0x1FFF` (include EXECUTE), `R_RIGHTS_EXECUTE = 0x37`
+        (0x26 collideva con `R_OBJ_PUT`), un solo frame di risposta per op,
+        payload EXECUTE col formato condiviso `arcafs::wire::obj_prefix`,
+        shell che passa `argv` via `pack_args`. Vittoria: dalla shell nativa
+        `runhello hello` stampa `runhello: hello`, il padre riceve l'exit e
+        le op FS successive (`users`) restano funzionanti. Gate: 6 righe
+        PASS, zero FAIL/PANIC.
 
 - [ ] **Multi-engine + auto-mount dichiarativo** (ADR-0059 §6): oggi un
       solo `DiskEngine` globale e' legato al volume root, quindi un **secondo

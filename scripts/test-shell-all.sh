@@ -20,11 +20,11 @@ PHASES=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --jobs) JOBS="$2"; shift 2;;
-        base|run|redirect|41|42|source|43|43b|44|44b) PHASES+=("$1"); shift;;
-        *) echo "fase ignota: $1 (base|run|redirect|41|42|source|43|43b|44|44b)"; exit 2;;
+        base|native|run|redirect|41|42|source|43|43b|44|44b) PHASES+=("$1"); shift;;
+        *) echo "fase ignota: $1 (base|native|run|redirect|41|42|source|43|43b|44|44b)"; exit 2;;
     esac
 done
-[ ${#PHASES[@]} -eq 0 ] && PHASES=(base run redirect 41 42 source 43 43b 44 44b)
+[ ${#PHASES[@]} -eq 0 ] && PHASES=(base native run redirect 41 42 source 43 43b 44 44b)
 
 # ADR-0059: il FAT esce — niente immagini FAT ne' iniettore: il seed
 # ArcaFS porta gia' i binari (i dischi FAT servono solo ai run dedicati:

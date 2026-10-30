@@ -324,9 +324,42 @@ class Shell:
         self.type_text(pwd + "\n")
 
     def boot(self, timeout=60):
-        """Avvia QEMU, fa il login e attende la shell pronta (produzione:
-        niente test, login e shell subito). Ritorna il Popen (anche in
-        self.q)."""
+        """Avvia QEMU, fa il login e attende la shell **POSIX** pronta
+        (personality: prompt `$ `). Ritorna il Popen (anche in self.q)."""
+        self._boot_start()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            data = self.read_log()
+            if (b"[shell] starting" in data
+                    and b"registered mount '/dev/input'" in data
+                    and b"$ " in data):
+                self.wait_prompt()
+                return self.q
+            time.sleep(T_BOOT_POLL)
+        raise RuntimeError("shell non pronta")
+
+    def boot_native(self, timeout=60):
+        """Avvia QEMU, fa il login e attende la **shell nativa** (default dal
+        login, ADR-0062): banner `[shell] Velordo shell nativa` + prompt
+        `> `. Ritorna il Popen (anche in self.q).
+
+        Il prompt nativo contiene ANSI truecolor e glifi Nerd Font: si
+        sincronizza sul banner, non sul prompt (che non e' confrontabile
+        come stringa). Il `_prompt_seen` di `wait_prompt` riguarda `$ ` e
+        non si usa qui (i test nativi attendono pattern espliciti)."""
+        self._boot_start()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            data = self.read_log()
+            if (b"[shell] Velordo shell nativa" in data
+                    and b"> " in data):
+                time.sleep(T_WAIT_TAIL)
+                return self.q
+            time.sleep(T_BOOT_POLL)
+        raise RuntimeError("shell nativa non pronta")
+
+    def _boot_start(self):
+        """Parte QEMU e fa il login (comune a `boot` e `boot_native`)."""
         for p in (self.serial, self.mon):
             try:
                 os.unlink(p)
@@ -358,16 +391,6 @@ class Shell:
               "fast" if FAST else "slow"), flush=True)
         # Il login parte col boot (ADR-0055): credenziali e poi la shell.
         self.login()
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            data = self.read_log()
-            if (b"[shell] starting" in data
-                    and b"registered mount '/dev/input'" in data
-                    and b"$ " in data):
-                self.wait_prompt()
-                return self.q
-            time.sleep(T_BOOT_POLL)
-        raise RuntimeError("shell non pronta")
 
     def terminate(self):
         if self.q is not None:

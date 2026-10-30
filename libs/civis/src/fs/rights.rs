@@ -14,20 +14,20 @@ pub fn rights_execute(bucket: &[u8], key: &[u8]) -> Result<bool, Error> {
     // scriverebbe su VA mai mappate (#PF).
     fs_gate()?;
 
-    // Costruisce il payload: `[bucket\0key\0]`.
-    let payload_len = bucket.len() + 1 + key.len() + 1;
-    if payload_len == 0 || payload_len > 512 {
-        return Err(Error::Invalid);
-    }
-
-    let mut payload = alloc::vec::Vec::with_capacity(payload_len);
-    payload.extend_from_slice(bucket);
-    payload.push(b'\0');
-    payload.extend_from_slice(key);
-    payload.push(b'\0');
+    // Costruisce il payload col formato condiviso
+    // `[bucket_len:1][bucket]\0[key_len:1][key]\0` (single source
+    // `arcafs::wire`, lo stesso che parsa cardo): i bound li applica il
+    // builder, mai troncamento silenzioso.
+    let payload = match arcafs::wire::obj_prefix(bucket, key) {
+        Some(p) => p,
+        None => return Err(Error::Invalid),
+    };
+    let payload_len = payload.len();
 
     // Scrive il frame nel request ring: [tag:4][w0:8][w1:8][payload].
-    let frame = || req_ring_write(crate::R_RIGHTS_EXECUTE, 0, 0, &payload);
+    // w0 = lunghezza payload: cardo consuma ESATTAMENTE il dichiarato (con
+    // w0=0 il frame veniva scartato come payload mancante → sempre ERR).
+    let frame = || req_ring_write(crate::R_RIGHTS_EXECUTE, payload_len as u64, 0, &payload);
     if !frame() {
         return Err(Error::RingFull);
     }

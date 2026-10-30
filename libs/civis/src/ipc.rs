@@ -188,10 +188,10 @@ pub fn reply(tag: u64, w0: u64, w1: u64) -> Result<(), Error> {
 /// (ADR-0008). `spawn` ritorna il channel id (lato parent) verso il figlio.
 pub const CHANNEL_PARENT: u64 = syscall_numbers::CHANNEL_PARENT;
 
-/// S3.2b — Richiede a cardo la lista dei bucket di tipo "bin" (eseguibili).
+/// S3.2b — Richiede a cardo la lista dei bucket di tipo `binary` (eseguibili).
 /// Protocollo FS: scrivi frame vuoto nel request ring con tag BIN_LIST,
-/// invia FS_NOTIFY, leggi risposta dal response ring.
-/// Cardo risponde scrivendo i nomi separati da `\n` nel response ring.
+/// invia FS_NOTIFY, leggi UNA risposta dal response ring.
+/// Cardo risponde con `count` e i nomi separati da `\n` nel response ring.
 /// Ritorna il vettore dei bucket (byte); `NotFound` se cardo non e' disponibile.
 pub fn bin_list() -> Result<alloc::vec::Vec<alloc::vec::Vec<u8>>, Error> {
     // Cancello ring: senza, un processo che non ha mai fatto FS scriverebbe
@@ -204,38 +204,41 @@ pub fn bin_list() -> Result<alloc::vec::Vec<alloc::vec::Vec<u8>>, Error> {
         return Err(Error::RingFull);
     }
 
-    // Legge la risposta dal response ring del client.
-    // Formato: [count:8][w1:8][payload: bucket names separated by '\n']
+    // UNA richiesta -> UNA risposta (cardo non pagina: il vecchio loop
+    // rispediva la richiesta all'infinito finche' la lista non era vuota).
     use crate::{fs_notify_result, fs_reply_check};
     use crate::fs::ring::{resp_ring_consume, resp_ring_read_payload};
-    let mut buckets = alloc::vec::Vec::new();
 
-    loop {
-        match fs_notify_result(crate::FS_NOTIFY, frame) {
-            Some((size, _w1, payload_len)) => {
-                // Consuma l'intestazione (16 byte) per liberare il ring.
+    match fs_notify_result(crate::FS_NOTIFY, frame) {
+        Some((size, _w1, payload_len)) => {
+            // Sentinella ERR_*: consuma il frame (16 B) e propaga l'errore,
+            // o il frame stale desincronizza la prossima op FS.
+            let count = match fs_reply_check(size) {
+                Ok(c) => c,
+                Err(e) => {
+                    resp_ring_consume(16);
+                    return Err(e);
+                }
+            };
+            if count == 0 || payload_len == 0 {
                 resp_ring_consume(16);
-                // Leggo il payload: e' una stringa con nomi separati da '\n'.
-                let mut buf = alloc::vec::Vec::new();
-                if payload_len > 0 {
-                    let to_read = payload_len.min(crate::fs::ring::RING_MAX_PAYLOAD as usize);
-                    resp_ring_read_payload(&mut buf, to_read);
-                }
-                // Suddividi per '\n' e aggiungi solo i nomi non vuoti.
-                let s = core::str::from_utf8(&buf).unwrap_or("");
-                for part in s.split('\n') {
-                    if !part.is_empty() {
-                        buckets.push(part.as_bytes().to_vec());
-                    }
-                }
-                // Se count (size) e' 0 o la lista e' vuota, esci.
-                if size == 0 || buckets.is_empty() {
-                    break;
+                return Ok(alloc::vec::Vec::new());
+            }
+            // Formato: [count:8][w1:8][payload: nomi separati da '\n'].
+            // `resp_ring_read_payload` consuma da sola header+payload: MAI
+            // chiamare anche `resp_ring_consume(16)` prima (doppio consumo,
+            // tail oltre la head -> ring desincronizzato).
+            let mut buf = alloc::vec![0u8; payload_len];
+            resp_ring_read_payload(&mut buf, payload_len);
+            let s = core::str::from_utf8(&buf).unwrap_or("");
+            let mut buckets = alloc::vec::Vec::new();
+            for part in s.split('\n') {
+                if !part.is_empty() {
+                    buckets.push(part.as_bytes().to_vec());
                 }
             }
-            None => return Err(Error::NotReady),
+            Ok(buckets)
         }
+        None => Err(Error::NotReady),
     }
-
-    Ok(buckets)
 }

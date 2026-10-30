@@ -11,11 +11,11 @@
 //!   `create-user [nome]`  crea un utente (token VELORDO_SESSION richiesto)
 //!   `logout` / `exit`   torna al prompt di login (init riavvia il login come getty)
 //!
-//! Comandi S3.2b — esecuzione esterna da bucket ArcaFS:
-//!   `run <programma>`  lancia un programma da un bucket eseguibile.
-//!                      La shell scopre i bucket tramite BIN_LIST, cerca
-//!                      `<bucket>/<programma>`, verifica EXECUTE con cardo,
-//!                      e lo esegue con spawn_image.
+//! Comandi S3.2b — esecuzione esterna da bucket `binary`:
+//!   `<programma>`  lancia un programma da un bucket eseguibile.
+//!                  La shell scopre i bucket tramite BIN_LIST, cerca il nome
+//!                  piatto `<programma>` (niente sottocartelle, ADR-0064),
+//!                  verifica EXECUTE con cardo, e lo esegue con spawn_image.
 //!
 //! Se l'output di un comando non viene catturato in una variabile, il valore
 //! (futuro, S3.2b+) viene stampato serializzato.
@@ -45,9 +45,6 @@ civis::entry!(real_main);
 const CONSOLE_PATH: &str = "/dev/console";
 const KEYBOARD_PATH: &str = "/dev/input/keyboard";
 const IDENTIS_BUCKET: &str = "identis:config";
-
-/// S3.2b — opcode BIN_LIST per scoprire i bucket eseguibili (importato da civis).
-use civis::BIN_LIST;
 
 /// Variabile d'ambiente con il token di sessione (hex).
 const ENV_SESSION: &str = "VELORDO_SESSION";
@@ -349,10 +346,12 @@ fn cmd_logout() -> ! {
     civis::exit(0);
 }
 
-/// S3.2b — Tenta di eseguire un programma esterno da un bucket ArcaFS.
-/// La shell scopre i bucket tramite BIN_LIST, cerca `<bucket>/<programma>`,
-/// verifica EXECUTE con cardo (R_RIGHTS_EXECUTE), e lo esegue con spawn_image.
-/// Ritorna `true` se il programma e' stato trovato ed eseguito, `false` altrimenti.
+/// S3.2b — Tenta di eseguire un programma esterno da un bucket `binary`.
+/// La shell scopre i bucket tramite BIN_LIST, cerca il nome PIATTO
+/// `<programma>` (i bucket binary non hanno sottocartelle, ADR-0064),
+/// verifica EXECUTE con cardo (R_RIGHTS_EXECUTE) e lo esegue con spawn_image.
+/// Ritorna `true` se il programma e' stato trovato (eseguito o rifiutato con
+/// un errore specifico), `false` se non esiste in nessun bucket binary.
 fn try_execute_external(program: &str, args: &[&str]) -> bool {
     // 1. Richiedi la lista dei bucket eseguibili a cardo (BIN_LIST).
     let buckets = match civis::ipc::bin_list() {
@@ -368,11 +367,16 @@ fn try_execute_external(program: &str, args: &[&str]) -> bool {
         return false;
     }
 
-    // 2. Itera i bucket e cerca `<bucket>/<programma>` come oggetto ArcaFS.
+    // I bucket binary sono piatti: la chiave e' il nome del programma, senza
+    // path ne' suffisso `.bin`. Un nome con '/' non e' un comando binary.
+    if program.is_empty() || program.contains('/') {
+        return false;
+    }
+    let key_bytes = program.as_bytes();
+
+    // 2. Itera i bucket binary e cerca la chiave piatta.
     for bucket in &buckets {
         let bucket_str = core::str::from_utf8(bucket).unwrap_or("");
-        let key = format!("{}/{}", bucket_str, program);
-        let key_bytes = key.as_bytes();
 
         // 3. Prova a leggere l'oggetto dal bucket (obj_get).
         let obj = match civis::fs::obj::obj_get(bucket.as_slice(), key_bytes) {
@@ -395,28 +399,45 @@ fn try_execute_external(program: &str, args: &[&str]) -> bool {
                 console_write_str("ERRORE: EXECUTE negato per '");
                 console_write_str(program);
                 console_write_str("'\n");
-                return false;
+                return true;
             }
             Err(e) => {
                 console_write_str("ERRORE rights_execute: ");
                 console_write_str(&alloc::format!("{:?}", e));
                 console_write_str("\n");
-                return false;
+                return true;
             }
         }
 
-        // 5. Esegui l'immagine con spawn_image (il meta e' Option, unwrap).
-        let meta = civis::SpawnMeta::new(program, 16, &[]).expect("nome valido < 16 byte");
+        // 5. Esegui l'immagine con spawn_image, passando argv (argv[0] =
+        // nome del programma + argomenti digitati). Il blocco packed deve
+        // restare vivo fino a dopo la syscall (il kernel lo copia).
+        let mut argv: Vec<&[u8]> = Vec::with_capacity(args.len() + 1);
+        argv.push(key_bytes);
+        for a in args {
+            argv.push(a.as_bytes());
+        }
+        let packed = civis::pack_args(&argv, &[]);
+        let mut meta = match civis::SpawnMeta::new(program, 16, &[]) {
+            Some(m) => m,
+            None => {
+                console_write_str("ERRORE: nome programma non valido\n");
+                return true;
+            }
+        };
+        if let Some(ref p) = packed {
+            meta = meta.argv(p);
+        }
         match civis::spawn_image(&obj, &meta) {
-            Ok(_chan) => {
+            Ok(chan) => {
                 console_write_str("[run] Processo avviato (canale ");
-                console_write_str(&alloc::format!("{}", _chan));
+                console_write_str(&alloc::format!("{}", chan));
                 console_write_str(")\n");
                 // Attendi la terminazione del figlio leggendo dal canale di nascita.
                 loop {
                     match civis::recv() {
                         Ok(msg) => {
-                            if msg.channel as i64 == _chan {
+                            if msg.channel as i64 == chan {
                                 console_write_str("[run] Processo terminato\n");
                                 return true;
                             }

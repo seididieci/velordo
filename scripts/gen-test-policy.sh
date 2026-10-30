@@ -76,7 +76,7 @@ for p in bins:
         data = f.read()
     if not data:
         sys.exit("binario vuoto: %s" % p)
-    lines.append("    (0x%016X, 0xFFF), // %s" % (fnv1a(data), os.path.basename(p)))
+    lines.append("    (0x%016X, 0x1FFF), // %s" % (fnv1a(data), os.path.basename(p)))
 lines.append("];")
 
 with open(tmp, "w") as f:

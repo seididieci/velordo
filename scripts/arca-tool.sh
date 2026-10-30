@@ -82,12 +82,15 @@ seed_bin userland/build/identis-login.bin bin/identis-login.bin sys bin/identis-
 # Personalita' POSIX in `/bin/posix` (D1: MOVE da /bin, solo ArcaFS).
 seed_bin flavours/posix/build/usershell.bin bin/posix/shell.bin sys bin/posix/shell.bin
 seed_bin flavours/posix/build/userposix.bin bin/posix/posix.bin sys bin/posix/posix.bin
-# Programmi utente in `/usr/bin` (D1: MOVE da /bin, solo ArcaFS; obj reserved).
-seed_bin flavours/posix/build/userrunhello.bin usr/bin/runhello.bin usr usr/bin/runhello.bin
-seed_bin userland/build/userarca.bin usr/bin/arca.bin usr usr/bin/arca.bin
+# Programmi utente in `/usr/bin` (D1: MOVE da /bin, solo ArcaFS).
+# Bucket `usr` = tipo BINARY (ADR-0064): namespace PIATTO, solo eseguibili,
+# niente sottocartelle. Le chiavi oggetto NON hanno suffisso `.bin`; il mirror
+# `ns` mantiene i path VFS (`usr/bin/...`).
+seed_bin flavours/posix/build/userrunhello.bin usr/bin/runhello.bin usr runhello
+seed_bin userland/build/userarca.bin usr/bin/arca.bin usr arca
 # create-user (ADR-0055): programma utente (la shell nativa lo invoca come
 # comando, Fase 3.2).
-seed_bin userland/build/create-user.bin usr/bin/cuuser.bin usr usr/bin/cuuser.bin
+seed_bin userland/build/create-user.bin usr/bin/cuuser.bin usr cuuser
 # Shell nativa (Fase 3.2, S3.2a): REPL minima, spawnata dal login (identis-login).
 seed_bin userland/build/shell.bin bin/shell.bin sys bin/shell.bin
 # Test suite /test (stessi dest 8.3 di inject-bins.sh). D2: le 6 suite che

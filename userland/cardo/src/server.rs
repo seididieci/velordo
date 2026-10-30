@@ -1,5 +1,10 @@
 use super::*;
 
+/// Tag `BIN_LIST` visto come `u32`: i pattern di `match` non ammettono cast,
+/// e il resto del dispatch confronta `u32`. Single source: la costante in
+/// `syscall-numbers` (mai il letterale 0x41 sparso).
+const BIN_LIST_TAG: u32 = BIN_LIST as u32;
+
 // ── Main ───────────────────────────────────────────────────────────
 
 /// Nome del driver dietro il canale `chan` dal suo `image_hash` (Fase 36,
@@ -350,9 +355,9 @@ fn real_main(_sp: u64) -> ! {
     // Client registrati: pid → (req_ring_phys, resp_ring_phys).
     let mut rings: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
 
-    // Tipi di bucket (S3.2b-2): bucket → {Object, Block, Bin}. Il tipo si
-    // dichiara al momento della creazione con nuovo tag IPC R_BUCKET_CREATE;
-    // qui e' popolato solo dal seed statico. Default: Object.
+    // Tipi di bucket (S3.2b-2, ADR-0064): bucket → {object, binary}. Il tipo
+    // si dichiara al momento della creazione con un futuro tag IPC
+    // R_BUCKET_CREATE; oggi e' una tabella statica. Default: object.
     let mut bucket_types: BTreeMap<String, &'static str> = BTreeMap::new();
 
     // Diritti per-canale (Fase 17): entry assente = {ALL, root}.
@@ -379,14 +384,12 @@ fn real_main(_sp: u64) -> ! {
     // come rights/policy: col peer muore la riga (purge su EXIT_NOTIFY).
     let mut sync_expect: BTreeMap<u64, u32> = BTreeMap::new();
 
-    // Popola bucket_types dal seed SYS_SEED (S3.2b-2): tutti i bucket che
-    // contengono eseguibili (.bin nel path) sono di tipo "bin".
-    for (_path, bucket, _key) in SYS_SEED.iter() {
-        let b = core::str::from_utf8(*bucket).unwrap_or("");
-        if !bucket_types.contains_key(b) {
-            bucket_types.insert(String::from(b), "bin");
-        }
-    }
+    // Bucket eseguibili (ADR-0064): tipo `binary` = namespace PIATTO di soli
+    // eseguibili (niente sottocartelle). Oggi solo `usr` (programmi utente);
+    // `sys`/`vela`/`tst` restano object (path strutturati). La lista e'
+    // esplicita: derivarla da SYS_SEED marcava servizi/driver/test come
+    // eseguibili e non copriva `usr` (che vive solo sul volume).
+    bucket_types.insert(String::from("usr"), "binary");
 
     // Fase A: niente piu' populate della ramfs radice — `/` e' il volume
     // ArcaFS (hello.txt/test.txt seedati a build-time, Fase C) e ramfs vive
@@ -657,9 +660,12 @@ fn real_main(_sp: u64) -> ! {
             // dei tag (single source nei commenti di `syscall-numbers`).
             R_SNAP_CREATE | R_SNAP_ROLLBACK | R_SNAP_CLONE | R_OBJ_DELETE | R_OBJ_STAT => w0 as usize,
             R_SNAP_DELETE | R_OBJ_GET_ID | R_OBJ_STAT_ID => 8,
+            // R_RIGHTS_EXECUTE: payload `[bucket_len][bucket]\0[key_len][key]\0`
+            // (formato `arcafs::wire`), lunghezza in w0.
+            R_RIGHTS_EXECUTE => w0 as usize,
             R_READ | R_CLOSE | R_RIGHTS_GET | R_DUP_GRANT => 0,
             // BIN_LIST (S3.2b): nessun payload, w0=w1=0.
-            0x41u32 => 0,
+            BIN_LIST_TAG => 0,
             _ => {
                 // Tag impossibile: scarta tutto e riallinea (vedi req_resync).
                 rings::req_resync();
@@ -907,21 +913,16 @@ fn real_main(_sp: u64) -> ! {
                 handlers::handle_disk_list(&topo_disk, &rings, chan)
             }
 
-            // BIN_LIST (S3.2b): nessun payload, w0=w1=0. Risposta: lista bucket
-            // "bin" separati da '\n' nel response ring. Skip frame+reply generico.
-            0x41u32 => {
+            // BIN_LIST (S3.2b): nessun payload, w0=w1=0. Risposta: lista
+            // dei bucket di tipo `binary` separati da '\n' nel response ring.
+            // La reply IPC e' obbligatoria: il client usa `send` sincrona e
+            // senza reply resta bloccato in BlockedOnReply per sempre
+            // (l'avevamo dimenticata qui: shell congelata su runhello).
+            BIN_LIST_TAG => {
                 let mut bin_buckets: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
                 for (name, btype) in bucket_types.iter() {
-                    if *btype == "bin" {
+                    if *btype == "binary" {
                         bin_buckets.push(name.as_str());
-                    }
-                }
-                if bin_buckets.is_empty() {
-                    for (_path, bucket, _key) in SYS_SEED.iter() {
-                        let b = core::str::from_utf8(*bucket).unwrap_or("");
-                        if !bin_buckets.contains(&b) {
-                            bin_buckets.push(b);
-                        }
                     }
                 }
                 let mut resp = alloc::vec::Vec::new();
@@ -931,6 +932,7 @@ fn real_main(_sp: u64) -> ! {
                 }
                 let count = bin_buckets.len() as u64;
                 rings::resp_ring_write(count, 0, &resp);
+                let _ = civis::reply(0, count, 0);
                 continue;
             }
 
@@ -1235,11 +1237,11 @@ fn real_main(_sp: u64) -> ! {
 
             R_RIGHTS_GET => rights::handle_rights_get(&rights, &rings, chan, ceiling).ok_or(ERR),
 
-            // Verifica EXECUTE su un oggetto ArcaFS (S3.2b-1): il canale ha
-            // sia READ che EXECUTE per il bucket specificato? Payload
-            // `[bucket\0key\0]`; reply 0 OK / ERR_DENIED. Scrive la reply nel
-            // response ring dell'handler stesso (non passa dal dispatch gen.).
-            R_RIGHTS_EXECUTE => rights::handle_rights_execute(&rights, &rings, chan, &payload).ok_or(ERR),
+            // Verifica EXECUTE su un oggetto ArcaFS (S3.2b-1): payload
+            // `[bucket_len][bucket]\0[key_len][key]\0` (formato
+            // `arcafs::wire`); reply 0 OK / ERR_DENIED scritta dal dispatch
+            // generico (un solo frame per op).
+            R_RIGHTS_EXECUTE => rights::handle_rights_execute(&rights, chan, &payload, ceiling).ok_or(ERR),
 
             _ => {
                 // Tag sconosciuto: frame gia' consumato sopra, ritorna errore.

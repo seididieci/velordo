@@ -2962,3 +2962,47 @@
       avviata". File: `userland/shell/{Cargo.toml,Cargo.lock,src/}` (nuovo),
       `scripts/build-userland.sh` (modificato), `scripts/arca-tool.sh`
       (modificato), `userland/identis-login/src/main.rs` (modificato).
+- [x] **S3.2b-4 — Bucket `binary` piatti e `runhello` end-to-end** (2026-10,
+      ADR-0064): la shell nativa si congelava su `runhello` per **quattro**
+      difetti indipendenti, e il tipo di bucket non era quello pensato.
+      Diagnosi: (1) l'handler `BIN_LIST` di cardo consumava il frame e usciva
+      senza `reply` — il client, in `send` sincrona, restava in
+      `BlockedOnReply` per sempre (nessun errore, nessun timeout: solo
+      silenzio); (2) `bin_list` consumava **due volte** lo stesso frame
+      (header con `consume(16)` + `read_payload` che consuma anche l'header),
+      sfondando la tail oltre la head e rispedendo la richiesta in loop;
+      (3) `R_RIGHTS_EXECUTE` era `0x26`, lo stesso numero di `R_OBJ_PUT`:
+      il match di cardo vinceva sul primo e l'handler EXECUTE era codice
+      morto; (4) `RIGHTS_ALL` valeva `0xFFF` e **non** conteneva EXECUTE
+      (`0x1000`), quindi *nessuno* poteva passare il check — nemmeno i
+      servizi TCB. In piu' l'handler EXECUTE scriveva un frame suo **e** il
+      dispatch generico ne scriveva un secondo: il frame stale
+      desincronizzava la prima op FS successiva.
+      Decisione (ADR-0064): il tipo `binary` e' un namespace **piatto** di
+      soli eseguibili, senza sottocartelle; la shell cerca il nome digitato
+      cosi' com'e' e non serve `PATH`. Solo `usr` e' `binary`
+      (`runhello`, `arca`, `cuuser`: chiavi senza `.bin`); `sys`, `vela`,
+      `tst` restano `object`. La tabella dei tipi e' **esplicita** (prima
+      era derivata da `SYS_SEED`, che marcava servizi/test come eseguibili e
+      lasciava fuori proprio `usr`). Il mirror `ns` resta invariato
+      (`usr/bin/runhello.bin`): la vista POSIX non cambia.
+      Fix: reply obbligatoria in `BIN_LIST` (e `BIN_LIST_TAG` per non
+      spargere il letterale 0x41); `bin_list` single-shot con un solo
+      consumo; `RIGHTS_ALL = 0x1FFF` (+ mask policy servizi/test a
+      `0x1FFF`, default ignoto `0x19F` senza EXECUTE); `R_RIGHTS_EXECUTE =
+      0x37`; payload EXECUTE costruito con `arcafs::wire::obj_prefix` e
+      lunghezza in `w0` (l'handler prima si aspettava un formato diverso da
+      quello che il client scriveva); un solo frame di risposta per op;
+      shell che passa `argv` con `pack_args` + `SpawnMeta::argv`.
+      Validazione: boot produzione, login `root/root`, `runhello hello` →
+      `[run] Esecuzione di 'runhello' dal bucket 'usr' (30328 byte)`,
+      `runhello: hello`, `[run] Processo terminato`, prompt rientrato;
+      `users` subito dopo elenca `root` (ring sincronizzato). Gate 6 righe
+      PASS, zero FAIL/PANIC/FAULT. Lezioni: (1) un handler che chiude il
+      ramo senza `reply` non e' un errore visibile — e' un **hang** del
+      client; (2) i formati wire condivisi vanno costruiti/parsati con la
+      stessa funzione (`arcafs::wire`), o client e server divergono in
+      silenzio; (3) un bit nuovo in una mask "ALL" va aggiunto **anche**
+      alle mask derivate (policy), altrimenti il permesso esiste ma nessuno
+      lo possiede; (4) i numeri degli opcode sono uno spazio condiviso:
+      prima di assegnarne uno, cercarlo in tutti i crate.

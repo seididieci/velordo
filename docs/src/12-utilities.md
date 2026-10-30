@@ -191,11 +191,26 @@ pipeline gira nel figlio (effetti scoped, `$?` iniziale 0).
 
 ### runhello
 
-Primo programma lanciabile (`flavours/posix/cli/runhello`, `/bin/runhello.bin` su disco
-— non un servizio: init non lo spawna). Stampa gli argv (uno per riga) su
+Primo programma lanciabile (`flavours/posix/cli/runhello`, `usr/bin/runhello.bin`
+sulla vista POSIX — non un servizio: init non lo spawna; nel bucket `usr` la
+chiave e' piatta: `runhello`). Stampa gli argv (uno per riga) su
 seriale ed esce 0; con argomento `fail` esce 3 (dopo aver stampato). Con
 stdin redirectato stampa anche `runhello: stdin:<byte>` (Fase 40.4d). Serve ai
 test shell (`scripts/test-shell-*.py`) come target fg/bg con exit code osservabile.
+
+### Shell nativa: programmi da bucket `binary` (ADR-0064)
+
+La shell nativa (ADR-0062, entry point del login) non usa `PATH`: chiede a
+cardo i bucket di tipo `binary` (`BIN_LIST`), cerca il nome digitato **cosi'
+com'e'** (namespace piatto: niente sottocartelle ne' suffisso `.bin`),
+verifica `RIGHTS_EXECUTE` e lo esegue con `spawn_image`, passando gli argv con
+`pack_args`. Oggi l'unico bucket `binary` e' `usr` (`runhello`, `arca`,
+`cuuser`); `sys`/`vela`/`tst` restano `object` con i loro path. Il mirror `ns`
+conserva la vista POSIX (`usr/bin/runhello.bin`).
+
+Verifica: `scripts/test-shell-native.py` (fase `native` di
+`test-shell-all.sh`) — 9 check, incluso il response ring FS ancora
+sincronizzato dopo lo spawn (`users` subito dopo `runhello`).
 
 Line editing (Fase 43b, readline nella shell su tty raw): Up/Down history
 comandi (Enter accoda: non vuota, no duplicato consecutivo; heredoc esclusi),

@@ -91,3 +91,4 @@
 - [ADR-0063: Lo sfondo immagine del terminale (layer 0) (Fase 60)](./adr/0063-sfondo-immagine-terminale.md)
 - [ADR-0058: Creazione utenti, token di sessione e protocollo Identis (Fase 3.1)](./adr/0058-creazione-utenti-token-sessione.md)
 - [ADR-0059: Il FAT esce dal boot e dalla suite — ArcaFS unico filesystem di sistema](./adr/0059-fat-fuori-boot-arcafs-unico.md)
+- [ADR-0064: Bucket `binary` — namespace piatto di eseguibili](./adr/0064-bucket-binari-piatti.md)
