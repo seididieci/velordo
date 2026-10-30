@@ -72,6 +72,8 @@ pub enum Stmt {
     Block(Vec<Stmt>),
     /// `if cond { then } else { otherwise }`.
     If(Box<Expr>, Vec<Stmt>, Vec<Stmt>),
+    /// `for name in start..end { stmts... }` — placeholder per Fase 2+.
+    For(String, Expr, Expr, Vec<Stmt>),
 }
 
 /// Errore di parsing con posizione.

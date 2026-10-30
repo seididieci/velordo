@@ -46,6 +46,7 @@ use identis_proto as proto;
 // Moduli interprete (ADR-0065).
 mod lexer;
 mod parser;
+mod env;
 
 civis::entry!(real_main);
 
@@ -128,21 +129,23 @@ fn real_main(_sp: u64) -> ! {
             continue;
         }
 
-        // ADR-0065 Fase 1: interprete Rust-like prima del dispatcher.
+        // ADR-0065 Fase 1+2: interprete Rust-like prima del dispatcher.
         // Se la riga è syntax-valida, viene valutata dall'interprete.
-        // Altrimenti fallback al dispatcher esistente (help, users, ecc.).
+        // Se l'eval fallisce → fallback al dispatcher esistente (help, users, ecc.).
         let mut interpreted = false;
         match parser::parse(&line) {
             Ok(stmts) => {
-                // Parsing riuscito — per ora stampiamo l'AST come debug.
-                // La valutazione vera e propria viene nella Fase 2.
                 if !stmts.is_empty() {
-                    console_write_str("[ast] ");
-                    for stmt in &stmts {
-                        console_write_str(&format!("{:?} ", stmt));
+                    // Valuta con l'interprete. Se fallisce, è probabilmente un
+                    // comando shell (es. `help`) → fallback al dispatcher.
+                    match env::evaluate(&stmts) {
+                        Ok(_) => { interpreted = true; }
+                        Err(e) => {
+                            console_write_str("[ast] skip: ");
+                            console_write_str(&format!("{}", e));
+                            console_write_str("\n");
+                        }
                     }
-                    console_write_str("\n");
-                    interpreted = true;
                 }
             }
             Err(e) => {
