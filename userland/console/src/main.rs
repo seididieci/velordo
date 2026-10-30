@@ -789,8 +789,8 @@ fn real_main(_sp: u64) -> ! {
     // 4. Il modello: la griglia segue la surface.
     let geom = surface.geom();
     let mut grid = Grid::new(geom.cols, geom.rows);
-    // Il prompt parte in fondo (come il terminale di sempre).
-    grid.cursor = (0, geom.rows.saturating_sub(1));
+    // Nessuna modifica: Grid::new pone il cursore a (0, 0) —
+    // il testo scorre dall'alto verso il basso (nuove righe in fondo).
 
     let mut term = Term {
         grid,
