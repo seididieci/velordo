@@ -346,8 +346,8 @@ fn format_value(v: &Value) -> String {
         Value::Bool(b)  => format!("{}", b),
         Value::Number(n)=> format!("{}", n),
         Value::Str(s)   => {
-            let s = core::str::from_utf8(s).unwrap_or("");
-            format!("\"{}\"", s)
+            // Non aggiungo virgolette qui: lo fa Display per Value::Str.
+            core::str::from_utf8(s).unwrap_or("").into()
         }
         _ => "[non serializzato]".into(),
     }
