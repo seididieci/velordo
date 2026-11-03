@@ -32,7 +32,7 @@ pub fn getcwd<S: Sys>() -> Result<Vec<u8>, Error> {
 /// Per i percorsi assoluti ritorna un prestito su `path` (zero allocazione
 /// heap); solo i relativi allacciano un `Vec`. `Cow::Borrowed` per assoluti,
 /// `Cow::Owned` per relativi.
-pub fn resolve<S: Sys>(path: &str) -> Result<Cow<[u8]>, Error> {
+pub fn resolve<S: Sys>(path: &str) -> Result<Cow<'_, [u8]>, Error> {
     if path.is_empty() || path.starts_with('/') {
         return Ok(Cow::Borrowed(path.as_bytes()));
     }

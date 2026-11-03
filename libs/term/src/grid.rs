@@ -379,7 +379,14 @@ impl Grid {
         for col in 0..self.cols {
             self.cells[last * self.cols + col] = Cell::default();
         }
-        self.dirty.mark_all(self.cols, self.rows);
+        // Solo l'ultima riga e' cambiata visivamente: le celle copiate
+        // in su (copy_within) avevano gia' lo stesso contenuto. Il dirty
+        // flag viene resettato da take_dirty() dopo ogni render, quindi
+        // non devo marcare il resto della griglia.
+        if self.rows > 0 {
+            self.dirty.mark(0, last);
+            self.dirty.mark(self.cols - 1, last);
+        }
     }
 
     /// La zona sporca e la azzera (la surface la consuma).

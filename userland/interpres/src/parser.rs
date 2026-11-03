@@ -45,6 +45,7 @@ pub enum Expr {
 
 /// Valore letterale — tipi supportati in fase 1.
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // Array/Object mai costruiti (Fase 2+), ma i match arm esistono per futura compatibilita'.
 pub enum Value {
     Null,
     Bool(bool),
@@ -220,15 +221,6 @@ pub fn parse(input: &str) -> Result<Vec<Stmt>, ParseError> {
     }
 
     Ok(stmts)
-}
-
-/// Parse e valutazione combinata: ritorna il valore dell'ultimo statement (se applicabile).
-pub fn parse_and_eval(input: &str) -> Result<Option<Value>, ParseError> {
-    let stmts = parse(input)?;
-    // Per ora non valutiamo — la valutazione viene nella Fase 2.
-    // Ritorna None per permettere il fallback al dispatcher esistente.
-    let _ = stmts;
-    Ok(None)
 }
 
 // ── Statement parsing ─────────────────────────────────────────────

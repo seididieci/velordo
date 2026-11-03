@@ -313,9 +313,6 @@ const ENV_SESSION: &str = "VELORDO_SESSION";
 /// Variabile d'ambiente con il nome utente.
 const ENV_USER: &str = "USER";
 
-/// Hostname fisso (per ora).
-const HOSTNAME: &str = "velordo";
-
 /// Tentativi in caso di servizio occupato (`R_BUSY`).
 const RETRIES: u32 = 20;
 
@@ -1049,9 +1046,6 @@ fn read_line_from_keyboard(mask: bool) -> String {
 
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
-
-    // Futex word locale per il wait: zero-initialized nel BSS, mai toccata da altri.
-    static FUTEX_WORD: u32 = 0;
 
     loop {
         let n = civis::read_fs(fd, &mut byte, 1).unwrap_or(0);

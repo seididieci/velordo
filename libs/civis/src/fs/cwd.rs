@@ -12,7 +12,7 @@ pub fn getcwd() -> Result<Vec<u8>, Error> {
 }
 
 
-pub fn resolve(path: &str) -> Result<Cow<[u8]>, Error> {
+pub fn resolve(path: &str) -> Result<Cow<'_, [u8]>, Error> {
     vfscli::cwd::resolve::<super::CivisSys>(path)
 }
 

@@ -50,20 +50,6 @@ impl Env {
         env
     }
 
-    /// Crea un nuovo scope con questo ambiente come parent.
-    pub fn child(&self) -> Self {
-        let parent_snapshot = Self {
-            parent:   self.parent.clone(),
-            vars:     BTreeMap::new(),
-            builtins: self.builtins.clone(),
-        };
-        Self {
-            parent:   Some(Rc::new(parent_snapshot)),
-            vars:     BTreeMap::new(),
-            builtins: self.builtins.clone(),
-        }
-    }
-
     /// Registra una funzione builtin.
     fn register_builtin<F>(&mut self, name: &str, f: F)
     where
@@ -97,11 +83,6 @@ impl Env {
     /// Imposta una variabile nello scope corrente.
     pub fn set(&mut self, name: String, value: Value) {
         self.vars.insert(name, value);
-    }
-
-    /// Rimuove una variabile dallo scope corrente.
-    pub fn remove(&mut self, name: &str) -> bool {
-        self.vars.remove(name).is_some()
     }
 
     /// Valuta un'espressione e ritorna il valore.
@@ -289,16 +270,6 @@ impl Env {
             Err(RuntimeError("clear richiede un identificatore".into()))
         }
     }
-
-    /// Reset completo dell'ambiente (per `clear` senza argomenti).
-    pub fn clear_all(&mut self) {
-        self.vars.clear();
-        if let Some(parent) = &mut self.parent {
-            if let Some(inner) = Rc::get_mut(parent) {
-                inner.clear_all();
-            }
-        }
-    }
 }
 
 // ── Operator evaluation ────────────────────────────────────────────
@@ -329,7 +300,6 @@ fn eval_binop(op: &BinOp, lv: Value, rv: Value) -> Result<Value, RuntimeError> {
         BinOp::Ge   => numeric_cmp(lv, rv, |a, b| a >= b),
         BinOp::And  => bool_binop(lv, rv, |a, b| a && b),
         BinOp::Or   => bool_binop(lv, rv, |a, b| a || b),
-        _ => Err(RuntimeError(format!("operatore non supportato: {:?}", op))),
     }
 }
 

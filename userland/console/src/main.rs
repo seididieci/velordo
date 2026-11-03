@@ -788,7 +788,7 @@ fn real_main(_sp: u64) -> ! {
 
     // 4. Il modello: la griglia segue la surface.
     let geom = surface.geom();
-    let mut grid = Grid::new(geom.cols, geom.rows);
+    let grid = Grid::new(geom.cols, geom.rows);
     // Nessuna modifica: Grid::new pone il cursore a (0, 0) —
     // il testo scorre dall'alto verso il basso (nuove righe in fondo).
 
