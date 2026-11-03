@@ -38,6 +38,177 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::format;
 
+// ------------------------------------------------------------------
+// History & line editor implementation for REPL
+// ------------------------------------------------------------------
+
+/// Simple history buffer for the REPL.
+/// Stores command strings and provides navigation via up/down.
+struct History {
+    entries: Vec<String>,
+    index: usize, // current navigation position (0 = top of history)
+}
+
+impl History {
+    fn new() -> Self {
+        Self { entries: Vec::new(), index: 0 }
+    }
+
+    /// Push a new entry and reset navigation index.
+    fn push(&mut self, entry: String) {
+        self.entries.push(entry);
+        self.index = self.entries.len();
+    }
+
+    /// Move one step up in history (previous command).
+    fn prev(&mut self) -> Option<String> {
+        if self.index > 0 {
+            self.index -= 1;
+            Some(self.entries[self.index].clone())
+        } else {
+            None
+        }
+    }
+
+    /// Move one step down in history (next command). Returns None when at end.
+    fn next(&mut self) -> Option<String> {
+        if self.index < self.entries.len() {
+            self.index += 1;
+            if self.index == self.entries.len() {
+                None
+            } else {
+                Some(self.entries[self.index].clone())
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Return a suggestion that starts with the given prefix, if any.
+    fn suggest(&self, prefix: &str) -> Option<&str> {
+        for entry in self.entries.iter().rev() {
+            if entry.starts_with(prefix) && entry.len() > prefix.len() {
+                return Some(&entry[prefix.len()..]);
+            }
+        }
+        None
+    }
+}
+
+/// Line editor that supports arrow keys, backspace, and history navigation.
+struct LineEditor<'a> {
+    buffer: String,
+    history: &'a mut History,
+    last_exit: u8,
+    kb_fd: i64,
+    /// `true` when continuing after a `{` (multi-line block).
+    continuation: bool,
+}
+
+impl<'a> LineEditor<'a> {
+    fn new(history: &'a mut History, last_exit: u8, kb_fd: i64) -> Self {
+        Self {
+            buffer: String::new(),
+            history,
+            last_exit,
+            kb_fd,
+            continuation: false,
+        }
+    }
+
+    /// Refresh the displayed prompt and line, including dimmed suggestion.
+    fn refresh(&self) {
+        // Build prompt
+        let prompt = build_prompt(self.last_exit);
+        if self.continuation {
+            // Multi-line continuation: newline + indent, no full prompt re-print.
+            console_write_str("\n  ");
+            console_write_str(&self.buffer);
+            if let Some(sug) = self.history.suggest(&self.buffer) {
+                console_write(b"\x1b[2m");
+                console_write(sug.as_bytes());
+                console_write(b"\x1b[22m");
+            }
+        } else {
+            // First line: clear and print full prompt + buffer.
+            console_write_str("\r\x1b[K");
+            console_write(prompt);
+            console_write_str(&self.buffer);
+            if let Some(sug) = self.history.suggest(&self.buffer) {
+                console_write(b"\x1b[2m");
+                console_write(sug.as_bytes());
+                console_write(b"\x1b[22m");
+            }
+        }
+    }
+
+    /// Clear the current buffer (called between lines of a multi‑line block).
+    fn clear_buffer(&mut self) {
+        self.buffer.clear();
+        self.continuation = true;
+    }
+
+    /// Read user input with editing support.
+    fn read(&mut self) -> String {
+        let mut byte = [0u8; 1];
+        loop {
+            let n = civis::read_fs(self.kb_fd, &mut byte, 1).unwrap_or(0);
+            if n == 0 {
+                let _ = civis::recv_poll();
+                // Sleep 1 tick to avoid tight spin when waiting for input.
+                let next = civis::get_ticks() + 1;
+                let mut dummy = 0u32;
+                let _ = civis::futex_wait(&mut dummy as *mut u32 as usize, 0, next as u64);
+                continue;
+            }
+            let c = byte[0];
+            match c {
+                0x1b => {
+                    // Escape sequence: read two more bytes if available
+                    let _ = civis::read_fs(self.kb_fd, &mut byte, 1).unwrap_or(0);
+                    let b1 = byte[0];
+                    let _ = civis::read_fs(self.kb_fd, &mut byte, 1).unwrap_or(0);
+                    let b2 = byte[0];
+                    match (b1 as char, b2 as char) {
+                        ('[', 'A') => { // Up
+                            if let Some(cmd) = self.history.prev() {
+                                self.buffer = cmd;
+                                self.refresh();
+                            }
+                        }
+                        ('[', 'B') => { // Down
+                            if let Some(cmd) = self.history.next() {
+                                self.buffer = cmd;
+                                self.refresh();
+                            } else {
+                                self.buffer.clear();
+                                self.refresh();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                0x08 | 0x7F => {
+                    self.buffer.pop();
+                    self.refresh();
+                }
+                0x0a | 0x0d => {
+                    console_write_str("\n");
+                    break;
+                }
+                _ => {
+                    let ch = c as char;
+                    self.buffer.push(ch);
+                    self.refresh();
+                }
+            }
+        }
+        let result = core::mem::take(&mut self.buffer);
+        result
+    }
+}
+
+
 use blake2s::blake2s;
 use civis;
 use civis::println;
@@ -122,17 +293,25 @@ fn real_main(_sp: u64) -> ! {
     // Ambiente persistente per l'interprete: le variabili sopravvivono tra
     // una riga e l'altra del REPL.
     let mut interp_env = env::Env::new();
+    let mut history = History::new();
+
+    // Apri tastiera una sola volta per tutta la sessione REPL.
+    let kb_fd = match civis::open(KEYBOARD_PATH, 0) {
+        Ok(f) => f,
+        Err(_) => {
+            console_write_str("[shell] ERRORE: impossibile aprire tastiera\n");
+            civis::exit(1);
+        }
+    };
 
     loop {
-        // Costruisci il prompt con glifi Nerd Font.
-        console_write(build_prompt(last_exit));
         // Read a line, supporting multi‑line blocks.
         let mut accumulated = String::new();
         let mut brace_depth: i32 = 0;
+        let mut editor = LineEditor::new(&mut history, last_exit, kb_fd);
         loop {
-            let raw_line = read_line_from_keyboard(false);
-            let trimmed = trim_str(&raw_line);
-            console_write_str("\n");
+            let raw_line = editor.read();
+            editor.clear_buffer();
             // Append to buffer.
             accumulated.push_str(&raw_line);
             accumulated.push('\n');
@@ -169,12 +348,9 @@ fn real_main(_sp: u64) -> ! {
                         }
                         Err(e) => {
                             let err_msg = format!("{}", e);
-                            // Non stampare i skip per errori attesi (variabile/funzione non trovata).
-                            if !err_msg.contains("non trovato") && !err_msg.contains("non ancora implementato") {
-                                console_write_str("[ast] skip: ");
-                                console_write_str(&err_msg);
-                                console_write_str("\n");
-                            }
+                            console_write_str("[ast] skip: ");
+                            console_write_str(&err_msg);
+                            console_write_str("\n");
                         }
                     }
                 }
@@ -793,7 +969,7 @@ fn read_line_from_keyboard(mask: bool) -> String {
             // per eventuali eventi in arrivo, poi dormi 1 tick. Se c'e'
             // qualcos'altro nel ring buffer lo legge subito — zero latenza.
             let _ = civis::recv_poll();
-            let _ = civis::futex_wait(&FUTEX_WORD as *const u32 as usize, 0, (civis::get_ticks() + 1) as u64);
+            // futex_wait omitted in read_line_from_keyboard
             continue;
         }
         let b = byte[0];

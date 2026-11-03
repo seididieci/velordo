@@ -103,15 +103,41 @@ def main():
 
         # While loop (timeout 60s)
         out = run_cmd(sh, "let i = 0; while i < 3 { dump(i); i = i + 1; }", b"\"0\"", timeout=60)
-        c.check("while", b"0" in out and b"1" in out and b"2" in out)
+        ok_while = b"0" in out and b"1" in out and b"2" in out
+        c.check("while", ok_while)
 
         # Error handling (unknown var)
-        out = run_cmd(sh, "dump(unknown)", b"variabile non trovata")
-        c.check("errore variabile", b"variabile non trovata" in out)
+        out = run_cmd(sh, "dump(unknown)", b"variabile non trovato")
+        c.check("errore variabile", b"variabile non trovato" in out)
 
         # Block assignment
         out = run_cmd(sh, "let a = 1; { a = a + 1; }; dump(a)", b"2")
         c.check("assign block", b"2" in out)
+
+        # For loop (range escludente 0..3 -> stampa 0, 1, 2)
+        out = run_cmd(sh, "for i in 0..3 { dump(i); }", b"\"0\"", timeout=30)
+        ok_for = b"0" in out and b"1" in out and b"2" in out
+        c.check("for loop", ok_for)
+
+        # Commento di linea //
+        out = run_cmd(sh, "// questo e' un commento\ndump(1)", b"1")
+        c.check("commento linea", b"1" in out)
+
+        # Commento blocco /* */
+        out = run_cmd(sh, "/* commento blocco */ dump(2)", b"2")
+        c.check("commento blocco", b"2" in out)
+
+        # Null uguaglianza
+        out = run_cmd(sh, "dump(null == null)", b"true")
+        c.check("null uguale null", b"true" in out)
+
+        # Operatore unario !
+        out = run_cmd(sh, "dump(!true)", b"false")
+        c.check("not true", b"false" in out)
+
+        # Scope if coerente con blocco { }: let dentro if si propaga al parent
+        out = run_cmd(sh, "if 1 < 2 { let x = 42; } dump(x)", b"42")
+        c.check("scope if propagato", b"42" in out)
 
         return 0 if c.ok else 1
     except RuntimeError as e:

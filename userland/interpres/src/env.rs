@@ -3,13 +3,13 @@
 //! Supporta: variabili `let`, assegnamento, scope annidati, operatori
 //! aritmetici/relazionali/logici, chiamate funzione, builtin (`clear`, `dump`, `type`).
 
-use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
+use alloc::sync::Arc;
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 use alloc::format;
 
-use crate::parser::{Expr, Stmt, Value, BinOp};
+use crate::parser::{Expr, Stmt, Value, BinOp, UnaryOp};
 
 // ── Runtime errors ─────────────────────────────────────────────────
 
@@ -25,16 +25,24 @@ impl core::fmt::Display for RuntimeError {
 
 // ── Environment ────────────────────────────────────────────────────
 
+/// Firma di una funzione builtin registrabile.
+type BuiltinFn = Arc<dyn Fn(&Env, &[Expr]) -> Result<Value, RuntimeError> + 'static>;
+
 /// Ambiente a scope annidati. Ogni blocco crea un nuovo `Env` con `parent`.
 pub struct Env {
-    parent: Option<Box<Env>>,
-    vars:   BTreeMap<String, Value>,
+    parent:   Option<Rc<Env>>,
+    vars:     BTreeMap<String, Value>,
+    builtins: BTreeMap<String, BuiltinFn>,
 }
 
 impl Env {
     /// Crea un nuovo ambiente root (senza parent).
     pub fn new() -> Self {
-        let mut env = Self { parent: None, vars: BTreeMap::new() };
+        let mut env = Self {
+            parent:   None,
+            vars:     BTreeMap::new(),
+            builtins: BTreeMap::new(),
+        };
         // Registra i builtin.
         env.register_builtin("type", env_fn_type);
         env.register_builtin("dump", env_fn_dump);
@@ -44,12 +52,15 @@ impl Env {
 
     /// Crea un nuovo scope con questo ambiente come parent.
     pub fn child(&self) -> Self {
+        let parent_snapshot = Self {
+            parent:   self.parent.clone(),
+            vars:     BTreeMap::new(),
+            builtins: self.builtins.clone(),
+        };
         Self {
-            parent: Some(Box::new(Self {
-                parent: None,
-                vars: BTreeMap::new(),
-            })),
-            vars: BTreeMap::new(),
+            parent:   Some(Rc::new(parent_snapshot)),
+            vars:     BTreeMap::new(),
+            builtins: self.builtins.clone(),
         }
     }
 
@@ -58,10 +69,18 @@ impl Env {
     where
         F: Fn(&Env, &[Expr]) -> Result<Value, RuntimeError> + 'static,
     {
-        // Salvata come Value::Object con campo speciale (placeholder per Fase 4).
-        let _ = name;
-        let _ = f;
-        // Per ora i builtin sono gestiti direttamente in eval_expr.
+        self.builtins.insert(name.to_string(), Arc::new(f));
+    }
+
+    /// Cerca una funzione builtin: scope corrente → parent → …
+    fn find_builtin(&self, name: &str) -> Option<&BuiltinFn> {
+        if let Some(f) = self.builtins.get(name) {
+            return Some(f);
+        }
+        if let Some(parent) = &self.parent {
+            return parent.find_builtin(name);
+        }
+        None
     }
 
     /// Cerca una variabile: scope corrente → parent → ...
@@ -101,53 +120,25 @@ impl Env {
                 eval_binop(op, lv, rv)
             }
             Expr::Call(name, args) => {
-                // Funzioni builtin o variabili-funzione (Fase 4).
-                match name.as_str() {
-                    "type" => {
-                        if args.len() == 1 {
-                            let v = self.eval_expr(&args[0])?;
-                            Ok(Value::Str(type_name(&v).as_bytes().to_vec()))
-                        } else {
-                            Err(RuntimeError("type richiede 1 arg".into()))
-                        }
-                    }
-                    "dump" => {
-                        if args.len() == 1 {
-                            let v = self.eval_expr(&args[0])?;
-                            Ok(Value::Str(format_value(&v).into_bytes()))
-                        } else {
-                            Err(RuntimeError("dump richiede 1 arg".into()))
-                        }
-                    }
-                    "clear" => {
-                        // clear name — rimuove la variabile.
-                        if let Expr::Ident(n) = &args[0] {
-                            // Non posso mutare self qui (borrow checker).
-                            // La rimozione viene gestita in eval_stmt.
-                            Ok(Value::Null)
-                        } else {
-                            Err(RuntimeError("clear richiede un identificatore".into()))
-                        }
-                    }
-                    _ => {
-                        // Nome non riconosciuto: variabile o riferimento a builtin futuro.
-                        match self.get(name) {
-                            Some(v) => Ok(v.clone()),
-                            None => Err(RuntimeError(format!("funzione non trovata: {}", name))),
-                        }
-                    }
+                // 1. Builtin registrati (cercati anche nei parent scope).
+                if let Some(f) = self.find_builtin(name) {
+                    return f(self, args);
+                }
+                // 2. Variabile-funzione (Fase 4) o riferimento a variabile.
+                match self.get(name) {
+                    Some(v) => Ok(v.clone()),
+                    None => Err(RuntimeError(format!("funzione non trovata: {}", name))),
                 }
             }
             Expr::Unary(op, inner) => {
                 match op {
-                    BinOp::Not => {
+                    UnaryOp::Not => {
                         let v = self.eval_expr(inner)?;
                         match v {
                             Value::Bool(b) => Ok(Value::Bool(!b)),
                             _ => Err(RuntimeError("! richiede un valore booleano".into())),
                         }
                     }
-                    _ => Err(RuntimeError(format!("operatore unario non supportato: {:?}", op))),
                 }
             }
         }
@@ -163,30 +154,38 @@ impl Env {
             }
             Stmt::Assign(name, expr) => {
                 let val = self.eval_expr(expr)?;
-                // Cerca nello scope corrente o in un parent.
+                // Cerca nello scope corrente o in un parent (solo se il parent
+                // e' mutabile tramite Rc::get_mut).
                 if self.vars.contains_key(name.as_str()) {
                     self.vars.insert(name.clone(), val);
                     Ok(None)
+                } else if let Some(parent) = &mut self.parent {
+                    if let Some(inner) = Rc::get_mut(parent) {
+                        inner.vars.insert(name.clone(), val);
+                        return Ok(None);
+                    }
+                    // Non mutabile: errore.
+                    Err(RuntimeError(format!("variabile non dichiarata: {}", name)))
                 } else {
-                    // Non presente: errore (non posso risalire ai parent per set).
                     Err(RuntimeError(format!("variabile non dichiarata: {}", name)))
                 }
             }
             Stmt::Expr(expr) => Ok(Some(self.eval_expr(expr)?)),
             Stmt::Block(stmts) => {
-                // Crea un nuovo scope.
-                let mut child = Env {
-                    parent: Some(Box::new(Self {
-                        parent: None,
-                        vars: BTreeMap::new(),
-                    })),
-                    vars: self.vars.clone(), // eredita le variabili visibili
+                // Crea un nuovo scope figlio che eredita variabili e catena dei
+                // parent. Copia le variabili visibili in child.vars così le
+                // assegnazioni a variabili esterne (es. `i = i + 1` in un while)
+                // vengono trovate e propagate correttamente da merge_from.
+                let mut child = Self {
+                    parent:   self.parent.clone(),
+                    vars:     self.vars.clone(),
+                    builtins: self.builtins.clone(),
                 };
                 let mut last: Option<Value> = None;
                 for s in stmts {
                     last = child.eval_stmt(s)?;
                 }
-                // Propaga le variabili dallo scope figlio al padre (per `let` nel blocco).
+                // Propaga le variabili dallo scope figlio al padre.
                 self.merge_from(&child);
                 Ok(last)
             }
@@ -221,19 +220,52 @@ impl Env {
                 }
             }
 
-            Stmt::For(..) => {
-                // Placeholder per Fase 2+.
-                Err(RuntimeError("for non ancora implementato".into()))
+            Stmt::For(name, start_expr, end_expr, body) => {
+                let start = match self.eval_expr(start_expr)? {
+                    Value::Number(n) => n as i64,
+                    _ => return Err(RuntimeError("for richiede un numero come inizio".into())),
+                };
+                let end = match self.eval_expr(end_expr)? {
+                    Value::Number(n) => n as i64,
+                    _ => return Err(RuntimeError("for richiede un numero come fine".into())),
+                };
+                let mut last: Option<Value> = None;
+                let mut i = start;
+                while i < end {
+                    // Crea uno scope figlio che eredita variabili da self.
+                    // La variabile di loop viene inserita in child.vars e le
+                    // assegnazioni nel corpo la trovano e la aggiornano;
+                    // merge_from (chiamato da eval_block) propaga il valore
+                    // aggiornato di ritorno a child per l'iterazione successiva.
+                    let mut child = Self {
+                        parent:   self.parent.clone(),
+                        vars:     self.vars.clone(),
+                        builtins: self.builtins.clone(),
+                    };
+                    child.set(name.clone(), Value::Number(i as f64));
+                    last = child.eval_block(body)?;
+                    i += 1;
+                }
+                Ok(last)
             }
         }
     }
 
-    /// Valuta un blocco di statement (senza creare scope — usato per if/else).
+    /// Valuta un blocco di statement in uno scope figlio, coerente con `Stmt::Block`.
+    /// Le variabili definite qui si propagano al parent (merge_from) così `if`/`else`
+    /// si comporta come `{ }`.
     fn eval_block(&mut self, stmts: &[Stmt]) -> Result<Option<Value>, RuntimeError> {
+        let mut child = Self {
+            parent:   self.parent.clone(),
+            vars:     self.vars.clone(),
+            builtins: self.builtins.clone(),
+        };
         let mut last: Option<Value> = None;
         for s in stmts {
-            last = self.eval_stmt(s)?;
+            last = child.eval_stmt(s)?;
         }
+        // Propaga le variabili dallo scope figlio al padre.
+        self.merge_from(&child);
         Ok(last)
     }
 
@@ -262,7 +294,9 @@ impl Env {
     pub fn clear_all(&mut self) {
         self.vars.clear();
         if let Some(parent) = &mut self.parent {
-            parent.clear_all();
+            if let Some(inner) = Rc::get_mut(parent) {
+                inner.clear_all();
+            }
         }
     }
 }
@@ -345,6 +379,8 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Number(a), Value::Number(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Str(a), Value::Str(b)) => a == b,
+        (Value::Array(a), Value::Array(b)) => a == b,
+        (Value::Object(a), Value::Object(b)) => a == b,
         (Value::Null, Value::Null) => true,
         _ => false,
     }
@@ -359,7 +395,8 @@ fn type_name(v: &Value) -> &'static str {
         Value::Bool(_)  => "bool",
         Value::Number(_) => "number",
         Value::Str(_)   => "string",
-        _               => "unknown",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
 }
 
@@ -373,7 +410,26 @@ fn format_value(v: &Value) -> String {
             // Non aggiungo virgolette qui: lo fa Display per Value::Str.
             core::str::from_utf8(s).unwrap_or("").into()
         }
-        _ => "[non serializzato]".into(),
+        Value::Array(items) => {
+            let mut out = String::from("[");
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 { out.push_str(", "); }
+                out.push_str(&format!("{}", item));
+            }
+            out.push(']');
+            out
+        }
+        Value::Object(map) => {
+            let mut out = String::from("{");
+            let mut first = true;
+            for (k, v) in map {
+                if !first { out.push_str(", "); }
+                first = false;
+                out.push_str(&format!("\"{}\": {}", k, v));
+            }
+            out.push('}');
+            out
+        }
     }
 }
 
@@ -398,15 +454,14 @@ fn env_fn_dump(_env: &Env, args: &[Expr]) -> Result<Value, RuntimeError> {
     if args.len() != 1 {
         return Err(RuntimeError("dump richiede 1 arg".into()));
     }
-    // La valutazione avviene nel chiamante. Qui restituiamo la stringa formattata.
-    Ok(Value::Str(match &args[0] {
-        Expr::Literal(v) => format_value(v).into_bytes(),
+    match &args[0] {
+        Expr::Literal(v) => Ok(Value::Str(format_value(v).into_bytes())),
         Expr::Ident(name) => match _env.get(name) {
-            Some(v) => format_value(v).into_bytes(),
-            None => b"[undefined]".to_vec(),
+            Some(v) => Ok(Value::Str(format_value(v).into_bytes())),
+            None => Err(RuntimeError(format!("variabile non trovato: {}", name))),
         },
-        _ => b"[non dumpabile]".to_vec(),
-    }))
+        _ => Ok(Value::Str(b"[non dumpabile]".to_vec())),
+    }
 }
 
 /// Funzione builtin `clear(name)` — chiamata da eval_expr.

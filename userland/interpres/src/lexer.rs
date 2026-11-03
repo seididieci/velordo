@@ -71,6 +71,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
                     "if"      => tokens.push(Token::Keyword("if".into())),
                     "else"    => tokens.push(Token::Keyword("else".into())),
                     "for"     => tokens.push(Token::Keyword("for".into())),
+                    "while"   => tokens.push(Token::Keyword("while".into())),
                     "in"      => tokens.push(Token::Keyword("in".into())),
                     "fn"      => tokens.push(Token::Keyword("fn".into())),
                     "true"    => tokens.push(Token::Keyword("true".into())),
@@ -84,8 +85,17 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
                 tokens.push(Token::Number(num));
             }
             '"' => {
-                let s = read_string(&mut chars)?;
+                let s = read_string(&mut chars, pos)?;
                 tokens.push(Token::Str(s));
+            }
+            '.' => {
+                // Controlla se e' un operatore range `..`
+                if chars.peek() == Some(&'.') {
+                    chars.next(); // consume second '.'
+                    tokens.push(Token::Op("..".into()));
+                } else {
+                    return Err(LexError { pos, msg: format!("unexpected character '.'") });
+                }
             }
             // Operatori composti a 2 char (==, !=, <=, >=, &&, ||)
             '<' => {
@@ -136,9 +146,36 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
                     return Err(LexError { pos, msg: format!("unexpected '|'",) });
                 }
             }
-            '+' | '-' | '*' | '/' | '%' => {
+            '+' | '-' | '*' | '%' => {
                 let op = String::from(c);
                 tokens.push(Token::Op(op));
+            }
+            '/' => {
+                if chars.peek() == Some(&'/') {
+                    // Commento di linea // fino a fine riga.
+                    while let Some(&cc) = chars.peek() {
+                        if cc == '\n' { break; }
+                        chars.next();
+                    }
+                    // Il '\n' rimane nel flusso: verrà letto come Delim(';')
+                    // dal loop principale.
+                } else if chars.peek() == Some(&'*') {
+                    // Commento blocco /* ... */
+                    chars.next(); // consume '*'
+                    let mut closed = false;
+                    while let Some(cc) = chars.next() {
+                        if cc == '*' && chars.peek() == Some(&'/') {
+                            chars.next(); // consume '/'
+                            closed = true;
+                            break;
+                        }
+                    }
+                    if !closed {
+                        return Err(LexError { pos, msg: "commento non chiuso".into() });
+                    }
+                } else {
+                    tokens.push(Token::Op("/".into()));
+                }
             }
             '{' | '}' | '(' | ')' | '[' | ']' | ';' | ',' => {
                 tokens.push(Token::Delim(c));
@@ -170,13 +207,13 @@ fn read_ident(chars: &mut core::iter::Peekable<core::str::Chars>, first: char) -
     s
 }
 
-/// Legge un numero (intero o float).
+/// Legge un numero intero (senza decimali — i float non sono supportati).
 /// `first` e' il primo carattere gia' consumato dal lexer.
 fn read_number(chars: &mut core::iter::Peekable<core::str::Chars>, first: char) -> f64 {
     let mut int_part = String::new();
     int_part.push(first); // Include il primo carattere perso dal lexer
     while let Some(&c) = chars.peek() {
-        if c.is_ascii_digit() || c == '.' {
+        if c.is_ascii_digit() {
             int_part.push(c);
             chars.next();
         } else {
@@ -187,14 +224,32 @@ fn read_number(chars: &mut core::iter::Peekable<core::str::Chars>, first: char) 
     int_part.parse::<f64>().unwrap_or(0.0)
 }
 
-/// Legge una stringa letterale tra doppi apici (senza escape).
-fn read_string(chars: &mut core::iter::Peekable<core::str::Chars>) -> Result<Vec<u8>, LexError> {
+/// Legge una stringa letterale tra doppi apici con escape (`\"`, `\\`, `\n`, `\t`, `\r`).
+/// `pos` è la posizione del carattere di apertura `"` nel testo originale.
+fn read_string(chars: &mut core::iter::Peekable<core::str::Chars>, pos: usize) -> Result<Vec<u8>, LexError> {
     let mut s = Vec::new();
-    for c in chars.by_ref() {
+    let mut closed = false;
+    while let Some(c) = chars.next() {
         if c == '"' {
-            break; // chiusura
+            closed = true;
+            break;
+        }
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => s.push(b'\n'),
+                Some('t') => s.push(b'\t'),
+                Some('r') => s.push(b'\r'),
+                Some('\\') => s.push(b'\\'),
+                Some('"') => s.push(b'"'),
+                Some(other) => return Err(LexError { pos, msg: format!("escape sconosciuta: \\{}", other) }),
+                None => return Err(LexError { pos, msg: "stringa non chiusa".into() }),
+            }
+            continue;
         }
         s.push(c as u8);
+    }
+    if !closed {
+        return Err(LexError { pos, msg: "stringa non chiusa".into() });
     }
     Ok(s)
 }

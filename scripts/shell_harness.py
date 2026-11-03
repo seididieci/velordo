@@ -36,6 +36,12 @@ KEYMAP = {" ": "spc", "\n": "ret", ".": "dot", "-": "minus", "/": "slash", "&": 
           "{": "shift-bracket_left", "}": "shift-bracket_right",
           "(": "shift-9",
           ")": "shift-0",
+        "\\x1b": "esc",
+        "\\[": "bracket",
+        "A": "A",
+        "B": "B",
+        "C": "C",
+        "D": "D",
         "+": "shift-equal",
           "`": "grave_accent"}
 KEYMAP.update({chr(c): "shift-%s" % chr(c).lower() for c in range(ord("A"), ord("Z") + 1)})

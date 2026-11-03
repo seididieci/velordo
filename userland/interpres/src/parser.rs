@@ -3,6 +3,7 @@
 //! Trasforma i token prodotti dal lexer in un AST (`Expr` / `Stmt`).
 //! Grammar semplificata: `let`, assegnamento, blocchi `{}`, `if/else`.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -18,7 +19,13 @@ use crate::lexer::{Token, LexError};
 pub enum BinOp {
     Add, Sub, Mul, Div, Mod,
     Eq, Ne, Lt, Le, Gt, Ge,
-    And, Or, Not, // Not è unario, ma lo metto qui per semplicità
+    And, Or,
+}
+
+/// Tipo di operatore unario.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UnaryOp {
+    Not,
 }
 
 /// Espressione — nodo interno dell'AST.
@@ -33,7 +40,7 @@ pub enum Expr {
     /// Chiamata di funzione: nome + argomenti.
     Call(String, Vec<Expr>),
     /// Operatore unario (!).
-    Unary(BinOp, Box<Expr>),
+    Unary(UnaryOp, Box<Expr>),
 }
 
 /// Valore letterale — tipi supportati in fase 1.
@@ -43,6 +50,24 @@ pub enum Value {
     Bool(bool),
     Number(f64),
     Str(Vec<u8>),
+    /// Array di valori.
+    Array(Vec<Value>),
+    /// Oggetto (mappa chiave -> valore).
+    Object(BTreeMap<String, Value>),
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Null, Value::Null) => true,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Number(a), Value::Number(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::Array(a), Value::Array(b)) => a == b,
+            (Value::Object(a), Value::Object(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 impl core::fmt::Display for Value {
@@ -54,6 +79,24 @@ impl core::fmt::Display for Value {
             Value::Str(s)   => {
                 let s = core::str::from_utf8(s).unwrap_or("");
                 write!(f, "\"{}\"", s)
+            }
+            Value::Array(items) => {
+                write!(f, "[")?;
+                for (i, v) in items.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
+            Value::Object(map) => {
+                write!(f, "{{")?;
+                let mut first = true;
+                for (k, v) in map {
+                    if !first { write!(f, ", ")?; }
+                    first = false;
+                    write!(f, "\"{}\": {}", k, v)?;
+                }
+                write!(f, "}}")
             }
         }
     }
@@ -302,7 +345,7 @@ fn parse_while(state: &mut ParserState) -> Result<Stmt, ParseError> {
     }
 }
 
-/// `for IDENT in expr { stmts... }` — placeholder per Fase 2+.
+/// `for IDENT in start..end { stmts... }` (range escludente).
 fn parse_for(state: &mut ParserState) -> Result<Stmt, ParseError> {
     state.advance(); // consume "for"
     let name = match state.advance() {
@@ -313,10 +356,11 @@ fn parse_for(state: &mut ParserState) -> Result<Stmt, ParseError> {
     let start = parse_expr(state)?;
     state.expect(Token::Op("..".into()))?; // range operator
     let end = parse_expr(state)?;
-    let body = parse_block(state)?;
-    // Per ora: restituisce un placeholder — la valutazione viene dopo.
-    let _ = (name, start, end);
-    Ok(body)
+    let body = match parse_block(state)? {
+        Stmt::Block(stmts) => stmts,
+        other => vec![other],
+    };
+    Ok(Stmt::For(name, start, end, body))
 }
 
 /// Expression statement: `expr` o `expr ; expr`.
@@ -428,7 +472,7 @@ fn parse_multiplicative(state: &mut ParserState) -> Result<Expr, ParseError> {
 fn parse_unary(state: &mut ParserState) -> Result<Expr, ParseError> {
     if state.try_consume(Token::Op("!".into())) {
         let expr = parse_unary(state)?; // right-associative
-        return Ok(Expr::Unary(BinOp::Not, Box::new(expr)));
+        return Ok(Expr::Unary(UnaryOp::Not, Box::new(expr)));
     }
     parse_primary(state)
 }
