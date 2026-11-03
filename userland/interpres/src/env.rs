@@ -433,35 +433,26 @@ fn format_value(v: &Value) -> String {
     }
 }
 
-/// Funzione builtin `type(name)` — chiamata da eval_expr.
-fn env_fn_type(_env: &Env, args: &[Expr]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
-        return Err(RuntimeError("type richiede 1 arg".into()));
+/// Valuta l'unico argomento di un builtin. Gli argomenti arrivano come AST:
+/// la valutazione (call-by-value) spetta al builtin, non a `Expr::Call`
+/// (`clear` ha bisogno dell'identificatore non valutato).
+fn eval_builtin_arg(env: &Env, args: &[Expr], name: &str) -> Result<Value, RuntimeError> {
+    match args {
+        [arg] => env.eval_expr(arg),
+        _ => Err(RuntimeError(format!("{} richiede 1 arg", name))),
     }
-    // La valutazione avviene nel chiamante. Qui restituiamo il tipo del primo arg non valutato.
-    Ok(Value::Str(match &args[0] {
-        Expr::Literal(v) => type_name(v).as_bytes().to_vec(),
-        Expr::Ident(name) => match _env.get(name) {
-            Some(v) => type_name(v).as_bytes().to_vec(),
-            None => b"undefined".to_vec(),
-        },
-        _ => b"expr".to_vec(),
-    }))
 }
 
-/// Funzione builtin `dump(name)` — chiamata da eval_expr.
-fn env_fn_dump(_env: &Env, args: &[Expr]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
-        return Err(RuntimeError("dump richiede 1 arg".into()));
-    }
-    match &args[0] {
-        Expr::Literal(v) => Ok(Value::Str(format_value(v).into_bytes())),
-        Expr::Ident(name) => match _env.get(name) {
-            Some(v) => Ok(Value::Str(format_value(v).into_bytes())),
-            None => Err(RuntimeError(format!("variabile non trovato: {}", name))),
-        },
-        _ => Ok(Value::Str(b"[non dumpabile]".to_vec())),
-    }
+/// Funzione builtin `type(expr)` — chiamata da eval_expr.
+fn env_fn_type(env: &Env, args: &[Expr]) -> Result<Value, RuntimeError> {
+    let v = eval_builtin_arg(env, args, "type")?;
+    Ok(Value::Str(type_name(&v).as_bytes().to_vec()))
+}
+
+/// Funzione builtin `dump(expr)` — chiamata da eval_expr.
+fn env_fn_dump(env: &Env, args: &[Expr]) -> Result<Value, RuntimeError> {
+    let v = eval_builtin_arg(env, args, "dump")?;
+    Ok(Value::Str(format_value(&v).into_bytes()))
 }
 
 /// Funzione builtin `clear(name)` — chiamata da eval_expr.

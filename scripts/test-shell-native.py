@@ -107,8 +107,8 @@ def main():
         c.check("while", ok_while)
 
         # Error handling (unknown var)
-        out = run_cmd(sh, "dump(unknown)", b"variabile non trovato")
-        c.check("errore variabile", b"variabile non trovato" in out)
+        out = run_cmd(sh, "dump(unknown)", b"variabile non trovata")
+        c.check("errore variabile", b"variabile non trovata" in out)
 
         # Block assignment
         out = run_cmd(sh, "let a = 1; { a = a + 1; }; dump(a)", b"2")
@@ -130,6 +130,10 @@ def main():
         # Null uguaglianza
         out = run_cmd(sh, "dump(null == null)", b"true")
         c.check("null uguale null", b"true" in out)
+
+        # type() valuta l'espressione (stesso difetto di dump: prima "expr")
+        out = run_cmd(sh, "type(null == null)", b"bool")
+        c.check("type valuta espressione", b"bool" in out)
 
         # Operatore unario !
         out = run_cmd(sh, "dump(!true)", b"false")
