@@ -14,7 +14,7 @@ digita, verifica sul log seriale, pulisce. Vedi scripts/shell_harness.py.
 import sys, os, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 from shell_harness import (Shell, Checker, prep_images, parse_shell_args,
-                           T_WAIT_POLL, T_WAIT_TAIL)
+                           T_WAIT_POLL, T_WAIT_TAIL, T_RUN)
 
 
 def run_cmd(sh, cmd, pattern=None, timeout=30):
@@ -56,11 +56,22 @@ def main():
 
         # Percorso completo: BIN_LIST -> oggetto piatto in `usr` -> EXECUTE ->
         # spawn_image. Il nome NON ha path ne' suffisso `.bin`.
+        mark = len(sh.read_log())
         out = run_cmd(sh, "runhello hello", b"Processo terminato")
         c.check("bucket binary scoperto (usr)",
                 b"[run] Esecuzione di 'runhello' dal bucket 'usr'" in out)
         c.check("runhello eseguito con argv", b"runhello: hello" in out)
         c.check("exit notificato al padre", b"[run] Processo terminato" in out)
+
+        # Il prompt e' disegnato UNA volta per riga: il vecchio editor lo
+        # riscriveva a ogni tasto (~1 prompt per carattere). Attende il prompt
+        # successivo, poi conta quelli nel tratto digitato + comando.
+        deadline = time.time() + 5
+        while sh.read_log()[mark:].count(b" > ") < 1 and time.time() < deadline:
+            time.sleep(T_WAIT_POLL)
+        typed = sh.read_log()[mark:]
+        c.check("prompt una volta per riga (no redraw per tasto)",
+                1 <= typed.count(b" > ") <= 2)
 
         # argv multiplo: la shell passa i token via pack_args (prima venivano
         # ignorati: il figlio vedeva solo argv[0]).
@@ -73,6 +84,29 @@ def main():
         out = run_cmd(sh, "users", b"Utenti registrati")
         c.check("users dopo lo spawn (ring sincronizzato)",
                 b"Utenti registrati" in out and b"root" in out)
+
+        # Suggerimento inline (stile oh-my-zsh): digitando `us` la history
+        # propone il resto di `users` (`ers`) in Slate, poi riporta il cursore
+        # a fine buffer. Poi svuota la riga con due backspace + Invio.
+        mark = len(sh.read_log())
+        sh.type_text("us")
+        time.sleep(T_WAIT_TAIL)
+        hint = sh.read_log()[mark:]
+        c.check("suggerimento inline dalla history",
+                b"\x1b[38;2;141;150;168mers\x1b[0m" in hint)
+        sh.send_mon("sendkey backspace")
+        sh.send_mon("sendkey backspace")
+        sh.send_mon("sendkey ret")
+        time.sleep(T_RUN)
+
+        # Up richiama l'ultimo comando (redraw completo della riga) e Invio
+        # lo esegue: prova che la history sia davvero alimentata.
+        mark = len(sh.read_log())
+        sh.press("up", sleep=T_WAIT_TAIL)
+        nav = sh.read_log()[mark:]
+        c.check("history Up richiama l'ultimo comando", b"> users" in nav)
+        sh.send_mon("sendkey ret")
+        time.sleep(T_RUN)
 
         # Comando inesistente: la ricerca nei bucket binary non deve produrre
         # un falso positivo ne' un hang.

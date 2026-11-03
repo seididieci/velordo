@@ -42,6 +42,9 @@ use alloc::format;
 // History & line editor implementation for REPL
 // ------------------------------------------------------------------
 
+/// Numero massimo di comandi tenuti in history (i piu' vecchi escono).
+const HISTORY_MAX: usize = 100;
+
 /// Simple history buffer for the REPL.
 /// Stores command strings and provides navigation via up/down.
 struct History {
@@ -54,8 +57,17 @@ impl History {
         Self { entries: Vec::new(), index: 0 }
     }
 
-    /// Push a new entry and reset navigation index.
+    /// Push a new entry and reset navigation index. I duplicati consecutivi
+    /// non entrano (come nella shell POSIX): premere Invio due volte non
+    /// riempie la history di righe identiche.
     fn push(&mut self, entry: String) {
+        if self.entries.last().is_some_and(|last| last == &entry) {
+            self.index = self.entries.len();
+            return;
+        }
+        if self.entries.len() >= HISTORY_MAX {
+            self.entries.remove(0);
+        }
         self.entries.push(entry);
         self.index = self.entries.len();
     }
@@ -95,6 +107,11 @@ impl History {
     }
 }
 
+/// Colore del suggerimento (Slate #8D96A8): il console server ignora SGR
+/// `2`/`22` (dim), quindi si usa un truecolor supportato.
+const HINT_COLOR: &[u8] = b"\x1b[38;2;141;150;168m";
+const HINT_RESET: &[u8] = b"\x1b[0m";
+
 /// Line editor that supports arrow keys, backspace, and history navigation.
 struct LineEditor<'a> {
     buffer: String,
@@ -103,6 +120,8 @@ struct LineEditor<'a> {
     kb_fd: i64,
     /// `true` when continuing after a `{` (multi-line block).
     continuation: bool,
+    /// Celle occupate dal suggerimento attualmente disegnato (0 = nessuno).
+    hint_len: usize,
 }
 
 impl<'a> LineEditor<'a> {
@@ -113,33 +132,94 @@ impl<'a> LineEditor<'a> {
             last_exit,
             kb_fd,
             continuation: false,
+            hint_len: 0,
         }
     }
 
-    /// Refresh the displayed prompt and line, including dimmed suggestion.
-    fn refresh(&self) {
-        // Build prompt
-        let prompt = build_prompt(self.last_exit);
+    /// Disegna il prompt una volta sola all'inizio della riga (o la sola
+    /// indentazione in continuazione). Prima veniva ridisegnato a ogni tasto.
+    fn draw_prompt(&mut self) {
         if self.continuation {
-            // Multi-line continuation: newline + indent, no full prompt re-print.
-            console_write_str("\n  ");
-            console_write_str(&self.buffer);
-            if let Some(sug) = self.history.suggest(&self.buffer) {
-                console_write(b"\x1b[2m");
-                console_write(sug.as_bytes());
-                console_write(b"\x1b[22m");
-            }
+            console_write(b"  ");
         } else {
-            // First line: clear and print full prompt + buffer.
-            console_write_str("\r\x1b[K");
-            console_write(prompt);
-            console_write_str(&self.buffer);
-            if let Some(sug) = self.history.suggest(&self.buffer) {
-                console_write(b"\x1b[2m");
-                console_write(sug.as_bytes());
-                console_write(b"\x1b[22m");
-            }
+            console_write(build_prompt(self.last_exit));
         }
+        self.hint_len = 0;
+    }
+
+    /// Suffisso suggerito dalla history. Mai in continuazione ne' a buffer
+    /// vuoto (altrimenti al prompt comparirebbe l'intero ultimo comando).
+    fn hint(&self) -> Option<&str> {
+        if self.continuation || self.buffer.is_empty() {
+            None
+        } else {
+            self.history.suggest(&self.buffer)
+        }
+    }
+
+    /// Scrive il suggerimento dopo il cursore e riporta il cursore a fine
+    /// buffer (`ESC[D` per glifo: il console server salta l'intero glifo
+    /// largo, quindi un carattere = un movimento).
+    fn push_hint(&mut self, out: &mut Vec<u8>) {
+        let sug = self.hint().map(String::from);
+        let Some(sug) = sug else {
+            self.hint_len = 0;
+            return;
+        };
+        out.extend_from_slice(HINT_COLOR);
+        out.extend_from_slice(sug.as_bytes());
+        out.extend_from_slice(HINT_RESET);
+        let cells = sug.chars().count();
+        for _ in 0..cells {
+            out.extend_from_slice(b"\x1b[D");
+        }
+        self.hint_len = cells;
+    }
+
+    /// Cancella il suggerimento eventualmente a schermo (cursore a fine
+    /// buffer: `ESC[K` pulisce da qui a fine riga).
+    fn erase_hint(&mut self, out: &mut Vec<u8>) {
+        if self.hint_len > 0 {
+            out.extend_from_slice(b"\x1b[K");
+            self.hint_len = 0;
+        }
+    }
+
+    /// Eco incrementale: una sola `console_write` per evento (la console
+    /// renderizza e flushatta una volta per scrittura, non una per tasto).
+    fn echo(&mut self, bytes: &[u8]) {
+        let mut out = Vec::new();
+        self.erase_hint(&mut out);
+        out.extend_from_slice(bytes);
+        self.push_hint(&mut out);
+        if !out.is_empty() {
+            console_write(&out);
+        }
+    }
+
+    /// Ridisegno completo: serve solo alla navigazione della history
+    /// (Up/Down), dove il contenuto della riga cambia del tutto.
+    fn redraw(&mut self) {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"\r\x1b[K");
+        if self.continuation {
+            out.extend_from_slice(b"  ");
+        } else {
+            out.extend_from_slice(build_prompt(self.last_exit));
+        }
+        out.extend_from_slice(self.buffer.as_bytes());
+        self.hint_len = 0;
+        self.push_hint(&mut out);
+        console_write(&out);
+    }
+
+    /// Chiude la riga: toglie il suggerimento e va a capo, senza ridisegnarne
+    /// uno nuovo (il cursore e' gia' sulla riga successiva).
+    fn finish_line(&mut self) {
+        let mut out = Vec::new();
+        self.erase_hint(&mut out);
+        out.push(b'\n');
+        console_write(&out);
     }
 
     /// Clear the current buffer (called between lines of a multi‑line block).
@@ -150,6 +230,7 @@ impl<'a> LineEditor<'a> {
 
     /// Read user input with editing support.
     fn read(&mut self) -> String {
+        self.draw_prompt();
         let mut byte = [0u8; 1];
         loop {
             let n = civis::read_fs(self.kb_fd, &mut byte, 1).unwrap_or(0);
@@ -173,33 +254,34 @@ impl<'a> LineEditor<'a> {
                         ('[', 'A') => { // Up
                             if let Some(cmd) = self.history.prev() {
                                 self.buffer = cmd;
-                                self.refresh();
+                                self.redraw();
                             }
                         }
                         ('[', 'B') => { // Down
                             if let Some(cmd) = self.history.next() {
                                 self.buffer = cmd;
-                                self.refresh();
+                                self.redraw();
                             } else {
                                 self.buffer.clear();
-                                self.refresh();
+                                self.redraw();
                             }
                         }
                         _ => {}
                     }
                 }
                 0x08 | 0x7F => {
-                    self.buffer.pop();
-                    self.refresh();
+                    if self.buffer.pop().is_some() {
+                        self.echo(b"\x08 \x08");
+                    }
                 }
                 0x0a | 0x0d => {
-                    console_write_str("\n");
+                    self.finish_line();
                     break;
                 }
                 _ => {
                     let ch = c as char;
                     self.buffer.push(ch);
-                    self.refresh();
+                    self.echo(&[c]);
                 }
             }
         }
@@ -305,26 +387,35 @@ fn real_main(_sp: u64) -> ! {
     };
 
     loop {
-        // Read a line, supporting multi‑line blocks.
+        // Read a line, supporting multi‑line blocks. L'editor e' in uno scope
+        // proprio: tiene `&mut history` e va rilasciato prima del `push`.
         let mut accumulated = String::new();
         let mut brace_depth: i32 = 0;
-        let mut editor = LineEditor::new(&mut history, last_exit, kb_fd);
-        loop {
-            let raw_line = editor.read();
-            editor.clear_buffer();
-            // Append to buffer.
-            accumulated.push_str(&raw_line);
-            accumulated.push('\n');
+        {
+            let mut editor = LineEditor::new(&mut history, last_exit, kb_fd);
+            loop {
+                let raw_line = editor.read();
+                editor.clear_buffer();
+                // Append to buffer.
+                accumulated.push_str(&raw_line);
+                accumulated.push('\n');
 
-            // Count braces for very simple matching.
-            brace_depth += raw_line.matches('{').count() as i32 - raw_line.matches('}').count() as i32;
-            if brace_depth <= 0 {
-                break;
+                // Count braces for very simple matching.
+                brace_depth += raw_line.matches('{').count() as i32 - raw_line.matches('}').count() as i32;
+                if brace_depth <= 0 {
+                    break;
+                }
             }
         }
         let line = trim_str(&accumulated);
         if line.is_empty() {
             continue;
+        }
+
+        // History: solo comandi mono-riga (i blocchi multi-riga non sono
+        // riproponibili con Up/Down ne' suggeribili).
+        if !line.contains('\n') {
+            history.push(String::from(line));
         }
 
         // ADR-0065 Fase 1+2: interprete Rust-like prima del dispatcher.

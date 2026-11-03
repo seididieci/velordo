@@ -209,10 +209,12 @@ verifica `RIGHTS_EXECUTE` e lo esegue con `spawn_image`, passando gli argv con
 conserva la vista POSIX (`usr/bin/runhello.bin`).
 
 Verifica: `scripts/test-shell-native.py` (fase `native` di
-`test-shell-all.sh`) — 25 check: path bucket (`BIN_LIST` → `obj_get` →
+`test-shell-all.sh`) — 28 check: path bucket (`BIN_LIST` → `obj_get` →
 EXECUTE → `spawn_image` con argv → exit), response ring FS ancora
-sincronizzato dopo lo spawn (`users` subito dopo `runhello`), e interprete
-ADR-0065 (`let`, aritmetica, `if`/`while`/`for`, commenti, `dump`/`type`).
+sincronizzato dopo lo spawn (`users` subito dopo `runhello`), interprete
+ADR-0065 (`let`, aritmetica, `if`/`while`/`for`, commenti, `dump`/`type`) e
+prompt disegnato **una volta per riga** (l'editor nativo fa eco incrementale,
+history Up/Down con suggerimento inline in stile oh-my-zsh).
 
 Line editing (Fase 43b, readline nella shell su tty raw): Up/Down history
 comandi (Enter accoda: non vuota, no duplicato consecutivo; heredoc esclusi),
