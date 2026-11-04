@@ -92,3 +92,5 @@
 - [ADR-0058: Creazione utenti, token di sessione e protocollo Identis (Fase 3.1)](./adr/0058-creazione-utenti-token-sessione.md)
 - [ADR-0059: Il FAT esce dal boot e dalla suite — ArcaFS unico filesystem di sistema](./adr/0059-fat-fuori-boot-arcafs-unico.md)
 - [ADR-0064: Bucket `binary` — namespace piatto di eseguibili](./adr/0064-bucket-binari-piatti.md)
+- [ADR-0065: Interprete "Rust-like" per la shell di Velordo](./adr/0065-interprete-rust-like.md)
+- [ADR-0066: Redraw del terminale — danno, rect di trasferimento, sfondo precomposto e scroll (D7)](./adr/0066-redraw-terminale-danno-rect-scroll.md)
