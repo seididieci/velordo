@@ -378,8 +378,12 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `useruptime` in boot reale).
 - **Robustezza scheduler (fix pre-esistenti)**: (1) i wait in userland NON fanno
   busy-loop su syscall (`get_ticks`) — che maschera gli interrupt (IF=0) e
-  affama il timer — ma spin puri IF=1 (shell/console; `usertestspin`/`utcbstest`
-  fanno batch da 512 spin puri tra due `get_ticks`); (2) `ipc_recv` controlla
+  affama il timer — e le attese **idle** (prompt di input) dormono con
+  `futex_wait` a deadline di 1 tick (ADR-0067: processo `Blocked`, PIT attivo,
+  CPU ~0%); restano spin puri IF=1 solo i bound brevi e certi (`spin_esc` delle
+  continuazioni ESC, `wait_fg`/`cancel_job` durante un comando foreground;
+  `usertestspin`/`utcbstest` fanno batch da 512 spin puri tra due
+  `get_ticks`); (2) `ipc_recv` controlla
   la coda e marca `Blocked` sotto lo STESSO lock (chiusa la race check-then-
   block / lost-wakeup); (3) i wait da IRQ (kbd) usano `pending_wake`: `wake`
   imposta il flag se il processo non e' ancora bloccato, `block_current` lo
@@ -478,3 +482,11 @@ test "$(rg -c 'FAIL|PANIC|#.* FAULT' /tmp/boot.log)" = "0"
    lì si usa `send_raw` (D5/ADR-0062). Con `send()` la sequenza di
    cancellazione (3 byte) arrivava come 7 e il mirror seriale non combaciava
    col terminale.
+9. **Attese di input in userland: futex, non spin (ADR-0067)**: quando
+   `read_fs` non ha byte, il loop deve dormire con
+   `futex_wait(word, 0, get_ticks()+1)` (processo `Blocked`, PIT attivo),
+   mai `continue` nudo né `spin_brief()` illimitato: al prompt la CPU va al
+   100% (misurato 99,7% in POSIX shell e in `read_line_from_keyboard`).
+   Lo spin va bene solo per bound di microsecondi (continuazioni ESC) e
+   durante un comando foreground (`wait_fg`/`cancel_job`). Le fasi shell
+   `base`/`native` campionano la CPU di QEMU e falliscono sopra il 50%.

@@ -200,6 +200,27 @@ class Shell:
         except FileNotFoundError:
             return b""
 
+    def cpu_percent(self, seconds=1.0):
+        """CPU% del processo QEMU su una finestra (host Linux: /proc/<pid>/stat).
+
+        Serve alle regressioni "busy-wait al prompt": uno spin di attesa
+        input tiene QEMU a ~100%, un futex a ~0-2%. Il campione e' per
+        processo, quindi non dipende dal carico degli altri QEMU in parallelo.
+        """
+        pid = self.q.pid
+
+        def ticks():
+            with open("/proc/%d/stat" % pid) as f:
+                parts = f.read().split()
+            return int(parts[13]) + int(parts[14])  # utime + stime
+
+        a = ticks()
+        t0 = time.time()
+        time.sleep(seconds)
+        b = ticks()
+        dt = time.time() - t0
+        return 100.0 * ((b - a) / os.sysconf("SC_CLK_TCK")) / dt
+
     # ── Prompt sync ───────────────────────────────────────────────
 
     def wait_prompt(self, timeout=8):

@@ -322,7 +322,7 @@ nei test).
 | `IDENTIS_*` | 0x70-0x72 | servizio Identis (client→Identis, Fase 3.1/ADR-0058: `VERIFY`/`ADD_USER` con **payload chunked** (magic `ACLI`/`ACUS`, header `w0=total_len`, chunk `w0=offset`/`w1=4 byte`, EOF `w0=0xFFFFFFFF`), `LIST` in una richiesta; `w1` della reply di `VERIFY` = **token di sessione**) |
 | `DEV_*` | 0x20-0x24 | op cardo↔driver (`OPEN/READ/WRITE/CLOSE/READDIR`; DocsD: prima duplicati in 6 file) |
 | `DEV_*` type (`w0` di `DEV_OPEN`) | 0-4 | `NULL/ZERO` (devfs), `KEYBOARD` (tty), `CONSOLE` (console), `KBD` (kbd) |
-| `GPU_DISPLAY_*` | 0x74-0x78 | protocollo display (console↔gpu, D3/D4: `STATS` 0x74, `QUERY`/`PRESENT`/`FLUSH`/`CHANGED` 0x75-0x78) |
+| `GPU_DISPLAY_*` | 0x74-0x78 | protocollo display (console↔gpu, D3/D4: `STATS` 0x74, `QUERY`/`PRESENT`/`FLUSH`/`CHANGED` 0x75-0x78; `FLUSH` porta il rect in pixel: `w0 = x \| (y<<16)`, `w1 = w \| (h<<16)`, `(0,0)` = schermo intero — D7/ADR-0066) |
 | `CONSOLE_*` | 0x79-0x7B | `QUERY`/`SET_MODE`/`STATE` (client→console, D4) |
 | `EXIT_NOTIFY` | 0x7C | morte peer (kernel→tutti i peer, `w0` = code, `w1` = pid) |
 | `KBD_NOTIFY` | 0x40 | scancode pronti (kbd→porta) |

@@ -27,6 +27,13 @@ def main():
         sh.boot()
         ok = True
 
+        # Regressione "CPU 100% al prompt" (ADR-0067): la POSIX shell deve
+        # dormire in futex quando la tastiera e' vuota, non spinare in
+        # `kbd_read_byte`. Busy-wait ~100%, attesa ~0-2%: soglia ampia.
+        cpu = sh.cpu_percent(1.0)
+        print("info CPU prompt POSIX: %.1f%%" % cpu, flush=True)
+        c.check("prompt POSIX idle senza busy-wait (CPU < 50%)", cpu < 50.0)
+
         # Suite di boot (se il kernel bootato la include: dipende da come e'
         # stato compilato init): si asserisce quando la suite e' presente, si
         # salta in boot di produzione.

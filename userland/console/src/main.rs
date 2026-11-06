@@ -60,6 +60,61 @@ const CRTC_DATA: u16 = 0x3D5;
 
 // ── Il terminale ───────────────────────────────────────────────────
 
+/// Rettangolo di pixel toccati (half-open): il danno da trasferire al driver
+/// (D7, ADR-0066). Unico punto di dichiarazione del danno: ogni cella disegnata
+/// aggiunge il proprio bbox.
+#[derive(Clone, Copy)]
+struct Damage { x0: u32, y0: u32, x1: u32, y1: u32 }
+
+impl Damage {
+    /// Il sentinella di "nessun danno": x0/y0 al massimo cosi' il primo
+    /// `add_rect` li abbassa al valore vero (con 0 l'`min` terrebbe l'origine
+    /// e ogni rect partirebbe da (0,0)).
+    fn none() -> Self { Self { x0: u32::MAX, y0: u32::MAX, x1: 0, y1: 0 } }
+    fn is_empty(&self) -> bool { self.x0 >= self.x1 || self.y0 >= self.y1 }
+    fn add_rect(&mut self, x: u32, y: u32, w: u32, h: u32) {
+        if w == 0 || h == 0 { return; }
+        let x1 = x.saturating_add(w);
+        let y1 = y.saturating_add(h);
+        self.x0 = self.x0.min(x);
+        self.y0 = self.y0.min(y);
+        self.x1 = self.x1.max(x1);
+        self.y1 = self.y1.max(y1);
+    }
+    /// Espande il danno di 1 cella in tutte le direzioni (I3: sbordo glifo).
+    /// `c0..=c1` / `r0..=r1` sono indici di cella inclusivi; il rettangolo
+    /// risultante e' in pixel, half-open, clipped a `(surf_w, surf_h)`.
+    fn add_cells(
+        &mut self,
+        geom: term::surface::Geom,
+        surf_w: u32,
+        surf_h: u32,
+        c0: usize,
+        r0: u32,
+        c1: usize,
+        r1: u32,
+    ) {
+        let cw = geom.cell_w as u32;
+        let ch = geom.cell_h as u32;
+        let ox = geom.origin_x;
+        let oy = geom.origin_y;
+        let last_col = (geom.cols.saturating_sub(1)) as u32;
+        let last_row = (geom.rows.saturating_sub(1)) as u32;
+        let x0 = ox + (c0.saturating_sub(1)) as u32 * cw;
+        let y0 = oy + r0.saturating_sub(1) * ch;
+        let x1 = (ox + ((c1 as u32 + 1).min(last_col) + 1) * cw).min(surf_w);
+        let y1 = (oy + ((r1 + 1).min(last_row) + 1) * ch).min(surf_h);
+        self.add_rect(x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0));
+    }
+    /// Restituisce `(x,y,w,h)` se non vuoto, `None` altrimenti.
+    fn take(&mut self) -> Option<(u32, u32, u32, u32)> {
+        if self.is_empty() { return None; }
+        let r = (self.x0, self.y0, self.x1 - self.x0, self.y1 - self.y0);
+        *self = Self::none();
+        Some(r)
+    }
+}
+
 /// Lo stato del terminale: modello, decoder, surface.
 struct Term {
     grid: Grid,
@@ -76,6 +131,10 @@ struct Term {
     pending: alloc::vec::Vec<u32>,
     /// Ultima posizione del cursore disegnata (per ridisegnarla).
     cursor_drawn: (usize, usize),
+    /// Ultimo stato visibile del cursore (per non ridisegnare la cella del
+    /// cursore a ogni render se nulla e' cambiato: con il danno esplicito
+    /// sarebbe un trasferimento per messaggio).
+    cursor_drawn_visible: bool,
     /// Colore foreground corrente (truecolor RGBA packed).
     fg: u32,
     /// Colore background corrente (truecolor RGBA packed).
@@ -101,6 +160,15 @@ struct Term {
     /// un riadattamento fallito non deve lasciare la surface su un buffer
     /// liberato).
     fb_slot: u64,
+    /// Danno accumulato (D7, ADR-0066): rettangolo di pixel da trasferire.
+    damage: Damage,
+    // Statistiche (T0, ADR-0066): diagnostica su seriale.
+    stat_renders: u64,
+    stat_cells: u64,
+    stat_flushes: u64,
+    stat_bytes: u64,
+    stat_cyc_render: u64,
+    stat_cyc_flush: u64,
 }
 
 impl Term {
@@ -218,7 +286,7 @@ impl Term {
         //    schermo nero fino a li').
         self.draw_layer0_full();
         self.render();
-        self.flush_display();
+        self.flush_display_full();
         true
     }
 
@@ -251,14 +319,88 @@ impl Term {
     /// dentro si deadlockerebbe). Inoltre i ring client e server condividono
     /// la stessa finestra `CLI_*`: il canale diretto evita anche la
     /// sovrapposizione.
+    ///
+    /// D7 (ADR-0066): trasferisce solo il rettangolo di danno, non lo schermo
+    /// intero. Valvola di sicurezza: `FULL_FLUSH_ONLY = true` → si torna al
+    /// comportamento pre-D7.
     fn flush_display(&mut self) {
+        // T0 (ADR-0066): statistica.
+        let t0 = civis::rdtsc();
         if self.driver_chan == 0 {
             return;
         }
         if !matches!(self.surface, Surface::Pixel(_)) {
             return;
         }
-        let _ = civis::send(self.driver_chan, civis::syscall_numbers::GPU_DISPLAY_FLUSH, 0, 0);
+        // D7 (ADR-0066): valvola di sicurezza. Se FULL_FLUSH_ONLY=true si torna
+        // al comportamento pre-D7 (sempre full-screen). Con danno vuoto non si
+        // manda nulla (nessuna IPC).
+        const FULL_FLUSH_ONLY: bool = false;
+        let f = if FULL_FLUSH_ONLY {
+            term::disp::Flush::Full
+        } else {
+            match self.damage.take() {
+                Some((x, y, w, h)) => term::disp::Flush::Rect { x, y, w, h },
+                None => return, // niente da trasferire
+            }
+        };
+        let (w0, w1) = term::disp::pack_flush(f);
+        let _ = civis::send(self.driver_chan, civis::syscall_numbers::GPU_DISPLAY_FLUSH, w0, w1);
+        self.stat_flushes += 1; // T0 (ADR-0066)
+        // Byte effettivamente trasferiti: il full e' la superficie intera
+        // (width*height*4), il rect e' la sua area.
+        if let Surface::Pixel(p) = &self.surface {
+            self.stat_bytes += match f {
+                term::disp::Flush::Full => p.width as u64 * p.height as u64 * 4,
+                term::disp::Flush::Rect { w, h, .. } => w as u64 * h as u64 * 4,
+            };
+        } // ADR-0066
+        self.stat_cyc_flush += civis::rdtsc() - t0;
+        if self.stat_flushes % 64 == 0 {
+            civis::println!(
+                "[console] stats: renders={} cells={} flushes={} B/flush={} cyc/render={} cyc/flush={}",
+                self.stat_renders,
+                self.stat_cells,
+                self.stat_flushes,
+                self.stat_bytes / self.stat_flushes.max(1),
+                self.stat_cyc_render / self.stat_renders.max(1),
+                self.stat_cyc_flush / self.stat_flushes.max(1)
+            );
+        }
+    }
+
+    /// Forza un trasferimento **full-screen** (D7: I4 — dopo PRESENT il device
+    /// deve ricevere tutti i pixel, anche con danno vuoto). Usato all'avvio e
+    /// a ogni resize (I4), e da `CONSOLE_REPAINT` (T4).
+    fn flush_display_full(&mut self) {
+        let t0 = civis::rdtsc();
+        if self.driver_chan == 0 {
+            return;
+        }
+        if !matches!(self.surface, Surface::Pixel(_)) {
+            return;
+        }
+        let f = term::disp::Flush::Full;
+        let (w0, w1) = term::disp::pack_flush(f);
+        let _ = civis::send(self.driver_chan, civis::syscall_numbers::GPU_DISPLAY_FLUSH, w0, w1);
+        // Azzera il danno: un full transfer copre tutto.
+        self.damage = Damage::none();
+        self.stat_flushes += 1; // T0 (ADR-0066)
+        if let Surface::Pixel(p) = &self.surface {
+            self.stat_bytes += p.width as u64 * p.height as u64 * 4; // ADR-0066
+        }
+        self.stat_cyc_flush += civis::rdtsc() - t0;
+        if self.stat_flushes % 64 == 0 {
+            civis::println!(
+                "[console] stats: renders={} cells={} flushes={} B/flush={} cyc/render={} cyc/flush={}",
+                self.stat_renders,
+                self.stat_cells,
+                self.stat_flushes,
+                self.stat_bytes / self.stat_flushes.max(1),
+                self.stat_cyc_render / self.stat_renders.max(1),
+                self.stat_cyc_flush / self.stat_flushes.max(1)
+            );
+        }
     }
 
     /// Un codepoint nel modello (movimento del cursore, scroll, editing).
@@ -381,6 +523,8 @@ impl Term {
     /// background corrente (cosi' i pixel del vecchio carattere non restano
     /// impressi). Poi si disegna il glifo (se presente).
     fn render(&mut self) {
+        // T0 (ADR-0066): misura i cicli per render.
+        let t0 = civis::rdtsc();
         // Estraggo i dati del layer 0 come puntatore+lunghezza (tipo Copy)
         // PRIMA di qualsiasi mut-borrow su self, per evitare conflitti di
         // borrow con restore_layer0_cell(&mut self, ...).
@@ -400,27 +544,38 @@ impl Term {
                     let is_cursor =
                         (col, row) == self.grid.cursor_clamped() && self.grid.cursor_visible;
                     self.draw_cell_at(col, row, is_cursor, l0_data);
+                    self.stat_cells += 1; // T0 (ADR-0066)
                 }
             }
         }
-        // Il cursore si e' spostato: la cella vecchia va ridisegnata.
+        // Il cursore si e' spostato o ha cambiato visibilita': ridisegna la
+        // cella del cursore solo se lo stato e' cambiato (con il danno
+        // esplicito sarebbe un trasferimento per messaggio).
         let cur = self.grid.cursor_clamped();
-        if cur != self.cursor_drawn {
-            let (cc, cr) = self.cursor_drawn;
+        let cur_visible = self.grid.cursor_visible;
+        if cur != self.cursor_drawn || cur_visible != self.cursor_drawn_visible {
+            // Cancella la vecchia posizione del cursore (se diversa).
+            if cur != self.cursor_drawn {
+                let (cc, cr) = self.cursor_drawn;
+                if cc < self.grid.cols() && cr < self.grid.rows() {
+                    self.draw_cell_at(cc, cr, false, l0_data);
+                }
+            }
+            // Disegna il cursore nella nuova posizione.
+            let (cc, cr) = cur;
             if cc < self.grid.cols() && cr < self.grid.rows() {
-                self.draw_cell_at(cc, cr, false, l0_data);
+                self.draw_cell_at(cc, cr, cur_visible, l0_data);
             }
             self.cursor_drawn = cur;
-        }
-        // La cella del cursore (con il cursore dentro).
-        let (cc, cr) = self.cursor_drawn;
-        if cc < self.grid.cols() && cr < self.grid.rows() {
-            self.draw_cell_at(cc, cr, self.grid.cursor_visible, l0_data);
+            self.cursor_drawn_visible = cur_visible;
         }
         // Nel fallback VGA il cursore e' quello hardware (CRTC).
+        let (cc, cr) = cur;
         if matches!(self.surface, Surface::VgaText(_)) {
             unsafe { move_hw_cursor(cr, cc) };
         }
+        self.stat_renders += 1; // T0 (ADR-0066)
+        self.stat_cyc_render += civis::rdtsc() - t0;
     }
 
     /// Riempe una cella (o uno span di celle) col suo background (nessun
@@ -472,6 +627,7 @@ impl Term {
     /// Disegna la cella (col,row): se e' una continuazione disegna la testa
     /// dello span (una cella non si ridisegna da sola in mezzo a un glifo
     /// largo). `l0_data` e' il layer 0 gia' estratto (puntatore+lunghezza).
+    /// D7 (ADR-0066): dichiara il danno subito dopo aver calcolato lo span.
     fn draw_cell_at(
         &mut self,
         col: usize,
@@ -482,6 +638,12 @@ impl Term {
         let (start, _len) = self.grid.span_at(col, row);
         let cell = self.grid.cell(start, row);
         let span = cell.width.max(1) as usize;
+        // D7 (ADR-0066): dichiara il danno subito dopo aver calcolato lo span
+        // (una cella toccata e' una cella cambiata), con lo sbordo di 1 cella
+        // e il clip alla superficie.
+        let geom = self.surface.geom();
+        let (sw, sh) = self.surface.pixel_size();
+        self.damage.add_cells(geom, sw, sh, start, row as u32, start + span - 1, row as u32);
         // Celle vuote (cp == 0): ripristina lo sfondo dal layer 0 (pixel BMP
         // dove sovrappone, nero altrove). Niente glifo. Senza layer 0 la
         // cella va riempita col suo bg (una cella "spazio" puo' avere un
@@ -801,6 +963,7 @@ fn real_main(_sp: u64) -> ! {
         csi_params: alloc::vec::Vec::new(),
         pending: alloc::vec::Vec::with_capacity(64),
         cursor_drawn: (0, 0),
+        cursor_drawn_visible: false,
         fg: color::DEFAULT_FG,
         bg: color::DEFAULT_BG,
         driver_chan,
@@ -810,6 +973,11 @@ fn real_main(_sp: u64) -> ! {
         layer0_offset_x: 0,
         layer0_offset_y: 0,
         fb_slot: civis::DMA_SLOT_DEVICE,
+        // D7 (ADR-0066): nessun danno iniziale.
+        damage: Damage::none(),
+        // T0: statistica (ADR-0066).
+        stat_renders: 0, stat_cells: 0, stat_flushes: 0,
+        stat_bytes: 0, stat_cyc_render: 0, stat_cyc_flush: 0,
     };
 
     // Lo sfondo e' un layer: caricato PRIMA del banner, altrimenti il testo
@@ -828,7 +996,7 @@ fn real_main(_sp: u64) -> ! {
     }
     // Fondo: colore di pagina + immagine centrata (se c'e').
     term.draw_layer0_full();
-    term.flush_display();
+    term.flush_display_full();
 
     // 5. Banner sul terminale (il framebuffer o la VGA) + il seriale (sink
     //    di debug): la console si annuncia come il vecchio console server.

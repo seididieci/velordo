@@ -461,6 +461,10 @@ pub const GPU_DISPLAY_QUERY: u64 = 0x75;
 pub const GPU_DISPLAY_PRESENT: u64 = 0x76;
 /// Refresh della superficie (copia i pixel dal buffer del client): senza,
 /// lo schermo resta nero (path non-virgl: il flush non copia i pixel).
+/// D7 (ADR-0066): `w0` = `x | (y << 16)`, `w1` = `w | (h << 16)` (pixel,
+/// half-open sul bordo destro/basso); `(0,0)` = schermo intero (compatibilita'
+/// con il call pre-D7 che mandava `(0,0)`). Se `w == 0 || h == 0` → schermo
+/// intero.
 pub const GPU_DISPLAY_FLUSH: u64 = 0x77;
 /// Notifica del driver alla console (D4): la misura del display e' cambiata
 /// (config change MSI-X, o resize dell'host). `w1` = geometria impacchettata.

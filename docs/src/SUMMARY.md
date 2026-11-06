@@ -94,3 +94,4 @@
 - [ADR-0064: Bucket `binary` — namespace piatto di eseguibili](./adr/0064-bucket-binari-piatti.md)
 - [ADR-0065: Interprete "Rust-like" per la shell di Velordo](./adr/0065-interprete-rust-like.md)
 - [ADR-0066: Redraw del terminale — danno, rect di trasferimento, sfondo precomposto e scroll (D7)](./adr/0066-redraw-terminale-danno-rect-scroll.md)
+- [ADR-0067: Attese di input in userland — futex, non spin](./adr/0067-attese-input-futex.md)

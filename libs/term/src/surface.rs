@@ -333,6 +333,15 @@ impl Surface {
         }
     }
 
+    /// Dimensioni in pixel della superficie attiva: `(width, height)` per il
+    /// path pixel, `(0, 0)` per la VGA testuale (nessun trasferimento).
+    pub fn pixel_size(&self) -> (u32, u32) {
+        match self {
+            Surface::Pixel(p) => (p.width, p.height),
+            Surface::VgaText(_) => (0, 0),
+        }
+    }
+
     /// Mette un codepoint in una cella (col,row) con colori truecolor.
     ///
     /// `span` e' quante celle occupa il glifo (1 per un carattere normale,

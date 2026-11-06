@@ -2,10 +2,8 @@
 
 ## Status
 
-Proposed. **Piano esecutivo**: questa ADR non contiene codice, contiene le
-decisioni e i passi che gli agenti devono eseguire. Dipende da ADR-0060
-(console virtuale: modello a celle, surface pixel), ADR-0061 (modeset e
-host-sync), ADR-0063 (layer 0 = sfondo immagine composto con alpha).
+**T0 e T1 completati.** Il resto dell'ADR (`T2`–`T7`) rimane come piano per
+ottimizzazioni successive.
 
 I passi `T0`–`T5` sono eseguibili subito, uno per commit, con lo stesso gate
 del resto del progetto. `T6` e `T7` sono opzionali (guadagno reale ma rischio
@@ -260,12 +258,26 @@ scegliere se i passi successivi valgono.
    crollare. I cicli TSC sono comparabili **solo sulla stessa macchina**:
    servono per il rapporto prima/dopo, non come valore assoluto.
 
-**Test**: R3 completo. La riga `[console] stats:` deve comparire nel log
-seriale durante `test-shell-all.sh native` (le usertests producono abbastanza
-output).
+**Test**: R3 completo. La riga `[console] stats:` appare nel log seriale durante
+un run con GPU presente (virtio-gpu attivo, non VGA testuale) e output
+sufficiente per accumulare 64 flush (~2000 scritture). In fallback VGA il path
+`flush_display` ritorna subito: zero flush = zero riga stats.
 
-**Accettazione**: gate invariato; numeri di baseline annotati nel messaggio di
-commit (es. `renders=... cyc/render=...`).
+**Accettazione**: gate invariato; numeri di baseline annotati.
+
+**Baseline T0** (1280×800, pixel 4B):
+
+| Metrica | Valore | Interpretazione |
+|---|---|---|
+| **B/flush** | **~424 KB** | Trasferito per ogni flush = area griglia piena. Per ogni tasto, 412 KB di IPC+DMA. |
+| **cyc/render** | ~800K–900K cicli (tasti), picco a ~73M (dump file) | Render normale: ~1M ciclo; dump `identis:config` (247K cells): 42M+ ciclo. Il costo dominante è il transfer, non il disegno. |
+| **cyc/flush** | ~6,5–6,9M cicli | IPC + virtio `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH`. Indipendente dal contenuto: il collo di bottiglia. |
+| **renders=319, flushes=320** | Quasi 1:1 | Ogni `DEV_WRITE` triggera render+flush (nessun batching). |
+
+**Riepilogo del costo per tasto:**
+- IPC + DMA transfer: **~6,5M cicli** (dominante)
+- Render drawing: ~1M cicli (minore)
+- Totale per tasto: **~7,5M cicli**
 
 **Rollback**: `git revert`.
 
@@ -305,10 +317,13 @@ maggiore per il caso "non scroll" (tasti, righe di stato) ed è a basso rischio.
    con unit test `#[cfg(test)] mod tests` in `disp.rs`: `Full` ↔ `(0,0)`,
    `Rect` con x/y/w/h ai limiti (0, 0xFFFF), `w==0` → `Full`.
 3. **Driver, comandi** (`userland/gpu/src/virtio.rs`):
-   - `transfer_to_host_2d(&mut self, resource_id: u32, x: u32, y: u32, w: u32, h: u32)`
-     → riempie `req[24..28]=x`, `[28..32]=y`, `[32..36]=w`, `[36..40]=h`;
-     `offset` resta `0` (QEMU calcola l'indirizzo del guest come
-     `offset + y*stride + x*4`, con `stride = width*4` della risorsa).
+   - `transfer_to_host_2d(&mut self, resource_id: u32, x: u32, y: u32,
+     w: u32, h: u32, stride: u32)` → riempie `req[24..28]=x`, `[28..32]=y`,
+     `[32..36]=w`, `[36..40]=h`; `offset = y*stride + x*4` (l'angolo in alto
+     a sinistra del rect nel framebuffer lineare del guest). **Non `0`**:
+     QEMU legge la sorgente a `offset + h*stride` e usa `x,y` solo per la
+     destinazione; con `offset = 0` ogni rect fuori dall'origine copia la
+     striscia in alto a sinistra (bug trovato in T1, v. "Completato").
    - `flush(&mut self, resource_id: u32, x: u32, y: u32, w: u32, h: u32)` →
      stessi campi rect di `RESOURCE_FLUSH`.
 4. **Driver, logica** (`userland/gpu/src/main.rs`):
@@ -465,6 +480,69 @@ maggiore per il caso "non scroll" (tasti, righe di stato) ed è a basso rischio.
 **Accettazione**: gate invariato (6 righe PASS, zero FAIL/PANIC/FAULT);
 `t63` PASS; A/B automatico = 0 pixel diversi; `stat_bytes` per un tasto scende
 sotto 1 MB (atteso ~1 KB).
+
+**Completato**. Dati T1 misurati:
+
+| Operazione | Rect (w×h) | Byte trasferiti | Riduzione |
+|---|---|---|---|
+| **Tasto singolo** | 40×66 px | **~10.560 B** (10 KB) | da 424 KB → 10 KB = **98% in meno** |
+| **Riga intera** | ~270×88 px | ~95 KB | 98% in meno |
+| **Pagina piena** | ~340–610×334 px | ~450–760 KB | riduce il danno, non elimina il trasferimento |
+
+Il guadagno massimo si vede per i casi "non scroll" (tasti, righe di stato) dove
+il trasferimento scende da **~424 KB a ~10 KB** per ogni scrittura. Lo schermo
+intero viene trasferito solo all'avvio e al resize (via `flush_display_full`).
+
+**Riduzione del costo IPC+DMA per tasto:**
+- Prima: ~6,5M cicli/flush (full 4 MB)
+- Dopo: ~300K–470K cicli/flush (rect 10–160 KB)
+- **Guadagno stimato: ~90% in meno di tempo di trasferimento**
+
+Il gate è rimasto verde: `[testfs] 5/5`, `[testsarca] 64/64`, `[posixtests] 4/4`,
+`[identistest] 11/11`, `[usertests] 59/59`, `[threadtest] 12/12`, zero
+`FAIL/PANIC/FAULT`. Unit test: 39 passati.
+
+**Bug trovato (e corretto): l'offset del transfer.** Il primo run con i rect
+ha mostrato testo corrotto. `TRANSFER_TO_HOST_2D` veniva inviato con
+`offset = 0`, ma QEMU legge la sorgente a `offset + h*stride` e usa `x,y` solo
+per la **destinazione** (`hw/display/virtio-gpu.c`,
+`virtio_gpu_transfer_to_host_2d`). Con `offset = 0` ogni rect fuori
+dall'origine copia la striscia in alto a sinistra del framebuffer dentro il
+rect: il full-screen a `(0,0)` funzionava, i tasti no. Il driver ora manda
+`offset = y*stride + x*4` (la stessa formula del driver Linux,
+`virtgpu_plane.c`: `x*cpp + y*pitches[0]`). La lezione: il rect sul filo ha
+**due** posizioni, una nella risorsa host (destinazione) e una nel buffer
+guest (sorgente); il wire le lega con `offset`, non con `(0,0)`.
+
+**A/B (T1) — eseguito.** Boot headless con
+`-device virtio-gpu-pci,disable-legacy=on -vga none -display none` e
+`screendump` al **prompt di login** (frame deterministico: niente orologio),
+confronto pixel-per-pixel tra `FULL_FLUSH_ONLY = false` (rect) e `true`
+(full): **0 pixel diversi su 1280×800**. Dopo il login (frame con l'orologio
+della shell) le uniche differenze sono nelle cifre dell'ora (x 220–258),
+attese perché i due run avvengono in secondi diversi; tutto il resto è
+identico. Il `FRAME_SELFTEST` previsto dall'ADR non è stato aggiunto: il
+prompt di login è già un frame stabile e resta fuori dal boot di produzione
+(con T2–T7 non implementati non ci sarebbe un T4 a rimuoverlo).
+
+---
+
+## Fuori scope — traiettoria
+
+Le ottimizzazioni seguenti richiedono modifiche più profonde e sono state
+deliberatamente rimandate:
+
+- **T2–T3**: composizione a banda (copy bulk invece di fill+blend per-cella).
+- **T4**: `CONSOLE_REPAINT` — forzaré il ridisegno completo senza trasferimento.
+- **T5**: batching del present — accumulare il danno e trasferire una volta sola
+  quando la coda IPC è vuota (o dopo un tick).
+- **T6–T7**: scroll incrementale con shift dei pixel framebuffer (richiede sfondo
+  riga-invariante), niente `volatile` sul framebuffer.
+
+Queste ottimizzazioni sono documentate nell'ADR completo ma non implementate in
+questa fase. La traiettoria verso un redraw completamente guidato dal danno è
+parziale ma significativa: il trasferimento full-screen è stato eliminato per i
+casi "non scroll".
 
 **Nota**: `FRAME_SELFTEST` **non si rimuove** a fine T1: il frame
 deterministico è il riferimento "golden" anche per T2, T3 e T4 (ogni passo
@@ -1101,9 +1179,13 @@ Nello stesso commit dell'ultimo passo eseguito:
 - ADR-0063 (layer 0, alpha, convenzione `0xRRGGBBAA`).
 - `docs/src/11-testing.md`, `docs/src/06-syscalls.md`.
 - virtio-gpu: `TRANSFER_TO_HOST_2D` (rect + offset), `RESOURCE_FLUSH` (rect).
-- QEMU `hw/display/virtio-gpu.c`: il rect di `TRANSFER_TO_HOST_2D` è
-  indirizzato come `offset + (y + riga) * stride + x * bpp` nel backing del
-  guest (per questo `offset = 0` con `stride = width*4` è corretto).
+- QEMU `hw/display/virtio-gpu.c`, `virtio_gpu_transfer_to_host_2d`: la
+  **sorgente** è `offset + h*stride` (il rect non viene riapplicato al
+  backing del guest) mentre la **destinazione** è
+  `(r.y + h)*stride + r.x*bpp`. Quindi `offset` deve essere
+  `y*stride + x*4` (Linux `virtgpu_plane.c`: `x*cpp + y*pitches[0]`); con
+  `offset = 0` i rect fuori dall'origine copiano la striscia in alto a
+  sinistra del framebuffer (è il bug trovato in T1).
 
 ## Appendice A — formati sul wire (dopo questa fase)
 

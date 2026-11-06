@@ -198,8 +198,8 @@ read-write si corromperebbero):
 
 | File | Fase | Check |
 |------|------|-------|
-| `test-shell-base.py` | 9.4/18/19/20 (ls/cat/mkdir, backspace, builtin, cd/pwd, ls -l, kill, ps, rm/cp/mv, FAT scrivibile, clear) | 29 |
-| `test-shell-native.py` | S3.2b-4/ADR-0064 + ADR-0065 (shell nativa: `BIN_LIST` → oggetto piatto `usr` → EXECUTE → spawn con argv → exit, ring sincronizzato, comando ignoto; interprete: variabili, aritmetica, if/while/for, commenti, `dump`/`type`; prompt una volta per riga, hint inline, Up) | 28 |
+| `test-shell-base.py` | 9.4/18/19/20 (ls/cat/mkdir, backspace, builtin, cd/pwd, ls -l, kill, ps, rm/cp/mv, FAT scrivibile, clear) + guardia CPU al prompt (ADR-0067) | 29 |
+| `test-shell-native.py` | S3.2b-4/ADR-0064 + ADR-0065 (shell nativa: `BIN_LIST` → oggetto piatto `usr` → EXECUTE → spawn con argv → exit, ring sincronizzato, comando ignoto; interprete: variabili, aritmetica, if/while/for, commenti, `dump`/`type`; prompt una volta per riga, hint inline, Up) + guardia CPU al prompt `create-user` (ADR-0067) | 30 |
 | `test-shell-run.py` | 37.2 (run fg/bg, argv, exit-code, jobs/wait) | 8 |
 | `test-shell-redirect.py` | 40.4 (`> >> < 2> 2>&1` + run redirectato) | 20 |
 | `test-shell-41.py` | 41 (quoting/escape, `$VAR/$?/~/$$`, `; && \|\|`, commenti, glob) | 37 |
@@ -211,12 +211,13 @@ read-write si corromperebbero):
 | `test-shell-44b.py` | 44b (Ctrl-C → 130 su fg non cooperante, selettivita', cleanup) | 5 |
 | `foreign.bin`     | t57: attore "ignoto" fuori tabella policy — default fail-closed   | — |
 
-La fase `native` e' **28/28 verde**. Le 10 fasi POSIX (179 check) sono
-**storiche**: dal login nativo (ADR-0062) `boot()` — che attende
-`[shell] starting` e il prompt `$ ` della personalita' POSIX — non completa,
-quindi non girano nel boot di default (serve un knob per avviare
-`bin/posix/shell.bin` come entry point). Restano la specifica eseguibile del
-parser/redirect/pipe POSIX. Stesso kernel produzione del gate: il kernel
+La fase `native` e' **30/30 verde**. Le 10 fasi POSIX (179 check) restano la
+specifica eseguibile del parser/redirect/pipe POSIX: non sono nel gate di boot
+(il login nativo non le lancia da solo), ma `test-shell-all.sh` le guida via
+`boot()` digitando `usershell` al prompt nativo. `base` e `native` includono
+la guardia CPU di ADR-0067: al prompt il processo QEMU deve stare sotto il
+50% (un busy-wait di attesa input e' ~100%). Stesso kernel produzione del gate:
+il kernel
 embedda init/fs/disk, quindi va ricompilato DOPO `build-userland.sh` — ordine
 di `run.sh` — altrimenti il manifest Strato 2 di init non matcha i binari su
 disco e il boot fallisce loud.

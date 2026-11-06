@@ -97,8 +97,20 @@ zero FAIL/PANIC/FAULT. La suite FAT32 e' **fuori dal gate** (ADR-0059:
   ready chiama `futex_wait`; gli interrupt hardware (PIT a 100 Hz) continuano
   a girare e risvegliano i waiter alla scadenza; `ticks_used` di pid=8 (useruptime)
   sceso da 230 a 0
+- **Attese input — futex nei prompt** (`flavours/posix/shell/src/term.rs`,
+  `userland/interpres/src/main.rs`, ADR-0067): la POSIX shell spinava in
+  `kbd_read_byte` (CPU host 99,7% al prompt `$ `) e la shell nativa aveva perso
+  la futex in `read_line_from_keyboard` (99,7% ai prompt `create-user`);
+  ora un `wait_input_tick()` (futex, deadline 1 tick) porta entrambi a
+  ~0%. Guardia CPU (`/proc/<qemu>/stat`) nelle fasi `base` e `native`
 - **Console — Layer 0 sfondo** (`userland/console/`): immagine bitmap centrata
   con composizione alpha (ADR-0063), margini griglia, fallback colore pagina
+- **Console — Danno e rect di trasferimento** (`userland/console/`, `userland/gpu/`,
+  `libs/term/`): `GPU_DISPLAY_FLUSH` porta il rettangolo danneggiato (T1,
+  ADR-0066); il tasto singolo passa da 4 MB a ~10 KB per flush (−90% di
+  tempo). `[console] stats:` misura ogni 64 flush (T0). Fix trovato in
+  validazione: `TRANSFER_TO_HOST_2D.offset` deve essere `y*stride + x*4`,
+  non 0
 
 ## Pianificate
 
@@ -226,6 +238,22 @@ Voci con scope e vittoria dichiarati (non date).
       pixel di destinazione (alone nero). Vittoria: frame identico al BMP
       composto (0 pixel diversi su 78.975) e gate invariato (6 righe, zero
       FAIL/PANIC).
+- [x] **D7 — redraw del terminale: danno e rect di trasferimento (T0/T1)**
+      (completata, ADR-0066): ogni scrittura della console trasferiva la
+      superficie intera (4 MB) al device; ora trasferisce **solo il
+      rettangolo di danno** (`GPU_DISPLAY_FLUSH` porta `x,y,w,h` in pixel,
+      `(0,0)` = full per compatibilita'). Il danno ha un unico punto di
+      dichiarazione (`draw_cell_at`), si espande di 1 cella (sbordo glifo) e
+      si clippa alla superficie; `flush_display` non fa IPC con danno vuoto,
+      `flush_display_full` resta obbligatorio dopo `PRESENT`/resize (I4).
+      T0 misura con `[console] stats:` ogni 64 flush. Risultato: tasto
+      singolo ~424 KB → ~10 KB (`cyc/flush` ~6,5M → ~300–470K, ≈ −90%).
+      **Bug trovato e corretto**: `TRANSFER_TO_HOST_2D` con `offset = 0`
+      copiava la striscia in alto a sinistra in ogni rect fuori
+      dall'origine; il driver ora manda `offset = y*stride + x*4` (semantica
+      QEMU/Linux). A/B headless rect-vs-full al prompt di login: **0 pixel
+      diversi** su 1280×800. Gate invariato (6 righe, zero
+      FAIL/PANIC/FAULT).
 - [x] **S3.2a — Shell nativa REPL minima + gestione utenti** (completata, 2026-10): programma interattivo
       **nativo** (meccanismo, niente POSIX) su `/dev/input/keyboard` +
       `/dev/console`. Comandi: `help`, `users`, `create-user <nome>`,

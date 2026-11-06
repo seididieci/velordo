@@ -6,13 +6,28 @@ const KEYBOARD_PATH: &str = "/dev/input/keyboard";
 
 static mut TERM_FD: i64 = -1;
 
-/// Breve attesa in SOLO spin (nessuna syscall): la CPU resta con IF=1, quindi
-/// la preemption del timer funziona e non si affama il sistema (a differenza
-/// di un busy-loop su `get_ticks`, che tiene gli interrupt mascherati).
+/// Breve attesa in SOLO spin (nessuna syscall): serve ai bound di boot (retry
+/// dell'`open`) e non all'attesa dell'utente. Per il prompt si usa
+/// `wait_input_tick` (futex): uno spin illimitato tiene la CPU al 100%.
 fn spin_brief() {
     for _ in 0..1_000_000 {
         core::hint::spin_loop();
     }
+}
+
+/// Word futex dell'attesa input: mai scritta (resta 0), l'indirizzo e' solo la
+/// chiave del waiter per `(mm, addr)`. Unica per processo (la shell e'
+/// single-threaded, i due campi non si attendono mai insieme).
+static INPUT_FUTEX: u32 = 0;
+
+/// Dorme fino al prossimo tick quando la tastiera e' vuota. Il processo va in
+/// `Blocked`: il PIT continua a girare e il futex lo risveglia alla deadline
+/// (stesso meccanismo di `useruptime`/login/native shell). 1 tick = latenza
+/// massima 10 ms; nessuna diluizione per gli altri processi, niente CPU
+/// bruciata al prompt (lo spin qui la teneva al 100%).
+fn wait_input_tick() {
+    let deadline = civis::get_ticks() + 1;
+    let _ = civis::futex_wait(core::ptr::addr_of!(INPUT_FUTEX) as usize, 0, deadline as u64);
 }
 
 /// Attesa brevissima per le continuazioni ESC (Fase 43b-fix): i byte della
@@ -100,8 +115,8 @@ pub(crate) fn term_read_stdin() -> Vec<u8> {
     out
 }
 
-/// Legge un byte di input dal terminale. Quando il buffer e' vuoto attende un
-/// breve spin (IF=1) prima di riprovare: niente busy-loop su syscall.
+/// Legge un byte di input dal terminale. Quando il buffer e' vuoto dorme un
+/// tick (`wait_input_tick`): il futex blocca il processo, non la CPU.
 fn kbd_read_byte() -> Option<u8> {
     let mut buf = [0u8; 1];
     loop {
@@ -109,7 +124,7 @@ fn kbd_read_byte() -> Option<u8> {
         if n > 0 {
             return Some(buf[0]);
         }
-        spin_brief();
+        wait_input_tick();
     }
 }
 

@@ -3006,3 +3006,69 @@
       alle mask derivate (policy), altrimenti il permesso esiste ma nessuno
       lo possiede; (4) i numeri degli opcode sono uno spazio condiviso:
       prima di assegnarne uno, cercarlo in tutti i crate.
+- [x] **D7/T0–T1 — redraw del terminale: danno e rect di trasferimento**
+      (2026-11, ADR-0066): primo passo dell'ottimizzazione del redraw. Prima
+      ogni scrittura sulla console trasferiva la superficie intera
+      (1280×800×4 = 4 MB) con `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH`; il
+      costo dominante era il **transfer**, non il disegno (baseline:
+      ~424 KB/B-flush misurati sul vecchio denominatore, `cyc/flush`
+      ~6,5–6,9M, `renders:flushes` ≈ 1:1).
+      **T0**: sei contatori in `Term` (`stat_renders/cells/flushes/bytes/
+      cyc_render/cyc_flush`) e una riga `[console] stats:` ogni 64 flush —
+      l'unica diagnostica ammessa. **T1**: il wire di `GPU_DISPLAY_FLUSH`
+      porta `w0 = x | (y << 16)`, `w1 = w | (h << 16)` (coordinate pixel
+      half-open; `(0,0)` = schermo intero, retrocompatibile); in
+      `libs/term::disp` il tipo `Flush` con `pack_flush`/`unpack_flush` e
+      quattro unit test; la console accumula un `Damage` (retangolo
+      half-open) con l'unico punto di dichiarazione in `draw_cell_at`
+      (espansione di 1 cella per lo sbordo del glifo, clip alla superficie);
+      `flush_display` non manda IPC con danno vuoto e `flush_display_full`
+      resta obbligatorio dopo `PRESENT`/resize (I4). Il cursore si ridisegna
+      solo se posizione o visibilità cambiano (`cursor_drawn_visible`).
+      **Bug trovato**: il driver mandava `offset = 0` in
+      `TRANSFER_TO_HOST_2D`; QEMU legge la sorgente a `offset + h*stride` e
+      usa `x,y` solo per la destinazione, quindi ogni rect fuori
+      dall'origine copiava la striscia in alto a sinistra del framebuffer
+      (testo corrotto a schermo, full-screen al boot corretto). Fix:
+      `offset = y*stride + x*4`, la stessa formula del driver Linux
+      (`virtgpu_plane.c`). **Validazione**: A/B headless con
+      `virtio-gpu` e `-vga none`, screendump al prompt di login (frame senza
+      orologio) e confronto pixel-per-pixel tra rect e full → **0 pixel
+      diversi su 1280×800**; dopo il login le uniche differenze sono le
+      cifre dell'orologio della shell. Misure T1: tasto singolo ~10.560 B
+      (40×66) contro 4 MB, `cyc/flush` ~300K–470K (≈ −90%). Gate verde
+      (6 righe, zero FAIL/PANIC/FAULT), unit test 39, shell nativa 28 check.
+      Lezioni: (1) un'ottimizzazione che tocca **chi legge** i pixel va
+      misurata sul frame, non solo sui contatori — la misura T1 iniziale era
+      solo strumentale e il bug è passato; (2) il rect ha due origini (host
+      e guest) e il wire le lega con l'offset, non con la sola coppia x,y;
+      (3) un sentinella di danno vuoto a `(0,0)` è sbagliato: con `min()`
+      ogni rect partirebbe dall'origine (serve `u32::MAX`).
+- [x] **D7/bis — attese input: futex, non spin (CPU 100% al prompt)**
+      (2026-11, ADR-0067): la `usershell` POSIX avviata dal login teneva la
+      CPU host al **99,7%** al prompt `$ ` e anche dopo un comando. Causa:
+      `kbd_read_byte` (`flavours/posix/shell/src/term.rs`) chiamava
+      `spin_brief()` (1M `spin_loop`) in loop quando `read_fs` non aveva
+      byte. Stessa regressione nella shell nativa: `read_line_from_keyboard`
+      (`userland/interpres/src/main.rs`) aveva perso la `futex_wait` in
+      `0a54272` (sostituita da un commento) e `5cf4244` aveva poi rimosso la
+      word inutilizzata — quindi **99,7%** ai prompt `Nome utente:`/
+      `Password:` di `create-user` e del refresh token.
+      **Fix**: un solo `wait_input_tick()` per processo (word statica,
+      `futex_wait` con deadline `get_ticks()+1`) usato da entrambi i lettori;
+      lo spin resta solo per i bound ESC (`spin_esc`) e il retry di
+      `term_init`. Misure (host, `/proc/<qemu>/stat`): POSIX prompt
+      99,7% → **0,0%**, dopo `help` 99,7% → **0,3%**, `create-user`
+      99,7% → **0,0–0,3%**; login e prompt nativo invariati a ~0%.
+      **Guardia**: `Shell::cpu_percent` nel harness e check «CPU < 50%» in
+      `test-shell-base.py` (prompt `$ `) e `test-shell-native.py`
+      (`create-user`, +2 check). Gate verde (6 righe, zero
+      FAIL/PANIC/FAULT), unit test 39, base e native verdi.
+      Lezioni: (1) **uno spin di attesa input non è idle**: con IF=1 la
+      preemption funziona ma la CPU resta al 100% — il criterio giusto è
+      dormire, non «non fare la syscall»; (2) un warning non si spegne
+      cancellando il codice che lo causa: la `futex_wait` rimossa ha
+      lasciato un `continue` nudo che nessun compilatore segnala;
+      (3) due copie dello stesso wait divergono: l'helper unico è la
+      contromisura; (4) la regressione va misurata sul **processo QEMU**
+      (`/proc`), non a occhio, e va resa un test.

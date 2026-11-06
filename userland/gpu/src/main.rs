@@ -87,7 +87,7 @@ fn real_main(_sp: u64) -> ! {
                     }
 
                     civis::syscall_numbers::GPU_DISPLAY_FLUSH => {
-                        let ok = handle_flush(&mut dev, &mut presented);
+                        let ok = handle_flush(&mut dev, &mut presented, msg.w0, msg.w1);
                         if ok {
                             flushes_after_present += 1;
                         }
@@ -183,7 +183,8 @@ fn descriptor(dev: &mut Option<virtio::Device>) -> (u8, term::disp::Geometry) {
 
 /// `FLUSH`: il device copia la risorsa nella superficie (path non-virgl:
 /// senza flush lo schermo resta nero). La console lo manda dopo ogni render.
-fn handle_flush(dev: &mut Option<virtio::Device>, presented: &mut Option<(u32, u32, u32)>) -> bool {
+/// D7 (ADR-0066): w0/w1 = rettangolo da trasferire, decodificato in Flush.
+fn handle_flush(dev: &mut Option<virtio::Device>, presented: &mut Option<(u32, u32, u32)>, w0: u64, w1: u64) -> bool {
     let dev = match dev.as_mut() {
         Some(d) => d,
         None => return false,
@@ -192,12 +193,28 @@ fn handle_flush(dev: &mut Option<virtio::Device>, presented: &mut Option<(u32, u
         Some(p) => *p,
         None => return false,
     };
-    let _ = stride;
+    // Decodifica il rettangolo dalla console: `(0,0)` → schermo intero.
+    let f = term::disp::unpack_flush(w0, w1);
+    let (x, y, rw, rh) = match f {
+        term::disp::Flush::Full => (0, 0, w, h),
+        term::disp::Flush::Rect { x: rx, y: ry, w: rw, h: rh } => {
+            // Clip al display presentato.
+            let rx = (rx as u32).min(w);
+            let ry = (ry as u32).min(h);
+            let rw = (rw as u32).min(w.saturating_sub(rx));
+            let rh = (rh as u32).min(h.saturating_sub(ry));
+            if rw == 0 || rh == 0 {
+                return false; // vuoto, nessun trasferimento
+            }
+            (rx, ry, rw, rh)
+        }
+    };
     // Prima i pixel (transfer), poi il refresh della superficie (flush).
-    if !dev.transfer_to_host_2d(1, w, h) {
+    // `stride` serve al driver: l'offset sorgente del rect e' y*stride + x*4.
+    if !dev.transfer_to_host_2d(1, x, y, rw, rh, stride) {
         return false;
     }
-    dev.flush(1, w, h)
+    dev.flush(1, x, y, rw, rh)
 }
 
 /// `PRESENT`: crea la risorsa 2D, le aggancia al buffer del client e la
@@ -233,7 +250,7 @@ fn handle_present(
         return false;
     }
     *presented = Some((geom.width, geom.height, geom.stride));
-    let _ = dev.flush(RESOURCE_ID, geom.width, geom.height);
+    let _ = dev.flush(RESOURCE_ID, 0, 0, geom.width, geom.height);
     civis::println!(
         "[gpu] scanout: {}x{} stride={} (resource {})",
         geom.width,

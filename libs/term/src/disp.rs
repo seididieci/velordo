@@ -77,3 +77,65 @@ impl Geometry {
             && self.stride >= self.width * 4
     }
 }
+
+/// Tipo di flush da inviare al driver (D7, ADR-0066).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flush {
+    /// Tutta la superficie (dopo un PRESENT o per un ridisegno completo).
+    Full,
+    /// Rettangolo in pixel: `(x, y, w, h)`, half-open sul bordo destro/basso.
+    Rect { x: u32, y: u32, w: u32, h: u32 },
+}
+
+/// Impacchetta un flush per il wire (D7): `w0 = x | (y << 16)`,
+/// `w1 = w | (h << 16)`. `(0,0)` → schermo intero.
+pub fn pack_flush(f: Flush) -> (u64, u64) {
+    match f {
+        Flush::Full => (0, 0),
+        Flush::Rect { x, y, w, h } => ((x | (y << 16)) as u64, (w | (h << 16)) as u64),
+    }
+}
+
+/// Scompatta un flush dal wire. `(0,0)` → `Full`.
+pub fn unpack_flush(w0: u64, w1: u64) -> Flush {
+    if w0 == 0 && w1 == 0 {
+        return Flush::Full;
+    }
+    let x = (w0 & 0xFFFF) as u32;
+    let y = ((w0 >> 16) & 0xFFFF) as u32;
+    let w = (w1 & 0xFFFF) as u32;
+    let h = ((w1 >> 16) & 0xFFFF) as u32;
+    if w == 0 || h == 0 {
+        Flush::Full
+    } else {
+        Flush::Rect { x, y, w, h }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flush_pack_full() {
+        assert_eq!(pack_flush(Flush::Full), (0, 0));
+    }
+
+    #[test]
+    fn flush_unpack_full() {
+        assert_eq!(unpack_flush(0, 0), Flush::Full);
+    }
+
+    #[test]
+    fn flush_rect_roundtrip() {
+        let rect = Flush::Rect { x: 10, y: 20, w: 100, h: 200 };
+        let (w0, w1) = pack_flush(rect);
+        assert_eq!(unpack_flush(w0, w1), rect);
+    }
+
+    #[test]
+    fn flush_zero_dim_is_full() {
+        assert_eq!(unpack_flush(0x100, 0), Flush::Full); // h=0 → full
+        assert_eq!(unpack_flush(0, 0x200), Flush::Full); // w=0 → full
+    }
+}

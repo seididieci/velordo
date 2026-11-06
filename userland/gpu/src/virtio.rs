@@ -392,16 +392,32 @@ impl Device {
     /// `TRANSFER_TO_HOST_2D`: copia il buffer del guest nella risorsa (e' il
     /// comando che *trasferisce* i pixel nel path non-virgl: senza, la
     /// superficie resta quella vuota della creazione della risorsa).
-    pub fn transfer_to_host_2d(&mut self, resource_id: u32, width: u32, height: u32) -> bool {
+    ///
+    /// D7 (ADR-0066): `x,y,w,h` = rettangolo da trasferire. `offset` e' la
+    /// posizione dell'angolo in alto a sinistra del rect **dentro il buffer
+    /// guest** (`y*stride + x*4`): QEMU legge `offset + h*stride` per ogni riga
+    /// del rect e non usa `x`/`y` per la sorgente (li usa solo per la
+    /// destinazione). Con `offset = 0` un rect fuori dall'origine copierebbe la
+    /// striscia in alto a sinistra del framebuffer.
+    pub fn transfer_to_host_2d(
+        &mut self,
+        resource_id: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        stride: u32,
+    ) -> bool {
         let mut req = [0u8; 56];
         req[0..4].copy_from_slice(&vela::gpu::VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D.to_le_bytes());
-        // rect x, y, w, h
-        req[24..28].copy_from_slice(&0u32.to_le_bytes());
-        req[28..32].copy_from_slice(&0u32.to_le_bytes());
+        // rect x, y, w, h (destinazione nella risorsa)
+        req[24..28].copy_from_slice(&x.to_le_bytes());
+        req[28..32].copy_from_slice(&y.to_le_bytes());
         req[32..36].copy_from_slice(&width.to_le_bytes());
         req[36..40].copy_from_slice(&height.to_le_bytes());
-        // offset nel buffer del guest
-        req[40..48].copy_from_slice(&0u64.to_le_bytes());
+        // Sorgente: inizio del rect nel framebuffer lineare del guest (BGRA, 4 B).
+        let offset = (y as u64) * (stride as u64) + (x as u64) * 4;
+        req[40..48].copy_from_slice(&offset.to_le_bytes());
         req[48..52].copy_from_slice(&resource_id.to_le_bytes());
         let mut resp = [0u8; 24];
         self.submit(&req, &mut resp) == Some(vela::gpu::VIRTIO_GPU_RESP_OK_NODATA)
@@ -409,11 +425,12 @@ impl Device {
 
     /// `RESOURCE_FLUSH`: dice al device di rinfrescare la superficie (non
     /// copia i pixel: quello e' `TRANSFER_TO_HOST_2D`).
-    pub fn flush(&mut self, resource_id: u32, width: u32, height: u32) -> bool {
+    /// D7 (ADR-0066): x,y,w,h = rettangolo da flushare; `(0,0)` → schermo intero.
+    pub fn flush(&mut self, resource_id: u32, x: u32, y: u32, width: u32, height: u32) -> bool {
         let mut req = [0u8; 48];
         req[0..4].copy_from_slice(&vela::gpu::VIRTIO_GPU_CMD_RESOURCE_FLUSH.to_le_bytes());
-        req[24..28].copy_from_slice(&0u32.to_le_bytes());
-        req[28..32].copy_from_slice(&0u32.to_le_bytes());
+        req[24..28].copy_from_slice(&x.to_le_bytes());
+        req[28..32].copy_from_slice(&y.to_le_bytes());
         req[32..36].copy_from_slice(&width.to_le_bytes());
         req[36..40].copy_from_slice(&height.to_le_bytes());
         req[40..44].copy_from_slice(&resource_id.to_le_bytes());

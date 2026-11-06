@@ -235,11 +235,7 @@ impl<'a> LineEditor<'a> {
         loop {
             let n = civis::read_fs(self.kb_fd, &mut byte, 1).unwrap_or(0);
             if n == 0 {
-                let _ = civis::recv_poll();
-                // Sleep 1 tick to avoid tight spin when waiting for input.
-                let next = civis::get_ticks() + 1;
-                let mut dummy = 0u32;
-                let _ = civis::futex_wait(&mut dummy as *mut u32 as usize, 0, next as u64);
+                wait_input_tick();
                 continue;
             }
             let c = byte[0];
@@ -1033,6 +1029,22 @@ fn trim_str(s: &str) -> &str {
     if end <= start { "" } else { &s[start..end] }
 }
 
+/// Word futex dell'attesa input: mai scritta (0), l'indirizzo e' la chiave del
+/// waiter per `(mm, addr)`. Condivisa dai due lettori (prompt REPL e prompt
+/// `read_line_from_keyboard`): un solo wait alla volta, shell single-threaded.
+static INPUT_FUTEX: u32 = 0;
+
+/// Attesa di un tick quando la tastiera e' vuota: drena le notifiche IPC
+/// (non-blocking) e dorme con `futex_wait` — il processo va `Blocked`, il PIT
+/// continua a girare e lo risveglia alla deadline. **Mai** un `continue` nudo
+/// su `read_fs`: sarebbe un busy-wait al 100% di CPU (regressione reale: la
+/// `futex_wait` fu sostituita da un commento in `0a54272`).
+fn wait_input_tick() {
+    let _ = civis::recv_poll();
+    let deadline = civis::get_ticks() + 1;
+    let _ = civis::futex_wait(core::ptr::addr_of!(INPUT_FUTEX) as usize, 0, deadline as u64);
+}
+
 /// Legge una riga terminata da newline dalla tastiera. Con `mask` l'eco e'
 /// mascherato (password: niente in chiaro).
 fn read_line_from_keyboard(mask: bool) -> String {
@@ -1050,11 +1062,8 @@ fn read_line_from_keyboard(mask: bool) -> String {
     loop {
         let n = civis::read_fs(fd, &mut byte, 1).unwrap_or(0);
         if n == 0 {
-            // Niente di nuovo: prima controlla la coda IPC (non-blocking)
-            // per eventuali eventi in arrivo, poi dormi 1 tick. Se c'e'
-            // qualcos'altro nel ring buffer lo legge subito — zero latenza.
-            let _ = civis::recv_poll();
-            // futex_wait omitted in read_line_from_keyboard
+            // Niente di nuovo: drena la coda IPC e dorme un tick (mai spin).
+            wait_input_tick();
             continue;
         }
         let b = byte[0];

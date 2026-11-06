@@ -177,6 +177,27 @@ def main():
         out = run_cmd(sh, "if 1 < 2 { let x = 42; } dump(x)", b"42")
         c.check("scope if propagato", b"42" in out)
 
+        # Regressione "CPU 100% al prompt" (ADR-0067): `create-user` senza
+        # argomento entra in `read_line_from_keyboard`, che deve dormire in
+        # futex, non girare a vuoto su `read_fs`. Poi Invio a vuoto (nome
+        # vuoto) per tornare al prompt.
+        mark = len(sh.read_log())
+        sh.type_text("create-user")
+        sh.send_mon("sendkey ret")
+        deadline = time.time() + 10
+        while (b"Nome utente:" not in sh.read_log()[mark:]
+               and time.time() < deadline):
+            time.sleep(T_WAIT_POLL)
+        time.sleep(T_WAIT_TAIL)
+        cpu = sh.cpu_percent(1.0)
+        print("info CPU prompt create-user: %.1f%%" % cpu, flush=True)
+        c.check("prompt create-user idle senza busy-wait (CPU < 50%)",
+                cpu < 50.0)
+        sh.send_mon("sendkey ret")
+        time.sleep(T_RUN)
+        c.check("nome vuoto rifiutato (ritorno al prompt)",
+                b"nome vuoto" in sh.read_log()[mark:])
+
         return 0 if c.ok else 1
     except RuntimeError as e:
         print("FAIL: %s" % e)
