@@ -18,7 +18,7 @@
 use super::*;
 
 /// Il canale del console server (None se non e' registrato).
-fn console_chan() -> Option<u64> {
+pub(crate) fn console_chan() -> Option<u64> {
     match civis::service_lookup(civis::Service::Console) {
         Ok(c) if c > 0 => Some(c as u64),
         _ => None,
@@ -47,19 +47,19 @@ fn device_size(chan: u64) -> Option<(u32, u32)> {
 }
 
 /// La griglia del terminale: `(cols, rows)`.
-fn console_grid(chan: u64) -> Option<(u64, u64)> {
+pub(crate) fn console_grid(chan: u64) -> Option<(u64, u64)> {
     let r = civis::send(chan, civis::syscall_numbers::CONSOLE_QUERY, 0, 0).ok()?;
     Some((r.w0, r.w1))
 }
 
 /// Statistiche del driver: `(PRESENT ricevuti, FLUSH dopo l'ultimo PRESENT)`.
-fn driver_stats(chan: u64) -> Option<(u64, u64)> {
+pub(crate) fn driver_stats(chan: u64) -> Option<(u64, u64)> {
     let r = civis::send(chan, civis::syscall_numbers::GPU_DISPLAY_STATS, 0, 0).ok()?;
     Some((r.w0, r.w1))
 }
 
 /// Il contenuto del terminale: `(celle non vuote, CRC del testo)`.
-fn console_state(chan: u64) -> Option<(u64, u64)> {
+pub(crate) fn console_state(chan: u64) -> Option<(u64, u64)> {
     let r = civis::send(chan, civis::syscall_numbers::CONSOLE_STATE, 0, 0).ok()?;
     Some((r.w0, r.w1))
 }

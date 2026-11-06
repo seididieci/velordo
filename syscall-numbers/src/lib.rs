@@ -477,6 +477,22 @@ pub const CONSOLE_SET_MODE: u64 = 0x7A;
 /// Riepilogo del contenuto del terminale (D4, per i test): `w0` = celle non
 /// vuote, `w1` = CRC32 del testo.
 pub const CONSOLE_STATE: u64 = 0x7B;
+/// Diagnostica (ADR-0066 T4, **solo test**): CRC32 del framebuffer BGRA
+/// visibile. `w0` = CRC, `w1` = byte hashati. Non e' una notifica: si
+/// risponde. Hashato riga per riga su `width*4` byte (lo stride padding non
+/// si hasha).
+pub const CONSOLE_FRAME_CRC: u64 = 0x67;
+/// Diagnostica (ADR-0066 T4, **solo test**): ridisegna **tutto** il modello
+/// corrente e trasferisce l'intero schermo. E' il riferimento "full repaint"
+/// del test di equivalenza scroll-vs-ricomposizione. Reply (0,0).
+pub const CONSOLE_REPAINT: u64 = 0x68;
+/// Diagnostica (ADR-0066 T4, **solo test**): `w0` bit0 = bg layer uniforme
+/// (senza immagine, `bg_rows_equal = true`), bit1 = disabilita lo shift
+/// (ricomposizione). Ricostruisce la bg layer e ridisegna. Reply (0,0).
+pub const CONSOLE_TEST_MODE: u64 = 0x69;
+/// Diagnostica (ADR-0066 T4, **solo test**): CRC32 di una **riga di celle**
+/// (`w0` = indice riga). `w0` della reply = CRC, `w1` = byte hashati.
+pub const CONSOLE_ROW_CRC: u64 = 0x6A;
 /// Statistiche del driver (D4, per i test): `w0` = `PRESENT` ricevuti,
 /// `w1` = `FLUSH` ricevuti **dopo l'ultimo** `PRESENT`. Serve a verificare
 /// il contratto "chi ridisegna manda anche il flush": un `PRESENT` aggancia

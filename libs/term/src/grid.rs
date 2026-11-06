@@ -20,6 +20,7 @@
 
 extern crate alloc;
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 /// Righe di scrollback tenute (oltre quelle della griglia).
@@ -175,7 +176,10 @@ pub struct Grid {
     rows: usize,
     cells: Vec<Cell>,
     /// Le righe uscite dal basso della griglia (dalla piu' vecchia).
-    scrollback: Vec<Vec<Cell>>,
+    /// `VecDeque`: `pop_front` e' O(1) — con `Vec::remove(0)` ogni scroll
+    /// spostava fino a 1000 righe (un `hexdump` da 5 MB = ~650 GB di
+    /// memmove).
+    scrollback: VecDeque<Vec<Cell>>,
     /// Posizione del cursore (colonna, riga).
     pub cursor: (usize, usize),
     /// Cursore visibile.
@@ -196,7 +200,7 @@ impl Grid {
             cols,
             rows,
             cells,
-            scrollback: Vec::new(),
+            scrollback: VecDeque::new(),
             cursor: (0, 0),
             cursor_visible: true,
             dirty: Dirty::none(),
@@ -365,23 +369,67 @@ impl Grid {
 
     /// Scorri in alto di una riga: la riga che esce va nello **scrollback**
     /// (D4: serve a conservare il testo al re-adattamento).
+    ///
+    /// Marca **tutte** le celle sporche: il chiamante ricompone la griglia
+    /// (percorso senza shift, T4).
     pub fn scroll_up(&mut self) {
+        self.scroll_cells();
+        self.dirty.mark_all(self.cols, self.rows);
+    }
+
+    /// Scroll del **solo modello** (T4): il chiamante ha gia' spostato i
+    /// pixel del framebuffer. Marca solo l'ultima riga (la nuova riga vuota).
+    pub fn scroll_up_after_shift(&mut self) {
+        self.scroll_model_n(1);
+    }
+
+    /// Scroll del modello di `n` righe (T4, feed in blocco): sposta le celle
+    /// e marca solo le ultime `n` righe (le uniche nuove). Il chiamante ha
+    /// gia' spostato i pixel di `n * cell_h`.
+    pub fn scroll_model_n(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        for _ in 0..n {
+            self.scroll_cells();
+        }
+        let rows = self.rows;
+        if rows == 0 {
+            return;
+        }
+        let first = rows.saturating_sub(n.min(rows));
+        for row in first..rows {
+            for col in 0..self.cols {
+                self.dirty.mark(col, row);
+            }
+        }
+    }
+
+    /// Il corpo dello scroll: scrollback + `copy_within` + azzeramento
+    /// dell'ultima riga. Non tocca il dirty (lo decide il chiamante).
+    fn scroll_cells(&mut self) {
         if self.rows == 0 {
             return;
         }
         let first: Vec<Cell> = self.cells[..self.cols].to_vec();
-        self.scrollback.push(first);
+        self.scrollback.push_back(first);
         if self.scrollback.len() > SCROLLBACK_MAX {
-            self.scrollback.remove(0);
+            self.scrollback.pop_front();
         }
         self.cells.copy_within(self.cols.., 0);
         let last = self.rows - 1;
         for col in 0..self.cols {
             self.cells[last * self.cols + col] = Cell::default();
         }
-        // Tutte le celle hanno cambiato contenuto (copy_within): mark_all.
-        // Ottimizzazione futura: shift framebuffer per righe spostate, ma
-        // non copiare il layer 0 (BMP): servirebbe un renderer batch-aware.
+    }
+
+    /// C'e' una zona sporca da ridisegnare?
+    pub fn has_dirty(&self) -> bool {
+        self.dirty.any
+    }
+
+    /// Segna **tutte** le celle come sporche (full repaint, T4).
+    pub fn mark_all(&mut self) {
         self.dirty.mark_all(self.cols, self.rows);
     }
 
@@ -780,5 +828,55 @@ mod tests {
         assert_eq!(g.cell(3, 0).cp, b' ' as u32);
         assert_eq!(g.cell(3, 0).width, 1);
         assert_eq!(g.cell(4, 0).width, 1);
+    }
+
+    // ── T4: scroll del modello e dirty ─────────────────────────────────
+
+    /// `scroll_up_after_shift` sposta il modello di una riga e marca **solo**
+    /// l'ultima riga (il chiamante ha gia' spostato i pixel).
+    #[test]
+    fn scroll_after_shift_marca_solo_ultima_riga() {
+        let mut g = Grid::new(4, 3);
+        g.put_wide(0, 0, b'A' as u32, 1, color::WHITE, color::BLACK);
+        g.put_wide(0, 1, b'B' as u32, 1, color::WHITE, color::BLACK);
+        g.put_wide(0, 2, b'C' as u32, 1, color::WHITE, color::BLACK);
+        let _ = g.take_dirty();
+        g.scroll_up_after_shift();
+        assert_eq!(g.cell(0, 0).cp, b'B' as u32, "la riga 1 sale in 0");
+        assert_eq!(g.cell(0, 1).cp, b'C' as u32, "la riga 2 sale in 1");
+        assert_eq!(g.cell(0, 2).cp, b' ' as u32, "l'ultima riga e' vuota");
+        let d = g.take_dirty();
+        assert!(d.any);
+        assert_eq!((d.min_row, d.max_row), (2, 2), "solo l'ultima riga e' sporca");
+        assert!(!g.has_dirty(), "take_dirty azzera");
+    }
+
+    /// `scroll_model_n(2)` sposta di due righe e marca le ultime due.
+    #[test]
+    fn scroll_model_n_marca_ultime_n() {
+        let mut g = Grid::new(4, 4);
+        for (r, ch) in [(0, b'A'), (1, b'B'), (2, b'C'), (3, b'D')] {
+            g.put_wide(0, r, ch as u32, 1, color::WHITE, color::BLACK);
+        }
+        let _ = g.take_dirty();
+        g.scroll_model_n(2);
+        assert_eq!(g.cell(0, 0).cp, b'C' as u32);
+        assert_eq!(g.cell(0, 1).cp, b'D' as u32);
+        assert_eq!(g.cell(0, 2).cp, b' ' as u32);
+        assert_eq!(g.cell(0, 3).cp, b' ' as u32);
+        let d = g.take_dirty();
+        assert_eq!((d.min_row, d.max_row), (2, 3), "le ultime due righe");
+    }
+
+    /// `scroll_up` (senza shift) marca tutto: il renderer ricompone.
+    #[test]
+    fn scroll_up_marca_tutto() {
+        let mut g = Grid::new(4, 3);
+        g.put_wide(0, 0, b'A' as u32, 1, color::WHITE, color::BLACK);
+        let _ = g.take_dirty();
+        g.scroll_up();
+        let d = g.take_dirty();
+        assert_eq!((d.min_row, d.max_row), (0, 2));
+        assert_eq!((d.min_col, d.max_col), (0, 3));
     }
 }

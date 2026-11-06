@@ -219,7 +219,32 @@ fn push_hex_byte(s: &mut String, b: u8) {
     s.push(civis::hex::encode_nibble(b & 0xF) as char);
 }
 
+/// Formatta `data` in righe hexdump da 16 byte, accumulando in `out` e
+/// scrivendo a blocchi da ~4 KiB. T4/bulk: una write per blocco, non per
+/// riga — il console fa un render+flush per write, e 2 write per riga
+/// significavano 2 flush dell'intera griglia per ogni riga.
+fn hexdump_emit(data: &[u8], off: &mut usize, out: &mut String) {
+    for chunk in data.chunks(16) {
+        for shift in (0..8).rev() {
+            out.push(civis::hex::encode_nibble(((*off >> (shift * 4)) & 0xF) as u8) as char);
+        }
+        out.push_str(": ");
+        for &b in chunk {
+            push_hex_byte(out, b);
+            out.push(' ');
+        }
+        out.push('\n');
+        *off += chunk.len();
+        if out.len() >= 4000 {
+            term::term_print(out.as_str());
+            out.clear();
+        }
+    }
+}
+
 pub(crate) fn cmd_hexdump(args: &[&str]) -> i64 {
+    let mut out = String::new();
+    let mut off = 0usize;
     // Senza file: stdin redirectato (`<`, come `cat`/`wc`).
     if args.len() < 2 {
         if libr::stdin_fd() < 0 {
@@ -227,20 +252,9 @@ pub(crate) fn cmd_hexdump(args: &[&str]) -> i64 {
             return 1;
         }
         let data = term::term_read_stdin();
-        let mut off = 0usize;
-        for chunk in data.chunks(16) {
-            let mut s = String::new();
-            for shift in (0..8).rev() {
-                s.push(civis::hex::encode_nibble(((off >> (shift * 4)) & 0xF) as u8) as char);
-            }
-            s.push_str(": ");
-            for &b in chunk {
-                push_hex_byte(&mut s, b);
-                s.push(' ');
-            }
-            term::term_print(&s);
-            term::term_print("\n");
-            off += chunk.len();
+        hexdump_emit(&data, &mut off, &mut out);
+        if !out.is_empty() {
+            term::term_print(out.as_str());
         }
         return 0;
     }
@@ -251,29 +265,21 @@ pub(crate) fn cmd_hexdump(args: &[&str]) -> i64 {
         term::term_err("\n");
         return 1;
     };
-    let mut buf = vec![0u8; 16];
-    let mut off = 0usize;
+    // Letture a blocchi (T4/bulk): 16 byte per read erano 326k round trip
+    // IPC per un file da 5 MB.
+    let mut buf = vec![0u8; 4096];
     loop {
-        let n = match civis::read_fs(fd, &mut buf, 16) {
+        let n = match civis::read_fs(fd, &mut buf, 4096) {
             Ok(n) => n,
             Err(_) => break,
         };
         if n == 0 {
             break;
         }
-        // Una sola write per riga (vedi cmd_echo: timestamp per write).
-        let mut s = String::new();
-        for shift in (0..8).rev() {
-            s.push(civis::hex::encode_nibble(((off >> (shift * 4)) & 0xF) as u8) as char);
-        }
-        s.push_str(": ");
-        for i in 0..n {
-            push_hex_byte(&mut s, buf[i]);
-            s.push(' ');
-        }
-        term::term_print(&s);
-        term::term_print("\n");
-        off += n;
+        hexdump_emit(&buf[..n], &mut off, &mut out);
+    }
+    if !out.is_empty() {
+        term::term_print(out.as_str());
     }
     let _ = civis::close(fd);
     0

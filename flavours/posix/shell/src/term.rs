@@ -6,6 +6,22 @@ const KEYBOARD_PATH: &str = "/dev/input/keyboard";
 
 static mut TERM_FD: i64 = -1;
 
+/// Budget del **mirror seriale** per comando (T4/bulk): un output enorme
+/// (es. `hexdump` di un file da MB) non deve passare tutto sul filo seriale
+/// byte-per-byte (la UART costa ~µs/byte: minuti). Oltre il budget il mirror
+/// si ferma e lo si segnala una volta; il terminale riceve comunque tutto.
+const MIRROR_BUDGET: usize = 256 * 1024; // 256 KiB
+static mut MIRROR_LEFT: usize = MIRROR_BUDGET;
+static mut MIRROR_TRUNCATED: bool = false;
+
+/// Azzera il budget del mirror: chiamata dal REPL prima di ogni comando.
+pub(crate) fn reset_mirror_budget() {
+    unsafe {
+        MIRROR_LEFT = MIRROR_BUDGET;
+        MIRROR_TRUNCATED = false;
+    }
+}
+
 /// Breve attesa in SOLO spin (nessuna syscall): serve ai bound di boot (retry
 /// dell'`open`) e non all'attesa dell'utente. Per il prompt si usa
 /// `wait_input_tick` (futex): uno spin illimitato tiene la CPU al 100%.
@@ -65,7 +81,26 @@ pub(crate) fn term_init() -> bool {
 /// (i builtin usano tutti `term_print`, non `println!`). Il mirror seriale
 /// resta sempre (l'output debug non si perde mai).
 pub(crate) fn term_write_bytes(data: &[u8]) {
-    let _ = civis::print_string(data);
+    // Mirror seriale con budget (T4/bulk): oltre 1 MiB per comando il
+    // seriale non e' piu' un mirror utile (e costa minuti sulla UART).
+    unsafe {
+        if MIRROR_LEFT > 0 {
+            let n = data.len().min(MIRROR_LEFT);
+            let _ = civis::print_string(&data[..n]);
+            MIRROR_LEFT -= n;
+            if n < data.len() && !MIRROR_TRUNCATED {
+                MIRROR_TRUNCATED = true;
+                let _ = civis::print_string(
+                    b"\n[mirror seriale troncato: output troppo grande]\n",
+                );
+            }
+        } else if !MIRROR_TRUNCATED {
+            MIRROR_TRUNCATED = true;
+            let _ = civis::print_string(
+                b"\n[mirror seriale troncato: output troppo grande]\n",
+            );
+        }
+    }
     let out = libr::stdout_fd();
     if out >= 0 {
         let _ = civis::write_fs(out, data, data.len());

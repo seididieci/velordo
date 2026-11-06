@@ -2,7 +2,7 @@
 
 > I conteggi di suite citati negli ADR e nelle sotto-fasi del libro sono
 > **snapshot all'epoca** di ciascuna fase (es. 17/17, 21/21, 32/32). Il gate
-> corrente e' quello qui sotto (5/5 + 64/64 + 4/4 + 11/11 + 59/59 + 12/12 +
+> corrente e' quello qui sotto (5/5 + 64/64 + 4/4 + 11/11 + 60/60 + 12/12 +
 > shell) e in `AGENTS.md`. La suite **FAT32** e' **fuori dal gate**
 > (ADR-0059: il FAT non e' piu' il filesystem di sistema): vive in
 > `scripts/run-fat-tests.sh`, un run dedicato con un disco FAT attaccato.
@@ -28,7 +28,7 @@ testland/   test suite meccanismo + repro + demo storiche
   testfs        usertestfs   — ramfs (read/write/mkdir/errori)   → PASS 5/5
   testfat       usertestfat  — FAT32 scrivibile (Fase 20) + /dev/null, /dev/zero → PASS 7/7
   testsarca     usertestsarca — ArcaFS P5+A1+56.1+56.2a+56.2b+56.2c (B+tree COW + commit, recovery/GC + sys-dal-volume) + logging L1 Fase 57 (gateway `Log` RAM-first, bucket per identita', seal, stats, bounce) + namespace POSIX 56.3 (dir emergenti + set RAM, ADR-0042) + quota per bucket A3 (budget, ERR_NOSPC, persistenza, ADR-0044) + rename/symlink S1.1 (file/dir, link+follow, ERR tipizzati) + range read 2 MiB S2.5f/F0 + prefix-overwrite W1 (merge esplicito `ns_write`) + extent dinamici S2.5w/W2 (ADR-0050: COW a blocchi, liveness, XSTATS) + append 512K bound (test59) + cache write-through S2.5w/W3 (ADR-0051: fasce R0/R1/R2, sizing meminfo, hit/reads in XSTATS) + epoche minime S2.5w/W4 (ADR-0052: fd-write a epoca, crash kill-mid recovery, test60) + packing sub-blocco stesso-bucket S2.5w/W5 (ADR-0053: tipo nodo PACKED, bump per bucket, refcount eager + rebuild al bind, test61) + blocchi 64 KiB e rimozione cap 16 MiB S2.5w/W6 (ADR-0054: ARCA_VERSION 3, nessun cap oggetto, walk streaming, test62) + identita' del volume v4 (ADR-0059: superblock 192 B, label + mountpoint dichiarato, test63-64) → PASS 64/64
-  usertests     usertests    — suite meccanismo (59 test, +t59 rename/+t60 symlink/+t61 chdir/+t62 chmod S1.1/+t63 modeset D4) → PASS 59/59
+  usertests     usertests    — suite meccanismo (60 test, +t59 rename/+t60 symlink/+t61 chdir/+t62 chmod S1.1/+t63 modeset D4/+t64 scroll vs repaint T4) → PASS 60/60
   identistest   identistest  — protocollo Identis (ADR-0058): sessione/token, verifica credenziali, creazione utente, duplicati, nomi non conformi, elenco utenti, formato del bucket `identis:config` → PASS 11/11
   threadtest    userthreadtest — thread 1:1 (S-T, ADR-0046: create/stack/TLS/futex/IPC/fd/stress-32/FPU-S2.5b) → PASS 12/12
   usertest-client usertestcli  — helper a modalita' (ECHO/ZEROREAD/NULLW/SRV/CHURN/KILLME/SRVDIE/SYNCWAIT/MNTDIE/OPENDIE/MAPHAMMER/FLOOD/NEST/FAULT_*/SHMDEMO/COWDEMO/FORKDEMO/ORPHAN/HARDEN/REG51/EXECDEMO/DUPCLAIM/DUPGRANT/DUPSIBCLAIM/SEEKDENY/SUSPENDENY/SIGCATCH/GRANTDENY)
@@ -86,7 +86,7 @@ Righe di gate:
 [testsarca] PASS 64/64
 [posixtests] PASS 4/4
 [identistest] PASS 11/11
-[usertests] PASS 59/59
+[usertests] PASS 60/60
 [threadtest] PASS 12/12
 ```
 
@@ -171,6 +171,16 @@ Righe di gate:
 > `RUN_DISPLAY=gtk`: su questo host non ci sono xvfb/xdotool/client VNC e il
 > monitor QEMU non ha comandi display; atteso
 > `[gpu] config change: events=0x1` seguito dalla nuova risoluzione.
+>
+> D7/T4 (redraw a danno, ADR-0066): **una riga di suite in più** — `t64
+> scroll vs repaint` (il gate passa da 59/59 a **60/60**). Scrive 120 righe
+> una per write (feed interattivo → shift dei pixel), abilita una bg
+> uniforme via `CONSOLE_TEST_MODE` (con il wallpaper `bg_rows_equal` è
+> false), poi confronta il CRC del framebuffer con un `CONSOLE_REPAINT`:
+> uguali. Il test ha trovato due bug veri: la chiamata a `shift_rows_up`
+> passava `gh - cell_h` (restavano ferme due righe di celle) e un glifo che
+> sbordava verticalmente scriveva nei margini (shift e repaint divergevano);
+> fix: clip verticale del glifo alla cella.
 
 ## Test shell interattivi (QEMU + sendkey, fuori dal gate kernel)
 
@@ -243,7 +253,7 @@ log seriale.
   l'alpha dell'immagine e i colori sono `0xRRGGBBAA`; **T2/T3**: fill a
   parole, `copy_from`/`shift_rows_up` con clipping, `draw_ink` che non tocca
   il background), `libs/valloc` e
-  `blake2s` (45 test in tutto). Girano da una
+  `blake2s` (48 test in tutto). Girano da una
   **directory neutra**: il `.cargo/config.toml` del repo impone
   `build.target = x86_64-unknown-none` + `build-std` in base alla directory
   corrente, e da dentro il repo `cargo test` proverebbe a compilare l'harness

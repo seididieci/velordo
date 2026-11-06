@@ -90,6 +90,10 @@ fn real_main(_sp: u64) -> ! {
         } else {
             prompt = cwd + "$ ";
         }
+        // T4/bulk: ogni comando ha un budget di mirror seriale (un output
+        // enorme non deve passare tutto sulla UART). Il reset e' prima del
+        // prompt: cosi' anche il prompt del comando successivo e' mirrorato.
+        term::reset_mirror_budget();
         let line = term::read_line(&prompt);
         // In REPL `Exit` non accade mai (script_mode=false: `exit` diverge
         // via civis::exit); l'arm resta per totalita'.

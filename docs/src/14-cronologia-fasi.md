@@ -3105,3 +3105,41 @@
       nessuno ridisegna; (4) `copy_from`/`shift_rows_up` lavorano in **byte**
       (`*mut u8`): con `*mut u32` lo stride in byte verrebbe moltiplicato
       per 4 (bug preso dai test host).
+- [x] **D7/quater — T4: scroll a shift di pixel + bulk (hexdump)**
+      (2026-11, ADR-0066): lo scroll ricomponeva tutte le celle
+      (`mark_all`). T4 sposta i pixel del framebuffer di una riga di cella
+      (`shift_rows_up`) e ridisegna solo l'ultima riga; con bg non
+      riga-invariante (wallpaper) o feed in blocco ricompone. `Grid`:
+      `scroll_cells`/`scroll_model_n`/`scroll_up_after_shift`/`has_dirty`,
+      scrollback a **`VecDeque`** (`pop_front` O(1): con `Vec::remove(0)`
+      ogni scroll spostava fino a 1000 righe). Console: `NO_SHIFT`,
+      `grid_px_rect`, `scroll()`, tag test `CONSOLE_FRAME_CRC` (0x67),
+      `CONSOLE_REPAINT` (0x68), `CONSOLE_TEST_MODE` (0x69),
+      `CONSOLE_ROW_CRC` (0x6A). Test `t64`: 120 righe una per write (shift),
+      bg uniforme via test mode, CRC del frame == dopo `CONSOLE_REPAINT`.
+      **Due bug trovati dal test**: (1) `shift_rows_up` era chiamato con
+      `gh - cell_h`, ma la funzione lascia invariate le ultime `dy` righe
+      **del rettangolo**: restavano ferme due righe di celle (fix: passare
+      `gh`); (2) un glifo che sbordava verticalmente nella cella scriveva nei
+      margini della griglia — lo shift non li sposta, il repaint li riscrive
+      → frame diversi (fix: clip verticale del glifo alla cella in
+      `glyph_pixels`).
+      **Bulk**: `hexdump /bg.bmp` (5,2 MB → 45 MB di testo) impiegava ~38
+      minuti (~2,3 KB/s): 2 write per riga, ognuna con render+flush
+      dell'intera griglia, 1 read da 16 B per riga e mirror seriale di 45 MB
+      sulla UART. Fix: feed > 256 B "in blocco" (ricompone, render+flush
+      differiti ogni 8 write; il batch finale lo flusha la write interattiva
+      successiva o `DEV_CLOSE`), `hexdump` legge e scrive a blocchi da 4000 B
+      (una frame FS: 4096 si spezzava in 4087+9 e i 9 B "interattivi"
+      forzavano un flush per blocco), mirror seriale con budget 256 KiB per
+      comando. Risultato: **31,3 s** (~70x).
+      **Verifica**: gate 6 righe, zero FAIL/PANIC/FAULT; `[usertests] 60/60`
+      (`t64` PASS); unit test host 48/48; frame al login identico a T1
+      (0 pixel diversi).
+      Lezioni: (1) un test di equivalenza **pixel** trova bug che il modello
+      non vede (le due righe ferme e i margini); (2) il dirty per riga non
+      basta se il glifo sborda: il confine di una cella è anche verticale;
+      (3) il costo di un output enorme non è il render ma il **numero di
+      flush** e il **mirror seriale**; (4) il taglio del ring FS (4087 B)
+      trasforma un blocco in "blocco + residuo interattivo": la dimensione
+      del chunk deve stare sotto la capacità della frame.

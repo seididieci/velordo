@@ -532,7 +532,6 @@ prompt di login è già un frame stabile e resta fuori dal boot di produzione
 Le ottimizzazioni seguenti richiedono modifiche più profonde e sono state
 deliberatamente rimandate:
 
-- **T4**: `CONSOLE_REPAINT` — forzaré il ridisegno completo senza trasferimento.
 - **T5**: batching del present — accumulare il danno e trasferire una volta sola
   quando la coda IPC è vuota (o dopo un tick).
 - **T6–T7**: scroll incrementale con shift dei pixel framebuffer (richiede sfondo
@@ -806,8 +805,10 @@ danno gli stessi pixel.
        let (gx, gy, gw, gh) = self.grid_px_rect();
        let cell_h = self.surface.geom().cell_h;
        if let Surface::Pixel(p) = &mut self.surface {
-           // sposta le righe della griglia, escluse le ultime cell_h righe
-           p.shift_rows_up(gx, gy, gw, gh.saturating_sub(cell_h), cell_h);
+           // `h` = tutta la griglia: la funzione lascia invariate le ultime
+           // `dy` righe (la nuova ultima riga di celle, che il renderer
+           // ridisegna). Con `gh - cell_h` resterebbero ferme DUE righe.
+           p.shift_rows_up(gx, gy, gw, gh, cell_h);
        }
        self.grid.scroll_up_after_shift();
        self.damage.add_rect(gx, gy, gw, gh);
@@ -915,6 +916,37 @@ wallpaper il testo scrolla; `cyc/render` durante lo scroll in forte calo
 
 **Rollback**: `git revert` (i tag 0x67/0x68 possono restare senza danno, ma è
 più pulito revertire tutto il passo).
+
+**Completato — dati T4**:
+
+- `Grid`: `scroll_cells` (corpo), `scroll_up` (mark_all), `scroll_model_n`
+  (marca solo le ultime `n` righe), `scroll_up_after_shift`, `has_dirty`,
+  `mark_all`. Scrollback passato a **`VecDeque`**: `pop_front` O(1) (con
+  `Vec::remove(0)` ogni scroll spostava fino a 1000 righe).
+- Console: `NO_SHIFT` (valvola), `grid_px_rect`, `scroll()` (shift se
+  `bg_rows_equal` e feed interattivo, altrimenti ricomposizione), tag
+  `CONSOLE_FRAME_CRC` (0x67), `CONSOLE_REPAINT` (0x68), `CONSOLE_TEST_MODE`
+  (0x69, bg uniforme / no-shift), `CONSOLE_ROW_CRC` (0x6A, diagnostica).
+- **Bug trovato (shift)**: la chiamata passava `gh - cell_h` a
+  `shift_rows_up`, che lascia invariate le ultime `dy` righe **del
+  rettangolo**: restavano ferme due righe di celle. La chiamata corretta
+  passa l'intera griglia (`gh`).
+- **Bug trovato (margini)**: un glifo che sborda verticalmente nella cella
+  scriveva nei margini della griglia; lo shift non li sposta, il repaint li
+  riscrive → frame diversi. Fix: **clip verticale del glifo alla cella** in
+  `glyph_pixels` (vale per `put_char` e `draw_ink`).
+- **Bulk (hexdump)**: il feed "in blocco" (> 256 B) ricompone invece di
+  shiftare e differisce render+flush ogni 8 write; il batch finale lo flusha
+  la write interattiva successiva (il prompt) o `DEV_CLOSE`. `hexdump` legge
+  e scrive a blocchi da 4000 B (una frame FS, niente taglio 4087+9 che
+  rendeva il residuo "interattivo" e forzava un flush per blocco). Mirror
+  seriale con **budget 256 KiB per comando** (la UART costa ~µs/byte).
+- **Verifica**: `t64` PASS (CRC shift == repaint, `first_bad_row=None`);
+  `[usertests] 60/60`; gate 6 righe, zero FAIL/PANIC/FAULT; frame al login
+  identico a T1 (0 pixel diversi); unit test host 48/48.
+- **`hexdump /bg.bmp`** (5.225.670 B → 45 MB di testo): da ~2,3 KB/s
+  (~38 min stimati) a **31,3 s** (~70x). Il costo residuo è il mirror
+  seriale (256 KiB) + 11.250 write da 4 KB con render/flush ogni 8.
 
 ### T5 — batching del present (un trasferimento per raffica)
 

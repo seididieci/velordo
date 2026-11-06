@@ -77,6 +77,25 @@ fn rows_all_equal(buf: &[u8], stride: u32) -> bool {
     true
 }
 
+/// T4 (ADR-0066): valvola di sicurezza. `true` = non si fa MAI lo shift dei
+/// pixel (si ricompone sempre): e' il comportamento pre-D7.
+const NO_SHIFT: bool = false;
+
+/// T4: un feed piu' lungo di questa soglia e' "in blocco" (output di un
+/// comando). Lo scroll ricompone invece di spostare i pixel: con il render
+/// differito a fine feed i pixel intermedi non esistono, e uno shift di N
+/// righe costerebbe N memcpy dell'intera griglia.
+///
+/// La soglia deve stare sopra il prompt della shell nativa (ANSI + orologio,
+/// ~80 B) e sotto un blocco di output (4 KiB): 256 B separa i due casi.
+const BULK_FEED_BYTES: usize = 256;
+
+/// T4/bulk: in un feed "in blocco" il render+flush e' differito ogni N
+/// write. Senza un timer nel kernel (niente `recv` con timeout) il batch
+/// finale lo flusha la prima write interattiva successiva (il prompt), che
+/// rende subito. Un output lungo passa da N flush dell'intera griglia a N/8.
+const BULK_FLUSH_EVERY: u32 = 8;
+
 // ── Il terminale ───────────────────────────────────────────────────
 
 /// Rettangolo di pixel toccati (half-open): il danno da trasferire al driver
@@ -181,6 +200,16 @@ struct Term {
     /// `true` se tutte le righe della bg layer sono byte-identiche alla riga
     /// 0: e' la condizione in cui lo scroll puo' spostare i pixel (T4).
     bg_rows_equal: bool,
+    /// T4: il feed corrente e' "in blocco" (molti byte): lo scroll ricompone
+    /// invece di spostare i pixel (i pixel intermedi non esistono).
+    bulk_feed: bool,
+    /// T4/bulk: write in blocco accumulate dall'ultimo render+flush.
+    bulk_writes: u32,
+    /// T4: valvola di sicurezza (default `NO_SHIFT`). `true` = mai shift.
+    no_shift: bool,
+    /// T4 (solo test): bg layer uniforme (senza immagine) per esercitare lo
+    /// shift anche con il wallpaper presente.
+    test_uniform_bg: bool,
     /// Lo slot DMA del framebuffer corrente (D4: il riadattamento alloca
     /// l'altro slot e libera questo solo dopo che il nuovo e' presentato —
     /// un riadattamento fallito non deve lasciare la surface su un buffer
@@ -200,6 +229,10 @@ struct Term {
 impl Term {
     /// Mangia i byte e aggiorna il modello.
     fn feed(&mut self, bytes: &[u8]) {
+        // T4: un feed lungo e' output di un comando (blocco): lo scroll
+        // ricompone invece di spostare i pixel (vedi `scroll`).
+        let bulk = bytes.len() > BULK_FEED_BYTES;
+        self.bulk_feed = bulk;
         self.decoder.push(bytes, &mut self.pending);
         // `drain` svuota il buffer riusandone la capacita': i codepoint
         // processati NON devono restare nel buffer (il feed successivo li
@@ -209,10 +242,23 @@ impl Term {
             self.put(cp);
         }
         self.pending = cps;
-        self.render();
-        // Il path non-virgl di QEMU copia la risorsa nella superficie del
-        // display **solo al flush**: senza, lo schermo resta nero.
-        self.flush_display();
+        self.bulk_feed = false;
+        if bulk {
+            // T4/bulk: render+flush differiti ogni N write. Il batch finale
+            // lo flusha la write interattiva successiva (il prompt).
+            self.bulk_writes += 1;
+            if self.bulk_writes >= BULK_FLUSH_EVERY {
+                self.bulk_writes = 0;
+                self.render();
+                self.flush_display();
+            }
+        } else {
+            self.bulk_writes = 0;
+            self.render();
+            // Il path non-virgl di QEMU copia la risorsa nella superficie del
+            // display **solo al flush**: senza, lo schermo resta nero.
+            self.flush_display();
+        }
     }
 
     /// **Il terminale si riadatta** a una nuova misura del display (D4):
@@ -484,7 +530,7 @@ impl Term {
                 // newline: la riga successiva, scroll se siamo in fondo
                 let row = self.grid.cursor.1;
                 if row + 1 >= self.grid.rows() {
-                    self.grid.scroll_up();
+                    self.scroll();
                 } else {
                     self.grid.cursor.1 = row + 1;
                 }
@@ -519,7 +565,7 @@ impl Term {
                 if col + advance > self.grid.cols() {
                     col = 0;
                     if row + 1 >= self.grid.rows() {
-                        self.grid.scroll_up();
+                        self.scroll();
                     } else {
                         row += 1;
                     }
@@ -530,7 +576,7 @@ impl Term {
                     // fine riga: il cursore va a capo (e scrolla se serve)
                     self.grid.cursor.0 = 0;
                     if row + 1 >= self.grid.rows() {
-                        self.grid.scroll_up();
+                        self.scroll();
                     } else {
                         self.grid.cursor.1 = row + 1;
                     }
@@ -539,6 +585,113 @@ impl Term {
                 }
             }
         }
+    }
+
+    /// Area della griglia in pixel: `(x, y, w, h)` clippata alla surface.
+    fn grid_px_rect(&self) -> (u32, u32, u32, u32) {
+        let g = self.surface.geom();
+        let (sw, sh) = self.surface.pixel_size();
+        let x = g.origin_x;
+        let y = g.origin_y;
+        let w = (g.cols as u32 * g.cell_w).min(sw.saturating_sub(x));
+        let h = (g.rows as u32 * g.cell_h).min(sh.saturating_sub(y));
+        (x, y, w, h)
+    }
+
+    /// CRC32 del framebuffer visibile (T4, solo test): righe `width*4` byte,
+    /// lo stride padding non si hasha. Ritorna `(crc, byte hashati)`.
+    fn frame_crc(&self) -> (u32, usize) {
+        let Surface::Pixel(p) = &self.surface else {
+            return (0, 0);
+        };
+        let row_bytes = p.width as usize * 4;
+        let mut crc = 0xFFFF_FFFFu32;
+        let mut hashed = 0usize;
+        for y in 0..p.height as usize {
+            let row = unsafe {
+                core::slice::from_raw_parts(
+                    (p.ptr as *const u8).add(y * p.stride as usize),
+                    row_bytes,
+                )
+            };
+            for &b in row {
+                crc ^= b as u32;
+                crc = crc.wrapping_mul(0x0100_0193);
+            }
+            hashed += row_bytes;
+        }
+        (crc, hashed)
+    }
+
+    /// CRC32 di una riga di celle (T4, solo test): `cell_h` pixel rows a
+    /// partire da `origin_y + row*cell_h`, `width*4` byte per riga.
+    fn row_crc(&self, row: usize) -> (u32, usize) {
+        let Surface::Pixel(p) = &self.surface else {
+            return (0, 0);
+        };
+        let g = p.geom;
+        if row >= g.rows {
+            return (0, 0);
+        }
+        let y0 = g.origin_y as usize + row * g.cell_h as usize;
+        let row_bytes = p.width as usize * 4;
+        let mut crc = 0xFFFF_FFFFu32;
+        let mut hashed = 0usize;
+        for yy in 0..g.cell_h as usize {
+            let y = y0 + yy;
+            if y >= p.height as usize {
+                break;
+            }
+            let row = unsafe {
+                core::slice::from_raw_parts(
+                    (p.ptr as *const u8).add(y * p.stride as usize),
+                    row_bytes,
+                )
+            };
+            for &b in row {
+                crc ^= b as u32;
+                crc = crc.wrapping_mul(0x0100_0193);
+            }
+            hashed += row_bytes;
+        }
+        (crc, hashed)
+    }
+
+    /// Scroll (T4, ADR-0066): sposta i pixel se lo sfondo e' riga-invariante
+    /// e il feed e' interattivo; altrimenti ricompone (`mark_all`).
+    ///
+    /// Lo shift e' possibile solo se i pixel sono aggiornati: per questo il
+    /// feed "in blocco" (output di un comando) ricompone — il render e'
+    /// differito a fine feed e i pixel intermedi non esistono.
+    fn scroll(&mut self) {
+        let can_shift = !self.no_shift
+            && !self.bulk_feed
+            && self.bg_rows_equal
+            && self.bg_layer.is_some()
+            && matches!(self.surface, Surface::Pixel(_));
+        if !can_shift {
+            self.grid.scroll_up();
+            return;
+        }
+        // I6: prima si disegna il pendente (i pixel del testo appena scritto
+        // devono esistere prima di essere spostati).
+        // I6b: il cursore non deve finire nello shift (diventerebbe un blocco
+        // fantasma una riga sopra): lo si cancella prima, ridisegnando la sua
+        // cella con cursor_visible = false, poi si ripristina il flag.
+        let cursor_was_visible = self.grid.cursor_visible;
+        self.grid.cursor_visible = false;
+        self.render();
+        self.grid.cursor_visible = cursor_was_visible;
+        let (gx, gy, gw, gh) = self.grid_px_rect();
+        let cell_h = self.surface.geom().cell_h;
+        if let Surface::Pixel(p) = &mut self.surface {
+            // `h` = tutta la griglia: la funzione lascia invariate le ultime
+            // `dy` righe (la nuova ultima riga di celle, che il renderer
+            // ridisegna). Passare `gh - cell_h` lascerebbe ferme DUE righe.
+            p.shift_rows_up(gx, gy, gw, gh, cell_h);
+        }
+        self.grid.scroll_up_after_shift();
+        self.damage.add_rect(gx, gy, gw, gh);
     }
 
     /// Ridisegna la zona sporca e il cursore.
@@ -554,7 +707,13 @@ impl Term {
         // Estraggo i dati del layer 0 come puntatore+lunghezza (tipo Copy)
         // PRIMA di qualsiasi mut-borrow su self, per evitare conflitti di
         // borrow con restore_layer0_cell(&mut self, ...).
-        let l0_data = self.layer0.as_ref().map(|v| (v.as_ptr() as *const u8, v.len()));
+        // T4 (solo test): con la bg uniforme il percorso legacy non deve
+        // comporre il wallpaper, o shift e repaint darebbero pixel diversi.
+        let l0_data = if self.test_uniform_bg {
+            None
+        } else {
+            self.layer0.as_ref().map(|v| (v.as_ptr() as *const u8, v.len()))
+        };
 
         // T3 (ADR-0066): con la bg layer pronta il render copia una banda di
         // background (memcpy) e disegna solo l'inchiostro. Puntatore+len+stride
@@ -689,12 +848,17 @@ impl Term {
         let font = self.font.as_mut();
         // Passa il layer 0 a put_char: i pixel BMP sovrapposti vengono
         // copiati sopra lo sfondo prima del glifo, cosi' il testo resta
-        // sopra l'immagine senza cancellarla.
-        let l0 = self.layer0.as_ref().map(|v| {
-            // Righe = byte / (larghezza * 4): il pixel e' BGRA.
-            let l0_h = (v.len() / (self.layer0_width.max(1) as usize * 4)) as u32;
-            (v.as_slice(), self.layer0_width, l0_h, self.layer0_offset_x, self.layer0_offset_y)
-        });
+        // sopra l'immagine senza cancellarla. T4 (solo test): con la bg
+        // uniforme il wallpaper non si compone (coerenza con la banda).
+        let l0 = if self.test_uniform_bg {
+            None
+        } else {
+            self.layer0.as_ref().map(|v| {
+                // Righe = byte / (larghezza * 4): il pixel e' BGRA.
+                let l0_h = (v.len() / (self.layer0_width.max(1) as usize * 4)) as u32;
+                (v.as_slice(), self.layer0_width, l0_h, self.layer0_offset_x, self.layer0_offset_y)
+            })
+        };
         self.surface
             .put_char(col, row, span, cp, fg, bg, cursor, font, l0);
     }
@@ -878,7 +1042,7 @@ impl Term {
         let mut ox = 0u32;
         let mut oy = 0u32;
         let mut h_img = 0usize;
-        if w_img > 0 && len > 0 {
+        if !self.test_uniform_bg && w_img > 0 && len > 0 {
             h_img = len / (w_img * 4);
             ox = ((w_fb as usize).saturating_sub(w_img) / 2) as u32;
             oy = ((h_fb as usize).saturating_sub(h_img) / 2) as u32;
@@ -904,7 +1068,7 @@ impl Term {
                 }
             }
         }
-        self.bg_rows_equal = rows_all_equal(&v, bg_stride);
+        self.bg_rows_equal = self.test_uniform_bg || rows_all_equal(&v, bg_stride);
         let _ = civis::println!(
             "[console] layer 0: fb={}x{} img={}x{} offset=({},{}) stride={} bg_rows_equal={}",
             w_fb, h_fb, w_img, h_img, ox, oy, stride, self.bg_rows_equal
@@ -1083,6 +1247,10 @@ fn real_main(_sp: u64) -> ! {
         layer0_offset_y: 0,
         bg_layer: None,
         bg_rows_equal: false,
+        bulk_feed: false,
+        bulk_writes: 0,
+        no_shift: NO_SHIFT,
+        test_uniform_bg: false,
         fb_slot: civis::DMA_SLOT_DEVICE,
         // D7 (ADR-0066): nessun danno iniziale.
         damage: Damage::none(),
@@ -1153,6 +1321,14 @@ fn real_main(_sp: u64) -> ! {
                     }
 
                     DEV_CLOSE => {
+                        // T4/bulk: se restava un batch non ancora reso (lo
+                        // scrittore chiude senza una write interattiva), lo
+                        // si rende ora.
+                        if term.bulk_writes > 0 {
+                            term.bulk_writes = 0;
+                            term.render();
+                            term.flush_display();
+                        }
                         let _ = civis::reply(msg.tag, 0, 0);
                     }
 
@@ -1211,6 +1387,37 @@ fn real_main(_sp: u64) -> ! {
                             term.grid.non_empty() as u64,
                             term.grid.text_crc() as u64,
                         );
+                    }
+
+                    civis::syscall_numbers::CONSOLE_FRAME_CRC => {
+                        // T4 (solo test): CRC del framebuffer visibile.
+                        let (crc, bytes) = term.frame_crc();
+                        let _ = civis::reply(msg.tag, crc as u64, bytes as u64);
+                    }
+
+                    civis::syscall_numbers::CONSOLE_ROW_CRC => {
+                        // T4 (solo test): CRC di una riga di celle.
+                        let (crc, bytes) = term.row_crc(msg.w0 as usize);
+                        let _ = civis::reply(msg.tag, crc as u64, bytes as u64);
+                    }
+
+                    civis::syscall_numbers::CONSOLE_REPAINT => {
+                        // T4 (solo test): riferimento "full repaint".
+                        term.grid.mark_all();
+                        term.render();
+                        term.flush_display_full();
+                        let _ = civis::reply(msg.tag, 0, 0);
+                    }
+
+                    civis::syscall_numbers::CONSOLE_TEST_MODE => {
+                        // T4 (solo test): bg uniforme e/o niente shift.
+                        term.test_uniform_bg = (msg.w0 & 1) != 0;
+                        term.no_shift = (msg.w0 & 2) != 0;
+                        term.build_bg_layer();
+                        term.grid.mark_all();
+                        term.render();
+                        term.flush_display_full();
+                        let _ = civis::reply(msg.tag, 0, 0);
                     }
 
                     civis::EXIT_NOTIFY => {

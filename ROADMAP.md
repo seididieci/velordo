@@ -263,6 +263,17 @@ Voci con scope e vittoria dichiarati (non date).
       fill e il blend del BMP per cella spariscono. Le celle con bg
       colorato/trasparente restano sul percorso completo. Frame al login
       identico a T1 (**0 pixel diversi**); unit test host 45/45.
+- [x] **D7/ter — T4: scroll a shift di pixel + bulk (hexdump)** (completata,
+      ADR-0066): lo scroll sposta i pixel del framebuffer (`shift_rows_up`) e
+      ridisegna solo l'ultima riga, invece di ricomporre tutte le celle; con
+      bg non riga-invariante (wallpaper) o feed in blocco ricompone. `t64`
+      confronta il CRC del frame dopo shift e dopo `CONSOLE_REPAINT` (uguali).
+      Due bug trovati: `shift_rows_up` chiamato con `gh - cell_h` (due righe
+      ferme) e glifo che sbordava nei margini (clip verticale alla cella).
+      Bulk: feed > 256 B differisce render+flush ogni 8 write, `hexdump` legge
+      e scrive a blocchi da 4000 B, mirror seriale con budget 256 KiB,
+      scrollback `VecDeque`. `hexdump /bg.bmp` (5,2 MB): da ~38 min a **31 s**.
+      Gate 6 righe, zero FAIL; `[usertests] 60/60`; unit test 48/48.
 - [x] **S3.2a — Shell nativa REPL minima + gestione utenti** (completata, 2026-10): programma interattivo
       **nativo** (meccanismo, niente POSIX) su `/dev/input/keyboard` +
       `/dev/console`. Comandi: `help`, `users`, `create-user <nome>`,

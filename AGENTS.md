@@ -158,7 +158,7 @@ velordo/
 
 ## Stato corrente
 
-Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 59/59` + `[threadtest] PASS 12/12` + shell nativa (fase `native` di `test-shell-all.sh`; le fasi POSIX sono storiche dal login nativo, ADR-0062), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
+Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 60/60` + `[threadtest] PASS 12/12` + shell nativa (fase `native` di `test-shell-all.sh`; le fasi POSIX sono storiche dal login nativo, ADR-0062), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
 - **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
   BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
@@ -204,7 +204,7 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   (il device scala lo scanout). Il `PRESENT` non trasporta i pixel futuri:
   chi ridisegna deve anche **flushare** (`GPU_DISPLAY_STATS` conta i FLUSH
   dopo l'ultimo PRESENT; senza flush lo schermo resta nero fino al tasto).
-  Test: `t63` nella suite (usertests 59/59, modeset a 1920x1088 + rifiuto
+  Test: `t63` nella suite (usertests 60/60, modeset a 1920x1088 + rifiuto
   oltre-bound + refresh verificato). Prova manuale GTK **fatta**: al resize
   il terminale si aggiorna subito, testo conservato. **D5**: al
   ri-adattamento il **cursore non salta piu' in fondo** (tiene la sua riga,
@@ -213,7 +213,13 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `FULL_FLUSH_ONLY` come valvola), T2 (surface senza `volatile` per pixel,
   fill a parole, `blend_row_bgra`) e T3 (bg layer precomposta fondo+immagine,
   composizione a banda: `copy_from` + `draw_ink`, il fill/blend per cella
-  sparisce). Frame al login identico a T1 (0 pixel diversi).
+  sparisce). Frame al login identico a T1 (0 pixel diversi). **T4**: scroll
+  a shift di pixel (`shift_rows_up`, solo l'ultima riga ridisegnata) con
+  ricomposizione quando la bg non e' riga-invariante o il feed e' in blocco;
+  `t64` confronta il CRC del frame dopo shift e dopo `CONSOLE_REPAINT`.
+  Bulk: feed > 256 B differisce render+flush ogni 8 write, `hexdump` a
+  blocchi da 4000 B, mirror seriale con budget 256 KiB, scrollback
+  `VecDeque` (`hexdump /bg.bmp` 5,2 MB: ~38 min → 31 s).
   Prossimo: console server con mirror seriale e routing POSIX
   stdout→device (l'hook `persona`), poi il DE.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
@@ -416,7 +422,7 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
 
 ```bash
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term (rasterizer + cursore + surface/layer 0 + T2/T3), valloc, blake2s: 45 test
+./scripts/run-unit-tests.sh   # term (rasterizer + cursore + surface/layer 0 + T2/T3), valloc, blake2s: 48 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh
@@ -448,10 +454,10 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 59/59
+#   [usertests] PASS 60/60
 #   [threadtest] PASS 12/12
 timeout 150 ./run-tests.sh > /tmp/boot.log
-rg '\[testfs\] PASS 5/5|\[testsarca\] PASS 64/64|\[posixtests\] PASS 4/4|\[identistest\] PASS 11/11|\[usertests\] PASS 59/59|\[threadtest\] PASS 12/12' /tmp/boot.log
+rg '\[testfs\] PASS 5/5|\[testsarca\] PASS 64/64|\[posixtests\] PASS 4/4|\[identistest\] PASS 11/11|\[usertests\] PASS 60/60|\[threadtest\] PASS 12/12' /tmp/boot.log
 test "$(rg -c 'FAIL|PANIC|#.* FAULT' /tmp/boot.log)" = "0"
 ```
 

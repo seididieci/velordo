@@ -467,6 +467,7 @@ fn glyph_pixels(
         return;
     };
     let baseline = y as i32 + p.geom.ascent_px;
+    let ch = p.geom.cell_h;
     // Centra il bitmap dentro lo span. `start_x` e' clampato a >= 0 per
     // evitare underflow quando lo span e' piu' stretto del glifo.
     let start_x = (x as i32 + (w as i32 - bmp.w as i32) / 2).max(0);
@@ -479,6 +480,13 @@ fn glyph_pixels(
             let px = (start_x + c as i32) as u32;
             let py = (baseline + bmp.yoff + r as i32) as u32;
             if px >= x + w {
+                continue;
+            }
+            // Clip verticale alla cella: un glifo che sborda nella riga
+            // sopra/sotto verrebbe cancellato dalla banda della riga vicina
+            // e, ai margini della griglia, resterebbe come pixel orfano
+            // (shift e repaint darebbero frame diversi, T4).
+            if py < y || py >= y + ch {
                 continue;
             }
             let dest = unsafe { p.get(px, py) };

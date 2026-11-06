@@ -93,9 +93,9 @@ pub(crate) fn cmd_cat(args: &[&str]) -> i64 {
         term::term_err("\n");
         return 1;
     };
-    let mut buf = vec![0u8; 4096];
+    let mut buf = vec![0u8; 4000];
     loop {
-        match civis::read_fs(fd, &mut buf, 4096) {
+        match civis::read_fs(fd, &mut buf, 4000) {
             Ok(0) => break, // EOF
             Ok(n) => {
                 if let Ok(s) = core::str::from_utf8(&buf[..n]) {
@@ -184,11 +184,11 @@ fn copy_file(src: &str, dst: &str) -> bool {
         let _ = civis::close(fd_in);
         return false;
     };
-    let mut buf = vec![0u8; 4096];
+    let mut buf = vec![0u8; 4000];
     let mut ok = true;
     loop {
         // Come `cat`: EOF (Ok(0)) o errore chiudono il loop.
-        let n = match civis::read_fs(fd_in, &mut buf, 4096) {
+        let n = match civis::read_fs(fd_in, &mut buf, 4000) {
             Ok(n) => n,
             Err(_) => break,
         };
