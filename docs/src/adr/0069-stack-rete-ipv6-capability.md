@@ -1,0 +1,154 @@
+# ADR-0069: Stack di rete nativo — IPv6-first, servizi netdev/net, API a capability
+
+## Status
+
+Proposed (2026-11). Dipende da ADR-0068 (threat model/invarianti) e
+ADR-0070 (config `sys:*`).
+
+## Context
+
+Velordo non ha rete. Il kernel è neutro (ADR-0025/0048): niente socket, niente
+protocolli, niente syscall di rete. I servizi sono userspace, comunicano via
+IPC per nome con reply implicita, hanno diritti per canale e un manifest con
+hash verificato allo spawn.
+
+Decisioni prese in fase di analisi:
+
+- **IPv6-first**: il core parla solo IPv6; IPv4 arriva dopo, con un
+  traduttore separato.
+- **Driver e stack separati**: `netdev` (virtio-net) e `net` (protocolli),
+  entrambi userspace.
+- **API a capability**, non socket: il client chiede un endpoint con vincoli;
+  la policy è per binario.
+- **virtio-net** prima, hardware reale dopo; **1 RX + 1 TX**, niente offload.
+- **Config** in `sys:net` (ADR-0070), letta read-only; fallback compilato per
+  i test.
+- **Test IPv6** con `-netdev passt` (QEMU 10.2.2, passt installato, host con
+  IPv6 globale), fuori dal gate.
+- **Sicurezza**: RA guard, no DAD, IID randomizzato, ping solo test/config,
+  frammenti droppati, default-deny, audit.
+- **IOMMU-ready** ora, VT-d dopo.
+
+## Decision
+
+### 1. Stratificazione
+
+| Livello | Crate | Ruolo |
+|---|---|---|
+| Core | `libs/net` | protocolli puri, `no_std`, `#![forbid(unsafe_code)]`, host-testable, fuzzable. Nessun I/O: `input(frame, now) -> Actions`, `output() -> Frame`. |
+| Driver | `userland/netdev` | virtio-net; `unsafe` confinato a MMIO/DMA/ring; nessuna logica di protocollo. |
+| Servizio | `userland/net` | usa `civis`; possiede la config; risolve il driver; espone endpoint a capability; logga; CBS. |
+| Personalità | `flavours/posix` (dopo) | socket POSIX mappate su `net`; lì la PAL (ADR-0047). |
+
+Il core non conosce `civis`, il driver non conosce i protocolli, il servizio
+non conosce POSIX.
+
+### 2. IPv6-first
+
+- Il core implementa **solo IPv6** (e ICMPv6/NDP). IPv4 non esiste nel core.
+- IPv4 verso il mondo: **traduttore separato** (SIIT RFC 7915 o NAT64
+  RFC 6146) in un servizio dedicato, che possiede l'indirizzo IPv4 e traduce.
+  Disabilitato di default; policy esplicita.
+- Motivazione: una sola rappresentazione interna, un solo parser di
+  indirizzi; l'IPv4 (opzioni, frammentazione, broadcast, ARP) resta fuori dal
+  TCB del core.
+
+### 3. Servizi e kernel
+
+- `Service::Net = 14`, `Service::NetDev = 15` (slot liberi; `SERVICE_COUNT`
+  resta 16). Init li supervisiona; manifest + hash; `SERVICE_POLICY`.
+- Il kernel resta neutro: nessuna syscall di rete. **Prerequisiti kernel**:
+  - **DMA**: generalizzare l'owner del grant (oggi `Service::Console`) a un
+    dominio per servizio; il driver `netdev` ottiene i suoi slot; interfaccia
+    `DmaDomain` (identità oggi, VT-d dopo).
+  - **MMIO**: generalizzare il grant (oggi `Service::Gpu`) al device di rete
+    (finestra UC, non-owned).
+  - **MSI-X**: un vettore per la NIC (es. `MSI_VECTOR_NET = 0x51`), routing
+    IRQ→driver come per la GPU.
+- Il driver non fa I/O FS; il servizio legge `sys:net` (ADR-0070).
+
+### 4. Driver virtio-net
+
+- Device `virtio-net-pci` modern (`1af4:1041` con `disable-legacy=on`),
+  `VIRTIO_F_VERSION_1`.
+- **1 RX + 1 TX** (single-thread); niente MQ, niente control queue.
+- Feature: `MAC` (e `STATUS` se disponibile); **niente** `CSUM`/`GUEST_CSUM`/
+  `GSO`/`MRG_RXBUF`/`HASH`/`RSS`.
+- Buffer: **2048 byte/slot** (header virtio 12 + frame 1514 + margine);
+  **256 descrittori** per coda; MTU **1500**; jumbo dopo.
+- Il driver valida il used ring (`id` nel range, `len` ≤ buffer, niente
+  duplicati); lo stack valida il pacchetto.
+- IRQ: MSI-X; il driver drena il used ring e notifica lo stack (doorbell).
+
+### 5. API a capability (niente POSIX)
+
+- **Control plane** IPC: `NET_OPEN {proto, local, remote, flags}` → endpoint
+  (canale + ring TX/RX); `NET_CLOSE`, `NET_STATS`.
+- **Data plane**: ring SPSC per endpoint, slot a dimensione fissa, doorbell
+  solo sulla transizione vuoto→non vuoto (o ogni N).
+- **Policy**: il manifest del client dichiara gli endpoint consentiti; il
+  servizio verifica l'hash del peer (`SYS_PEER_INFO`) e applica la policy.
+- Niente `sockaddr`/`errno`/fd nel core: la personalità POSIX mappa dopo.
+
+### 6. Configurazione
+
+- `sys:net` (ADR-0070): indirizzo/prefix, gateway, MTU, policy ping/RA,
+  upstream DNS (per il resolver). Letto **read-only** all'avvio; config
+  invalida → fail-closed (niente rete).
+- Fallback compilato per i test (config statica) se il bucket non c'è.
+- Niente DHCPv6/SLAAC non controllato: **RA guard** con allowlist del router
+  (passt nei test); SLAAC solo dal router autorizzato.
+
+### 7. Sicurezza di default
+
+- RA guard; redirect ignorati; frammenti droppati; no DAD; IID randomizzato;
+  ping solo test/config; no raw; default-deny; rate limit; audit.
+- TCP (fase successiva): SYN cookies, RFC 5961, ISN randomizzato, no SACK/
+  timestamps, no urgent, RST rate-limited.
+
+### 8. Test
+
+- **Host**: unit + fuzzing + harness deterministico (input → output).
+- **QEMU**: `scripts/run-net-tests.sh` con `-netdev passt` (IPv6 reale,
+  unprivileged), **fuori dal gate**; il gate resta 6 righe.
+- **Milestone (a)**: il guest fa RA/SLAAC da passt e ping6 host/router; ping
+  abilitato solo dalla config di test.
+
+### 9. CBS e fairness
+
+- `net` e `netdev` si attaccano a un server CBS; la fairness per client è
+  interna (code bounded + DRR), non del kernel.
+
+### 10. Traiettoria (non piano)
+
+- **N1**: prerequisiti kernel (DMA/MMIO/MSI-X), driver virtio-net, core IPv6,
+  NDP/RA/SLAAC, ICMPv6 echo, passt test; config statica/`sys:net`.
+- **N2**: UDP + endpoint a capability + ring; echo server nativo; policy.
+- **N3**: TCP minimale; API stream nativa.
+- **N4**: traduttore IPv4 (SIIT/NAT64) separato.
+- **N5**: resolver DNS plain separato.
+- **N6**: DoH/DoT con TLS (servizio separato).
+- **N7**: personalità POSIX socket.
+- **N8**: VT-d/IOMMU.
+
+## Consequences
+
+### Positive
+
+- Un solo parser IPv6; IPv4 isolato; driver minimo; stack isolato; API
+  capability; test host/fuzz; gate indipendente da passt.
+- Il kernel resta neutro: la rete è un servizio, non una syscall.
+
+### Negative / limiti
+
+- Prerequisiti kernel (DMA/MMIO/MSI-X) prima del driver.
+- Niente IPv4 nel core: il mondo IPv4 richiede il traduttore (N4).
+- Niente frammentazione/DAD/SACK: subset dichiarato.
+- Single-thread: throughput limitato; multi-queue dopo.
+
+## Riferimenti
+
+- ADR-0068 (threat model/invarianti), ADR-0070 (policy subtree/bucket).
+- ADR-0005 (microkernel), ADR-0008 (IPC per nome), ADR-0025/0041/0048
+  (meccanismo/personalità), ADR-0057 (grant MMIO), ADR-0060 (console),
+  ADR-0064 (bucket binari).

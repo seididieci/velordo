@@ -667,6 +667,18 @@ Voci con scope e vittoria dichiarati (non date).
       `RUNS=3`). Restano W7 (DMA multi-pagina / payload piu' grandi) e
       write-back a epoche. Dettagli e caveat in `13-performance.md`.
 
+- [ ] **Rete — stack nativo IPv6-first (N1–N8)** (pianificata, ADR-0068/0069/0070):
+      stack in userspace — `libs/net` core `no_std` 100% safe (host-testable,
+      fuzzable), `userland/net` servizio, `userland/netdev` driver virtio-net;
+      IPv6-only nel core, IPv4 dopo con traduttore separato (SIIT/NAT64);
+      API a capability (niente POSIX nel meccanismo, la personalità socket
+      arriva dopo); policy per binario; config `sys:net` con policy di subtree
+      in cardo (`sys:identis` rinomina `identis:config`, chiude il debito
+      ADR-0058); virtio-net 1 RX + 1 TX, no offload, 2048 B/slot, 256
+      descrittori, MTU 1500; IOMMU-ready (VT-d dopo); test host/fuzz + QEMU
+      `passt` fuori dal gate. Vittoria N1: il guest fa RA/SLAAC da passt e
+      ping6 host/router; gate invariato (6 righe, zero FAIL).
+
 ## Parcheggiate
 
 Idee senza trigger (non date, solo su pressione reale).

@@ -95,3 +95,6 @@
 - [ADR-0065: Interprete "Rust-like" per la shell di Velordo](./adr/0065-interprete-rust-like.md)
 - [ADR-0066: Redraw del terminale — danno, rect di trasferimento, sfondo precomposto e scroll (D7)](./adr/0066-redraw-terminale-danno-rect-scroll.md)
 - [ADR-0067: Attese di input in userland — futex, non spin](./adr/0067-attese-input-futex.md)
+- [ADR-0068: Threat model e invarianti dello stack di rete](./adr/0068-threat-model-stack-rete.md)
+- [ADR-0069: Stack di rete nativo — IPv6-first, servizi netdev/net, API a capability](./adr/0069-stack-rete-ipv6-capability.md)
+- [ADR-0070: Policy di subtree per hash in cardo e bucket `sys:*`](./adr/0070-policy-subtree-bucket-sys.md)
