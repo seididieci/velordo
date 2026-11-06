@@ -207,13 +207,17 @@ pub struct Pixel {
 
 impl Pixel {
     /// Scrive un pixel BGRA.
+    ///
+    /// Il framebuffer e' RAM normale: la coerenza con il device e' il
+    /// `FLUSH` (confine IPC/syscall, barriera del compilatore), non la
+    /// singola parola. Per questo si usa `ptr::write` (non `volatile`).
     pub unsafe fn put(&mut self, x: u32, y: u32, color: u32) {
         if x >= self.width || y >= self.height {
             return;
         }
         let off = (y as usize * self.stride as usize) + (x as usize * 4);
         unsafe {
-            core::ptr::write_volatile(self.ptr.add(off) as *mut u32, color);
+            core::ptr::write(self.ptr.add(off) as *mut u32, color);
         }
     }
 
@@ -223,14 +227,39 @@ impl Pixel {
             return 0;
         }
         let off = (y as usize * self.stride as usize) + (x as usize * 4);
-        unsafe { core::ptr::read_volatile(self.ptr.add(off) as *const u32) }
+        unsafe { core::ptr::read(self.ptr.add(off) as *const u32) }
     }
 
     /// Riempie un rettangolo con un colore opaco.
+    ///
+    /// Un ciclo per riga che scrive `u32` a parole (bounds-check fatto una
+    /// sola volta su `w`/`h`, niente check per pixel). Quando `w` e' largo
+    /// si scrivono `u64` a coppie.
     pub fn fill_rect(&mut self, x: u32, y: u32, w: u32, h: u32, color: u32) {
-        for yy in y..(y + h) {
-            for xx in x..(x + w) {
-                unsafe { self.put(xx, yy, color) };
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let w = w.min(self.width - x);
+        let h = h.min(self.height - y);
+        if w == 0 || h == 0 {
+            return;
+        }
+        let row_stride = self.stride as usize;
+        let row_base = (y as usize) * row_stride;
+        let x_off = (x as usize) * 4;
+        let ptr = self.ptr; // *mut u8: offset in byte
+        let color64 = (color as u64) | ((color as u64) << 32);
+        for yy in 0..h {
+            let row_ptr = unsafe { ptr.add(row_base + (yy as usize) * row_stride + x_off) };
+            let mut xx = 0;
+            while xx + 1 < w {
+                unsafe {
+                    core::ptr::write(row_ptr.add(xx as usize * 4) as *mut u64, color64);
+                }
+                xx += 2;
+            }
+            if xx < w {
+                unsafe { core::ptr::write(row_ptr.add(xx as usize * 4) as *mut u32, color) };
             }
         }
     }
@@ -238,10 +267,28 @@ impl Pixel {
     /// Riempie un rettangolo blendando `color` con alpha `a` sopra i pixel
     /// gia' presenti (usato per il background trasparente).
     fn fill_rect_blend(&mut self, x: u32, y: u32, w: u32, h: u32, color: u32, a: u32) {
-        for yy in y..(y + h) {
-            for xx in x..(x + w) {
-                let dest = unsafe { self.get(xx, yy) };
-                unsafe { self.put(xx, yy, blend(dest, color, a)) };
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let w = w.min(self.width - x);
+        let h = h.min(self.height - y);
+        if w == 0 || h == 0 {
+            return;
+        }
+        let row_stride = self.stride as usize;
+        let row_base = (y as usize) * row_stride;
+        let x_off = (x as usize) * 4;
+        let ptr = self.ptr; // *mut u8: offset in byte
+        for yy in 0..h {
+            let row_ptr = unsafe { ptr.add(row_base + (yy as usize) * row_stride + x_off) };
+            for xx in 0..w {
+                let dest = unsafe { core::ptr::read(row_ptr.add(xx as usize * 4) as *const u32) };
+                unsafe {
+                    core::ptr::write(
+                        row_ptr.add(xx as usize * 4) as *mut u32,
+                        blend(dest, color, a),
+                    );
+                }
             }
         }
     }
@@ -249,10 +296,25 @@ impl Pixel {
     /// Riempie **tutta** la superficie con un colore opaco (BGRA): il fondo
     /// di pagina, compresi i margini fuori dalla griglia.
     pub fn fill(&mut self, color: u32) {
-        let words = (self.stride as usize * self.height as usize) / 4;
-        for i in 0..words {
-            let off = i * 4;
-            unsafe { core::ptr::write_volatile(self.ptr.add(off) as *mut u32, color) };
+        let row_words = (self.stride as usize) / 4;
+        let total_words = row_words * (self.height as usize);
+        if total_words == 0 {
+            return;
+        }
+        let color64 = (color as u64) | ((color as u64) << 32);
+        let ptr = self.ptr as *mut u64;
+        let total_u64 = total_words / 2;
+        let mut i = 0;
+        while i < total_u64 {
+            unsafe {
+                core::ptr::write(ptr.add(i), color64);
+            }
+            i += 1;
+        }
+        if total_words % 2 == 1 {
+            unsafe {
+                core::ptr::write(ptr.add(total_u64) as *mut u32, color);
+            }
         }
     }
 
@@ -261,9 +323,24 @@ impl Pixel {
     /// sfondo trasparente dell'immagine non deve dipingere (il fondo di
     /// pagina resta visibile).
     pub fn blend_bgra_span(&mut self, x: u32, y: u32, n: u32, src: &[u8]) {
+        let surface =
+            unsafe { core::slice::from_raw_parts_mut(self.ptr, (self.stride as usize) * (self.height as usize)) };
+        Self::blend_row_bgra(surface, self.stride, x, y, n, src);
+    }
+
+    /// Compone `n` pixel BGRA con alpha non premoltiplicato sopra una riga
+    /// della surface. `dst` e' il buffer lineare della surface (o di una
+    /// layer) con stride `dst_stride` byte; `(x, y)` e' l'origine e `n` il
+    /// numero di pixel da comporre. `src` e' il dato sorgente BGRA.
+    ///
+    /// Il clipping sulla larghezza e' a carico del caller: `blend_row_bgra`
+    /// non conosce la `width` della surface, solo lo stride.
+    pub fn blend_row_bgra(dst: &mut [u8], dst_stride: u32, x: u32, y: u32, n: u32, src: &[u8]) {
+        let row_start = (y as usize) * (dst_stride as usize);
         for i in 0..n {
             let px = x + i;
-            if px >= self.width {
+            let byte_off = row_start + (px as usize) * 4;
+            if byte_off + 4 > dst.len() {
                 break;
             }
             let s = (i as usize) * 4;
@@ -275,12 +352,18 @@ impl Pixel {
                 continue;
             }
             let rgb = u32::from_le_bytes([src[s], src[s + 1], src[s + 2], 0xFF]);
-            let v = if a == 0xFF {
-                rgb
-            } else {
-                blend(unsafe { self.get(px, y) }, rgb, a)
-            };
-            unsafe { self.put(px, y, v) };
+            let bg = u32::from_le_bytes([
+                dst[byte_off],
+                dst[byte_off + 1],
+                dst[byte_off + 2],
+                dst[byte_off + 3],
+            ]);
+            let v = if a == 0xFF { rgb } else { blend(bg, rgb, a) };
+            let bytes = v.to_le_bytes();
+            dst[byte_off] = bytes[0];
+            dst[byte_off + 1] = bytes[1];
+            dst[byte_off + 2] = bytes[2];
+            dst[byte_off + 3] = bytes[3];
         }
     }
 }
@@ -760,6 +843,96 @@ mod tests {
             for x in 10..30 {
                 assert_eq!(fb[y * 40 + x], red, "pixel ({},{}) del background", x, y);
             }
+        }
+    }
+
+    // ── T2: memoria (via `volatile`, fill a parole, copie bulk) ──────────
+
+    /// Surface di prova 40x44 (stride = 40*4 byte), grid 4x2 celle 10x22.
+    fn surface_40x44(fb: &mut [u32]) -> Surface {
+        Surface::Pixel(Pixel {
+            ptr: fb.as_mut_ptr() as *mut u8,
+            width: 40,
+            height: 44,
+            stride: 40 * 4,
+            geom: Geom {
+                cols: 4,
+                rows: 2,
+                cell_w: 10,
+                cell_h: 22,
+                ascent_px: 16,
+                origin_x: 0,
+                origin_y: 0,
+            },
+        })
+    }
+
+    /// Estrae il `Pixel` da una `Surface` di test (panica se VGA).
+    fn pixel_mut(s: &mut Surface) -> &mut Pixel {
+        match s {
+            Surface::Pixel(p) => p,
+            Surface::VgaText(_) => panic!("attesa Surface::Pixel"),
+        }
+    }
+
+    /// `fill_rect` riempie esattamente il rect e nulla fuori (bordi inclusi).
+    #[test]
+    fn fill_rect_bordi() {
+        let mut fb = alloc::vec![0u32; 40 * 44];
+        let mut s = surface_40x44(&mut fb);
+        let p = pixel_mut(&mut s);
+        let red = rgba_to_bgra(color::RED);
+        p.fill_rect(10, 5, 10, 7, red);
+        // Dentro il rect: tutto rosso.
+        for y in 5..12 {
+            for x in 10..20 {
+                assert_eq!(fb[y * 40 + x], red, "pixel ({},{}) dentro il rect", x, y);
+            }
+        }
+        // Fuori il rect: invariato (zero).
+        for y in 0..44 {
+            for x in 0..40 {
+                if (5..12).contains(&(y as usize)) && (10..20).contains(&(x as usize)) {
+                    continue;
+                }
+                assert_eq!(fb[y * 40 + x], 0, "pixel ({},{}) fuori dal rect", x, y);
+            }
+        }
+    }
+
+    /// `fill` copre interamente stride*height byte.
+    #[test]
+    fn fill_totale() {
+        let mut fb = alloc::vec![0u32; 40 * 44];
+        let mut s = surface_40x44(&mut fb);
+        let p = pixel_mut(&mut s);
+        let blue = rgba_to_bgra(color::BLUE);
+        p.fill(blue);
+        for v in &fb {
+            assert_eq!(*v, blue, "ogni pixel deve essere blue dopo fill");
+        }
+    }
+
+    /// `blend_row_bgra` non scrive fuori dal rect (x+n > width tronca).
+    #[test]
+    fn blend_row_confini() {
+        // dst e' una riga di 40 pixel (160 byte), stride = 160.
+        let mut dst = alloc::vec![0u8; 160];
+        // src: 20 pixel bianchi opachi (80 byte).
+        let mut src = alloc::vec![0u8; 80];
+        for i in (0..80).step_by(4) {
+            src[i] = 0xFF;     // B
+            src[i + 1] = 0xFF; // G
+            src[i + 2] = 0xFF; // R
+            src[i + 3] = 0xFF; // A
+        }
+        // Componiamo 10 pixel a partire da x=35: i primi 5 (35..39) entrano,
+        // i restanti 5 escono dal dst (x=40 -> byte_off=160 == len).
+        Pixel::blend_row_bgra(&mut dst, 160, 35, 0, 10, &src);
+        for i in 0..160 {
+            let in_rect = i >= 35 * 4 && i < 40 * 4;
+            let expected = if in_rect { 0xFF } else { 0x00 };
+            assert_eq!(dst[i], expected, "byte {} deve essere {}", i, expected);
         }
     }
 }

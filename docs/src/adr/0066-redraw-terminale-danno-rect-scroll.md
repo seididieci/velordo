@@ -532,7 +532,7 @@ prompt di login è già un frame stabile e resta fuori dal boot di produzione
 Le ottimizzazioni seguenti richiedono modifiche più profonde e sono state
 deliberatamente rimandate:
 
-- **T2–T3**: composizione a banda (copy bulk invece di fill+blend per-cella).
+- **T3**: composizione a banda (copy bulk invece di fill+blend per-cella).
 - **T4**: `CONSOLE_REPAINT` — forzaré il ridisegno completo senza trasferimento.
 - **T5**: batching del present — accumulare il danno e trasferire una volta sola
   quando la coda IPC è vuota (o dopo un tick).
@@ -553,12 +553,12 @@ caldo senza revertire il codice).
 
 ### T2 — memoria: via `volatile`, fill a parole, copie bulk
 
-**Obiettivo**: il disegno smette di essere dominato dagli accessi `volatile`
-per pixel. Nessun cambio di semantica.
+**Stato**: completato (insieme a T1 nel commit `88a3425`). Nessun cambio di
+semantica: il frame prodotto e' identico a T1.
 
 **File**: `libs/term/src/surface.rs`.
 
-**Modifiche**:
+**Modifiche applicate**:
 
 1. `Pixel::put` (`:210`) e `Pixel::get` (`:221`): **togliere
    `write_volatile`/`read_volatile`** e usare `ptr::write`/`ptr::read`.
@@ -581,22 +581,21 @@ per pixel. Nessun cambio di semantica.
    `core::slice::from_raw_parts_mut(self.ptr, stride*height)`). Serve a `T3`
    per comporre la bg layer su un `Vec<u8>` senza costruire un `Pixel`
    temporaneo.
-5. **Nessun cambio** a `blend()` (divisione per 255): il compilatore la
+5. Nessun cambio a `blend()` (divisione per 255): il compilatore la
    trasforma in moltiplicazione; un'approssimazione cambierebbe i colori e i
    test esistenti.
 
-**Test** (unit test host in `surface.rs`, `#[cfg(test)] mod tests`, esistente):
+**Test** (unit test host in `surface.rs`, `#[cfg(test)] mod tests`):
 - `fill_rect_bordi`: su un `Vec<u32>` 40×44, riempire `(10,5,10,7)` e
   verificare i pixel dentro e **fuori** (bordi inclusi).
 - `fill_totale`: `fill` copre `stride*height` byte.
-- `blend_row_confini`: `blend_row_bgra` non scrive fuori dal rect (x+n >
-  width → tronca).
-- I test esistenti (glifi larghi, alpha, colori) devono restare verdi: se
-  cambiano, il passo ha cambiato semantica → revert.
+- `blend_row_confini`: `blend_row_bgra` non scrive fuori dal rect
+  (`x+n > width` → tronca).
+- I test esistenti (glifi larghi, alpha, colori, layer 0) restano verdi.
 
-**Accettazione**: `./scripts/run-unit-tests.sh` verde; gate QEMU invariato;
-`cyc/render` (T0) in diminuzione a parità di `cells`; **A/B col frame golden**
-(stessa procedura di T1): `frame-t2.ppm` identico a `frame-t1.ppm`.
+**Accettazione**: `./scripts/run-unit-tests.sh` verde (42/42, +3 vs T1);
+gate QEMU invariato; A/B col frame golden: `frame-t2.ppm` identico a
+`frame-t1.ppm` (0 pixel diversi).
 
 **Rollback**: `git revert`.
 
