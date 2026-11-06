@@ -532,7 +532,6 @@ prompt di login è già un frame stabile e resta fuori dal boot di produzione
 Le ottimizzazioni seguenti richiedono modifiche più profonde e sono state
 deliberatamente rimandate:
 
-- **T3**: composizione a banda (copy bulk invece di fill+blend per-cella).
 - **T4**: `CONSOLE_REPAINT` — forzaré il ridisegno completo senza trasferimento.
 - **T5**: batching del present — accumulare il danno e trasferire una volta sola
   quando la coda IPC è vuota (o dopo un tick).
@@ -600,6 +599,9 @@ gate QEMU invariato; A/B col frame golden: `frame-t2.ppm` identico a
 **Rollback**: `git revert`.
 
 ### T3 — bg layer precomposta + composizione a banda
+
+**Stato**: completato. Nessun cambio di semantica: il frame al login e'
+identico a T1 (0 pixel diversi).
 
 **Obiettivo**: eliminare il fill per cella e il blend del BMP per cella.
 È il cambiamento che rende lo scroll ricomponibile a costo di memcpy.
@@ -727,6 +729,30 @@ gate QEMU invariato; A/B col frame golden: `frame-t2.ppm` identico a
 `frame-t3.ppm` identico a `frame-t1.ppm` (0 pixel diversi).
 
 **Rollback**: `git revert`.
+
+**Completato — dati T3**:
+
+- Unit test host: **45/45** (+3: `copy_from_rect`, `shift_rows_up_righe`,
+  `draw_ink_solo_inchiostro`).
+- **Golden A/B** (headless, prompt di login): `frame-t3-login.ppm` vs
+  `frame-t1-login.ppm` → **0 pixel diversi**. Dopo il login le uniche
+  differenze sono le cifre dell'orologio (x 181–258), attese perché i run
+  avvengono in secondi diversi.
+- **A/B a parità di lavoro** (stessa sequenza: `help`, `users`, `abc def`;
+  `renders=63 cells=857 flushes=64 B/flush=128363` in entrambi i run):
+
+  | Metrica | Prima (T1/T2) | Dopo (T3) | Variazione |
+  |---|---|---|---|
+  | `cyc/render` | 94.630 | **52.141** | **−45%** |
+  | `cyc/flush` | 368.385 | 331.502 | −10% |
+
+  Il calo è nel **render** (fill+blend per cella eliminati); il flush è
+  dominato dal trasferimento DMA, che T3 non tocca.
+- Gate: 6 righe PASS, zero FAIL/PANIC/FAULT; `t63` PASS (modeset
+  1920×1088, griglia 128×36 → 192×49 → 128×36, testo conservato).
+- Nota: l'immagine di sfondo è 1763×741 su un framebuffer 1280×800 →
+  `ox = 0`, `n = min(1763, 1280) = 1280`: il clipping nella costruzione
+  della bg layer è necessario (non basta quello del blend).
 
 ### T4 — scroll: shift dei pixel + ultima riga (condizionato) e test di equivalenza
 

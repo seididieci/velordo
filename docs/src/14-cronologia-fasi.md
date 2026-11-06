@@ -3072,3 +3072,36 @@
       (3) due copie dello stesso wait divergono: l'helper unico è la
       contromisura; (4) la regressione va misurata sul **processo QEMU**
       (`/proc`), non a occhio, e va resa un test.
+- [x] **D7/ter — T2/T3: memoria della surface e composizione a banda**
+      (2026-11, ADR-0066): il redraw per-cella costava un `fill_rect` di
+      background e un blend del BMP per ogni cella sporca, con accessi
+      `volatile` per pixel. **T2**: `Pixel::put/get` usano `ptr::write/read`
+      (il framebuffer è RAM normale; la coerenza è il `FLUSH`, non la
+      singola parola), `fill_rect`/`fill` scrivono a parole (`u32`, `u64` a
+      coppie) con bounds-check una volta per riga, e il corpo di
+      `blend_bgra_span` diventa la funzione libera `blend_row_bgra` (serve a
+      T3). **T3**: la console precompone una **bg layer** (fondo di pagina +
+      immagine, `Vec<u8>` grande quanto il framebuffer) a avvio/resize; il
+      render copia una banda di background con `copy_from` (memcpy per riga)
+      e disegna solo l'inchiostro con `draw_ink` (glifo + cursore, nessun
+      fill). Le celle con bg colorato o trasparente restano sul percorso
+      completo (`put_char`), che resta l'unica verità per alpha e layer 0.
+      Aggiunte `shift_rows_up` e `bg_rows_equal` come mezzi per T4.
+      **Verifica**: unit test host 45/45 (+3: `copy_from_rect`,
+      `shift_rows_up_righe`, `draw_ink_solo_inchiostro`); frame al login
+      **identico a T1 (0 pixel diversi)**; dopo il login le uniche
+      differenze sono le cifre dell'orologio (x 181–258), attese perché i
+      run avvengono in secondi diversi. A/B a parità di lavoro
+      (`renders=63 cells=857 flushes=64 B/flush=128363`): `cyc/render`
+      **94.630 → 52.141 (−45%)**, `cyc/flush` 368.385 → 331.502 (−10%).
+      Gate verde (6 righe, zero FAIL/PANIC/FAULT), `t63` PASS.
+      Lezioni: (1) il fast path è sicuro **solo** se la bg layer riproduce
+      esattamente la sequenza del percorso per-cella (fondo → immagine →
+      glifo → cursore): per questo è ristretto a `bg == BLACK` opaco;
+      (2) un'immagine più larga del framebuffer (1763 px su 1280) richiede
+      clipping esplicito anche nella costruzione della layer, non solo nel
+      blend; (3) il bbox del danno va allargato agli span interi, altrimenti
+      una banda che parte in mezzo a un glifo largo cancella inchiostro che
+      nessuno ridisegna; (4) `copy_from`/`shift_rows_up` lavorano in **byte**
+      (`*mut u8`): con `*mut u32` lo stride in byte verrebbe moltiplicato
+      per 4 (bug preso dai test host).

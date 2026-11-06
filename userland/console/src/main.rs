@@ -58,6 +58,25 @@ const FONT_PX: u32 = 16;
 const CRTC_INDEX: u16 = 0x3D4;
 const CRTC_DATA: u16 = 0x3D5;
 
+/// `true` se tutte le righe del buffer (stride in byte) sono byte-identiche
+/// alla riga 0. E' la condizione in cui lo scroll puo' spostare i pixel
+/// invece di ricomporre la banda (T4, ADR-0066).
+fn rows_all_equal(buf: &[u8], stride: u32) -> bool {
+    let stride = stride as usize;
+    if stride == 0 || buf.len() < stride {
+        return true;
+    }
+    let first = &buf[..stride];
+    let mut off = stride;
+    while off + stride <= buf.len() {
+        if &buf[off..off + stride] != first {
+            return false;
+        }
+        off += stride;
+    }
+    true
+}
+
 // ── Il terminale ───────────────────────────────────────────────────
 
 /// Rettangolo di pixel toccati (half-open): il danno da trasferire al driver
@@ -155,6 +174,13 @@ struct Term {
     layer0_offset_x: u32,
     /// Offset Y del layer 0 centrato nel framebuffer (D4).
     layer0_offset_y: u32,
+    /// Background precomposto (T3, ADR-0066): fondo di pagina + layer 0 in
+    /// BGRA, dimensione framebuffer, stride = `width * 4`. Il render copia
+    /// una banda da qui invece di rifare fill+blend per ogni cella.
+    bg_layer: Option<alloc::vec::Vec<u8>>,
+    /// `true` se tutte le righe della bg layer sono byte-identiche alla riga
+    /// 0: e' la condizione in cui lo scroll puo' spostare i pixel (T4).
+    bg_rows_equal: bool,
     /// Lo slot DMA del framebuffer corrente (D4: il riadattamento alloca
     /// l'altro slot e libera questo solo dopo che il nuovo e' presentato —
     /// un riadattamento fallito non deve lasciare la surface su un buffer
@@ -284,7 +310,7 @@ impl Term {
         //    buffer nuovo ma il device ha visto solo gli zeri dell'allocazione
         //    (il primo FLUSH, senza questo, arriverebbe al primo tasto:
         //    schermo nero fino a li').
-        self.draw_layer0_full();
+        self.build_bg_layer();
         self.render();
         self.flush_display_full();
         true
@@ -530,21 +556,70 @@ impl Term {
         // borrow con restore_layer0_cell(&mut self, ...).
         let l0_data = self.layer0.as_ref().map(|v| (v.as_ptr() as *const u8, v.len()));
 
+        // T3 (ADR-0066): con la bg layer pronta il render copia una banda di
+        // background (memcpy) e disegna solo l'inchiostro. Puntatore+len+stride
+        // estratti prima del mut-borrow della surface (come per `l0_data`).
+        let bg_data: Option<(*const u8, usize, u32)> = match (&self.bg_layer, &self.surface) {
+            (Some(v), Surface::Pixel(p)) => Some((v.as_ptr(), v.len(), p.width * 4)),
+            _ => None,
+        };
+
         let dirty = self.grid.take_dirty();
         if dirty.any {
             let (cols, rows) = (self.grid.cols(), self.grid.rows());
-            for row in dirty.min_row..=dirty.max_row.min(rows.saturating_sub(1)) {
-                for col in dirty.min_col..=dirty.max_col.min(cols.saturating_sub(1)) {
-                    // Le continuazioni le disegna la **testa** dello span:
-                    // qui non si ridipinge il background sopra il glifo
-                    // largo (era il bug: l'icona restava di una cella).
-                    if self.grid.cell(col, row).width == 0 {
-                        continue;
+            let r0 = dirty.min_row.min(rows.saturating_sub(1));
+            let r1 = dirty.max_row.min(rows.saturating_sub(1));
+            let c0 = dirty.min_col.min(cols.saturating_sub(1));
+            let c1 = dirty.max_col.min(cols.saturating_sub(1));
+            if let Some((bg_ptr, bg_len, bg_stride)) = bg_data {
+                // Allarga il bbox agli span interi: una banda che parte in
+                // mezzo a un glifo largo cancellerebbe inchiostro che nessuno
+                // ridisegna (Grid marca gia' lo span, ma il bbox puo' essere
+                // stato ristretto da altre celle).
+                let mut bc0 = c0;
+                let mut bc1 = c1;
+                for row in r0..=r1 {
+                    let (s0, _) = self.grid.span_at(c0, row);
+                    bc0 = bc0.min(s0);
+                    let (s1, l1) = self.grid.span_at(c1, row);
+                    bc1 = bc1.max((s1 + l1).saturating_sub(1));
+                }
+                let geom = self.surface.geom();
+                let bg = unsafe { core::slice::from_raw_parts(bg_ptr, bg_len) };
+                for row in r0..=r1 {
+                    let x0 = geom.origin_x + (bc0 as u32) * geom.cell_w;
+                    let y0 = geom.origin_y + (row as u32) * geom.cell_h;
+                    let bw = ((bc1 - bc0 + 1) as u32) * geom.cell_w;
+                    if let Surface::Pixel(p) = &mut self.surface {
+                        p.copy_from(bg, bg_stride, x0, y0, bw, geom.cell_h);
                     }
-                    let is_cursor =
-                        (col, row) == self.grid.cursor_clamped() && self.grid.cursor_visible;
-                    self.draw_cell_at(col, row, is_cursor, l0_data);
-                    self.stat_cells += 1; // T0 (ADR-0066)
+                    self.damage.add_rect(x0, y0, bw, geom.cell_h);
+                    for col in bc0..=bc1 {
+                        // Le continuazioni le disegna la testa dello span.
+                        if self.grid.cell(col, row).width == 0 {
+                            continue;
+                        }
+                        let is_cursor =
+                            (col, row) == self.grid.cursor_clamped() && self.grid.cursor_visible;
+                        self.draw_cell_at(col, row, is_cursor, l0_data, true);
+                        self.stat_cells += 1; // T0 (ADR-0066)
+                    }
+                }
+            } else {
+                // Fallback (VGA o bg layer non pronta): percorso per-cella.
+                for row in r0..=r1 {
+                    for col in c0..=c1 {
+                        // Le continuazioni le disegna la **testa** dello span:
+                        // qui non si ridipinge il background sopra il glifo
+                        // largo (era il bug: l'icona restava di una cella).
+                        if self.grid.cell(col, row).width == 0 {
+                            continue;
+                        }
+                        let is_cursor =
+                            (col, row) == self.grid.cursor_clamped() && self.grid.cursor_visible;
+                        self.draw_cell_at(col, row, is_cursor, l0_data, false);
+                        self.stat_cells += 1; // T0 (ADR-0066)
+                    }
                 }
             }
         }
@@ -558,13 +633,13 @@ impl Term {
             if cur != self.cursor_drawn {
                 let (cc, cr) = self.cursor_drawn;
                 if cc < self.grid.cols() && cr < self.grid.rows() {
-                    self.draw_cell_at(cc, cr, false, l0_data);
+                    self.draw_cell_at(cc, cr, false, l0_data, false);
                 }
             }
             // Disegna il cursore nella nuova posizione.
             let (cc, cr) = cur;
             if cc < self.grid.cols() && cr < self.grid.rows() {
-                self.draw_cell_at(cc, cr, cur_visible, l0_data);
+                self.draw_cell_at(cc, cr, cur_visible, l0_data, false);
             }
             self.cursor_drawn = cur;
             self.cursor_drawn_visible = cur_visible;
@@ -628,12 +703,18 @@ impl Term {
     /// dello span (una cella non si ridisegna da sola in mezzo a un glifo
     /// largo). `l0_data` e' il layer 0 gia' estratto (puntatore+lunghezza).
     /// D7 (ADR-0066): dichiara il danno subito dopo aver calcolato lo span.
+    ///
+    /// `bg_ready` (T3): la banda di background e' gia' stata copiata dalla bg
+    /// layer, quindi per le celle col fondo di pagina (bg nero opaco) basta
+    /// l'inchiostro. Le altre (bg colorato/trasparente) passano dal percorso
+    /// completo, che resta l'unica verita' per alpha e layer 0.
     fn draw_cell_at(
         &mut self,
         col: usize,
         row: usize,
         cursor: bool,
         l0_data: Option<(*const u8, usize)>,
+        bg_ready: bool,
     ) {
         let (start, _len) = self.grid.span_at(col, row);
         let cell = self.grid.cell(start, row);
@@ -644,6 +725,14 @@ impl Term {
         let geom = self.surface.geom();
         let (sw, sh) = self.surface.pixel_size();
         self.damage.add_cells(geom, sw, sh, start, row as u32, start + span - 1, row as u32);
+        // T3: background gia' corretto dalla banda -> solo inchiostro.
+        // Copre anche `cp == 0` (la banda ha gia' messo il fondo giusto).
+        if bg_ready && cell.bg == color::BLACK {
+            if let Surface::Pixel(p) = &mut self.surface {
+                p.draw_ink(start, row, span, cell.cp, cell.fg, cursor, self.font.as_mut());
+            }
+            return;
+        }
         // Celle vuote (cp == 0): ripristina lo sfondo dal layer 0 (pixel BMP
         // dove sovrappone, nero altrove). Niente glifo. Senza layer 0 la
         // cella va riempita col suo bg (una cella "spazio" puo' avere un
@@ -757,54 +846,74 @@ impl Term {
 
     /// Ridisegna il fondo dell'intero framebuffer: il **colore di pagina**
     /// (anche nei margini fuori dalla griglia), poi il layer 0 (BMP) centrato,
-    /// composto con il suo alpha — lo sfondo trasparente dell'immagine lascia
-    /// vedere il colore di pagina.
+    /// Costruisce la **bg layer** (T3, ADR-0066): fondo di pagina + immagine
+    /// centrata, composti una volta sola in un buffer BGRA grande quanto il
+    /// framebuffer. Il render poi copia una banda da qui (memcpy) invece di
+    /// rifare fill+blend per ogni cella.
     ///
     /// Calcola e memorizza gli offset di centratura per `restore_layer0_cell`
     /// (cambiano al resize: gli offset sono relativi alla superficie).
-    fn draw_layer0_full(&mut self) {
-        let bg = surface::rgba_to_bgra(color::BLACK);
-        if let Surface::Pixel(p) = &mut self.surface {
-            p.fill(bg);
+    fn build_bg_layer(&mut self) {
+        let (w_fb, h_fb, stride) = match &self.surface {
+            Surface::Pixel(p) => (p.width, p.height, p.stride),
+            Surface::VgaText(_) => return,
+        };
+        let page = surface::rgba_to_bgra(color::BLACK);
+        let bg_stride = w_fb * 4;
+        let mut v = alloc::vec![0u8; (bg_stride as usize) * (h_fb as usize)];
+        // Fondo di pagina a parole (u32).
+        {
+            let words = v.len() / 4;
+            let ptr = v.as_mut_ptr() as *mut u32;
+            for i in 0..words {
+                unsafe { core::ptr::write(ptr.add(i), page) };
+            }
         }
-        // Puntatore+lunghezza PRIMA del mut-borrow della surface: `layer0` e'
-        // un campo di self (borrow disjoint, ma il prestito va chiuso).
+        // Immagine centrata (D4): offset relativi alla superficie.
+        let w_img = self.layer0_width as usize;
         let (ptr, len) = match self.layer0.as_ref() {
             Some(v) => (v.as_ptr() as *const u8, v.len()),
-            None => return,
+            None => (core::ptr::null(), 0),
         };
-        let layer0 = unsafe { core::slice::from_raw_parts(ptr, len) };
-        let w_img = self.layer0_width as usize;
-        if w_img == 0 {
-            return;
+        let mut ox = 0u32;
+        let mut oy = 0u32;
+        let mut h_img = 0usize;
+        if w_img > 0 && len > 0 {
+            h_img = len / (w_img * 4);
+            ox = ((w_fb as usize).saturating_sub(w_img) / 2) as u32;
+            oy = ((h_fb as usize).saturating_sub(h_img) / 2) as u32;
+            self.layer0_offset_x = ox;
+            self.layer0_offset_y = oy;
+            let layer0 = unsafe { core::slice::from_raw_parts(ptr, len) };
+            let n = (w_img as u32).min(w_fb.saturating_sub(ox));
+            if n > 0 {
+                for yy in 0..h_img {
+                    let sy = oy as usize + yy;
+                    if sy >= h_fb as usize {
+                        break;
+                    }
+                    let off = yy * w_img * 4;
+                    surface::Pixel::blend_row_bgra(
+                        &mut v,
+                        bg_stride,
+                        ox,
+                        sy as u32,
+                        n,
+                        &layer0[off..off + n as usize * 4],
+                    );
+                }
+            }
         }
-        let h_img = len / (w_img * 4);
-        let surface = match &mut self.surface {
-            Surface::Pixel(p) => p,
-            _ => return,
-        };
-        let w_fb = surface.width as usize;
-        let h_fb = surface.height as usize;
-
-        // Centra l'immagine nel framebuffer (D4).
-        self.layer0_offset_x = ((w_fb.saturating_sub(w_img)) / 2) as u32;
-        self.layer0_offset_y = ((h_fb.saturating_sub(h_img)) / 2) as u32;
-        let ox = self.layer0_offset_x;
-        let oy = self.layer0_offset_y;
+        self.bg_rows_equal = rows_all_equal(&v, bg_stride);
         let _ = civis::println!(
-            "[console] layer 0: fb={}x{} img={}x{} offset=({},{}) stride={}",
-            w_fb, h_fb, w_img, h_img, ox, oy, surface.stride
+            "[console] layer 0: fb={}x{} img={}x{} offset=({},{}) stride={} bg_rows_equal={}",
+            w_fb, h_fb, w_img, h_img, ox, oy, stride, self.bg_rows_equal
         );
-
-        for yy in 0..h_img {
-            let off = yy * w_img * 4;
-            surface.blend_bgra_span(
-                ox,
-                oy + yy as u32,
-                w_img as u32,
-                &layer0[off..off + w_img * 4],
-            );
+        // Copia nella surface (il buffer resta come bg layer per il render).
+        if let Surface::Pixel(p) = &mut self.surface {
+            p.copy_from(&v, bg_stride, 0, 0, w_fb, h_fb);
         }
+        self.bg_layer = Some(v);
     }
 
     /// Ripristina una cella (o uno span di celle) dal layer 0: prima il colore
@@ -972,6 +1081,8 @@ fn real_main(_sp: u64) -> ! {
         layer0_width: 0,
         layer0_offset_x: 0,
         layer0_offset_y: 0,
+        bg_layer: None,
+        bg_rows_equal: false,
         fb_slot: civis::DMA_SLOT_DEVICE,
         // D7 (ADR-0066): nessun danno iniziale.
         damage: Damage::none(),
@@ -995,7 +1106,7 @@ fn real_main(_sp: u64) -> ! {
         }
     }
     // Fondo: colore di pagina + immagine centrata (se c'e').
-    term.draw_layer0_full();
+    term.build_bg_layer();
     term.flush_display_full();
 
     // 5. Banner sul terminale (il framebuffer o la VGA) + il seriale (sink

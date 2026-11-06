@@ -209,6 +209,11 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   il terminale si aggiorna subito, testo conservato. **D5**: al
   ri-adattamento il **cursore non salta piu' in fondo** (tiene la sua riga,
   il contenuto resta ancorato al testo): unit test host in `libs/term`.
+  **D7 (ADR-0066)**: redraw guidato dal danno — T0/T1 (rect di trasferimento,
+  `FULL_FLUSH_ONLY` come valvola), T2 (surface senza `volatile` per pixel,
+  fill a parole, `blend_row_bgra`) e T3 (bg layer precomposta fondo+immagine,
+  composizione a banda: `copy_from` + `draw_ink`, il fill/blend per cella
+  sparisce). Frame al login identico a T1 (0 pixel diversi).
   Prossimo: console server con mirror seriale e routing POSIX
   stdout→device (l'hook `persona`), poi il DE.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
@@ -411,7 +416,7 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
 
 ```bash
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term (rasterizer + cursore + surface/layer 0), valloc, blake2s: 22 test
+./scripts/run-unit-tests.sh   # term (rasterizer + cursore + surface/layer 0 + T2/T3), valloc, blake2s: 45 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh

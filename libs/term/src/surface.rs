@@ -366,6 +366,131 @@ impl Pixel {
             dst[byte_off + 3] = bytes[3];
         }
     }
+
+    /// Copia un rettangolo BGRA da `src` (stride in byte) alla surface, con
+    /// clipping su entrambi i buffer. `src` e' la bg layer precomposta
+    /// (fondo di pagina + immagine) ed ha le stesse coordinate della
+    /// surface: si copia la stessa `(x, y)`.
+    pub fn copy_from(&mut self, src: &[u8], src_stride: u32, x: u32, y: u32, w: u32, h: u32) {
+        if x >= self.width || y >= self.height || w == 0 || h == 0 {
+            return;
+        }
+        let w = w.min(self.width - x);
+        let h = h.min(self.height - y);
+        let dst_stride = self.stride as usize;
+        let src_stride = src_stride as usize;
+        let bytes = w as usize * 4;
+        let ptr = self.ptr;
+        for rr in 0..h {
+            let dst_off = (y as usize + rr as usize) * dst_stride + x as usize * 4;
+            let src_off = (y as usize + rr as usize) * src_stride + x as usize * 4;
+            if src_off + bytes > src.len() {
+                break;
+            }
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src.as_ptr().add(src_off),
+                    ptr.add(dst_off),
+                    bytes,
+                );
+            }
+        }
+    }
+
+    /// Sposta verso l'alto di `dy` pixel il rettangolo `(x, y, w, h)` della
+    /// surface: la riga `y+dy+rr` va in `y+rr`. Le ultime `dy` righe restano
+    /// invariate (le ripulisce il renderer, T4). Sorgente e destinazione
+    /// stanno su righe distinte: mai sovrapposte.
+    pub fn shift_rows_up(&mut self, x: u32, y: u32, w: u32, h: u32, dy: u32) {
+        if x >= self.width || y >= self.height || w == 0 || h == 0 || dy == 0 || dy >= h {
+            return;
+        }
+        let w = w.min(self.width - x);
+        let h = h.min(self.height - y);
+        if dy >= h {
+            return;
+        }
+        let stride = self.stride as usize;
+        let bytes = w as usize * 4;
+        let ptr = self.ptr;
+        for rr in 0..(h - dy) {
+            let dst_off = (y as usize + rr as usize) * stride + x as usize * 4;
+            let src_off = (y as usize + rr as usize + dy as usize) * stride + x as usize * 4;
+            unsafe {
+                core::ptr::copy_nonoverlapping(ptr.add(src_off), ptr.add(dst_off), bytes);
+            }
+        }
+    }
+
+    /// Disegna **solo l'inchiostro** del glifo e il cursore nella cella: il
+    /// background e' gia' corretto (copiato dalla bg layer, T3). Nessun fill,
+    /// nessun layer 0.
+    pub fn draw_ink(
+        &mut self,
+        col: usize,
+        row: usize,
+        span: usize,
+        cp: u32,
+        fg: u32,
+        cursor: bool,
+        font: Option<&mut Font>,
+    ) {
+        let cw = self.geom.cell_w;
+        let ch = self.geom.cell_h;
+        let span = span.max(1) as u32;
+        let w = cw * span;
+        let x = self.geom.origin_x + (col as u32) * cw;
+        let y = self.geom.origin_y + (row as u32) * ch;
+        let fg_color = rgba_to_bgra(fg);
+        if cp != 0 {
+            glyph_pixels(self, x, y, w, cp, fg_color, font);
+        }
+        if cursor {
+            cursor_block(self, x, y, w, ch, fg_color);
+        }
+    }
+}
+
+/// Disegna i pixel del glifo `cp` centrato nello span `w` a partire da
+/// `(x, y)`. `fg` e' gia' BGRA. L'inchiostro e' clippato al bordo destro
+/// dello span (il bordo sinistro resta libero per gli sbordi Powerline).
+fn glyph_pixels(
+    p: &mut Pixel,
+    x: u32,
+    y: u32,
+    w: u32,
+    cp: u32,
+    fg: u32,
+    font: Option<&mut Font>,
+) {
+    let Some(bmp) = font.and_then(|f| f.glyph(cp)) else {
+        return;
+    };
+    let baseline = y as i32 + p.geom.ascent_px;
+    // Centra il bitmap dentro lo span. `start_x` e' clampato a >= 0 per
+    // evitare underflow quando lo span e' piu' stretto del glifo.
+    let start_x = (x as i32 + (w as i32 - bmp.w as i32) / 2).max(0);
+    for r in 0..bmp.h {
+        for c in 0..bmp.w {
+            let cov = bmp.bits[r * bmp.w + c] as u32;
+            if cov == 0 {
+                continue;
+            }
+            let px = (start_x + c as i32) as u32;
+            let py = (baseline + bmp.yoff + r as i32) as u32;
+            if px >= x + w {
+                continue;
+            }
+            let dest = unsafe { p.get(px, py) };
+            let mixed = blend(dest, fg, cov);
+            unsafe { p.put(px, py, mixed) };
+        }
+    }
+}
+
+/// Cursore a blocco pieno: riempie lo span con il colore foreground.
+fn cursor_block(p: &mut Pixel, x: u32, y: u32, w: u32, ch: u32, fg: u32) {
+    p.fill_rect(x, y, w, ch, fg);
 }
 
 /// Blend lineare fra background e foreground (copertura 0..255).
@@ -512,43 +637,11 @@ impl Surface {
                         }
                     }
                 }
-                if let Some(bmp) = font.and_then(|f| f.glyph(cp)) {
-                    let baseline = y as i32 + p.geom.ascent_px;
-                    // Centra il glifo nello span: il bitmap (larghezza bmp.w)
-                    // e' centrato dentro i `w` px dello span. L'xoff non
-                    // sposta l'inchiostro: un separatore Powerline (xoff<0)
-                    // sborda comunque a sinistra nella cella precedente,
-                    // che e' il comportamento voluto. start_x e' clampato a
-                    // >= 0 per evitare underflow su `px` (u32) quando lo span
-                    // e' piu' stretto del glifo (caso non reale: il console
-                    // server assegna sempre span >= glyph_width_cells).
-                    let start_x =
-                        (x as i32 + (w as i32 - bmp.w as i32) / 2).max(0);
-                    for r in 0..bmp.h {
-                        for c in 0..bmp.w {
-                            let cov = bmp.bits[r * bmp.w + c] as u32;
-                            if cov == 0 {
-                                continue;
-                            }
-                            let px = (start_x + c as i32) as u32;
-                            let py = (baseline + bmp.yoff + r as i32) as u32;
-                            // Il glifo e' disegnato dentro il suo span:
-                            // oltre il bordo destro la cella e' di un altro
-                            // carattere. Il bordo sinistro resta libero per
-                            // gli sbordi intenzionali (Powerline).
-                            if px >= x + w {
-                                continue;
-                            }
-                            let dest = unsafe { p.get(px, py) };
-                            let mixed = blend(dest, fg_color, cov);
-                            unsafe { p.put(px, py, mixed) };
-                        }
-                    }
-                }
+                glyph_pixels(p, x, y, w, cp, fg_color, font);
                 if cursor {
                     // Cursore a blocco pieno: riempie lo span con il colore
                     // foreground (come i terminali moderni).
-                    p.fill_rect(x, y, w, ch, fg_color);
+                    cursor_block(p, x, y, w, ch, fg_color);
                 }
             }
             Surface::VgaText(v) => {
@@ -933,6 +1026,116 @@ mod tests {
             let in_rect = i >= 35 * 4 && i < 40 * 4;
             let expected = if in_rect { 0xFF } else { 0x00 };
             assert_eq!(dst[i], expected, "byte {} deve essere {}", i, expected);
+        }
+    }
+
+    // ── T3: bg layer precomposta + composizione a banda ─────────────────
+
+    /// Source 40x44 con un valore unico per pixel (`riga<<8 | colonna`).
+    fn sorgente_40x44() -> alloc::vec::Vec<u8> {
+        let mut src = alloc::vec![0u8; 40 * 44 * 4];
+        for y in 0..44u32 {
+            for x in 0..40u32 {
+                let v: u32 = (y << 8) | x;
+                let off = ((y as usize) * 40 + x as usize) * 4;
+                src[off..off + 4].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        src
+    }
+
+    /// `copy_from` copia il rect richiesto e clippa a destra/basso.
+    #[test]
+    fn copy_from_rect() {
+        let mut fb = alloc::vec![0u32; 40 * 44];
+        let mut s = surface_40x44(&mut fb);
+        let p = pixel_mut(&mut s);
+        let src = sorgente_40x44();
+        p.copy_from(&src, 40 * 4, 10, 5, 10, 7);
+        for y in 0..44u32 {
+            for x in 0..40u32 {
+                let inside = (5..12).contains(&y) && (10..20).contains(&x);
+                let want = if inside { (y << 8) | x } else { 0 };
+                assert_eq!(fb[(y as usize) * 40 + x as usize], want, "pixel ({},{})", x, y);
+            }
+        }
+        // Clipping: 10 colonne a partire da x=35 -> 5 copiate; 10 righe da
+        // y=40 -> 4 copiate. Niente overflow ne' panic.
+        p.copy_from(&src, 40 * 4, 35, 40, 10, 10);
+        for y in 40..44u32 {
+            for x in 35..40u32 {
+                assert_eq!(
+                    fb[(y as usize) * 40 + x as usize],
+                    (y << 8) | x,
+                    "clip pixel ({},{})",
+                    x,
+                    y
+                );
+            }
+        }
+        // Fuori dal rect clippato resta il valore precedente (0).
+        assert_eq!(fb[(40) * 40 + 34], 0, "x=34 non deve essere coperto");
+        assert_eq!(fb[(39) * 40 + 35], 0, "y=39 non deve essere coperto");
+    }
+
+    /// `shift_rows_up` porta la riga `y+dy+rr` in `y+rr`; le ultime `dy`
+    /// restano invariate.
+    #[test]
+    fn shift_rows_up_righe() {
+        let mut fb = alloc::vec![0u32; 40 * 44];
+        for y in 0..44usize {
+            for x in 0..40usize {
+                fb[y * 40 + x] = y as u32;
+            }
+        }
+        let mut s = surface_40x44(&mut fb);
+        let p = pixel_mut(&mut s);
+        p.shift_rows_up(0, 0, 40, 44, 1);
+        for y in 0..43usize {
+            for x in 0..40usize {
+                assert_eq!(fb[y * 40 + x], (y + 1) as u32, "riga {} dopo shift", y);
+            }
+        }
+        for x in 0..40usize {
+            assert_eq!(fb[43 * 40 + x], 43, "l'ultima riga resta invariata");
+        }
+    }
+
+    /// `draw_ink` non tocca il background (nessun fill): con `cp = 0` non
+    /// cambia nulla, con un glifo cambia solo l'inchiostro.
+    #[test]
+    fn draw_ink_solo_inchiostro() {
+        let Some(mut font) = maple() else { return };
+        let page = rgba_to_bgra(color::BLACK);
+        let mut fb = alloc::vec![page; 40 * 44];
+        let mut s = surface_16px(&mut fb);
+        let p = pixel_mut(&mut s);
+
+        // Nessun glifo, nessun cursore: il fondo resta intatto.
+        let before = fb.clone();
+        p.draw_ink(0, 0, 1, 0, color::WHITE, false, Some(&mut font));
+        assert_eq!(fb, before, "cp=0 non deve dipingere nulla");
+
+        // Glifo: c'e' inchiostro, ma non e' un fill (area cambiata < cella).
+        p.draw_ink(0, 0, 1, b'A' as u32, color::WHITE, false, Some(&mut font));
+        let mut changed = 0;
+        for y in 0..22usize {
+            for x in 0..10usize {
+                if fb[y * 40 + x] != page {
+                    changed += 1;
+                }
+            }
+        }
+        assert!(changed > 0, "il glifo deve avere inchiostro");
+        assert!(changed < 10 * 22, "il background non deve essere riempito");
+
+        // Cursore: blocco pieno su tutto lo span.
+        p.draw_ink(1, 0, 1, b' ' as u32, color::WHITE, true, Some(&mut font));
+        let white = rgba_to_bgra(color::WHITE);
+        for y in 0..22usize {
+            for x in 10..20usize {
+                assert_eq!(fb[y * 40 + x], white, "cursore pixel ({},{})", x, y);
+            }
         }
     }
 }

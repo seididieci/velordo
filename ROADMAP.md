@@ -254,6 +254,15 @@ Voci con scope e vittoria dichiarati (non date).
       QEMU/Linux). A/B headless rect-vs-full al prompt di login: **0 pixel
       diversi** su 1280×800. Gate invariato (6 righe, zero
       FAIL/PANIC/FAULT).
+- [x] **D7/bis — T2/T3: memoria della surface e composizione a banda**
+      (completata, ADR-0066): T2 toglie il `volatile` per pixel (il
+      framebuffer e' RAM normale, la coerenza e' il `FLUSH`), fill a parole
+      (`u32`/`u64`) e `blend_row_bgra`; T3 precompone la **bg layer**
+      (fondo di pagina + immagine, una volta sola) e il render copia una
+      banda con `copy_from` disegnando solo l'inchiostro (`draw_ink`): il
+      fill e il blend del BMP per cella spariscono. Le celle con bg
+      colorato/trasparente restano sul percorso completo. Frame al login
+      identico a T1 (**0 pixel diversi**); unit test host 45/45.
 - [x] **S3.2a — Shell nativa REPL minima + gestione utenti** (completata, 2026-10): programma interattivo
       **nativo** (meccanismo, niente POSIX) su `/dev/input/keyboard` +
       `/dev/console`. Comandi: `help`, `users`, `create-user <nome>`,
