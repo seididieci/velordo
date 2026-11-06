@@ -210,6 +210,11 @@ pub const CWD_MAX: usize = 256;
 pub const DEV_MMIO_BASE: u64 = 0xFE00_0000;
 /// Dimensione della finestra MMIO device (32 KiB).
 pub const DEV_MMIO_SIZE: u64 = 0x8000;
+/// Finestra MMIO del driver di rete (ADR-0069): subito dopo quella del GPU.
+/// Il driver programma qui BAR1 (MSI-X) e BAR4 (modern) di virtio-net.
+pub const DEV_MMIO_NET_BASE: u64 = DEV_MMIO_BASE + 0x8000;
+/// Dimensione della finestra MMIO net (32 KiB).
+pub const DEV_MMIO_NET_SIZE: u64 = 0x8000;
 /// Indirizzo MSI xAPIC del LAPIC di QEMU (UP, dest 0): L0b lo scrive nella
 /// entry MSI-X del config change. `SYS_LAPIC_INFO` (base/id reali) e'
 /// rimandata al lavoro IOAPIC.
@@ -331,6 +336,17 @@ pub const fn dma_slot_va(idx: usize) -> u64 {
 pub const USER_MMIO_VA: u64 = FS_BLOCK + 0x270_000;
 /// Dimensione della finestra MMIO user (32 KiB: BAR1 4K + BAR4 16K).
 pub const USER_MMIO_SIZE: u64 = 0x8000;
+/// Finestra MMIO del driver di rete (ADR-0069): subito dopo quella del GPU.
+/// `SYS_MAP_MMIO` la concede solo all'owner di `Service::NetDev`.
+pub const USER_MMIO_NET_VA: u64 = USER_MMIO_VA + 0x8000;
+/// Dimensione della finestra MMIO net (32 KiB: BAR1 4K + BAR4 16K).
+pub const USER_MMIO_NET_SIZE: u64 = 0x8000;
+/// Ring condiviso driver `netdev` ↔ servizio `net` (ADR-0069): il driver
+/// mappa qui il proprio buffer DMA (RX + TX, slot da 2048 B). 64 KiB.
+pub const USER_NET_RING_VA: u64 = FS_BLOCK + 0x280_000;
+/// Dimensione del ring condiviso di rete (64 KiB: 2 direzioni × 16 slot ×
+/// 2048 B + header).
+pub const USER_NET_RING_SIZE: u64 = 0x10000;
 /// Finestre ring del processo corrente (single source S2.2: prima letterali
 /// duplicati in `layout.rs` del kernel, `civis/src/fs/ring.rs` e
 /// `cardo/src/rings.rs` con commenti "coincide con..."). `SYS_RING_ALLOC`
@@ -493,6 +509,31 @@ pub const CONSOLE_TEST_MODE: u64 = 0x69;
 /// Diagnostica (ADR-0066 T4, **solo test**): CRC32 di una **riga di celle**
 /// (`w0` = indice riga). `w0` della reply = CRC, `w1` = byte hashati.
 pub const CONSOLE_ROW_CRC: u64 = 0x6A;
+
+// ── Rete (ADR-0069): protocollo driver `netdev` ↔ servizio `net` ─────
+/// Il servizio `net` si attacca al driver: `w0` = versione protocollo.
+/// Reply: `w0` = MAC (6 byte packed), `w1` = 0. Il driver mappa il ring
+/// condiviso nella VA `USER_NET_RING_VA` del servizio.
+pub const NET_ATTACH: u64 = 0x6B;
+/// Il servizio chiede al driver di drenare le RX: reply `w0` = pacchetti
+/// scritti nel ring RX (0 = nessuno).
+pub const NET_POLL: u64 = 0x6C;
+/// Il servizio ha scritto pacchetti nel ring TX: il driver li posta.
+/// Reply `w0` = pacchetti consumati.
+pub const NET_TX: u64 = 0x6D;
+/// Stato del link: reply `w0` = 1 link up / 0 down, `w1` = MTU.
+pub const NET_INFO: u64 = 0x6E;
+
+/// Slot del ring condiviso di rete (per direzione).
+pub const NET_RING_SLOTS: usize = 8;
+/// Dimensione di uno slot (frame Ethernet max 1514 + margine).
+pub const NET_SLOT_SIZE: usize = 2048;
+/// Header del ring: `head:u32, tail:u32, slots:u32, slot_size:u32`.
+pub const NET_RING_HDR: usize = 16;
+/// Offset del ring RX nel buffer condiviso.
+pub const NET_RX_RING_OFF: usize = 0;
+/// Offset del ring TX nel buffer condiviso (dopo 8 slot RX + header).
+pub const NET_TX_RING_OFF: usize = 0x5000;
 /// Statistiche del driver (D4, per i test): `w0` = `PRESENT` ricevuti,
 /// `w1` = `FLUSH` ricevuti **dopo l'ultimo** `PRESENT`. Serve a verificare
 /// il contratto "chi ridisegna manda anche il flush": un `PRESENT` aggancia
@@ -943,6 +984,12 @@ pub enum Service {
     /// supervisioni** (se il login fallisce, init lo riavvia come un getty:
     /// l'utente trova un altro prompt invece di un sistema muto).
     Login = 13,
+    /// Servizio di rete (ADR-0069): protocolli IPv6/ICMPv6/NDP, endpoint a
+    /// capability, policy per binario. Userspace, sopra `NetDev`.
+    Net = 14,
+    /// Driver virtio-net (ADR-0069): possiede il device, le virtqueue e il
+    /// ring condiviso con `Net`. Nessuna logica di protocollo.
+    NetDev = 15,
 }
 
 /// Massimo numero di servizi conosciuti = dimensione del registro kernel.
@@ -977,7 +1024,13 @@ pub const IRQ_NOTIFY_DISK: u64 = 0x42;
 /// risposta: canale 0, nessun peer. Il driver legge l'ISR virtio e fa
 /// `events_clear`; il kernel non tocca il device.
 pub const IRQ_NOTIFY_GPU: u64 = 0x44;
+/// Tag del messaggio con cui il kernel sveglia `netdev` su MSI-X di
+/// virtio-net (ADR-0069): bridge interrupt→IPC, fire-and-forget, MAI
+/// risposta. Il driver legge l'ISR e drena le virtqueue.
+pub const IRQ_NOTIFY_NET: u64 = 0x45;
 
 /// Vettore IDT/LAPIC dedicato a `Gpu` (MSI-X config change, L0b).
 /// In L0a e' solo installato in IDT: nessun device lo genera ancora.
 pub const MSI_VECTOR_GPU: u8 = 0x50;
+/// Vettore IDT/LAPIC dedicato a `NetDev` (MSI-X virtio-net, ADR-0069).
+pub const MSI_VECTOR_NET: u8 = 0x51;

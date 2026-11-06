@@ -63,15 +63,18 @@ pub fn alloc_dma_pages(mm: usize, pid: usize, pages: usize, slot: u64) -> Option
         return None;
     }
 
-    // Grant: gli slot device sono riservati all'owner di `Service::Console`
-    // (D3). Lo staging (slot 0) resta aperto a tutti (path storico, 4 pagine).
+    // Grant: gli slot device sono riservati ai driver che possiedono un
+    // device DMA (Console per il framebuffer, NetDev per virtio-net —
+    // ADR-0069). Lo staging (slot 0) resta aperto a tutti (path storico).
     if idx >= 1 {
-        let owner = crate::relay::channels::lookup(syscall_numbers::Service::Console);
-        if owner != Some(pid) {
+        let console = crate::relay::channels::lookup(syscall_numbers::Service::Console);
+        let netdev = crate::relay::channels::lookup(syscall_numbers::Service::NetDev);
+        if console != Some(pid) && netdev != Some(pid) {
             crate::serial_println!(
-                "[dma] alloc: pid={} non owner di Console (owner={:?}), slot {} rifiutato",
+                "[dma] alloc: pid={} non owner di un device DMA (console={:?} netdev={:?}), slot {} rifiutato",
                 pid,
-                owner,
+                console,
+                netdev,
                 idx
             );
             return None;

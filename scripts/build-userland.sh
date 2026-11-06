@@ -48,6 +48,10 @@ fi
 build_one userland/block   userland/block/src/block.ld     block.bin       block
 build_one userland/vela    userland/vela/src/vela.ld       vela.bin        vela
 build_one userland/gpu     userland/gpu/src/gpu.ld         gpu.bin         gpu
+# Rete (ADR-0069): driver virtio-net + servizio IPv6/ICMPv6/NDP. Prima di
+# gen-service-hashes cosi' il manifest Strato 2 li copre.
+build_one userland/netdev  userland/netdev/src/netdev.ld   netdev.bin      netdev
+build_one userland/net     userland/net/src/net.ld         net.bin         netd
 # Console server (D3, ADR-0060): modello a celle, font TTF, surface; serve
 # /dev/console. Il driver `gpu` pubblica /dev/display.
 build_one userland/console userland/console/src/console.ld console.bin    console

@@ -2,10 +2,10 @@
 
 ## Status
 
-Proposed (2026-11). Primo artefatto della fase rete: fissa **cosa** deve
-essere sicuro e **come** si verifica, prima del piano di implementazione. Le
-scelte architetturali stanno in ADR-0069; la policy di configurazione in
-ADR-0070.
+Accepted (2026-11). **N1 implementata** (virtio-net + IPv6/NDP/ICMPv6 +
+ping6 con passt): gli invarianti sono applicati nel core `libs/net` e nel
+driver `netdev`. Le parti N2–N8 (UDP/TCP, traduttore IPv4, resolver, DoH,
+personalità POSIX, VT-d) restano la traiettoria.
 
 ## Context
 

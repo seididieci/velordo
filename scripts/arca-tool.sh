@@ -67,6 +67,9 @@ seed_bin() {
 }
 # Servizi /bin: driver in `vela`, resto in `sys` (D1).
 seed_bin userland/build/gpu.bin bin/gpu.bin vela bin/gpu.bin
+# Rete (ADR-0069): driver virtio-net in `vela`, servizio `net` in `sys`.
+seed_bin userland/build/netdev.bin bin/netdev.bin vela bin/netdev.bin
+seed_bin userland/build/net.bin bin/net.bin sys bin/net.bin
 # Console server (D3, ADR-0060): servizio di sistema (bucket `sys`).
 seed_bin userland/build/console.bin bin/console.bin sys bin/console.bin
 seed_bin userland/build/useruptime.bin bin/uptime.bin sys bin/uptime.bin

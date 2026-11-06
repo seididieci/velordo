@@ -213,12 +213,11 @@ pub(super) fn sys_map_physical(phys_addr: u64, virt_addr: u64, count: usize) -> 
     0
 }
 
-/// map_mmio(phys, virt, count): mappa `count` pagine MMIO device (L0b,
-/// virtio-gpu) a `virt` nello spazio del chiamante. A differenza di
-/// `map_physical` (WB, allowlist di frame di sistema) il mapping e' UC
-/// (PCD|PWT), non-owned, e puo' toccare solo la finestra `DEV_MMIO_BASE` /
-/// `USER_MMIO_VA`. Ristretta all'owner di `Service::Gpu`: il grant e' del
-/// driver video, non un'API generale (ADR-0057). Ritorna 0 o -1.
+/// map_mmio(phys, virt, count): mappa `count` pagine MMIO device a `virt`
+/// nello spazio del chiamante. A differenza di `map_physical` (WB, allowlist
+/// di frame di sistema) il mapping e' UC (PCD|PWT), non-owned, e puo' toccare
+/// solo la **finestra del servizio** del chiamante (ADR-0057 per il GPU,
+/// ADR-0069 per `NetDev`). Ritorna 0 o -1.
 pub(super) fn sys_map_mmio(phys_addr: u64, virt_addr: u64, count: usize) -> i64 {
     const PAGE_SIZE: u64 = 0x1000;
     const MAX_PAGES: usize = 16;
@@ -229,32 +228,56 @@ pub(super) fn sys_map_mmio(phys_addr: u64, virt_addr: u64, count: usize) -> i64 
     if count == 0 || count > MAX_PAGES {
         return -1;
     }
-    let dev_end = syscall_numbers::DEV_MMIO_BASE + syscall_numbers::DEV_MMIO_SIZE;
-    let user_end = syscall_numbers::USER_MMIO_VA + syscall_numbers::USER_MMIO_SIZE;
     let dev_len = match (count as u64).checked_mul(PAGE_SIZE) {
         Some(n) => n,
         None => return -1,
     };
-    if phys_addr < syscall_numbers::DEV_MMIO_BASE
-        || phys_addr.checked_add(dev_len).map_or(true, |e| e > dev_end)
+
+    // Finestra per servizio: il driver video e il driver di rete hanno
+    // finestre fisiche e VA distinte (least privilege, ADR-0069).
+    struct MmioWindow {
+        svc: syscall_numbers::Service,
+        phys: u64,
+        size: u64,
+        va: u64,
+    }
+    const WINDOWS: &[MmioWindow] = &[
+        MmioWindow {
+            svc: syscall_numbers::Service::Gpu,
+            phys: syscall_numbers::DEV_MMIO_BASE,
+            size: syscall_numbers::DEV_MMIO_SIZE,
+            va: syscall_numbers::USER_MMIO_VA,
+        },
+        MmioWindow {
+            svc: syscall_numbers::Service::NetDev,
+            phys: syscall_numbers::DEV_MMIO_NET_BASE,
+            size: syscall_numbers::DEV_MMIO_NET_SIZE,
+            va: syscall_numbers::USER_MMIO_NET_VA,
+        },
+    ];
+    let me = current_id() as usize;
+    let win = match WINDOWS
+        .iter()
+        .find(|w| crate::relay::channels::lookup(w.svc) == Some(me))
+    {
+        Some(w) => w,
+        None => {
+            crate::serial_println!(
+                "[syscall] map_mmio: pid={} non owner di un device MMIO, rifiutato",
+                me
+            );
+            return -1;
+        }
+    };
+    if phys_addr < win.phys
+        || phys_addr.checked_add(dev_len).map_or(true, |e| e > win.phys + win.size)
     {
         crate::serial_println!("[syscall] map_mmio: phys {:#x} fuori finestra", phys_addr);
         return -1;
     }
-    if virt_addr < syscall_numbers::USER_MMIO_VA
-        || virt_addr.checked_add(dev_len).map_or(true, |e| e > user_end)
+    if virt_addr < win.va
+        || virt_addr.checked_add(dev_len).map_or(true, |e| e > win.va + win.size)
     {
-        return -1;
-    }
-
-    // L0b: solo l'owner di Gpu mappa MMIO device. Se gpu non e' registrato
-    // (init fallito/prima registrazione) il grant non esiste.
-    let me = current_id() as usize;
-    if crate::relay::channels::lookup(syscall_numbers::Service::Gpu) != Some(me) {
-        crate::serial_println!(
-            "[syscall] map_mmio: pid={} non owner di Gpu, rifiutato",
-            me
-        );
         return -1;
     }
 

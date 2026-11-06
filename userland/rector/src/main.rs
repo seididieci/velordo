@@ -260,6 +260,23 @@ fn cmdline_has_s25() -> bool {
     false
 }
 
+/// Cerca il token `net=1` nella cmdline (ADR-0069: run di rete dedicato,
+/// fuori dal gate). Stesso match a token intero di `s25=1`.
+fn cmdline_has_net() -> bool {
+    let cmd = civis::boot_cmdline();
+    let mut i = 0usize;
+    while i + 5 <= cmd.len() {
+        if &cmd[i..i + 5] == b"net=1"
+            && (i == 0 || cmd[i - 1] == b' ' || cmd[i - 1] == 0)
+            && (i + 5 == cmd.len() || cmd[i + 5] == b' ' || cmd[i + 5] == 0)
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Spawna un binario di test da disco (Fase 21: `/test/*.bin`) e aspetta che
 /// segnali la fine (IPC TEST_DONE sul canale di nascita). I test girano in
 /// SEQUENZA: condividono la ramfs di cardo (path e file di lavoro) e la
@@ -424,6 +441,9 @@ struct Supervised {
     held: bool,
     /// Politica alla morte (vedi `OnDeath`).
     on_death: OnDeath,
+    /// Voce non attiva in questo boot (es. rete senza `net=1`): il
+    /// supervisore non la riavvia.
+    disabled: bool,
 }
 
 impl Supervised {
@@ -438,6 +458,7 @@ impl Supervised {
             window_start: 0,
             held: false,
             on_death: OnDeath::Restart,
+            disabled: false,
         }
     }
 }
@@ -609,6 +630,21 @@ const SVC_POSIX: SvcMeta = SvcMeta {
 const SVC_IDENTIS: SvcMeta = SvcMeta {
     bin: b"identis",
     obj: Some((b"sys", b"bin/identis.bin")),
+    prio: 16,
+    io: &[],
+};
+/// Driver virtio-net (ADR-0069): possiede il device, le virtqueue e il ring
+/// condiviso con `net`. Parte solo con `net=1` in cmdline (run dedicato).
+const SVC_NETDEV: SvcMeta = SvcMeta {
+    bin: b"netdev",
+    obj: Some((b"vela", b"bin/netdev.bin")),
+    prio: 16,
+    io: &[(civis::syscall_numbers::PCI_CONF_ADDR, civis::syscall_numbers::PCI_CONF_END)],
+};
+/// Servizio di rete (ADR-0069): IPv6/ICMPv6/NDP, endpoint a capability.
+const SVC_NET: SvcMeta = SvcMeta {
+    bin: b"net",
+    obj: Some((b"sys", b"bin/net.bin")),
     prio: 16,
     io: &[],
 };
@@ -785,6 +821,20 @@ fn real_main(_sp: u64) -> ! {
     }
     let _ = civis::vestigia::log(b"init", b"identis ready");
 
+    // Rete (ADR-0069): solo con `net=1` in cmdline (run dedicato, fuori dal
+    // gate). Il driver `netdev` parte prima del servizio `net` (che si
+    // attacca a lui). Se il device non c'e', il driver lo dice e resta vivo;
+    // il servizio lo segue e resta in attesa.
+    if cmdline_has_net() {
+        if boot_svc(&SVC_NETDEV, true).is_none() {
+            println!("[init] netdev FAILED (rete assente)");
+        } else if boot_svc(&SVC_NET, true).is_none() {
+            println!("[init] net FAILED");
+        } else {
+            let _ = civis::vestigia::log(b"init", b"net ready");
+        }
+    }
+
     // Tabella supervisione (Fase 14, init-restart): gpu/fs/vela/kbd/tty/
     // disk/posix/time/log vengono riavviati alla morte (dalla loro sorgente: embedded per
     // disk/fs, disco per gli altri — Fase 21); gli altri figli solo loggati.
@@ -808,6 +858,10 @@ fn real_main(_sp: u64) -> ! {
         Supervised::new(&SVC_POSIX, civis::Service::Posix),
         Supervised::new(&SVC_TIME, civis::Service::Time),
         Supervised::new(&SVC_VESTIGIA, civis::Service::Vestigia),
+        // Rete (ADR-0069): pid -1 se non spawnati (net=1 assente); il loop
+        // di supervisione salta i pid negativi.
+        Supervised::new(&SVC_NETDEV, civis::Service::NetDev),
+        Supervised::new(&SVC_NET, civis::Service::Net),
         // Il **login** (programma di autenticazione): politica di morte
         // propria — si riavvia solo se ha fallito (vedi `OnDeath`).
         Supervised {
@@ -815,7 +869,11 @@ fn real_main(_sp: u64) -> ! {
             ..Supervised::new(&SVC_LOGIN, civis::Service::Login)
         },
     ];
+    let net_enabled = cmdline_has_net();
     for e in supervised.iter_mut() {
+        if matches!(e.svc, civis::Service::Net | civis::Service::NetDev) {
+            e.disabled = !net_enabled;
+        }
         e.pid = civis::service_pid(e.svc).unwrap_or(-1);
     }
 
@@ -889,6 +947,9 @@ fn real_main(_sp: u64) -> ! {
     // Supervisore init-restart (Fase 14): se un servizio e' morto prima della
     // supervisione (es. tra boot e run_test), riavvialo subito; poi loop.
     for e in supervised.iter_mut() {
+        if e.disabled {
+            continue;
+        }
         if e.pid < 0 {
             e.pid = civis::service_pid(e.svc).unwrap_or(-1);
         }

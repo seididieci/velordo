@@ -3143,3 +3143,31 @@
       flush** e il **mirror seriale**; (4) il taglio del ring FS (4087 B)
       trasforma un blocco in "blocco + residuo interattivo": la dimensione
       del chunk deve stare sotto la capacità della frame.
+- [x] **N1 — stack di rete: virtio-net + IPv6/NDP/ICMPv6 (ping6)**
+      (2026-11, ADR-0068/0069): primo passo della rete nativa. Decisioni:
+      IPv6-only nel core (IPv4 dopo, con traduttore separato); driver
+      `netdev` e servizio `net` separati; API a capability (non socket);
+      virtio-net 1 RX + 1 TX, no offload, 2048 B/slot; config compilata per
+      N1 (`sys:net` con ADR-0070 dopo); test con `passt` fuori dal gate.
+      **Kernel**: `Service::Net=14`/`NetDev=15`, `MSI_VECTOR_NET=0x51`,
+      `IRQ_NOTIFY_NET=0x45`, finestra MMIO per servizio
+      (`DEV_MMIO_NET_BASE`/`USER_MMIO_NET_VA`), grant DMA per NetDev,
+      handler MSI-X. **Core `libs/net`**: Ethernet/IPv6/ICMPv6/NDP, SLAAC,
+      RA guard, neighbor cache bounded, IID randomizzato, no DAD,
+      `#![forbid(unsafe_code)]`, 4 unit test host. **Driver**: virtio-net
+      modern, split-ring, MSI-X, ring condiviso con il servizio via **shm**
+      (non DMA: il device non lo tocca). **Servizio**: attach, poll ogni
+      tick, drena RX, core, TX.
+      **Bug trovato**: il primo `NET_ATTACH` falliva perché il driver
+      mappava il ring con `map_in`, che accetta solo ring page FS; il ring
+      driver↔servizio è passato a `shm_create`/`shm_map` (condiviso, non
+      DMA). **Risultato reale** (`scripts/run-net-tests.sh`, passt):
+      indirizzo `2a01:e11:2430:7af0:...`, RA da
+      `fe80::3a07:16ff:fe2c:71ea`, **echo reply** dallo stesso router.
+      Gate invariato (6 righe, zero FAIL); unit test host 52/52.
+      Lezioni: (1) il confine driver↔stack è un **ring condiviso**, non
+      `map_in` (che è il data-plane FS, ristretto alle ring page); (2) il
+      device non deve vedere il ring condiviso: solo i buffer DMA delle
+      virtqueue; (3) `passt` dà IPv6 reale e NDP senza privilegi, slirp no;
+      (4) il core puro `no_std` con test host ha permesso di trovare gli
+      errori di layout (RA/prefix) prima del boot.

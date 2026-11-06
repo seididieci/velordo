@@ -43,6 +43,8 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
 
     // L0a: vettore MSI-X dedicato a Gpu (config change) + spurious LAPIC.
     idt[syscall_numbers::MSI_VECTOR_GPU].set_handler_fn(gpu_msi_handler);
+    // ADR-0069: vettore MSI-X dedicato a NetDev (virtio-net).
+    idt[syscall_numbers::MSI_VECTOR_NET].set_handler_fn(net_msi_handler);
     idt[0xFF].set_handler_fn(spurious_interrupt_handler);
 
     idt
@@ -340,6 +342,18 @@ extern "x86-interrupt" fn gpu_msi_handler(_stack_frame: InterruptStackFrame) {
         #[cfg(feature = "sched_debug")]
         crate::serial_println!("[msi] wake gpu pid={}", owner);
         crate::ordo::sched::notify_irq(owner, syscall_numbers::IRQ_NOTIFY_GPU);
+    }
+}
+
+/// ADR-0069: vettore MSI-X di `NetDev` (virtio-net). Routing puro, come
+/// IRQ1→kbd: EOI LAPIC PRIMA della notify, poi `notify_irq`. Il driver legge
+/// l'ISR virtio e drena le virtqueue; qui non si tocca il device.
+extern "x86-interrupt" fn net_msi_handler(_stack_frame: InterruptStackFrame) {
+    crate::lapic::eoi();
+    if let Some(owner) = crate::relay::channels::lookup(syscall_numbers::Service::NetDev) {
+        #[cfg(feature = "sched_debug")]
+        crate::serial_println!("[msi] wake netdev pid={}", owner);
+        crate::ordo::sched::notify_irq(owner, syscall_numbers::IRQ_NOTIFY_NET);
     }
 }
 

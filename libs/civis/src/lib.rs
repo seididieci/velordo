@@ -54,6 +54,18 @@ pub use syscall_numbers::{DMA_DEVICE_PAGES_MAX, DMA_SLOT_ANY, DMA_SLOT_DEVICE, U
 pub use syscall_numbers::{
     DEV_MMIO_BASE, DEV_MMIO_SIZE, MSI_ADDR_BASE, USER_MMIO_SIZE, USER_MMIO_VA,
 };
+/// Finestra MMIO del driver di rete (ADR-0069): `SYS_MAP_MMIO` la concede
+/// solo all'owner di `Service::NetDev`.
+pub use syscall_numbers::{
+    DEV_MMIO_NET_BASE, DEV_MMIO_NET_SIZE, USER_MMIO_NET_SIZE, USER_MMIO_NET_VA,
+};
+/// Ring condiviso driver `netdev` ↔ servizio `net` (ADR-0069).
+pub use syscall_numbers::{USER_NET_RING_SIZE, USER_NET_RING_VA};
+/// Protocollo rete driver↔servizio (ADR-0069).
+pub use syscall_numbers::{
+    NET_ATTACH, NET_INFO, NET_POLL, NET_RING_HDR, NET_RING_SLOTS, NET_RX_RING_OFF, NET_SLOT_SIZE,
+    NET_TX, NET_TX_RING_OFF,
+};
 /// Servizi di sistema raggiungibili per nome (ADR-0008).
 pub use syscall_numbers::Service;
 /// Tag della notifica kernel→parent della morte di un figlio (Fase 14).
@@ -69,8 +81,12 @@ pub use syscall_numbers::IRQ_NOTIFY_KBD;
 pub use syscall_numbers::IRQ_NOTIFY_DISK;
 /// Tag della notify kernel→gpu sul config change virtio-gpu (L0a/L0b).
 pub use syscall_numbers::IRQ_NOTIFY_GPU;
+/// Tag della notify kernel→netdev su MSI-X virtio-net (ADR-0069).
+pub use syscall_numbers::IRQ_NOTIFY_NET;
 /// Vettore MSI-X dedicato a gpu (0x50): il driver lo scrive in `data` (L0b).
 pub use syscall_numbers::MSI_VECTOR_GPU;
+/// Vettore MSI-X dedicato a netdev (0x51, ADR-0069).
+pub use syscall_numbers::MSI_VECTOR_NET;
 /// Bound di scansione PID per `ps` (Fase 19.1, = MAX_PIDS del kernel).
 pub use syscall_numbers::PS_SCAN_MAX;
 /// Identita' misurata di un'immagine ELF (Fase 36, Strato 2 di ADR-0026):

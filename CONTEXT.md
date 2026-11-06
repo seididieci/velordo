@@ -104,8 +104,9 @@ velordo/
 │   │       ├── font.rs      # Font loading & metrics
 │   │       ├── ttf.rs       # TrueType parser (subset)
 │   │       └── utf8.rs      # UTF-8 encoding/decoding
-│   ├── valloc/              # Segregated-fit allocator (S2.1)
-│   │   └── src/
+│   ├── net/                 # Core rete (N1, ADR-0068/0069): Ethernet/IPv6/
+│   │                        #   ICMPv6/NDP, SLAAC, RA guard; no_std, safe
+│   ├── valloc/              # Segregated-fit allocator (S2.1)│   │   └── src/
 │   │       ├── lib.rs       # Public API
 │   │       └── core.rs      # Core allocator implementation
 │   ├── vela/                # Driver code sharing (Fase R2, ADR-0040)
@@ -151,6 +152,8 @@ velordo/
 │   │       └── fat32/       # FAT32 driver (mount/read/write/dir)
 │   ├── console/             # Console server (D3, ADR-0060) — /dev/console
 │   ├── gpu/                 # GPU driver (virtio-gpu, BAR/MSI-X/2D/scanout) — /dev/display
+│   ├── netdev/              # Driver virtio-net (N1, ADR-0069): RX/TX, shm ring
+│   ├── net/                 # Servizio rete (N1): IPv6/NDP, SLAAC, ping6
 │   ├── kbd/                 # Keyboard driver — registers via name
 │   ├── block/               # Block storage driver — DISK_READ/WRITE via IPC
 │   ├── time/                # Time service (CMOS RTC + uptime counter)

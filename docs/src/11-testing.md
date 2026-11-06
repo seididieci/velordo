@@ -253,7 +253,7 @@ log seriale.
   l'alpha dell'immagine e i colori sono `0xRRGGBBAA`; **T2/T3**: fill a
   parole, `copy_from`/`shift_rows_up` con clipping, `draw_ink` che non tocca
   il background), `libs/valloc` e
-  `blake2s` (48 test in tutto). Girano da una
+  `blake2s` (52 test in tutto). Girano da una
   **directory neutra**: il `.cargo/config.toml` del repo impone
   `build.target = x86_64-unknown-none` + `build-std` in base alla directory
   corrente, e da dentro il repo `cargo test` proverebbe a compilare l'harness
@@ -264,6 +264,14 @@ log seriale.
   altro bug vero: al re-adattamento (resize) il cursore finiva **in fondo**
   allo schermo, lontano dal punto in cui l'utente stava scrivendo
   (ADR-0061 §4, corretto in D5/ADR-0062).
+
+- **rete N1** (`scripts/run-net-tests.sh`, ADR-0068/0069): boot con
+  `-netdev passt` + virtio-net (IPv6 reale, unprivileged), **fuori dal
+  gate** perché `passt` è una dipendenza host. Il guest fa SLAAC/NDP e
+  ping6 verso il router; PASS se il log contiene `[net] echo reply`.
+  Risultato N1: indirizzo `2a01:e11:2430:7af0:...`, RA da
+  `fe80::3a07:16ff:fe2c:71ea`, echo reply dallo stesso router. I servizi
+  `netdev`/`net` partono solo con `net=1` in cmdline (il gate non lo setta).
 
 - **hello std** (S1.3…S2.4): `scripts/build-pal.sh` (PAL + sysroot in
   `$PAL_WORK`) produce `pal/build/hello-std.bin`, seedato come

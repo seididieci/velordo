@@ -147,6 +147,8 @@ fn service_from_disc(disc: u64) -> Option<syscall_numbers::Service> {
         11 => Some(Identis),
         12 => Some(Console),
         13 => Some(Login),
+        14 => Some(Net),
+        15 => Some(NetDev),
         _ => None,
     }
 }
@@ -168,6 +170,8 @@ fn service_name(s: syscall_numbers::Service) -> &'static str {
         syscall_numbers::Service::Identis => "identis",
         syscall_numbers::Service::Console => "console",
         syscall_numbers::Service::Login => "login",
+        syscall_numbers::Service::Net => "net",
+        syscall_numbers::Service::NetDev => "netdev",
     }
 }
 

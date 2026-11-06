@@ -104,6 +104,10 @@ if [ -f userland/disk/arca.img ]; then
     if [ "${RUN_S25:-0}" = "1" ]; then
         APPEND="$APPEND s25=1"
     fi
+    # Rete (ADR-0069): run dedicato con virtio-net + passt (fuori dal gate).
+    if [ "${NET:-0}" = "1" ]; then
+        APPEND="$APPEND net=1"
+    fi
 else
     APPEND=""
 fi
@@ -157,6 +161,13 @@ esac
 if [ -n "$VGA_DEV" ]; then
     GPU_DEV="$GPU_DEV $VGA_DEV"
 fi
+# Rete (ADR-0069): virtio-net modern + passt (IPv6 reale, unprivileged,
+# fuori dal gate). `NET=1` aggiunge anche `net=1` alla cmdline (init spawana
+# netdev/net). Senza, il boot e' identico al gate.
+NET_DEV=""
+if [ "${NET:-0}" = "1" ]; then
+    NET_DEV="-netdev passt,id=n0 -device virtio-net-pci,netdev=n0,disable-legacy=on"
+fi
 # shellcheck disable=SC2086
 exec qemu-system-x86_64 \
     -m ${RUN_MEM:-256M} \
@@ -167,4 +178,5 @@ exec qemu-system-x86_64 \
     -kernel "$KERNEL" \
     $DRIVES \
     $GPU_DEV \
+    $NET_DEV \
     "$@"

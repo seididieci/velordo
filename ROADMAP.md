@@ -667,17 +667,23 @@ Voci con scope e vittoria dichiarati (non date).
       `RUNS=3`). Restano W7 (DMA multi-pagina / payload piu' grandi) e
       write-back a epoche. Dettagli e caveat in `13-performance.md`.
 
-- [ ] **Rete — stack nativo IPv6-first (N1–N8)** (pianificata, ADR-0068/0069/0070):
-      stack in userspace — `libs/net` core `no_std` 100% safe (host-testable,
-      fuzzable), `userland/net` servizio, `userland/netdev` driver virtio-net;
-      IPv6-only nel core, IPv4 dopo con traduttore separato (SIIT/NAT64);
-      API a capability (niente POSIX nel meccanismo, la personalità socket
-      arriva dopo); policy per binario; config `sys:net` con policy di subtree
-      in cardo (`sys:identis` rinomina `identis:config`, chiude il debito
-      ADR-0058); virtio-net 1 RX + 1 TX, no offload, 2048 B/slot, 256
-      descrittori, MTU 1500; IOMMU-ready (VT-d dopo); test host/fuzz + QEMU
-      `passt` fuori dal gate. Vittoria N1: il guest fa RA/SLAAC da passt e
-      ping6 host/router; gate invariato (6 righe, zero FAIL).
+- [x] **Rete N1 — virtio-net + IPv6/NDP/ICMPv6 (ping6)** (completata,
+      ADR-0068/0069): stack in userspace — `libs/net` core `no_std` 100% safe
+      (Ethernet/IPv6/ICMPv6/NDP, SLAAC, RA guard, neighbor cache, IID
+      randomizzato, no DAD; 4 unit test host), `userland/netdev` driver
+      virtio-net (1 RX + 1 TX, 64 descrittori, 2048 B, no offload, MSI-X,
+      ring condiviso via shm), `userland/net` servizio (attach, poll, SLAAC,
+      ping6). Kernel: `Service::Net=14`/`NetDev=15`, `MSI_VECTOR_NET=0x51`,
+      finestra MMIO per servizio, grant DMA per NetDev. Test
+      `scripts/run-net-tests.sh` (fuori dal gate, `passt`): indirizzo
+      `2a01:e11:2430:7af0:...`, RA da `fe80::3a07:16ff:fe2c:71ea`, **echo
+      reply**. Gate invariato (6 righe, zero FAIL).
+- [ ] **Rete N2–N8** (pianificata, ADR-0068/0069/0070): UDP + endpoint a
+      capability + ring per client; TCP minimale (SYN cookies, RFC 5961, no
+      SACK/timestamps); traduttore IPv4 (SIIT/NAT64) separato; resolver DNS
+      plain separato; DoH/DoT con TLS; personalità POSIX socket; VT-d/IOMMU.
+      Config `sys:net` con policy di subtree in cardo (`sys:identis` rinomina
+      `identis:config`, chiude il debito ADR-0058).
 
 ## Parcheggiate
 

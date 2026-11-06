@@ -118,6 +118,11 @@ POLICY = {
     "userrunhello": 0x00F,  # OPEN|READ|WRITE|READDIR (programma di terzi)
     # arca (Fase 54): legge /dev/* e la topologia; niente scritture/mount.
     "userarca": 0x00B,      # OPEN|READ|READDIR
+    # Rete (ADR-0069): il driver non tocca il FS; il servizio `net` per N1
+    # non legge config (compilata). Il bucket `sys:net` arrivera' con la
+    # policy di subtree (ADR-0070) e allora avra' READ.
+    "netdev": 0x000,
+    "net": 0x000,
 }
 DEFAULT_MASK = 0x1FFF  # ALL (servizi TCB, incluso EXECUTE)
 

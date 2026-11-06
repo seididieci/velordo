@@ -2,8 +2,10 @@
 
 ## Status
 
-Proposed (2026-11). Dipende da ADR-0068 (threat model/invarianti) e
-ADR-0070 (config `sys:*`).
+Accepted (2026-11). **N1 implementata** (virtio-net + IPv6/NDP/ICMPv6 +
+ping6 con passt); N2–N8 restano la traiettoria. Dipende da ADR-0068
+(threat model/invarianti) e ADR-0070 (config `sys:*`, non ancora
+implementata: N1 usa una config compilata).
 
 ## Context
 
@@ -130,6 +132,30 @@ non conosce POSIX.
 - **N6**: DoH/DoT con TLS (servizio separato).
 - **N7**: personalità POSIX socket.
 - **N8**: VT-d/IOMMU.
+
+## Completato — N1 (virtio-net + IPv6/NDP/ICMPv6 + ping6)
+
+- **Kernel**: `Service::Net = 14`, `Service::NetDev = 15`; vettore
+  `MSI_VECTOR_NET = 0x51` e notify `IRQ_NOTIFY_NET = 0x45`; finestra MMIO
+  per servizio (`DEV_MMIO_NET_BASE`/`USER_MMIO_NET_VA`, il grant
+  `SYS_MAP_MMIO` è per owner); grant DMA per `NetDev` (slot >= 1); handler
+  MSI-X che sveglia il driver. Il kernel resta neutro.
+- **Driver `userland/netdev`**: virtio-net modern (`1af4:1041`), 1 RX + 1 TX,
+  64 descrittori, buffer 2048 B, **nessun offload**, MSI-X, ring condiviso
+  con il servizio via **shm** (non DMA: il device non lo tocca). Valida il
+  used ring; copia i frame tra device e ring.
+- **Core `libs/net`**: Ethernet, IPv6 (niente extension header), ICMPv6
+  (echo, checksum), NDP (RS/RA/NS/NA, opzioni source/target LL, prefix, MTU),
+  SLAAC, RA guard, neighbor cache bounded, IID randomizzato, no DAD.
+  `#![forbid(unsafe_code)]`, 4 unit test host (RA/SLAAC, RA guard, echo
+  reply, NS→NA).
+- **Servizio `userland/net`**: `NET_ATTACH` → shm map, poll del driver ogni
+  tick, drena il ring RX, core, ring TX. Config compilata (RA accept, ping
+  di prova verso il router); `sys:net` (ADR-0070) è il passo successivo.
+- **Test**: `scripts/run-net-tests.sh` (fuori dal gate, dipende da `passt`):
+  boot con `-netdev passt` + virtio-net, SLAAC e ping6. Risultato reale:
+  indirizzo `2a01:e11:2430:7af0:...`, RA da `fe80::3a07:16ff:fe2c:71ea`,
+  **echo reply** dallo stesso router. Gate invariato (6 righe, zero FAIL).
 
 ## Consequences
 

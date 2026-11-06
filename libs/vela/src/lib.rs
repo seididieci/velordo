@@ -22,3 +22,6 @@ pub mod input;
 /// Terminale video (server `gpu`, ex-console): VGA + tastiera cotta.
 /// La line discipline (`porta`, ex-tty) resta servizio autonomo fuori Vela.
 pub mod gpu;
+
+/// Rete (ADR-0069): costanti virtio-net condivise tra driver e servizio.
+pub mod net;
