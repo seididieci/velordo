@@ -7,8 +7,9 @@ use crate::addr::{Ipv6Addr, MacAddr};
 use crate::config::Config;
 use crate::eth::{self, ETHERTYPE_IPV6};
 use crate::icmpv6::{self, TYPE_ECHO_REPLY, TYPE_ECHO_REQUEST, TYPE_NA, TYPE_NS, TYPE_RA, TYPE_REDIRECT};
-use crate::ipv6::{self, HOP_LIMIT, NEXT_ICMPV6, NEXT_UDP};
+use crate::ipv6::{self, HOP_LIMIT, NEXT_ICMPV6, NEXT_TCP, NEXT_UDP};
 use crate::ndp;
+use crate::tcp;
 use crate::udp;
 
 const NEIGHBORS: usize = 8;
@@ -72,6 +73,7 @@ pub struct Net {
     rng: u64,
     link_up: bool,
     echo_done: bool,
+    tcp_seq_counter: u32,
 }
 
 impl Net {
@@ -94,6 +96,7 @@ impl Net {
             rng: cfg.seed | 1,
             link_up: false,
             echo_done: false,
+            tcp_seq_counter: 0x1000,
         };
         // IID randomizzato (RFC 4941) con bit U/L = locale.
         let iid = n.next_rand() | 0x0200_0000_0000_0000;
@@ -115,6 +118,17 @@ impl Net {
 
     pub fn router(&self) -> Option<Ipv6Addr> {
         self.router
+    }
+
+    pub fn router_mac(&self) -> Option<MacAddr> {
+        self.router_mac
+    }
+
+    /// Ritorna il prossimo numero di sequenza TCP (contatore semplice).
+    pub fn tcp_next_seq(&mut self) -> u32 {
+        let s = self.tcp_seq_counter;
+        self.tcp_seq_counter = self.tcp_seq_counter.wrapping_add(1);
+        s
     }
 
     /// Ritorna `true` se `addr` è uno dei nostri indirizzi (link-local, global, loopback).
@@ -194,6 +208,100 @@ impl Net {
         );
         frame[off..off + udp_len].copy_from_slice(&udp_buf[..udp_len]);
         sink.send(&frame[..off + udp_len]);
+        true
+    }
+
+    /// Invia un segmento TCP a `dst` con i flag e le sequenze specificate.
+    /// Stessa logica di source-selection e risoluzione next-hop di `send_udp`.
+    /// Ritorna `true` se il segmento è stato accettato (inviato o consegnato localmente).
+    pub fn send_tcp(
+        &mut self,
+        dst: Ipv6Addr,
+        src_port: u16,
+        dst_port: u16,
+        seq: u32,
+        ack: u32,
+        flags: u8,
+        window: u16,
+        payload: &[u8],
+        sink: &mut dyn FrameSink,
+    ) -> bool {
+        let total = tcp::TCP_HDR + payload.len();
+        if total > 1500 - ipv6::IPV6_HDR - eth::ETH_HDR {
+            return false; // troppo grande per un frame Ethernet
+        }
+
+        // Indirizzo sorgente (stessa logica di send_udp).
+        let src = if dst.is_loopback() || dst == self.link_local {
+            self.link_local
+        } else if dst.is_link_local() {
+            self.link_local
+        } else if let Some(g) = self.global {
+            g
+        } else {
+            self.link_local
+        };
+
+        // Consegna locale per indirizzi propri/loopback: nessun frame Ethernet.
+        if dst.is_loopback() || self.is_our_address(dst) {
+            // Serializza il segmento TCP nello slot di delivery.
+            let mut tcp_buf = [0u8; 1500 - ipv6::IPV6_HDR - eth::ETH_HDR];
+            let tcp_len = tcp::write_checked(
+                &mut tcp_buf,
+                src_port,
+                dst_port,
+                seq,
+                ack,
+                flags,
+                window,
+                &src,
+                &dst,
+                payload,
+            );
+            sink.deliver(&src, &dst, src_port, dst_port, &tcp_buf[..tcp_len]);
+            return true;
+        }
+
+        // Risoluzione del MAC di prossimo hop (stessa logica di send_udp).
+        let dst_mac = if dst.is_link_local() {
+            match self.neighbor_lookup(dst) {
+                Some(m) => m,
+                None => return false, // nessun vicino noto
+            }
+        } else {
+            // Off-link: via router.
+            match (self.router, self.router_mac) {
+                (Some(_), Some(m)) => m,
+                _ => return false, // nessun router
+            }
+        };
+
+        // Costruisce il frame Ethernet + IPv6 + TCP.
+        let mut frame = [0u8; 1514];
+        let mut off = eth::write(&mut frame, dst_mac, self.mac, ETHERTYPE_IPV6);
+        let mut tcp_buf = [0u8; 1500 - ipv6::IPV6_HDR - eth::ETH_HDR];
+        let tcp_len = tcp::write_checked(
+            &mut tcp_buf,
+            src_port,
+            dst_port,
+            seq,
+            ack,
+            flags,
+            window,
+            &src,
+            &dst,
+            payload,
+        );
+        off += ipv6::write(
+            &mut frame[off..],
+            NEXT_TCP,
+            HOP_LIMIT,
+            src,
+            dst,
+            tcp_len as u16,
+        );
+        frame[off..off + tcp_len].copy_from_slice(&tcp_buf[..tcp_len]);
+        sink.send(&frame[..off + tcp_len]);
         true
     }
 
@@ -308,6 +416,17 @@ impl Net {
                             sink.deliver(&ip.src, &ip.dst, udp.src_port, udp.dst_port, body);
                         } else {
                             events(Event::Dropped("udp checksum"));
+                        }
+                    }
+                }
+            }
+            NEXT_TCP => {
+                if ip.dst.is_loopback() || self.is_our_address(ip.dst) {
+                    if let Some((tcp, body)) = tcp::parse(payload) {
+                        if tcp::checksum_ok(&ip.src, &ip.dst, payload) {
+                            sink.deliver(&ip.src, &ip.dst, tcp.src_port, tcp.dst_port, body);
+                        } else {
+                            events(Event::Dropped("tcp checksum"));
                         }
                     }
                 }

@@ -222,20 +222,23 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `VecDeque` (`hexdump /bg.bmp` 5,2 MB: ~38 min → 31 s).
   Prossimo: console server con mirror seriale e routing POSIX
   stdout→device (l'hook `persona`), poi il DE.
-- **Rete (N1+N2, ADR-0068/0069)**: stack nativo in userspace — `libs/net`
+- **Rete (N1+N2+N3, ADR-0068/0069)**: stack nativo in userspace — `libs/net`
   core `no_std` 100% safe (Ethernet/IPv6/ICMPv6/NDP, SLAAC, RA guard,
-  neighbor cache, IID randomizzato, no DAD; 4 unit test host), `userland/
-  netdev` driver virtio-net (1 RX + 1 TX, 64 descrittori, 2048 B, no
-  offload, MSI-X, ring condiviso via shm), `userland/net` servizio (attach,
-  poll, SLAAC, ping6 + endpoint a capability: `NET_EP_OPEN/TX/CLOSE/STATS`,
-  tag `0x6F`/`0x73`/`0x81`/`0x82`, shm ring SPSC per endpoint). Kernel:
-  `Service::Net=14`/`NetDev=15`, `MSI_VECTOR_NET=0x51`, finestra MMIO per
-  servizio, grant DMA per NetDev. I servizi partono solo con `net=1` in
-  cmdline (run dedicato, fuori dal gate). Test:
-  `./scripts/run-net-tests.sh` (passt, IPv6 reale): SLAAC + **echo reply**
-  (N1) e `[netudp] risultato: PASS` (N2: endpoint ephemeral → `::1:7` con
-  validazione echo, server `netecho` su porta 7). Prossimo: N3 (TCP
-  minimale), poi IPv4 translator, resolver, DoH, personalità POSIX, VT-d.
+  neighbor cache, IID randomizzato, no DAD; 4 unit test host IPv6, 6 unit
+  test host TCP), `userland/netdev` driver virtio-net (1 RX + 1 TX, 64
+  descrittori, 2048 B, no offload, MSI-X, ring condiviso via shm),
+  `userland/net` servizio (attach, poll, SLAAC, ping6 + endpoint a
+  capability: `NET_EP_OPEN/TX/CLOSE/STATS`, tag `0x6F`/`0x73`/`0x81`/`0x82`,
+  shm ring SPSC per endpoint; endpoint TCP LISTEN/CONNECT, stati TCP
+  semplificati). Kernel: `Service::Net=14`/`NetDev=15`,
+  `MSI_VECTOR_NET=0x51`, finestra MMIO per servizio, grant DMA per NetDev.
+  I servizi partono solo con `net=1` in cmdline (run dedicato, fuori dal
+  gate). Test: `./scripts/run-net-tests.sh` (passt, IPv6 reale): SLAAC +
+  **echo reply** (N1), `[netudp] risultato: PASS` (N2: endpoint ephemeral
+  → `::1:7` con validazione echo, server `netecho` su porta 7),
+  `[net3] risultato: PASS` (N3: endpoint TCP → `::1:8`, validazione invio
+  SYN accettato, server `netecho` TCP su porta 8). Prossimo: N4 (traduttore
+  IPv4 SIIT/NAT64), poi resolver, DoH, personalità POSIX, VT-d.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo

@@ -13,12 +13,12 @@ TIMEOUT="${NET_TIMEOUT:-90}"
 echo "[net-tests] boot con virtio-net + passt (timeout ${TIMEOUT}s)"
 NET=1 RUN_TESTS=1 RUN_DISPLAY=none timeout "$TIMEOUT" ./run.sh >"$LOG" 2>&1 || true
 
-if rg -q '\[net\] echo reply' "$LOG" && rg -q '\[netudp\] risultato: PASS' "$LOG"; then
-    echo "[net-tests] PASS: echo reply + UDP echo probe"
-    rg '\[net\]|\[netdev\]|\[netecho\]|\[netudp\]' "$LOG" | tail -30
+if rg -q '\[net\] echo reply' "$LOG" && rg -q '\[netudp\] risultato: PASS' "$LOG" && rg -q '\[net3\] risultato: PASS' "$LOG"; then
+    echo "[net-tests] PASS: echo reply + UDP echo + TCP SYN probe"
+    rg '\[net\]|\[netdev\]|\[netecho\]|\[netudp\]|\[net3\]' "$LOG" | tail -30
     exit 0
 fi
 
-echo "[net-tests] FAIL: mancante echo reply o UDP echo probe"
-rg '\[net\]|\[netdev\]|\[netecho\]|\[netudp\]|\[init\] net' "$LOG" | tail -40 || true
+echo "[net-tests] FAIL: mancante echo reply, UDP echo o TCP SYN probe"
+rg '\[net\]|\[netdev\]|\[netecho\]|\[netudp\]|\[net3\]|\[init\] net' "$LOG" | tail -40 || true
 exit 1

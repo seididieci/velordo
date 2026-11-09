@@ -562,14 +562,19 @@ pub const NET_EP_RX_RING_OFF: usize = 0;
 // Offset del ring TX (cliente → servizio) nel buffer shm dell'endpoint.
 pub const NET_EP_TX_RING_OFF: usize = 0x2000;
 
-// ── Costanti protocollo (N2) ───────────────────────────────────────
+// ── Costanti protocollo (N2+N3) ─────────────────────────────────────
 pub const NET_PROTO_UDP: u8 = 17;
+pub const NET_PROTO_TCP: u8 = 6;
 /// Porta echo server (hardcoded, specchiata in `libs/net::udp::ECHO_PORT`).
 pub const NET_ECHO_PORT: u16 = 7;
 
 // ── Flag di apertura endpoint ──────────────────────────────────────
 /// L'endpoint usa una porta ephemeral (assegnata dal servizio).
 pub const NET_EP_FLAG_EPHEMERAL: u64 = 0x1;
+/// L'endpoint TCP è in ascolto (accetta connessioni in arrivo).
+pub const NET_EP_FLAG_LISTEN: u64 = 0x2;
+/// L'endpoint TCP si connette attivamente (client).
+pub const NET_EP_FLAG_CONNECT: u64 = 0x4;
 /// Statistiche del driver (D4, per i test): `w0` = `PRESENT` ricevuti,
 /// `w1` = `FLUSH` ricevuti **dopo l'ultimo** `PRESENT`. Serve a verificare
 /// il contratto "chi ridisegna manda anche il flush": un `PRESENT` aggancia

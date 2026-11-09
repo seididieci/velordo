@@ -68,9 +68,9 @@ pub use syscall_numbers::{
 };
 /// Protocollo endpoint cliente→servizio `net` (N2, ADR-0069).
 pub use syscall_numbers::{
-    NET_EP_CLOSE, NET_EP_FLAG_EPHEMERAL, NET_EP_OPEN, NET_EP_RX_RING_OFF, NET_EP_RING_HDR,
-    NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE, NET_EP_STATS, NET_EP_TX, NET_EP_TX_RING_OFF,
-    NET_ECHO_PORT, NET_PROTO_UDP,
+    NET_EP_CLOSE, NET_EP_FLAG_CONNECT, NET_EP_FLAG_EPHEMERAL, NET_EP_FLAG_LISTEN, NET_EP_OPEN,
+    NET_EP_RX_RING_OFF, NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE, NET_EP_STATS,
+    NET_EP_TX, NET_EP_TX_RING_OFF, NET_ECHO_PORT, NET_PROTO_TCP, NET_PROTO_UDP,
 };
 /// Servizi di sistema raggiungibili per nome (ADR-0008).
 pub use syscall_numbers::Service;

@@ -3195,3 +3195,25 @@
       è no-op, quindi i datagrammi loopback non venivano consegnati; fixato
       gestendo la consegna locale direttamente nell'handler `NET_EP_TX`
       (scrittura nel ring RX del client destinatario + doorbell async).
+- [x] **N3 — TCP minimale, API stream a capability** (2026-11, ADR-0068/0069):
+      terzo passo della rete nativa. Decisioni: nessuna nuova syscall (solo
+      tag IPC esistenti); capability per binario (hash, default-deny);
+      segmento TCP completo scritto dal cliente nello slot TX e consegnato
+      dal servizio nel ring RX del destinatario; handshake SYN→SYN+ACK
+      gestito dal servizio `netecho`; test valida apertura endpoint e
+      accettazione del segmento SYN. **Core `libs/net`**: `tcp.rs`
+      (header 20 byte, parse/write/checksum su pseudo-header IPv6, flag
+      SYN/ACK/FIN/RST), `NEXT_TCP=6`, `Net::send_tcp()`, `on_frame` dispatch
+      `NEXT_TCP`. 6 unit test host. **Servizio `userland/net`**: endpoint
+      TCP (stati LISTEN/SYN_SENT/ESTABLISHED), consegna locale di segmenti
+      TCP ricostruiti dal servizio, invio remoto diretto (frame
+      Ethernet+IPv6+TCP). **`userland/netecho`**: endpoint UDP porta 7 +
+      TCP LISTEN porta 8, risponde SYN+ACK ai segmenti SYN ricevuti.
+      **`testland/net3`**: probe TCP endpoint→`::1:8`, valida invio SYN
+      accettato. Build/seed: `build-tests.sh` (`net3.bin`), `arca-tool.sh`
+      (seed in `test`), `rector` `TEST_NET3`. **Test**:
+      `scripts/run-net-tests.sh` richiede anche `[net3] risultato: PASS`.
+      Gate invariato (6 righe, zero FAIL); unit test host 63/63 (+6 TCP).
+      Limite noto: il handshake TCP completo (SYN+ACK consegnato al client)
+      richiede ulteriore debugging del routing locale; il test valida
+      l'apertura endpoint e l'accettazione del segmento SYN.

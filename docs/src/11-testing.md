@@ -265,14 +265,18 @@ log seriale.
   allo schermo, lontano dal punto in cui l'utente stava scrivendo
   (ADR-0061 §4, corretto in D5/ADR-0062).
 
-- **rete N1+N2** (`scripts/run-net-tests.sh`, ADR-0068/0069): boot con
+- **rete N1+N2+N3** (`scripts/run-net-tests.sh`, ADR-0068/0069): boot con
   `-netdev passt` + virtio-net (IPv6 reale, unprivileged), **fuori dal
   gate** perché `passt` è una dipendenza host. Il guest fa SLAAC/NDP e
-  ping6 verso il router; PASS se il log contiene sia `[net] echo reply`
-  (N1) sia `[netudp] risultato: PASS` (N2). Risultato N1: indirizzo
-  `2a01:e11:2430:7af0:...`, RA da `fe80::3a07:16ff:fe2c:71ea`, echo
-  reply dallo stesso router. Risultato N2: `netecho` apre endpoint porta
-  7, `netudp` (endpoint ephemeral) invia a `::1:7` e valida l'eco.
+  ping6 verso il router; PASS se il log contiene `[net] echo reply` (N1),
+  `[netudp] risultato: PASS` (N2) e `[net3] risultato: PASS` (N3).
+  Risultato N1: indirizzo `2a01:e11:2430:7af0:...`, RA da
+  `fe80::3a07:16ff:fe2c:71ea`, echo reply dallo stesso router.
+  Risultato N2: `netecho` apre endpoint porta 7, `netudp` (endpoint
+  ephemeral) invia a `::1:7` e valida l'eco.
+  Risultato N3: `netecho` apre endpoint TCP porta 8, `net3` (endpoint TCP
+  ephemeral) invia SYN a `::1:8` e valida che il servizio accetti il
+  segmento.
   I servizi `netdev`/`net`/`netecho` partono solo con `net=1` in cmdline
   (il gate non lo setta).
 

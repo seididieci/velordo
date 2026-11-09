@@ -47,6 +47,8 @@ build_one testland/utcbstest testland/utcbstest/src/utcbstest.ld utcbstest.bin u
 build_one testland/identistest testland/identistest/src/identistest.ld identistest.bin identistest
 # Probe UDP (N2, ADR-0069): test fuori gate, eseguito solo con `net=1`.
 build_one testland/netudp testland/netudp/src/netudp.ld netudp.bin netudp
+# Probe TCP (N3, ADR-0069): test fuori gate, eseguito solo con `net=1`.
+build_one testland/net3 testland/net3/src/net3.ld net3.bin net3
 # Bench: BENCH_REDUCED=1 compila il profilo ridotto (feature `reduced`), per
 # la validazione rapida su host lenti. Mai nel gate.
 BENCH_FEATURES=""

@@ -697,6 +697,9 @@ const TEST_IDENTIS: SvcMeta = SvcMeta { bin: b"identistest", obj: Some((b"tst", 
 // Probe UDP (N2, ADR-0069): eseguito solo con `net=1`, dopo identistest.
 #[cfg(not(feature = "skip_tests"))]
 const TEST_NETUDP: SvcMeta = SvcMeta { bin: b"netudp", obj: Some((b"tst", b"test/netudp.bin")), prio: 16, io: &[] };
+// Probe TCP (N3, ADR-0069): eseguito solo con `net=1`, dopo netudp.
+#[cfg(not(feature = "skip_tests"))]
+const TEST_NET3: SvcMeta = SvcMeta { bin: b"net3", obj: Some((b"tst", b"test/net3.bin")), prio: 16, io: &[] };
 #[cfg(not(feature = "skip_tests"))]
 const TESTS: SvcMeta = SvcMeta { bin: b"usertests", obj: Some((b"tst", b"test/tests.bin")), prio: 16, io: &[] };
 // Thread 1:1 (S-T, ADR-0046): dopo usertests (nessuna dipendenza dai diritti),
@@ -914,6 +917,7 @@ fn real_main(_sp: u64) -> ! {
         // ::1:7 (netecho) e valida l'eco.
         if net_enabled {
             run_test(&TEST_NETUDP, &mut supervised);
+            run_test(&TEST_NET3, &mut supervised);
         }
         run_test(&TESTS, &mut supervised);
         run_test(&TEST_THREADS, &mut supervised);

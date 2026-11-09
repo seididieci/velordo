@@ -120,6 +120,7 @@ seed_bin testland/build/userdemo.bin test/demo.bin
 seed_bin testland/build/userbench.bin test/bench.bin tst test/bench.bin
 seed_bin testland/build/identistest.bin test/idtest.bin tst test/idtest.bin
 seed_bin testland/build/netudp.bin test/netudp.bin tst test/netudp.bin
+seed_bin testland/build/net3.bin test/net3.bin tst test/net3.bin
 seed_bin testland/build/userforeign.bin test/foreign.bin
 seed_bin flavours/posix/tests/build/userposixtests.bin test/posixtst.bin tst test/posixtst.bin
 # Hello std nativo (S1.3): solo se compilato via scripts/build-pal.sh (fuori

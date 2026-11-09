@@ -30,6 +30,8 @@ const DST_PORT: u16 = 7;
 const TEST_PAYLOAD: &[u8] = b"velordo-netudp-probe";
 /// Numero massimo di tentativi di ricezione.
 const MAX_RETRIES: u32 = 2000;
+/// Metadata slot ring (N2+N3): [len:2][addr:16][sport:2][dport:2][seq:4][ack:4][flags:1].
+const SLOT_META: usize = 31;
 
 /// Entry point.
 civis::entry!(real_main);
@@ -100,8 +102,8 @@ fn real_main(_sp: u64) -> ! {
     }
 
     // Invia datagramma a ::1:7.
-    // Formato TX slot: [len:u16][dst_addr:16][dst_port:2][unused:2][payload].
-    let meta = 2 + 16 + 2 + 2; // len + addr + dport + sport(unused)
+    // Formato TX slot: [len:2][addr:16][sport:2][dport:2][seq:4][ack:4][flags:1][payload].
+    let meta = SLOT_META; // 31
     let total = meta + TEST_PAYLOAD.len();
     if total > NET_EP_SLOT_SIZE {
         println!("[netudp] FAIL: payload troppo grande per lo slot");
@@ -117,7 +119,10 @@ fn real_main(_sp: u64) -> ! {
         core::ptr::copy_nonoverlapping(DST_ADDR.as_ptr(), p.add(2), 16);
         write_volatile(p.add(18) as *mut u16, DST_PORT);
         write_volatile(p.add(20) as *mut u16, local_port);
-        core::ptr::copy_nonoverlapping(TEST_PAYLOAD.as_ptr(), p.add(22), TEST_PAYLOAD.len());
+        write_volatile(p.add(22) as *mut u32, 0); // seq (UDP: 0)
+        write_volatile(p.add(26) as *mut u32, 0); // ack (UDP: 0)
+        write_volatile(p.add(30) as *mut u8, 0);  // flags (UDP: 0)
+        core::ptr::copy_nonoverlapping(TEST_PAYLOAD.as_ptr(), p.add(31), TEST_PAYLOAD.len());
     }
     fence(Ordering::Release);
     unsafe {
@@ -144,22 +149,22 @@ fn real_main(_sp: u64) -> ! {
                 ring_base.add(NET_EP_RX_RING_OFF + NET_EP_RING_HDR + slot * NET_EP_SLOT_SIZE)
             };
             let total = unsafe { read_volatile(p as *const u16) } as usize;
+            let expected_total = SLOT_META + TEST_PAYLOAD.len();
             println!(
                 "[netudp] RX slot totale={} payload_len_atteso={}",
-                total,
-                2 + 16 + 2 + 2 + TEST_PAYLOAD.len()
+                total, expected_total
             );
-            if total >= 2 + 16 + 2 + 2 + TEST_PAYLOAD.len() {
+            if total >= expected_total {
                 let mut src_addr = [0u8; 16];
                 unsafe {
                     core::ptr::copy_nonoverlapping(p.add(2), src_addr.as_mut_ptr(), 16);
                 }
                 let src_port = unsafe { read_volatile(p.add(18) as *const u16) };
                 let dst_port = unsafe { read_volatile(p.add(20) as *const u16) };
-                let payload_start = 22;
+                let payload_start = 31;
                 println!(
                     "[netudp] RX da porta={} dst_port={} payload_len={}",
-                    src_port, dst_port, total - 22
+                    src_port, dst_port, total - SLOT_META
                 );
                 if src_port == DST_PORT {
                     let mut match_ok = true;

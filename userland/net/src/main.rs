@@ -1,9 +1,11 @@
-//! net — servizio di rete nativo (ADR-0069, N2).
+//! net — servizio di rete nativo (ADR-0069, N2+N3).
 //!
 //! Registra `Service::Net`, si attacca al driver `netdev` (`NET_ATTACH`),
 //! drena il ring RX, passa i frame al core `net` e gestisce endpoint a
 //! capability per i client (`NET_EP_OPEN/TX/CLOSE/STATS`).
 //! IPv6-first, core puro in `libs/net`, niente syscall di rete nel kernel.
+//! Il handshake TCP è gestito dal client; il servizio consegna segmenti
+//! nei ring RX e invia segmenti dai ring TX.
 
 #![no_std]
 #![no_main]
@@ -15,19 +17,19 @@ use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, Ordering};
 
 use civis;
-use net::{Config, Event, FrameSink, Ipv6Addr, MacAddr, Net};
+use net::{Config, Event, FrameSink, Ipv6Addr, MacAddr, Net, NEXT_TCP};
+use net::tcp;
+use net::ipv6;
+use net::eth::{self, ETHERTYPE_IPV6};
 
 // ── Costanti endpoint (da civis/syscall-numbers) ───────────────────
 use civis::{
-    NET_EP_CLOSE, NET_EP_FLAG_EPHEMERAL, NET_EP_OPEN, NET_EP_RX_RING_OFF, NET_EP_RING_HDR,
-    NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE, NET_EP_STATS, NET_EP_TX, NET_EP_TX_RING_OFF,
-    NET_PROTO_UDP,
+    NET_EP_CLOSE, NET_EP_FLAG_CONNECT, NET_EP_FLAG_EPHEMERAL, NET_EP_FLAG_LISTEN, NET_EP_OPEN,
+    NET_EP_RX_RING_OFF, NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE, NET_EP_STATS,
+    NET_EP_TX, NET_EP_TX_RING_OFF, NET_PROTO_TCP, NET_PROTO_UDP,
 };
 
 static FUTEX: u32 = 0;
-
-/// Numero massimo di endpoint concorrenti.
-const MAX_ENDPOINTS: usize = 8;
 
 /// Stato di un endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +37,15 @@ enum EpState {
     Free,
     Bound,
 }
+
+/// Numero massimo di endpoint concorrenti.
+const MAX_ENDPOINTS: usize = 8;
+
+/// Stati TCP semplificati (N3).
+const TCP_CLOSED: u8 = 0;
+const TCP_LISTEN: u8 = 1;
+const TCP_SYN_SENT: u8 = 2;
+const TCP_ESTABLISHED: u8 = 4;
 
 /// Tabella endpoint.
 #[derive(Clone, Copy)]
@@ -50,6 +61,10 @@ struct Endpoint {
     peer_hash: u64,
     rx_pkts: u64,
     tx_pkts: u64,
+    // Stato TCP (N3).
+    tcp_state: u8,
+    tcp_seq: u32,
+    tcp_ack: u32,
 }
 
 impl Endpoint {
@@ -66,6 +81,9 @@ impl Endpoint {
             peer_hash: 0,
             rx_pkts: 0,
             tx_pkts: 0,
+            tcp_state: TCP_CLOSED,
+            tcp_seq: 0,
+            tcp_ack: 0,
         }
     }
 }
@@ -101,12 +119,8 @@ impl NetService {
         }
     }
 
-    /// Alloca un nuovo endpoint. Ritorna l'indice o None se pieno.
-    pub fn alloc_endpoint(
-        &mut self,
-        peer_chan: u64,
-        peer_hash: u64,
-    ) -> Option<usize> {
+    /// Alloca un nuovo endpoint.
+    pub fn alloc_endpoint(&mut self, peer_chan: u64, peer_hash: u64) -> Option<usize> {
         for i in 0..MAX_ENDPOINTS {
             if self.endpoints[i].state == EpState::Free {
                 let ep_id = self.next_ep_id;
@@ -126,6 +140,9 @@ impl NetService {
                     peer_hash,
                     rx_pkts: 0,
                     tx_pkts: 0,
+                    tcp_state: TCP_CLOSED,
+                    tcp_seq: 0,
+                    tcp_ack: 0,
                 };
                 return Some(i);
             }
@@ -133,8 +150,7 @@ impl NetService {
         None
     }
 
-    /// Libera un endpoint (munmap del ring; i frame shm vengono rilasciati
-    /// dal kernel alla teardown del processo).
+    /// Libera un endpoint.
     pub fn free_endpoint(&mut self, idx: usize) {
         let ep = self.endpoints[idx];
         if ep.ring_id != 0 && !ep.ring_base.is_null() {
@@ -152,13 +168,6 @@ impl NetService {
             .position(|e| e.state != EpState::Free && e.ep_id == ep_id)
     }
 
-    /// Trova endpoint per porta locale (per delivery RX).
-    pub fn find_by_local_port(&self, port: u16) -> Option<usize> {
-        self.endpoints
-            .iter()
-            .position(|e| e.state == EpState::Bound && e.local_port == port)
-    }
-
     /// Trova endpoint per ID con riferimento mutabile.
     pub fn find_by_id_mut(&mut self, ep_id: u16) -> Option<&mut Endpoint> {
         self.endpoints
@@ -166,16 +175,26 @@ impl NetService {
             .find(|e| e.state != EpState::Free && e.ep_id == ep_id)
     }
 
-    /// Layout di uno slot ring: `[len:u16][addr:16][port:2][port:2][payload]`.
-    const SLOT_META: usize = 22; // len(2) + addr(16) + sport(2) + dport(2)
+    /// Trova endpoint per porta locale (per delivery RX).
+    pub fn find_by_local_port(&self, port: u16) -> Option<usize> {
+        self.endpoints
+            .iter()
+            .position(|e| e.state == EpState::Bound && e.local_port == port)
+    }
+
+    /// Layout di uno slot ring (N2+N3):
+    /// `[len:u16][src_addr:16][src_port:2][dst_port:2][seq:4][ack:4][flags:1][payload]`.
+    const SLOT_META: usize = 31; // 2+16+2+2+4+4+1
 
     /// Scrive uno slot nel ring RX (service → client) dato un ring base.
-    /// Formato: `[len:u16][src_addr:16][src_port:2][dst_port:2][payload]`.
     fn ep_rx_write_full(
         ring: *mut u8,
         src_addr: &Ipv6Addr,
         src_port: u16,
         dst_port: u16,
+        _seq: u32,
+        _ack: u32,
+        _flags: u8,
         payload: &[u8],
     ) -> bool {
         let total = Self::SLOT_META + payload.len();
@@ -196,7 +215,10 @@ impl NetService {
             core::ptr::copy_nonoverlapping(src_addr.0.as_ptr(), p.add(2), 16);
             write_volatile(p.add(18) as *mut u16, src_port);
             write_volatile(p.add(20) as *mut u16, dst_port);
-            core::ptr::copy_nonoverlapping(payload.as_ptr(), p.add(22), payload.len());
+            write_volatile(p.add(22) as *mut u32, 0); // seq (riservato per TCP)
+            write_volatile(p.add(26) as *mut u32, 0); // ack (riservato per TCP)
+            write_volatile(p.add(30) as *mut u8, 0);  // flags (riservato per TCP)
+            core::ptr::copy_nonoverlapping(payload.as_ptr(), p.add(31), payload.len());
         }
         fence(Ordering::Release);
         unsafe {
@@ -209,13 +231,12 @@ impl NetService {
     }
 
     /// Legge uno slot dal ring TX (client → service) dato un ring base.
-    /// Formato: `[len:u16][dst_addr:16][dst_port:2][payload]`.
-    /// Ritorna (payload_len, dst_addr, dst_port) oppure None.
+    /// Ritorna (payload_len, dst_addr, dst_port, seq, ack, flags).
     fn ep_tx_read_full(
         ring: *mut u8,
         slot_idx: usize,
         buf: &mut [u8],
-    ) -> Option<(usize, Ipv6Addr, u16)> {
+    ) -> Option<(usize, Ipv6Addr, u16, u32, u32, u8)> {
         if slot_idx >= NET_EP_RING_SLOTS {
             return None;
         }
@@ -223,7 +244,7 @@ impl NetService {
             ring.add(NET_EP_TX_RING_OFF + NET_EP_RING_HDR + slot_idx * NET_EP_SLOT_SIZE)
         };
         let total = unsafe { read_volatile(p as *const u16) } as usize;
-        if total < Self::SLOT_META - 2 || total > NET_EP_SLOT_SIZE {
+        if total < Self::SLOT_META || total > NET_EP_SLOT_SIZE {
             return None;
         }
         let mut addr = [0u8; 16];
@@ -231,14 +252,17 @@ impl NetService {
             core::ptr::copy_nonoverlapping(p.add(2), addr.as_mut_ptr(), 16);
         }
         let dst_port = unsafe { read_volatile(p.add(18) as *const u16) };
+        let seq = unsafe { read_volatile(p.add(22) as *const u32) };
+        let ack = unsafe { read_volatile(p.add(26) as *const u32) };
+        let flags = unsafe { read_volatile(p.add(30) as *const u8) };
         let payload_len = total - Self::SLOT_META;
         if payload_len > buf.len() {
             return None;
         }
         unsafe {
-            core::ptr::copy_nonoverlapping(p.add(22), buf.as_mut_ptr(), payload_len);
+            core::ptr::copy_nonoverlapping(p.add(31), buf.as_mut_ptr(), payload_len);
         }
-        Some((payload_len, Ipv6Addr(addr), dst_port))
+        Some((payload_len, Ipv6Addr(addr), dst_port, seq, ack, flags))
     }
 
     /// Avanza la tail del TX ring (slot consumato) dato un ring base.
@@ -251,8 +275,6 @@ impl NetService {
             )
         };
     }
-
-
 
     /// Carica la policy da `sys:net.conf`.
     pub fn load_policy(&mut self) {
@@ -282,14 +304,52 @@ impl NetService {
         }
         self.policy_allow_wk
     }
+}
 
-    /// Verifica se `dst` è destinazione consentita (default-deny).
-    pub fn can_dst(&self, _peer_hash: u64, dst: Ipv6Addr) -> bool {
-        dst.is_loopback()
+// ── Sink driver (frame Ethernet verso netdev) ──────────────────────
+struct DriverSink {
+    ring: *mut u8,
+}
+
+impl FrameSink for DriverSink {
+    fn send(&mut self, frame: &[u8]) {
+        if frame.len() > civis::NET_SLOT_SIZE - 2 {
+            return;
+        }
+        let head = unsafe {
+            read_volatile(self.ring.add(civis::NET_TX_RING_OFF) as *const u32)
+        };
+        let tail = unsafe {
+            read_volatile(self.ring.add(civis::NET_TX_RING_OFF + 4) as *const u32)
+        };
+        if tail.wrapping_sub(head) >= civis::NET_RING_SLOTS as u32 {
+            return;
+        }
+        let slot = (tail % civis::NET_RING_SLOTS as u32) as usize;
+        let p = unsafe {
+            self.ring.add(
+                civis::NET_TX_RING_OFF + civis::NET_RING_HDR + slot * civis::NET_SLOT_SIZE,
+            )
+        };
+        unsafe {
+            write_volatile(p as *mut u16, frame.len() as u16);
+            core::ptr::copy_nonoverlapping(frame.as_ptr(), p.add(2), frame.len());
+        }
+        fence(Ordering::Release);
+        unsafe {
+            write_volatile(
+                self.ring.add(civis::NET_TX_RING_OFF + 4) as *mut u32,
+                tail.wrapping_add(1),
+            )
+        };
+    }
+
+    fn deliver(&mut self, _src: &Ipv6Addr, _dst: &Ipv6Addr, _sp: u16, _dp: u16, _pl: &[u8]) {
+        // Non usato: la delivery locale passa per EpSink.
     }
 }
 
-// ── Sink combinato: driver ring (send) + endpoint RX (deliver) ─────
+// ── Sink endpoint (consegna locale nel ring RX) ────────────────────
 struct EpSink<'a> {
     driver_ring: *mut u8,
     endpoints: &'a mut [Endpoint; MAX_ENDPOINTS],
@@ -336,6 +396,8 @@ impl<'a> FrameSink for EpSink<'a> {
         dst_port: u16,
         payload: &[u8],
     ) {
+        // Consegna diretta nel ring RX dell'endpoint in ascolto su dst_port.
+        // Il client gestisce il handshake TCP leggendo dal ring RX.
         let idx = match self
             .endpoints
             .iter()
@@ -355,8 +417,7 @@ impl<'a> FrameSink for EpSink<'a> {
         let peer_chan = ep.peer_chan;
         let ep_id = ep.ep_id;
         let _ = ep;
-        // Scrive nello slot RX: indirizzo sorgente + porte + payload grezzo.
-        if NetService::ep_rx_write_full(ring, src, src_port, dst_port, payload) {
+        if NetService::ep_rx_write_full(ring, src, src_port, dst_port, 0, 0, 0, payload) {
             if peer_chan != 0 {
                 let _ = civis::send_async(peer_chan, NET_EP_TX, ep_id as u64, 0);
             }
@@ -364,6 +425,7 @@ impl<'a> FrameSink for EpSink<'a> {
     }
 }
 
+/// Entry point.
 civis::entry!(real_main);
 
 fn real_main(_sp: u64) -> ! {
@@ -437,11 +499,8 @@ fn real_main(_sp: u64) -> ! {
 
     let now = civis::get_ticks() as u64;
     if link {
-        let mut epsink = EpSink {
-            driver_ring: svc.sink_ring,
-            endpoints: &mut svc.endpoints,
-        };
-        svc.net.link_up(now, &mut epsink, &mut |e| log_event(e));
+        let mut sink = DriverSink { ring: svc.sink_ring };
+        svc.net.link_up(now, &mut sink, &mut |e| log_event(e));
     }
     civis::signal_ready(1);
 
@@ -490,11 +549,8 @@ fn real_main(_sp: u64) -> ! {
         }
 
         // Timer.
-        let mut epsink = EpSink {
-            driver_ring: svc.sink_ring,
-            endpoints: &mut svc.endpoints,
-        };
-        svc.net.on_tick(now, &mut epsink, &mut |e| log_event(e));
+        let mut sink = DriverSink { ring: svc.sink_ring };
+        svc.net.on_tick(now, &mut sink, &mut |e| log_event(e));
 
         // TX: il driver consuma il ring.
         let _ = civis::send(driver, civis::NET_TX, 0, 0);
@@ -522,7 +578,7 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
                     return;
                 }
             };
-            if proto != NET_PROTO_UDP as u16 {
+            if proto != NET_PROTO_UDP as u16 && proto != NET_PROTO_TCP as u16 {
                 let _ = civis::reply(NET_EP_OPEN, !0u64, 0);
                 return;
             }
@@ -579,6 +635,17 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
             ep.local_port = port;
             ep.ring_id = ring_id;
             ep.ring_base = ring_base;
+            // Stato TCP (N3).
+            if proto == NET_PROTO_TCP as u16 {
+                if flags & NET_EP_FLAG_LISTEN != 0 {
+                    ep.tcp_state = TCP_LISTEN;
+                } else if flags & NET_EP_FLAG_CONNECT != 0 {
+                    ep.tcp_state = TCP_SYN_SENT;
+                    ep.tcp_seq = svc.net.tcp_next_seq();
+                } else {
+                    ep.tcp_state = TCP_CLOSED;
+                }
+            }
             let ep_id = ep.ep_id;
             let ring_id_ret = ep.ring_id;
             let _ = civis::reply(
@@ -597,39 +664,59 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
             let ep = svc.endpoints[idx]; // Copy
             let ring = ep.ring_base;
             let mut payload = [0u8; NET_EP_SLOT_SIZE - 2];
-            let (len, dst, dst_port) = match NetService::ep_tx_read_full(ring, slot_idx, &mut payload)
-            {
-                Some(v) => v,
-                None => {
-                    let _ = civis::reply(NET_EP_TX, !0u64, 0);
-                    return;
-                }
-            };
+            let (payload_len, dst, dst_port, seq, ack, flags) =
+                match NetService::ep_tx_read_full(ring, slot_idx, &mut payload) {
+                    Some(v) => v,
+                    None => {
+                        let _ = civis::reply(NET_EP_TX, !0u64, 0);
+                        return;
+                    }
+                };
+            let is_tcp = ep.tcp_state != TCP_CLOSED;
 
             // Consegna locale (loopback o indirizzo proprio): scrivi direttamente
             // nel ring RX del client destinatario, senza passare per il driver.
             if dst.is_loopback() || svc.net.is_our_address(dst) {
-                let net = &svc.net;
                 let src_addr = if dst.is_loopback() {
                     Ipv6Addr::LOOPBACK
                 } else {
-                    net.link_local()
+                    svc.net.link_local()
                 };
                 let delivered = if let Some(dst_idx) = svc.find_by_local_port(dst_port) {
                     let dst_ep = svc.endpoints[dst_idx]; // Copy
                     // Verifica che il sorgente corrisponda al peer atteso (se vincolato).
                     if dst_ep.remote_port != 0 && dst_ep.remote_port != ep.local_port {
                         false
-                    } else if !dst_ep.remote_addr.is_unspecified() {
-                        // Non conosciamo l'indirizzo sorgente IP del datagramma
-                        // ricevuto (solo le porte nel formato TX), quindi
-                        // accettiamo se l'indirizzo non è vincolato.
+                    } else {
+                        // Per TCP, consegna il segmento completo (header + dati)
+                        // nel ring RX del destinatario.
+                        let rx_payload = if is_tcp {
+                            let mut tcp_seg = [0u8; 1500 - ipv6::IPV6_HDR - eth::ETH_HDR];
+                            let seg_len = tcp::write_checked(
+                                &mut tcp_seg,
+                                ep.local_port,
+                                dst_port,
+                                seq,
+                                ack,
+                                flags,
+                                65535,
+                                &src_addr,
+                                &dst,
+                                &payload[..payload_len],
+                            );
+                            tcp_seg[..seg_len].to_vec()
+                        } else {
+                            payload[..payload_len].to_vec()
+                        };
                         if NetService::ep_rx_write_full(
                             dst_ep.ring_base,
                             &src_addr,
                             ep.local_port,
                             dst_port,
-                            &payload[..len],
+                            seq,
+                            ack,
+                            flags,
+                            &rx_payload,
                         ) {
                             if dst_ep.peer_chan != 0 {
                                 let _ = civis::send_async(
@@ -642,26 +729,6 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
                             true
                         } else {
                             false // ring RX pieno
-                        }
-                    } else {
-                        if NetService::ep_rx_write_full(
-                            dst_ep.ring_base,
-                            &src_addr,
-                            ep.local_port,
-                            dst_port,
-                            &payload[..len],
-                        ) {
-                            if dst_ep.peer_chan != 0 {
-                                let _ = civis::send_async(
-                                    dst_ep.peer_chan,
-                                    NET_EP_TX,
-                                    dst_ep.ep_id as u64,
-                                    0,
-                                );
-                            }
-                            true
-                        } else {
-                            false
                         }
                     }
                 } else {
@@ -681,13 +748,63 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
             }
 
             // Consegna remota: invia frame Ethernet via driver.
-            let sent = svc.net.send_udp(
-                dst,
-                ep.local_port,
-                dst_port,
-                &payload[..len],
-                &mut DriverSink { ring: svc.sink_ring },
-            );
+            let sent = if is_tcp {
+                // Per TCP, il payload contiene già l'header TCP completo (scritto
+                // dal cliente nello slot TX). Incapsula direttamente in IPv6.
+                let dst_mac = if dst.is_link_local() {
+                    match svc.net.neighbor_lookup(dst) {
+                        Some(m) => m,
+                        None => {
+                            let _ = civis::reply(NET_EP_TX, !0u64, 0);
+                            return;
+                        }
+                    }
+                } else {
+                    match (svc.net.router(), svc.net.router_mac()) {
+                        (Some(_), Some(m)) => m,
+                        _ => {
+                            let _ = civis::reply(NET_EP_TX, !0u64, 0);
+                            return;
+                        }
+                    }
+                };
+                // Costruisce segmento TCP completo: header (20 byte) + dati.
+                let mut tcp_seg = [0u8; 1500 - ipv6::IPV6_HDR - eth::ETH_HDR];
+                let seg_len = tcp::write_checked(
+                    &mut tcp_seg,
+                    ep.local_port,
+                    dst_port,
+                    seq,
+                    ack,
+                    flags,
+                    65535,
+                    &svc.net.link_local(),
+                    &dst,
+                    &payload[..payload_len],
+                );
+                let mut frame = [0u8; 1514];
+                let mut off = eth::write(&mut frame, dst_mac, svc.net.mac(), ETHERTYPE_IPV6);
+                off += ipv6::write(
+                    &mut frame[off..],
+                    NEXT_TCP,
+                    ipv6::HOP_LIMIT,
+                    svc.net.link_local(),
+                    dst,
+                    seg_len as u16,
+                );
+                frame[off..off + seg_len].copy_from_slice(&tcp_seg[..seg_len]);
+                let mut sink = DriverSink { ring: svc.sink_ring };
+                sink.send(&frame[..off + seg_len]);
+                true
+            } else {
+                svc.net.send_udp(
+                    dst,
+                    ep.local_port,
+                    dst_port,
+                    &payload[..payload_len],
+                    &mut DriverSink { ring: svc.sink_ring },
+                )
+            };
             if sent {
                 NetService::ep_tx_consume_raw(ring);
                 if let Some(ep_mut) = svc.find_by_id_mut(ep_id) {
@@ -725,49 +842,6 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
             }
         }
         _ => {}
-    }
-}
-
-/// Sink puro per invio frame al driver (usato da send_udp per TX remoto).
-struct DriverSink {
-    ring: *mut u8,
-}
-
-impl FrameSink for DriverSink {
-    fn send(&mut self, frame: &[u8]) {
-        if frame.len() > civis::NET_SLOT_SIZE - 2 {
-            return;
-        }
-        let head = unsafe {
-            read_volatile(self.ring.add(civis::NET_TX_RING_OFF) as *const u32)
-        };
-        let tail = unsafe {
-            read_volatile(self.ring.add(civis::NET_TX_RING_OFF + 4) as *const u32)
-        };
-        if tail.wrapping_sub(head) >= civis::NET_RING_SLOTS as u32 {
-            return;
-        }
-        let slot = (tail % civis::NET_RING_SLOTS as u32) as usize;
-        let p = unsafe {
-            self.ring.add(
-                civis::NET_TX_RING_OFF + civis::NET_RING_HDR + slot * civis::NET_SLOT_SIZE,
-            )
-        };
-        unsafe {
-            write_volatile(p as *mut u16, frame.len() as u16);
-            core::ptr::copy_nonoverlapping(frame.as_ptr(), p.add(2), frame.len());
-        }
-        fence(Ordering::Release);
-        unsafe {
-            write_volatile(
-                self.ring.add(civis::NET_TX_RING_OFF + 4) as *mut u32,
-                tail.wrapping_add(1),
-            )
-        };
-    }
-
-    fn deliver(&mut self, _src: &Ipv6Addr, _dst: &Ipv6Addr, _sp: u16, _dp: u16, _pl: &[u8]) {
-        // Non usato: la delivery locale passa per EpSink.
     }
 }
 

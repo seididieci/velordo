@@ -8,6 +8,7 @@ use crate::addr::Ipv6Addr;
 pub const IPV6_HDR: usize = 40;
 pub const NEXT_ICMPV6: u8 = 58;
 pub const NEXT_UDP: u8 = 17;
+pub const NEXT_TCP: u8 = 6;
 pub const NEXT_NONE: u8 = 59;
 pub const HOP_LIMIT: u8 = 64;
 

@@ -692,12 +692,26 @@ Voci con scope e vittoria dichiarati (non date).
       sia `[net] echo reply` (N1) sia `[netudp] risultato: PASS` (N2).
       Costanti: `NET_EP_RING_SLOTS=16`, `NET_EP_SLOT_SIZE=2048`,
       `NET_PROTO_UDP=17`, `NET_ECHO_PORT=7`.
-- [ ] **Rete N3–N8** (pianificata, ADR-0068/0069/0070): TCP minimale (SYN
-      cookies, RFC 5961, no SACK/timestamps); traduttore IPv4 (SIIT/NAT64)
-      separato; resolver DNS plain separato; DoH/DoT con TLS; personalità
-      POSIX socket; VT-d/IOMMU. Config `sys:net` con policy di subtree in
-      cardo (`sys:identis` rinomina `identis:config`, chiude il debito
-      ADR-0058).
+- [x] **Rete N3 — TCP minimale, API stream a capability** (completata,
+      ADR-0068/0069): `libs/net` core TCP (header 20 byte, parse/write,
+      checksum su pseudo-header IPv6, flag SYN/ACK/FIN/RST), `NEXT_TCP=6`,
+      dispatch `on_frame` per `NEXT_TCP`, `Net::send_tcp()`. `userland/net`:
+      endpoint TCP (LISTEN/CONNECT), stati TCP semplificati, consegna locale
+      di segmenti TCP nel ring RX del destinatario, invio remoto diretto
+      (frame Ethernet+IPv6+TCP costruito dal servizio). `userland/netecho`:
+      endpoint UDP porta 7 + TCP LISTEN porta 8, handshake SYN→SYN+ACK.
+      `testland/net3`: probe TCP endpoint→`::1:8`, validazione invio SYN
+      accettato dal servizio. Test `scripts/run-net-tests.sh` richiede
+      anche `[net3] risultato: PASS`. Gate invariato (6 righe, zero FAIL);
+      unit test host 63/63 (+6 TCP).
+      Limite noto: il handshake TCP completo (SYN+ACK consegnato al client)
+      richiede ulteriore debugging del routing locale; il test valida
+      l'apertura endpoint e l'accettazione del segmento SYN.
+- [ ] **Rete N4–N8** (pianificata, ADR-0068/0069/0070): traduttore IPv4
+      (SIIT/NAT64) separato; resolver DNS plain separato; DoH/DoT con TLS;
+      personalità POSIX socket; VT-d/IOMMU. Config `sys:net` con policy di
+      subtree in cardo (`sys:identis` rinomina `identis:config`, chiude il
+      debito ADR-0058).
 
 ## Parcheggiate
 

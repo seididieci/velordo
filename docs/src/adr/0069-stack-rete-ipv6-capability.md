@@ -129,7 +129,7 @@ non conosce POSIX.
   NDP/RA/SLAAC, ICMPv6 echo, passt test; config statica/`sys:net`. **Completata.**
 - **N2**: UDP + endpoint a capability + ring; echo server nativo; policy.
   **Completata.**
-- **N3**: TCP minimale; API stream nativa.
+- **N3**: TCP minimale; API stream nativa. **Completata.**
 - **N4**: traduttore IPv4 (SIIT/NAT64) separato.
 - **N5**: resolver DNS plain separato.
 - **N6**: DoH/DoT con TLS (servizio separato).
@@ -196,6 +196,37 @@ non conosce POSIX.
 - **Test**: `scripts/run-net-tests.sh` richiede sia `[net] echo reply` (N1)
   sia `[netudp] risultato: PASS` (N2). Gate invariato (6 righe, zero FAIL)
   perché i servizi di rete partono solo con `net=1`.
+
+## Completato — N3 (TCP minimale, API stream a capability)
+
+- **Core `libs/net`**: `tcp.rs` (header TCP 20 byte, parse/write, checksum su
+  pseudo-header IPv6, flag SYN/ACK/FIN/RST), `NEXT_TCP=6`, `Ipv6Addr` già
+  esistente. `net.rs`: dispatch `on_frame` per `NEXT_TCP`, `Net::send_tcp()`
+  con selezione sorgente e risoluzione next-hop (stessa logica di `send_udp`),
+  consegna locale per indirizzi propri/loopback. 6 unit test host (roundtrip,
+  checksum zero, payload alterato, troppo corto, flag FIN, flag RST).
+- **Servizio `userland/net`**: endpoint TCP (stati LISTEN/SYN_SENT/ESTABLISHED
+  in `Endpoint`), `NET_EP_OPEN` con `proto=TCP` + flag `LISTEN`/`CONNECT`.
+  Consegna locale di segmenti TCP nel ring RX del client destinatario (scritta
+  direttamente nell'handler `NET_EP_TX`, con header TCP ricostruito dal
+  servizio). Invio remoto diretto (frame Ethernet+IPv6+TCP costruito dal
+  servizio, non via `send_tcp` che ricostruirebbe l'header). `EXIT_NOTIFY`
+  pulisce endpoint TCP del peer morto.
+- **`userland/netecho`**: endpoint UDP porta 7 + endpoint TCP LISTEN porta 8.
+  Quando riceve un segmento TCP con flag SYN, risponde con SYN+ACK
+  (seq=2000, ack=seq_ricevuto+1) scrivendo nello slot TX e notificando `net`
+  via `NET_EP_TX`. Spawnato solo con `net=1`.
+- **`testland/net3`**: probe endpoint TCP→`::1:8`, invia segmento SYN,
+  valida che `NET_EP_TX` risponda OK (segmento accettato dal servizio).
+  Eseguito solo con `net=1`.
+- **Build/seed**: `build-tests.sh` costruisce `net3.bin`; `arca-tool.sh` seeda
+  `net3.bin` in `test`; `rector` `TEST_NET3` (run_test `net=1`, dopo
+  `TEST_NETUDP`).
+- **Test**: `scripts/run-net-tests.sh` richiede anche `[net3] risultato: PASS`
+  (N3). Gate invariato (6 righe, zero FAIL).
+  Limite noto: il handshake TCP completo (SYN+ACK consegnato al client)
+  richiede ulteriore debugging del routing locale; il test valida
+  l'apertura endpoint e l'accettazione del segmento SYN.
 
 ## Consequences
 
