@@ -79,6 +79,10 @@ build_one userland/vestigia userland/vestigia/src/vestigia.ld vestigia.bin   ves
 # e incluso nel manifest degli hash prima di gen-service-hashes.
 build_one userland/netecho userland/netecho/src/netecho.ld netecho.bin netecho
 
+# Traduttore IPv4 SIIT/NAT64 (N4, ADR-0069): parte solo con `net=1`, ma va
+# costruito e incluso nel manifest degli hash prima di gen-service-hashes.
+build_one userland/siit userland/siit/src/siit.ld siit.bin siit
+
 # Tool guest ArcaFS (Fase 54, P5; Fase 58.4: dir `userland/tools/`): `list`/
 # `stat` dalla shell, in /bin. Nativo (solo meccanismo) ma usa `libr::entry!`
 # per onorare il redirect. Prima di gen-service-hashes (policy restrittiva).

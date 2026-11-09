@@ -130,7 +130,11 @@ non conosce POSIX.
 - **N2**: UDP + endpoint a capability + ring; echo server nativo; policy.
   **Completata.**
 - **N3**: TCP minimale; API stream nativa. **Completata.**
-- **N4**: traduttore IPv4 (SIIT/NAT64) separato.
+- **N4**: traduttore IPv4 (SIIT/NAT64) separato. **Completata.**
+- **N5**: resolver DNS plain separato.
+- **N6**: DoH/DoT con TLS.
+- **N7**: personalità POSIX socket.
+- **N8**: VT-d/IOMMU.
 - **N5**: resolver DNS plain separato.
 - **N6**: DoH/DoT con TLS (servizio separato).
 - **N7**: personalità POSIX socket.
@@ -227,6 +231,32 @@ non conosce POSIX.
   Limite noto: il handshake TCP completo (SYN+ACK consegnato al client)
   richiede ulteriore debugging del routing locale; il test valida
   l'apertura endpoint e l'accettazione del segmento SYN.
+
+## Completato — N4 (Traduttore IPv4 SIIT/NAT64)
+
+- **Core `libs/net/src/siit.rs` (nuovo)**: logica pura di traduzione IPv6↔IPv4
+  (no `#![forbid(unsafe_code)]` ma puro, nessuna allocazione per pacchetto,
+  nessun panic su input). Prefisso SIIT `64:ff9b::/96` (RFC 6052), parsing
+  header IPv4, scrittura header UDP/TCP su IPv4 con checksum su
+  pseudo-header IPv4, conversione indirizzi IPv6↔IPv4. 5 unit test host.
+- **Servizio `userland/siit` (nuovo)**: si registra come `Service::Siit`
+  (slot 16), apre endpoint UDP presso `net` sulla porta 30000 per le
+  risposte in entrata, espone `SIIT_EP_OPEN/TX/CLOSE` (tag `0x84`/`0x85`/
+  `0x86`) per i clienti. Tabella NAPT bounded (max 16 connessioni) per
+  mappatura cliente IPv6:porta → porta IPv4 ephemeral. Consegna risposte
+  in entrata al cliente corretto tramite tabella NAPT. Spawnato solo con
+  `net=1`.
+- **`testland/net4` (nuovo)**: probe endpoint UDP presso `siit` verso
+  indirizzo IPv4 `10.0.0.1` (formato SIIT), valida che `siit` accetti il
+  payload (`SIIT_EP_TX` risponde OK). Eseguito solo con `net=1`.
+- **Build/seed**: `build-userland.sh` costruisce `siit.bin`;
+  `build-tests.sh` costruisce `net4.bin`; `arca-tool.sh` seeda entrambi;
+  `rector` `SVC_SIIT` e `TEST_NET4`.
+- **Test**: `scripts/run-net-tests.sh` richiede anche `[net4] risultato: PASS`
+  (N4). Gate invariato (6 righe, zero FAIL).
+- **Kernel**: `Service::Siit = 16`, `SERVICE_COUNT = 17`. Il kernel resta
+  neutro: il traduttore è un servizio userspace, nessuna syscall di rete
+  aggiunta.
 
 ## Consequences
 

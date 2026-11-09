@@ -1,0 +1,17 @@
+[package]
+name = "siit"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+civis = { path = "../../libs/civis" }
+net = { path = "../../libs/net" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"

@@ -45,6 +45,7 @@ fn expected_hash(bin: &[u8]) -> Option<u64> {
         b"identis" => Some(HASH_IDENTIS),
         b"identis-login" => Some(HASH_IDENTIS_LOGIN),
         b"netecho" => Some(HASH_NETECHO),
+        b"siit" => Some(HASH_SIIT),
         _ => None,
     }
 }
@@ -68,6 +69,7 @@ fn expected_blake(bin: &[u8]) -> Option<[u8; 32]> {
         b"identis" => Some(BLAKE_IDENTIS),
         b"identis-login" => Some(BLAKE_IDENTIS_LOGIN),
         b"netecho" => Some(BLAKE_NETECHO),
+        b"siit" => Some(BLAKE_SIIT),
         _ => None,
     }
 }
@@ -657,6 +659,13 @@ const SVC_NETECHO: SvcMeta = SvcMeta {
     prio: 16,
     io: &[],
 };
+/// Traduttore IPv4 SIIT/NAT64 (N4, ADR-0069): porta 30000, spawnato solo con `net=1`.
+const SVC_SIIT: SvcMeta = SvcMeta {
+    bin: b"siit",
+    obj: Some((b"sys", b"bin/siit.bin")),
+    prio: 16,
+    io: &[],
+};
 const SVC_LOGIN: SvcMeta = SvcMeta {
     bin: b"identis-login",
     obj: Some((b"sys", b"bin/identis-login.bin")),
@@ -700,6 +709,9 @@ const TEST_NETUDP: SvcMeta = SvcMeta { bin: b"netudp", obj: Some((b"tst", b"test
 // Probe TCP (N3, ADR-0069): eseguito solo con `net=1`, dopo netudp.
 #[cfg(not(feature = "skip_tests"))]
 const TEST_NET3: SvcMeta = SvcMeta { bin: b"net3", obj: Some((b"tst", b"test/net3.bin")), prio: 16, io: &[] };
+// Probe IPv4/SIIT (N4, ADR-0069): eseguito solo con `net=1`, dopo net3.
+#[cfg(not(feature = "skip_tests"))]
+const TEST_NET4: SvcMeta = SvcMeta { bin: b"net4", obj: Some((b"tst", b"test/net4.bin")), prio: 16, io: &[] };
 #[cfg(not(feature = "skip_tests"))]
 const TESTS: SvcMeta = SvcMeta { bin: b"usertests", obj: Some((b"tst", b"test/tests.bin")), prio: 16, io: &[] };
 // Thread 1:1 (S-T, ADR-0046): dopo usertests (nessuna dipendenza dai diritti),
@@ -847,6 +859,8 @@ fn real_main(_sp: u64) -> ! {
             println!("[init] net FAILED");
         } else if boot_svc(&SVC_NETECHO, false).is_none() {
             println!("[init] netecho FAILED");
+        } else if boot_svc(&SVC_SIIT, false).is_none() {
+            println!("[init] siit FAILED");
         } else {
             let _ = civis::vestigia::log(b"init", b"net ready");
         }
@@ -879,6 +893,7 @@ fn real_main(_sp: u64) -> ! {
         // di supervisione salta i pid negativi.
         Supervised::new(&SVC_NETDEV, civis::Service::NetDev),
         Supervised::new(&SVC_NET, civis::Service::Net),
+        Supervised::new(&SVC_SIIT, civis::Service::Siit),
         // Il **login** (programma di autenticazione): politica di morte
         // propria — si riavvia solo se ha fallito (vedi `OnDeath`).
         Supervised {
@@ -918,6 +933,7 @@ fn real_main(_sp: u64) -> ! {
         if net_enabled {
             run_test(&TEST_NETUDP, &mut supervised);
             run_test(&TEST_NET3, &mut supervised);
+            run_test(&TEST_NET4, &mut supervised);
         }
         run_test(&TESTS, &mut supervised);
         run_test(&TEST_THREADS, &mut supervised);

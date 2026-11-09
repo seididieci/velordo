@@ -72,6 +72,8 @@ seed_bin userland/build/netdev.bin bin/netdev.bin vela bin/netdev.bin
 seed_bin userland/build/net.bin bin/net.bin sys bin/net.bin
 # Server di echo UDP (N2, ADR-0069): in `sys` (servizio), spawnato da init con `net=1`.
 seed_bin userland/build/netecho.bin bin/netecho.bin sys bin/netecho.bin
+# Traduttore IPv4 SIIT/NAT64 (N4, ADR-0069): in `sys` (servizio), spawnato da init con `net=1`.
+seed_bin userland/build/siit.bin bin/siit.bin sys bin/siit.bin
 # Console server (D3, ADR-0060): servizio di sistema (bucket `sys`).
 seed_bin userland/build/console.bin bin/console.bin sys bin/console.bin
 seed_bin userland/build/useruptime.bin bin/uptime.bin sys bin/uptime.bin
@@ -121,6 +123,7 @@ seed_bin testland/build/userbench.bin test/bench.bin tst test/bench.bin
 seed_bin testland/build/identistest.bin test/idtest.bin tst test/idtest.bin
 seed_bin testland/build/netudp.bin test/netudp.bin tst test/netudp.bin
 seed_bin testland/build/net3.bin test/net3.bin tst test/net3.bin
+seed_bin testland/build/net4.bin test/net4.bin tst test/net4.bin
 seed_bin testland/build/userforeign.bin test/foreign.bin
 seed_bin flavours/posix/tests/build/userposixtests.bin test/posixtst.bin tst test/posixtst.bin
 # Hello std nativo (S1.3): solo se compilato via scripts/build-pal.sh (fuori

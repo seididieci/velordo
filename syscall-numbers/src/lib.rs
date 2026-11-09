@@ -565,8 +565,21 @@ pub const NET_EP_TX_RING_OFF: usize = 0x2000;
 // ── Costanti protocollo (N2+N3) ─────────────────────────────────────
 pub const NET_PROTO_UDP: u8 = 17;
 pub const NET_PROTO_TCP: u8 = 6;
+pub const NET_PROTO_IPV4: u8 = 255;
 /// Porta echo server (hardcoded, specchiata in `libs/net::udp::ECHO_PORT`).
 pub const NET_ECHO_PORT: u16 = 7;
+
+// ── Traduttore IPv4 SIIT/NAT64 (N4) ───────────────────────────────
+/// `SIIT_EP_OPEN {proto, local_port, flags}` → `{endpoint_id, ring_shm_id}`.
+/// `w0` = proto<<16 | local_port, `w1` = flags. Reply: `w0` = endpoint_id,
+/// `w1` = ring_shm_id.
+pub const SIIT_EP_OPEN: u64 = 0x84;
+/// `SIIT_EP_TX {ep_id}` → invia payload applicativo da tradurre.
+/// `w0` = endpoint_id, `w1` = slot index.
+pub const SIIT_EP_TX: u64 = 0x85;
+/// `SIIT_EP_CLOSE {ep_id}` → chiude l'endpoint.
+/// `w0` = endpoint_id. Reply (0,0).
+pub const SIIT_EP_CLOSE: u64 = 0x86;
 
 // ── Flag di apertura endpoint ──────────────────────────────────────
 /// L'endpoint usa una porta ephemeral (assegnata dal servizio).
@@ -1031,15 +1044,17 @@ pub enum Service {
     /// Driver virtio-net (ADR-0069): possiede il device, le virtqueue e il
     /// ring condiviso con `Net`. Nessuna logica di protocollo.
     NetDev = 15,
+    /// Traduttore IPv4 SIIT/NAT64 (ADR-0069, N4): traduce pacchetti IPv6
+    /// verso indirizzi IPv4 e viceversa. Userspace, sopra `Net`.
+    Siit = 16,
 }
 
 /// Massimo numero di servizi conosciuti = dimensione del registro kernel.
-/// Fase 39: 8→16 (slot liberi per futuri servizi senza ritoccare il
-/// kernel; discriminant storici intoccati, ABI stabile). Fase 50: slot 9
-/// assegnato a `Time`; Fase 57/R8: slot 10 assegnato a `Vestigia`; liberi 11-15.
+/// Fase 39: 8→16; Fase 50: slot 9 = `Time`; Fase 57/R8: slot 10 = `Vestigia`;
+/// Fase N4: slot 16 = `Siit`; liberi 11-15.
 
 /// Massimo numero di servizi conosciuti = dimensione del registro kernel.
-pub const SERVICE_COUNT: usize = 16;
+pub const SERVICE_COUNT: usize = 17;
 
 /// Canale predefinito del processo: il canale di nascita verso il parent.
 /// Ogni processo nasce con canale 0 = parent (o `CHANNEL_NONE` per init/idle).

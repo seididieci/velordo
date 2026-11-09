@@ -3217,3 +3217,23 @@
       Limite noto: il handshake TCP completo (SYN+ACK consegnato al client)
       richiede ulteriore debugging del routing locale; il test valida
       l'apertura endpoint e l'accettazione del segmento SYN.
+- [x] **N4 — Traduttore IPv4 SIIT/NAT64** (2026-11, ADR-0068/0069):
+      quarto passo della rete nativa. Decisioni: niente nuove syscall (solo
+      tag IPC `0x84`/`0x85`/`0x86`); traduttore in userspace sopra `net`;
+      prefisso SIIT `64:ff9b::/96` (RFC 6052); tabella NAPT bounded (max 16
+      connessioni) per mappatura cliente IPv6:porta → porta IPv4 ephemeral.
+      **Core `libs/net/src/siit.rs`**: parsing header IPv4, scrittura header
+      UDP/TCP su IPv4 con checksum su pseudo-header IPv4, conversione
+      indirizzi IPv6↔IPv4, 5 unit test host. **Servizio `userland/siit`**:
+      si registra come `Service::Siit` (slot 16), apre endpoint UDP presso
+      `net` sulla porta 30000, espone `SIIT_EP_OPEN/TX/CLOSE`, consegna
+      risposte in entrata al cliente corretto tramite tabella NAPT.
+      **`testland/net4`**: probe endpoint UDP presso `siit` verso indirizzo
+      IPv4 in formato SIIT, valida accettazione del payload.
+      Build/seed: `build-userland.sh` (`siit.bin`), `build-tests.sh`
+      (`net4.bin`), `arca-tool.sh` (seed entrambi), `rector` (`SVC_SIIT`,
+      `TEST_NET4`). **Test**: `scripts/run-net-tests.sh` richiede anche
+      `[net4] risultato: PASS`. Gate invariato (6 righe, zero FAIL); unit
+      test host 68/68 (+5 SIIT). Kernel: `Service::Siit = 16`,
+      `SERVICE_COUNT = 17`. Il kernel resta neutro: il traduttore è un
+      servizio userspace, nessuna syscall di rete aggiunta.

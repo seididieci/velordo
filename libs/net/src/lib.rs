@@ -28,6 +28,7 @@ pub mod icmpv6;
 pub mod ipv6;
 pub mod ndp;
 pub mod net;
+pub mod siit;
 pub mod tcp;
 pub mod udp;
 
@@ -35,5 +36,6 @@ pub use addr::{Ipv6Addr, MacAddr};
 pub use config::Config;
 pub use ipv6::{NEXT_TCP, NEXT_UDP};
 pub use net::{Event, FrameSink, Net};
+pub use siit::{siit_from_ipv4, SIIT_PREFIX, SIIT_TRANSLATOR_PORT};
 pub use tcp::TcpHeader;
 pub use udp::{ECHO_PORT, UDP_HDR};
