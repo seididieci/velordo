@@ -16,6 +16,8 @@ impl Ipv6Addr {
     pub const ALL_ROUTERS: Self = Self([
         0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
     ]);
+    /// `::1` — loopback.
+    pub const LOOPBACK: Self = Self([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
     pub const fn from_bytes(b: [u8; 16]) -> Self {
         Self(b)
@@ -39,6 +41,11 @@ impl Ipv6Addr {
 
     pub fn is_unicast(&self) -> bool {
         !self.is_multicast() && !self.is_unspecified()
+    }
+
+    /// `::1` — loopback.
+    pub fn is_loopback(&self) -> bool {
+        self.0 == Self::LOOPBACK.0
     }
 
     /// Link-local `fe80::` + IID.

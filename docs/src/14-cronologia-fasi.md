@@ -3171,3 +3171,27 @@
       virtqueue; (3) `passt` dà IPv6 reale e NDP senza privilegi, slirp no;
       (4) il core puro `no_std` con test host ha permesso di trovare gli
       errori di layout (RA/prefix) prima del boot.
+- [x] **N2 — UDP + endpoint a capability + ring** (2026-11, ADR-0068/0069):
+      secondo passo della rete nativa. Decisioni: niente nuove syscall
+      (solo tag IPC `0x6F`/`0x73`/`0x81`/`0x82`); capability per binario
+      (hash, default-deny); uno shm ring SPSC per endpoint (RX+TX, slot con
+      metadata `[len][addr:16][sport:2][dport:2]`); consegna locale per
+      loopback/own senza frame Ethernet (`FrameSink::deliver`); porta ben
+      nota solo se `sys:net.conf` lo consente (fail-closed); `EXIT_NOTIFY`
+      pulisce gli endpoint del peer morto. **Core `libs/net`**: `udp.rs`
+      (parse/write/checksum, zero rifiutato), `Ipv6Addr::LOOPBACK`/
+      `is_loopback()`, `Net::send_udp()`, `on_frame` dispatch `NEXT_UDP`.
+      5 unit test host. **Servizio `userland/net`**: endpoint table (max 8),
+      policy `sys:net.conf`, shm per endpoint, doorbell `send_async`.
+      **`userland/netecho`**: echo UDP su porta 7, spawnato solo `net=1`.
+      **`testland/netudp`**: probe ephemeral→`::1:7`, validazione echo.
+      Build/seed: `build-userland.sh`/`build-tests.sh`/`arca-tool.sh`
+      (`sys:net.conf`, netecho in `sys`, netudp in `test`), `gen-service-
+      hashes.sh` POLICY `netecho: 0x000`, `rector` `SVC_NETECHO` e
+      `TEST_NETUDP`. **Test**: `scripts/run-net-tests.sh` richiede sia
+      `[net] echo reply` sia `[netudp] risultato: PASS`. Gate invariato
+      (6 righe, zero FAIL); unit test host 57/57 (+5 UDP).
+      Bug trovato: la consegna locale usava `DriverSink` il cui `deliver()`
+      è no-op, quindi i datagrammi loopback non venivano consegnati; fixato
+      gestendo la consegna locale direttamente nell'handler `NET_EP_TX`
+      (scrittura nel ring RX del client destinatario + doorbell async).

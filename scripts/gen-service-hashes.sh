@@ -123,6 +123,8 @@ POLICY = {
     # policy di subtree (ADR-0070) e allora avra' READ.
     "netdev": 0x000,
     "net": 0x000,
+    # Server di echo UDP (N2): nessuna operazione FS, solo IPC/shm.
+    "netecho": 0x000,
 }
 DEFAULT_MASK = 0x1FFF  # ALL (servizi TCB, incluso EXECUTE)
 

@@ -3,9 +3,11 @@
 ## Status
 
 Accepted (2026-11). **N1 implementata** (virtio-net + IPv6/NDP/ICMPv6 +
-ping6 con passt); N2–N8 restano la traiettoria. Dipende da ADR-0068
-(threat model/invarianti) e ADR-0070 (config `sys:*`, non ancora
-implementata: N1 usa una config compilata).
+ping6 con passt). **N2 implementata** (UDP + endpoint a capability + ring,
+echo server nativo `netecho`, probe `netudp`). N3–N8 restano la traiettoria.
+Dipende da ADR-0068 (threat model/invarianti) e ADR-0070 (config `sys:*`,
+non ancora implementata: N1 usa una config compilata; `sys:net.conf` per N2
+è seedato a build-time con fail-closed).
 
 ## Context
 
@@ -124,8 +126,9 @@ non conosce POSIX.
 ### 10. Traiettoria (non piano)
 
 - **N1**: prerequisiti kernel (DMA/MMIO/MSI-X), driver virtio-net, core IPv6,
-  NDP/RA/SLAAC, ICMPv6 echo, passt test; config statica/`sys:net`.
+  NDP/RA/SLAAC, ICMPv6 echo, passt test; config statica/`sys:net`. **Completata.**
 - **N2**: UDP + endpoint a capability + ring; echo server nativo; policy.
+  **Completata.**
 - **N3**: TCP minimale; API stream nativa.
 - **N4**: traduttore IPv4 (SIIT/NAT64) separato.
 - **N5**: resolver DNS plain separato.
@@ -156,6 +159,43 @@ non conosce POSIX.
   boot con `-netdev passt` + virtio-net, SLAAC e ping6. Risultato reale:
   indirizzo `2a01:e11:2430:7af0:...`, RA da `fe80::3a07:16ff:fe2c:71ea`,
   **echo reply** dallo stesso router. Gate invariato (6 righe, zero FAIL).
+
+## Completato — N2 (UDP + endpoint a capability + ring)
+
+- **Core `libs/net`**: `udp.rs` (header UDP 8 byte, parse/write, checksum su
+  pseudo-header IPv6 obbligatorio, zero rifiutato), `Ipv6Addr::LOOPBACK`/
+  `is_loopback()`, `NEXT_UDP=17`, `ECHO_PORT=7`. `net.rs`: `FrameSink`
+  ottiene `deliver()` per consegna locale (nessun frame Ethernet), `Net::
+  send_udp()` con selezione sorgente, risoluzione prossimo hop (cache
+  vicino per link-local, MAC router per off-link), consegna locale per
+  indirizzi propri/loopback, drop di extension header/malformed. 5 unit test
+  host (roundtrip, checksum zero, payload alterato, troppo corto, len
+  inconsistente).
+- **Servizio `userland/net`**: endpoint table (max 8), `NET_EP_OPEN` (`0x6F`),
+  `NET_EP_TX` (`0x73`), `NET_EP_CLOSE` (`0x81`), `NET_EP_STATS` (`0x82`);
+  shm ring SPSC per endpoint (`NET_EP_RING_SLOTS=16`, `NET_EP_SLOT_SIZE=2048`,
+  RX service→client + TX client→service, slot con metadata
+  `[len:u16][addr:16][src_port:2][dst_port:2][payload]`); policy `sys:net.conf`
+  (fail-closed: porta ben nota solo se config esiste, ephemeral sempre);
+  `EXIT_NOTIFY` pulisce gli endpoint del peer morto. Consegna locale gestita
+  direttamente nell'handler `NET_EP_TX` (scrittura nel ring RX del client
+  destinatario + doorbell async), consegna remota via `DriverSink` +
+  `send_udp`.
+- **`userland/netecho`**: server echo UDP su porta 7 (hardcoded), apre
+  endpoint presso `net`, polla RX, rispecchia payload al mittente scrivendo
+  nel proprio TX ring e notificando `net` via `NET_EP_TX`. Spawnato solo con
+  `net=1`.
+- **`testland/netudp`**: probe endpoint ephemeral, invia a `::1:7`, valida
+  l'eco (porta + payload), segnala `TEST_DONE`. Eseguito solo con `net=1`.
+- **Build/seed**: `build-userland.sh` costruisce `netecho.bin`; `build-tests.sh`
+  costruisce `netudp.bin`; `arca-tool.sh` seeda `sys:net.conf`
+  (`<hash_fnv1a_netecho>:7`), `netecho.bin` in `sys`, `netudp.bin` in `test`;
+  `gen-service-hashes.sh` POLICY `netecho: 0x000`; `rector` `SVC_NETECHO`
+  (spawn `net=1`), `TEST_NETUDP` (run_test `net=1`), `expected_hash`/
+  `expected_blake` per netecho.
+- **Test**: `scripts/run-net-tests.sh` richiede sia `[net] echo reply` (N1)
+  sia `[netudp] risultato: PASS` (N2). Gate invariato (6 righe, zero FAIL)
+  perché i servizi di rete partono solo con `net=1`.
 
 ## Consequences
 

@@ -75,6 +75,10 @@ build_one userland/time     userland/time/src/time.ld       usertime.bin    user
 # Gateway centrale di logging L1 (Fase 57, ADR-0039): prima di
 # gen-service-hashes cosi' il manifest Strato 2 lo copre (HASH_VESTIGIA).
 build_one userland/vestigia userland/vestigia/src/vestigia.ld vestigia.bin   vestigia
+# Server di echo UDP (N2, ADR-0069): parte solo con `net=1`, ma va costruito
+# e incluso nel manifest degli hash prima di gen-service-hashes.
+build_one userland/netecho userland/netecho/src/netecho.ld netecho.bin netecho
+
 # Tool guest ArcaFS (Fase 54, P5; Fase 58.4: dir `userland/tools/`): `list`/
 # `stat` dalla shell, in /bin. Nativo (solo meccanismo) ma usa `libr::entry!`
 # per onorare il redirect. Prima di gen-service-hashes (policy restrittiva).

@@ -678,12 +678,26 @@ Voci con scope e vittoria dichiarati (non date).
       `scripts/run-net-tests.sh` (fuori dal gate, `passt`): indirizzo
       `2a01:e11:2430:7af0:...`, RA da `fe80::3a07:16ff:fe2c:71ea`, **echo
       reply**. Gate invariato (6 righe, zero FAIL).
-- [ ] **Rete N2–N8** (pianificata, ADR-0068/0069/0070): UDP + endpoint a
-      capability + ring per client; TCP minimale (SYN cookies, RFC 5961, no
-      SACK/timestamps); traduttore IPv4 (SIIT/NAT64) separato; resolver DNS
-      plain separato; DoH/DoT con TLS; personalità POSIX socket; VT-d/IOMMU.
-      Config `sys:net` con policy di subtree in cardo (`sys:identis` rinomina
-      `identis:config`, chiude il debito ADR-0058).
+- [x] **Rete N2 — UDP + endpoint a capability + ring** (completata,
+      ADR-0068/0069): `libs/net` core UDP (header, parse/write, checksum su
+      pseudo-header IPv6 obbligatorio), `Ipv6Addr::LOOPBACK`/`is_loopback`,
+      `FrameSink::deliver()` per consegna locale, `Net::send_udp()`.
+      `userland/net` servizio: endpoint table (max 8), `NET_EP_OPEN/TX/CLOSE/
+      STATS` (tag `0x6F`/`0x73`/`0x81`/`0x82`), shm ring SPSC per endpoint
+      (RX service→client, TX client→service), policy `sys:net.conf`
+      (fail-closed, porta ben nota solo se configurata), `EXIT_NOTIFY`
+      cleanup. `userland/netecho`: server echo UDP su porta 7 (spawn solo
+      `net=1`). `testland/netudp`: probe ephemeral→`::1:7` con validazione
+      echo. Test `scripts/run-net-tests.sh` (fuori dal gate, `passt`): richiede
+      sia `[net] echo reply` (N1) sia `[netudp] risultato: PASS` (N2).
+      Costanti: `NET_EP_RING_SLOTS=16`, `NET_EP_SLOT_SIZE=2048`,
+      `NET_PROTO_UDP=17`, `NET_ECHO_PORT=7`.
+- [ ] **Rete N3–N8** (pianificata, ADR-0068/0069/0070): TCP minimale (SYN
+      cookies, RFC 5961, no SACK/timestamps); traduttore IPv4 (SIIT/NAT64)
+      separato; resolver DNS plain separato; DoH/DoT con TLS; personalità
+      POSIX socket; VT-d/IOMMU. Config `sys:net` con policy di subtree in
+      cardo (`sys:identis` rinomina `identis:config`, chiude il debito
+      ADR-0058).
 
 ## Parcheggiate
 

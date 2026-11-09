@@ -44,6 +44,7 @@ fn expected_hash(bin: &[u8]) -> Option<u64> {
         b"vestigia" => Some(HASH_VESTIGIA),
         b"identis" => Some(HASH_IDENTIS),
         b"identis-login" => Some(HASH_IDENTIS_LOGIN),
+        b"netecho" => Some(HASH_NETECHO),
         _ => None,
     }
 }
@@ -66,6 +67,7 @@ fn expected_blake(bin: &[u8]) -> Option<[u8; 32]> {
         b"vestigia" => Some(BLAKE_VESTIGIA),
         b"identis" => Some(BLAKE_IDENTIS),
         b"identis-login" => Some(BLAKE_IDENTIS_LOGIN),
+        b"netecho" => Some(BLAKE_NETECHO),
         _ => None,
     }
 }
@@ -648,6 +650,13 @@ const SVC_NET: SvcMeta = SvcMeta {
     prio: 16,
     io: &[],
 };
+/// Server di echo UDP (N2, ADR-0069): porta 7, spawnato solo con `net=1`.
+const SVC_NETECHO: SvcMeta = SvcMeta {
+    bin: b"netecho",
+    obj: Some((b"sys", b"bin/netecho.bin")),
+    prio: 16,
+    io: &[],
+};
 const SVC_LOGIN: SvcMeta = SvcMeta {
     bin: b"identis-login",
     obj: Some((b"sys", b"bin/identis-login.bin")),
@@ -685,6 +694,9 @@ const TEST_POSIX: SvcMeta = SvcMeta { bin: b"userposixtests", obj: Some((b"tst",
 // sessione con token, add_user, duplicati, nomi non conformi, elenco.
 #[cfg(not(feature = "skip_tests"))]
 const TEST_IDENTIS: SvcMeta = SvcMeta { bin: b"identistest", obj: Some((b"tst", b"test/idtest.bin")), prio: 16, io: &[] };
+// Probe UDP (N2, ADR-0069): eseguito solo con `net=1`, dopo identistest.
+#[cfg(not(feature = "skip_tests"))]
+const TEST_NETUDP: SvcMeta = SvcMeta { bin: b"netudp", obj: Some((b"tst", b"test/netudp.bin")), prio: 16, io: &[] };
 #[cfg(not(feature = "skip_tests"))]
 const TESTS: SvcMeta = SvcMeta { bin: b"usertests", obj: Some((b"tst", b"test/tests.bin")), prio: 16, io: &[] };
 // Thread 1:1 (S-T, ADR-0046): dopo usertests (nessuna dipendenza dai diritti),
@@ -830,6 +842,8 @@ fn real_main(_sp: u64) -> ! {
             println!("[init] netdev FAILED (rete assente)");
         } else if boot_svc(&SVC_NET, true).is_none() {
             println!("[init] net FAILED");
+        } else if boot_svc(&SVC_NETECHO, false).is_none() {
+            println!("[init] netecho FAILED");
         } else {
             let _ = civis::vestigia::log(b"init", b"net ready");
         }
@@ -895,6 +909,12 @@ fn real_main(_sp: u64) -> ! {
         run_test(&TEST_ARCA, &mut supervised);
         run_test(&TEST_POSIX, &mut supervised);
         run_test(&TEST_IDENTIS, &mut supervised);
+        // Probe UDP (N2): solo con `net=1`, dopo identistest (che usa net
+        // solo se abilitato). Il probe apre un endpoint ephemeral, invia a
+        // ::1:7 (netecho) e valida l'eco.
+        if net_enabled {
+            run_test(&TEST_NETUDP, &mut supervised);
+        }
         run_test(&TESTS, &mut supervised);
         run_test(&TEST_THREADS, &mut supervised);
     }

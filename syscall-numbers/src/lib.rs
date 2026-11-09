@@ -534,6 +534,42 @@ pub const NET_RING_HDR: usize = 16;
 pub const NET_RX_RING_OFF: usize = 0;
 /// Offset del ring TX nel buffer condiviso (dopo 8 slot RX + header).
 pub const NET_TX_RING_OFF: usize = 0x5000;
+
+// ── Endpoint IPC (cliente → servizio `net`, N2) ────────────────────
+/// `NET_EP_OPEN {proto, local_port, flags}` → `{endpoint_id, ring_shm_id}`.
+/// `w0` = proto<<16 | local_port, `w1` = flags. Reply: `w0` = endpoint_id,
+/// `w1` = ring_shm_id (o lower 16 = local_port assegnato se ephemeral).
+pub const NET_EP_OPEN: u64 = 0x6F;
+/// `NET_EP_TX {ep_id}` → invia datagramma sul ring TX dell'endpoint.
+/// `w0` = endpoint_id, `w1` = slot index (scritto dal client nel ring).
+pub const NET_EP_TX: u64 = 0x73;
+/// `NET_EP_CLOSE {ep_id}` → chiude l'endpoint e libera il ring.
+/// `w0` = endpoint_id. Reply (0,0).
+pub const NET_EP_CLOSE: u64 = 0x81;
+/// `NET_EP_STATS {ep_id}` → statistiche endpoint.
+/// `w0` = endpoint_id. Reply: `w0` = rx_pkts, `w1` = tx_pkts.
+pub const NET_EP_STATS: u64 = 0x82;
+
+// ── Ring per endpoint (SPSC, shm) ──────────────────────────────────
+/// Slot del ring per endpoint (per direzione).
+pub const NET_EP_RING_SLOTS: usize = 16;
+/// Dimensione di uno slot endpoint (max datagram UDP ~1500 byte).
+pub const NET_EP_SLOT_SIZE: usize = 2048;
+/// Header del ring endpoint: `head:u32, tail:u32, slots:u32, slot_size:u32`.
+pub const NET_EP_RING_HDR: usize = 16;
+// Offset del ring RX (servizio → cliente) nel buffer shm dell'endpoint.
+pub const NET_EP_RX_RING_OFF: usize = 0;
+// Offset del ring TX (cliente → servizio) nel buffer shm dell'endpoint.
+pub const NET_EP_TX_RING_OFF: usize = 0x2000;
+
+// ── Costanti protocollo (N2) ───────────────────────────────────────
+pub const NET_PROTO_UDP: u8 = 17;
+/// Porta echo server (hardcoded, specchiata in `libs/net::udp::ECHO_PORT`).
+pub const NET_ECHO_PORT: u16 = 7;
+
+// ── Flag di apertura endpoint ──────────────────────────────────────
+/// L'endpoint usa una porta ephemeral (assegnata dal servizio).
+pub const NET_EP_FLAG_EPHEMERAL: u64 = 0x1;
 /// Statistiche del driver (D4, per i test): `w0` = `PRESENT` ricevuti,
 /// `w1` = `FLUSH` ricevuti **dopo l'ultimo** `PRESENT`. Serve a verificare
 /// il contratto "chi ridisegna manda anche il flush": un `PRESENT` aggancia

@@ -70,6 +70,8 @@ seed_bin userland/build/gpu.bin bin/gpu.bin vela bin/gpu.bin
 # Rete (ADR-0069): driver virtio-net in `vela`, servizio `net` in `sys`.
 seed_bin userland/build/netdev.bin bin/netdev.bin vela bin/netdev.bin
 seed_bin userland/build/net.bin bin/net.bin sys bin/net.bin
+# Server di echo UDP (N2, ADR-0069): in `sys` (servizio), spawnato da init con `net=1`.
+seed_bin userland/build/netecho.bin bin/netecho.bin sys bin/netecho.bin
 # Console server (D3, ADR-0060): servizio di sistema (bucket `sys`).
 seed_bin userland/build/console.bin bin/console.bin sys bin/console.bin
 seed_bin userland/build/useruptime.bin bin/uptime.bin sys bin/uptime.bin
@@ -117,6 +119,7 @@ seed_bin testland/build/userdevreader.bin test/devreadr.bin
 seed_bin testland/build/userdemo.bin test/demo.bin
 seed_bin testland/build/userbench.bin test/bench.bin tst test/bench.bin
 seed_bin testland/build/identistest.bin test/idtest.bin tst test/idtest.bin
+seed_bin testland/build/netudp.bin test/netudp.bin tst test/netudp.bin
 seed_bin testland/build/userforeign.bin test/foreign.bin
 seed_bin flavours/posix/tests/build/userposixtests.bin test/posixtst.bin tst test/posixtst.bin
 # Hello std nativo (S1.3): solo se compilato via scripts/build-pal.sh (fuori
@@ -247,6 +250,23 @@ if [ -f "$ROOT/assets/bg.bmp" ]; then
     echo "[arca] + bg.bmp (sfondo immagine)"
 else
     echo "[arca] ATTENZIONE: assets/bg.bmp mancante (console senza sfondo immagine)" >&2
+fi
+
+# Config rete (N2, ADR-0069): `sys:net.conf` consente a netecho (hash noto)
+# di bindare la porta ben nota 7. L'hash e' FNV-1a sul .bin di netecho,
+# calcolato con lo stesso algoritmo di gen-service-hashes.sh.
+if [ -f "$ROOT/userland/build/netecho.bin" ]; then
+    NETECHO_HASH=$(python3 -c "
+data = open('$ROOT/userland/build/netecho.bin','rb').read()
+h = 0xCBF29CE484222325
+for b in data:
+    h ^= b
+    h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+print('%016X' % h)
+")
+    echo "${NETECHO_HASH}:7" > "$ROOT/build-meta/net.conf"
+    SEED_NS+=( "sys:net.conf=$ROOT/build-meta/net.conf" )
+    echo "[arca] + sys:net.conf (netecho -> porta 7)"
 fi
 
 # Seed bucket Identis (ADR-0055): utente root con hash BLAKE2s-256 di "root".

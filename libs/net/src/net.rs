@@ -7,8 +7,9 @@ use crate::addr::{Ipv6Addr, MacAddr};
 use crate::config::Config;
 use crate::eth::{self, ETHERTYPE_IPV6};
 use crate::icmpv6::{self, TYPE_ECHO_REPLY, TYPE_ECHO_REQUEST, TYPE_NA, TYPE_NS, TYPE_RA, TYPE_REDIRECT};
-use crate::ipv6::{self, HOP_LIMIT, NEXT_ICMPV6};
+use crate::ipv6::{self, HOP_LIMIT, NEXT_ICMPV6, NEXT_UDP};
 use crate::ndp;
+use crate::udp;
 
 const NEIGHBORS: usize = 8;
 /// 1 s a 100 Hz.
@@ -22,7 +23,11 @@ const ECHO_DATA: &[u8] = b"velordo";
 
 /// Destinazione dei frame da trasmettere.
 pub trait FrameSink {
+    /// Emette un frame Ethernet sul link.
     fn send(&mut self, frame: &[u8]);
+    /// Consegna un datagramma UDP localmente (loopback o indirizzo proprio):
+    /// nessun frame Ethernet viene emesso. Default: no-op.
+    fn deliver(&mut self, _src: &Ipv6Addr, _dst: &Ipv6Addr, _src_port: u16, _dst_port: u16, _payload: &[u8]) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +117,86 @@ impl Net {
         self.router
     }
 
+    /// Ritorna `true` se `addr` è uno dei nostri indirizzi (link-local, global, loopback).
+    pub fn is_our_address(&self, addr: Ipv6Addr) -> bool {
+        addr == self.link_local || self.global == Some(addr) || addr.is_loopback()
+    }
+
+    /// Invia un datagramma UDP a `dst`.
+    ///
+    /// Seleziona l'indirizzo sorgente, risolve il MAC di prossimo hop (cache vicinato
+    /// per link-local, MAC router per off-link) oppure consegna localmente via
+    /// `sink.deliver()` per indirizzi propri/loopback. Ritorna `true` se il datagramma
+    /// è stato accettato (inviato o consegnato localmente), `false` se non c'è rotta.
+    pub fn send_udp(
+        &mut self,
+        dst: Ipv6Addr,
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+        sink: &mut dyn FrameSink,
+    ) -> bool {
+        let total = udp::UDP_HDR + payload.len();
+        if total > 1500 - ipv6::IPV6_HDR - eth::ETH_HDR {
+            return false; // troppo grande per un frame Ethernet
+        }
+
+        // Indirizzo sorgente.
+        let src = if dst.is_loopback() || dst == self.link_local {
+            self.link_local
+        } else if dst.is_link_local() {
+            self.link_local
+        } else if let Some(g) = self.global {
+            g
+        } else {
+            self.link_local
+        };
+
+        // Consegna locale per indirizzi propri/loopback: nessun frame Ethernet.
+        if dst.is_loopback() || self.is_our_address(dst) {
+            sink.deliver(&src, &dst, src_port, dst_port, payload);
+            return true;
+        }
+
+        // Risoluzione del MAC di prossimo hop.
+        let dst_mac = if dst.is_link_local() {
+            match self.neighbor_lookup(dst) {
+                Some(m) => m,
+                None => return false, // nessun vicino noto
+            }
+        } else {
+            // Off-link: via router.
+            match (self.router, self.router_mac) {
+                (Some(_), Some(m)) => m,
+                _ => return false, // nessun router
+            }
+        };
+
+        // Costruisce il frame Ethernet + IPv6 + UDP.
+        let mut frame = [0u8; 1514];
+        let mut off = eth::write(&mut frame, dst_mac, self.mac, ETHERTYPE_IPV6);
+        let mut udp_buf = [0u8; 1500 - ipv6::IPV6_HDR - eth::ETH_HDR];
+        let udp_len = udp::write_checked(
+            &mut udp_buf,
+            src_port,
+            dst_port,
+            &src,
+            &dst,
+            payload,
+        );
+        off += ipv6::write(
+            &mut frame[off..],
+            NEXT_UDP,
+            HOP_LIMIT,
+            src,
+            dst,
+            udp_len as u16,
+        );
+        frame[off..off + udp_len].copy_from_slice(&udp_buf[..udp_len]);
+        sink.send(&frame[..off + udp_len]);
+        true
+    }
+
     fn next_rand(&mut self) -> u64 {
         let mut x = self.rng;
         x ^= x << 13;
@@ -176,44 +261,57 @@ impl Net {
         if eth.ethertype != ETHERTYPE_IPV6 {
             return;
         }
-        let Some((ip, icmp)) = ipv6::parse(payload) else {
+        let Some((ip, payload)) = ipv6::parse(payload) else {
             return;
         };
-        if ip.next_header != NEXT_ICMPV6 {
-            return;
-        }
-        if !icmpv6::checksum_ok(&ip.src, &ip.dst, icmp) {
-            events(Event::Dropped("icmpv6 checksum"));
-            return;
-        }
-        let Some(msg) = icmpv6::parse(icmp) else {
-            return;
-        };
-        match msg.typ {
-            TYPE_RA => {
-                if ip.hop_limit != 255 {
-                    events(Event::Dropped("ra hop"));
+        match ip.next_header {
+            NEXT_ICMPV6 => {
+                if !icmpv6::checksum_ok(&ip.src, &ip.dst, payload) {
+                    events(Event::Dropped("icmpv6 checksum"));
                     return;
                 }
-                self.on_ra(&eth, &ip, msg.body, now, sink, events);
-            }
-            TYPE_NS => {
-                if ip.hop_limit != 255 {
-                    events(Event::Dropped("ns hop"));
+                let Some(msg) = icmpv6::parse(payload) else {
                     return;
+                };
+                match msg.typ {
+                    TYPE_RA => {
+                        if ip.hop_limit != 255 {
+                            events(Event::Dropped("ra hop"));
+                            return;
+                        }
+                        self.on_ra(&eth, &ip, msg.body, now, sink, events);
+                    }
+                    TYPE_NS => {
+                        if ip.hop_limit != 255 {
+                            events(Event::Dropped("ns hop"));
+                            return;
+                        }
+                        self.on_ns(&eth, &ip, msg.body, now, sink);
+                    }
+                    TYPE_NA => {
+                        if ip.hop_limit != 255 {
+                            events(Event::Dropped("na hop"));
+                            return;
+                        }
+                        self.on_na(&ip, msg.body, now);
+                    }
+                    TYPE_ECHO_REQUEST => self.on_echo_request(&eth, &ip, msg.body, sink),
+                    TYPE_ECHO_REPLY => self.on_echo_reply(&ip, msg.body, events),
+                    TYPE_REDIRECT => events(Event::Dropped("redirect")),
+                    _ => {}
                 }
-                self.on_ns(&eth, &ip, msg.body, now, sink);
             }
-            TYPE_NA => {
-                if ip.hop_limit != 255 {
-                    events(Event::Dropped("na hop"));
-                    return;
+            NEXT_UDP => {
+                if ip.dst.is_loopback() || self.is_our_address(ip.dst) {
+                    if let Some((udp, body)) = udp::parse(payload) {
+                        if udp::checksum_ok(&ip.src, &ip.dst, payload) {
+                            sink.deliver(&ip.src, &ip.dst, udp.src_port, udp.dst_port, body);
+                        } else {
+                            events(Event::Dropped("udp checksum"));
+                        }
+                    }
                 }
-                self.on_na(&ip, msg.body, now);
             }
-            TYPE_ECHO_REQUEST => self.on_echo_request(&eth, &ip, msg.body, sink),
-            TYPE_ECHO_REPLY => self.on_echo_reply(&ip, msg.body, events),
-            TYPE_REDIRECT => events(Event::Dropped("redirect")),
             _ => {}
         }
     }
@@ -469,8 +567,7 @@ impl Net {
         };
     }
 
-    #[allow(dead_code)]
-    fn neighbor_lookup(&self, addr: Ipv6Addr) -> Option<MacAddr> {
+    pub fn neighbor_lookup(&self, addr: Ipv6Addr) -> Option<MacAddr> {
         self.neighbors
             .iter()
             .find(|nb| nb.valid && nb.addr == addr)

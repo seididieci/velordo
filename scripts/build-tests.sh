@@ -45,6 +45,8 @@ build_one testland/utcbstest testland/utcbstest/src/utcbstest.ld utcbstest.bin u
 # identistest (ADR-0055, Fase 3.1): protocollo di autenticazione e creazione
 # utenti (sessione/token, add_user, duplicati, nomi non conformi, elenco).
 build_one testland/identistest testland/identistest/src/identistest.ld identistest.bin identistest
+# Probe UDP (N2, ADR-0069): test fuori gate, eseguito solo con `net=1`.
+build_one testland/netudp testland/netudp/src/netudp.ld netudp.bin netudp
 # Bench: BENCH_REDUCED=1 compila il profilo ridotto (feature `reduced`), per
 # la validazione rapida su host lenti. Mai nel gate.
 BENCH_FEATURES=""
