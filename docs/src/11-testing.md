@@ -253,7 +253,7 @@ log seriale.
   l'alpha dell'immagine e i colori sono `0xRRGGBBAA`; **T2/T3**: fill a
   parole, `copy_from`/`shift_rows_up` con clipping, `draw_ink` che non tocca
   il background), `libs/valloc` e
-  `blake2s` (52 test in tutto). Girano da una
+  `blake2s` (72 test in tutto). Girano da una
   **directory neutra**: il `.cargo/config.toml` del repo impone
   `build.target = x86_64-unknown-none` + `build-std` in base alla directory
   corrente, e da dentro il repo `cargo test` proverebbe a compilare l'harness
@@ -265,12 +265,12 @@ log seriale.
   allo schermo, lontano dal punto in cui l'utente stava scrivendo
   (ADR-0061 §4, corretto in D5/ADR-0062).
 
-- **rete N1+N2+N3+N4** (`scripts/run-net-tests.sh`, ADR-0068/0069): boot con
+- **rete N1+N2+N3+N4+N5** (`scripts/run-net-tests.sh`, ADR-0068/0069): boot con
   `-netdev passt` + virtio-net (IPv6 reale, unprivileged), **fuori dal
   gate** perché `passt` è una dipendenza host. Il guest fa SLAAC/NDP e
   ping6 verso il router; PASS se il log contiene `[net] echo reply` (N1),
-  `[netudp] risultato: PASS` (N2), `[net3] risultato: PASS` (N3) e
-  `[net4] risultato: PASS` (N4).
+  `[netudp] risultato: PASS` (N2), `[net3] risultato: PASS` (N3),
+  `[net4] risultato: PASS` (N4) e `[dns] risultato: PASS` (N5).
   Risultato N1: indirizzo `2a01:e11:2430:7af0:...`, RA da
   `fe80::3a07:16ff:fe2c:71ea`, echo reply dallo stesso router.
   Risultato N2: `netecho` apre endpoint porta 7, `netudp` (endpoint
@@ -282,8 +282,12 @@ log seriale.
   ephemeral presso `siit`) invia payload verso indirizzo IPv4
   `10.0.0.1` (formato SIIT `64:ff9b::a00:1`) e valida che `siit` accetti
   il segmento (`SIIT_EP_TX` risponde OK).
-  I servizi `netdev`/`net`/`netecho`/`siit` partono solo con `net=1` in
-  cmdline (il gate non lo setta).
+  Risultato N5: `dns` apre endpoint UDP porta 53, `dnsprobe` (endpoint
+  ephemeral presso `dns`) invia una query A per `example.com` e valida che
+  la risposta contenga `93.184.216.34` (tabella statica N5; l'inoltro
+  upstream arriva con N6).
+  I servizi `netdev`/`net`/`netecho`/`siit`/`dns` partono solo con `net=1`
+  in cmdline (il gate non lo setta).
 
 - **hello std** (S1.3…S2.4): `scripts/build-pal.sh` (PAL + sysroot in
   `$PAL_WORK`) produce `pal/build/hello-std.bin`, seedato come

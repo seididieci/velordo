@@ -718,8 +718,22 @@ Voci con scope e vittoria dichiarati (non date).
       Kernel: `Service::Siit = 16`, `SERVICE_COUNT = 17`. Il kernel resta
       neutro: il traduttore è un servizio userspace, nessuna syscall di rete
       aggiunta.
-- [ ] **Rete N5–N8** (pianificata, ADR-0068/0069/0070): resolver DNS plain
-      separato; DoH/DoT con TLS; personalità POSIX socket; VT-d/IOMMU.
+- [x] **Rete N5 — Resolver DNS plain** (completata, ADR-0068/0069):
+      `libs/net/src/dns.rs` (core puro: header RFC 1035, encode/decode nome,
+      query, record A/AAAA, compressione puntatori, 4 unit test host).
+      `userland/dns`: servizio risolutore (`Service::Dns` slot 17), endpoint
+      UDP porta 53, tabella statica N5 (`example.com` → `93.184.216.34`,
+      `ipv6.example.com` → `2001:db8::1`), NXDOMAIN per i nomi assenti,
+      API `DNS_EP_OPEN/TX/CLOSE/STATS` (tag `0x87`/`0x88`/`0x89`/`0x8A`).
+      `testland/dns` (bin `dnsprobe`): probe UDP, query A per `example.com`
+      e validazione di `93.184.216.34`. Test `scripts/run-net-tests.sh`
+      richiede anche `[dns] risultato: PASS`. Gate invariato (6 righe,
+      zero FAIL); unit test host 72/72 (+4 DNS).
+      Kernel: `Service::Dns = 17`, `SERVICE_COUNT = 18`. Il kernel resta
+      neutro: nessuna syscall DNS, tutto in userspace sopra `net`.
+      Nota: l'inoltro upstream reale arriva con N6 (DoH/DoT).
+- [ ] **Rete N6–N8** (pianificata, ADR-0068/0069/0070): DoH/DoT con TLS;
+      personalità POSIX socket; VT-d/IOMMU.
       Config `sys:net` con policy di subtree in cardo (`sys:identis` rinomina
       `identis:config`, chiude il debito ADR-0058).
 

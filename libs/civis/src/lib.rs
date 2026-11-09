@@ -66,12 +66,16 @@ pub use syscall_numbers::{
     NET_ATTACH, NET_INFO, NET_POLL, NET_RING_HDR, NET_RING_SLOTS, NET_RX_RING_OFF, NET_SLOT_SIZE,
     NET_TX, NET_TX_RING_OFF,
 };
-/// Protocollo endpoint cliente→servizio `net` (N2, ADR-0069).
+/// Protocollo endpoint cliente→servizio `net` (N2+N3+N4, ADR-0069).
 pub use syscall_numbers::{
     NET_EP_CLOSE, NET_EP_FLAG_CONNECT, NET_EP_FLAG_EPHEMERAL, NET_EP_FLAG_LISTEN, NET_EP_OPEN,
     NET_EP_RX_RING_OFF, NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE, NET_EP_STATS,
-    NET_EP_TX, NET_EP_TX_RING_OFF, NET_ECHO_PORT, NET_PROTO_IPV4, NET_PROTO_TCP, NET_PROTO_UDP,
-    SIIT_EP_CLOSE, SIIT_EP_OPEN, SIIT_EP_TX,
+    NET_EP_TX, NET_EP_TX_RING_OFF, NET_ECHO_PORT, NET_PROTO_DNS, NET_PROTO_IPV4, NET_PROTO_TCP,
+    NET_PROTO_UDP, SIIT_EP_CLOSE, SIIT_EP_OPEN, SIIT_EP_TX,
+};
+/// Protocollo endpoint cliente→servizio DNS (N5, ADR-0069).
+pub use syscall_numbers::{
+    DNS_CLOSE, DNS_OPEN, DNS_STATS, DNS_TX, DNS_PORT,
 };
 /// Servizi di sistema raggiungibili per nome (ADR-0008).
 pub use syscall_numbers::Service;

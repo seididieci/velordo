@@ -83,6 +83,10 @@ build_one userland/netecho userland/netecho/src/netecho.ld netecho.bin netecho
 # costruito e incluso nel manifest degli hash prima di gen-service-hashes.
 build_one userland/siit userland/siit/src/siit.ld siit.bin siit
 
+# Resolver DNS (N5, ADR-0069): parte solo con `net=1`, ma va costruito
+# e incluso nel manifest degli hash prima di gen-service-hashes.
+build_one userland/dns userland/dns/src/dns.ld dns.bin dns
+
 # Tool guest ArcaFS (Fase 54, P5; Fase 58.4: dir `userland/tools/`): `list`/
 # `stat` dalla shell, in /bin. Nativo (solo meccanismo) ma usa `libr::entry!`
 # per onorare il redirect. Prima di gen-service-hashes (policy restrittiva).

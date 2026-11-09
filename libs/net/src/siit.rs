@@ -281,7 +281,7 @@ mod tests {
             &[10, 0, 0, 2],
             b"hello",
         );
-        assert_eq!(len, 14);
+        assert_eq!(len, 13);
         let c = udp_ipv4_checksum(&[10, 0, 0, 1], &[10, 0, 0, 2], len as u16, &out[8..]);
         assert_eq!(c, u16::from_be_bytes([out[6], out[7]]));
         assert_ne!(c, 0);

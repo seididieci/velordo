@@ -3237,3 +3237,26 @@
       test host 68/68 (+5 SIIT). Kernel: `Service::Siit = 16`,
       `SERVICE_COUNT = 17`. Il kernel resta neutro: il traduttore è un
       servizio userspace, nessuna syscall di rete aggiunta.
+- [x] **N5 — Resolver DNS plain** (2026-11, ADR-0068/0069):
+      quinto passo della rete nativa. Decisioni: niente nuove syscall (solo
+      tag IPC `0x87`/`0x88`/`0x89`/`0x8A`); resolver in userspace sopra
+      `net`; N5 risolve da una tabella statica e l'inoltro upstream arriva
+      con N6 (DoH/DoT). **Core `libs/net/src/dns.rs`**: header RFC 1035,
+      encode/decode nome (compressione a puntatori), question, record
+      A/AAAA, `parse_response`; `no_std` con `alloc::vec::Vec`, nessun panic
+      su input; 4 unit test host. **Servizio `userland/dns`**: si registra
+      come `Service::Dns` (slot 17), apre endpoint UDP presso `net` sulla
+      porta 53, espone `DNS_EP_OPEN/TX/CLOSE/STATS`, risponde dalla tabella
+      statica (`example.com` A → `93.184.216.34`, `ipv6.example.com` AAAA →
+      `2001:db8::1`) e NXDOMAIN (rcode 3) per i nomi assenti.
+      **`testland/dns` (bin `dnsprobe`)**: probe endpoint UDP presso `dns`,
+      query A per `example.com` e validazione di `93.184.216.34`. Il binario
+      si chiama `dnsprobe` per non collidere con il servizio `dns`
+      (hash/manifest). Build/seed: `build-userland.sh` (`dns.bin`),
+      `build-tests.sh` (`dnsprobe.bin`), `arca-tool.sh` (seed entrambi),
+      `rector` (`SVC_DNS`, `TEST_DNS`, pin `HASH_DNS`/`BLAKE_DNS`).
+      **Test**: `scripts/run-net-tests.sh` richiede anche
+      `[dns] risultato: PASS`. Gate invariato (6 righe, zero FAIL); unit
+      test host 72/72 (+4 DNS). Kernel: `Service::Dns = 17`,
+      `SERVICE_COUNT = 18`. Il kernel resta neutro: nessuna syscall DNS,
+      tutto in userspace sopra `net`.

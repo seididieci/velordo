@@ -581,6 +581,32 @@ pub const SIIT_EP_TX: u64 = 0x85;
 /// `w0` = endpoint_id. Reply (0,0).
 pub const SIIT_EP_CLOSE: u64 = 0x86;
 
+// ── Servizio DNS (N5) ───────────────────────────────────────────────
+/// Porta DNS standard (RFC 1035).
+pub const DNS_PORT: u16 = 53;
+/// Next header per DNS su UDP (stesso di UDP).
+pub const NET_PROTO_DNS: u8 = 17;
+
+/// `DNS_EP_OPEN {proto=UDP, local_port, flags}` → `{endpoint_id, ring_shm_id}`.
+/// `w0` = proto<<16 | local_port, `w1` = flags. Reply: `w0` = endpoint_id,
+/// `w1` = ring_shm_id.
+pub const DNS_EP_OPEN: u64 = 0x87;
+/// `DNS_EP_TX {ep_id}` → invia query DNS sul ring TX dell'endpoint.
+/// `w0` = endpoint_id, `w1` = slot index.
+pub const DNS_EP_TX: u64 = 0x88;
+/// `DNS_EP_CLOSE {ep_id}` → chiude l'endpoint e libera il ring.
+/// `w0` = endpoint_id. Reply (0,0).
+pub const DNS_EP_CLOSE: u64 = 0x89;
+/// `DNS_EP_STATS {ep_id}` → statistiche endpoint DNS.
+/// `w0` = endpoint_id. Reply: `w0` = rx_pkts, `w1` = tx_pkts.
+pub const DNS_EP_STATS: u64 = 0x8A;
+
+// Alias brevi per comodità d'uso nei clienti DNS.
+pub const DNS_OPEN: u64 = DNS_EP_OPEN;
+pub const DNS_TX: u64 = DNS_EP_TX;
+pub const DNS_CLOSE: u64 = DNS_EP_CLOSE;
+pub const DNS_STATS: u64 = DNS_EP_STATS;
+
 // ── Flag di apertura endpoint ──────────────────────────────────────
 /// L'endpoint usa una porta ephemeral (assegnata dal servizio).
 pub const NET_EP_FLAG_EPHEMERAL: u64 = 0x1;
@@ -1047,14 +1073,17 @@ pub enum Service {
     /// Traduttore IPv4 SIIT/NAT64 (ADR-0069, N4): traduce pacchetti IPv6
     /// verso indirizzi IPv4 e viceversa. Userspace, sopra `Net`.
     Siit = 16,
+    /// Resolver DNS plain (ADR-0069, N5): risolve nomi a indirizzi IPv6/IPv4
+    /// tramite query DNS su UDP/TCP porta 53. Userspace, sopra `Net`.
+    Dns = 17,
 }
 
 /// Massimo numero di servizi conosciuti = dimensione del registro kernel.
 /// Fase 39: 8→16; Fase 50: slot 9 = `Time`; Fase 57/R8: slot 10 = `Vestigia`;
-/// Fase N4: slot 16 = `Siit`; liberi 11-15.
+/// Fase N4: slot 16 = `Siit`; Fase N5: slot 17 = `Dns`; liberi 11-15.
 
 /// Massimo numero di servizi conosciuti = dimensione del registro kernel.
-pub const SERVICE_COUNT: usize = 17;
+pub const SERVICE_COUNT: usize = 18;
 
 /// Canale predefinito del processo: il canale di nascita verso il parent.
 /// Ogni processo nasce con canale 0 = parent (o `CHANNEL_NONE` per init/idle).

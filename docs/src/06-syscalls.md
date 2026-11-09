@@ -299,6 +299,32 @@ vedi [IPC](./07-ipc.md) e [ADR-0039](./adr/0039-logging-l1.md). Nota: il
 kernel embedda anche `vestigia` (boot-TCB con init/block/cardo: deve partire
 prima che il FS esista).
 
+### Rete — servizi e tag IPC (nessuna syscall nuova, N1–N5)
+
+Lo stack di rete (ADR-0068/0069) non aggiunge numeri di syscall: driver e
+servizi sono processi userspace che usano `service_register`/`service_lookup`/
+`send`/`recv` esistenti, e i dati viaggiano su ring SPSC in shm. Il kernel
+resta neutro (nessun parser di protocolli). Tag dei servizi:
+
+| Tag | Nome | Servizio | Descrizione |
+|-----|------|----------|-------------|
+| 0x6E | `NET_INFO` | `net` | stato link/indirizzo |
+| 0x6F | `NET_EP_OPEN` | `net` | apre endpoint (`w0` = proto<<16 \| porta) → `(ep_id, ring_id)` |
+| 0x73 | `NET_EP_TX` | `net` | invia lo slot TX indicato |
+| 0x81 | `NET_EP_CLOSE` | `net` | chiude l'endpoint e libera il ring |
+| 0x82 | `NET_EP_STATS` | `net` | statistiche endpoint |
+| 0x84 | `SIIT_EP_OPEN` | `siit` | apre endpoint tradotto (N4) |
+| 0x85 | `SIIT_EP_TX` | `siit` | invia payload da tradurre |
+| 0x86 | `SIIT_EP_CLOSE` | `siit` | chiude l'endpoint |
+| 0x87 | `DNS_EP_OPEN` | `dns` | apre endpoint UDP (`w0` = proto<<16 \| porta) → `(ep_id, ring_id)` (N5) |
+| 0x88 | `DNS_EP_TX` | `dns` | invia la query DNS nello slot TX (N5) |
+| 0x89 | `DNS_EP_CLOSE` | `dns` | chiude l'endpoint e libera il ring (N5) |
+| 0x8A | `DNS_EP_STATS` | `dns` | statistiche endpoint DNS (N5) |
+
+Servizi: `Service::Net = 14`, `NetDev = 15`, `Siit = 16`, `Dns = 17`
+(`SERVICE_COUNT = 18`). Partono solo con `net=1` in cmdline. Dettagli e
+traiettoria in [ADR-0069](./adr/0069-stack-rete-ipv6-capability.md).
+
 ### I/O
 
 | Syscall | Numero | Descrizione |

@@ -131,12 +131,8 @@ non conosce POSIX.
   **Completata.**
 - **N3**: TCP minimale; API stream nativa. **Completata.**
 - **N4**: traduttore IPv4 (SIIT/NAT64) separato. **Completata.**
-- **N5**: resolver DNS plain separato.
+- **N5**: resolver DNS plain separato. **Completata.**
 - **N6**: DoH/DoT con TLS.
-- **N7**: personalità POSIX socket.
-- **N8**: VT-d/IOMMU.
-- **N5**: resolver DNS plain separato.
-- **N6**: DoH/DoT con TLS (servizio separato).
 - **N7**: personalità POSIX socket.
 - **N8**: VT-d/IOMMU.
 
@@ -257,6 +253,31 @@ non conosce POSIX.
 - **Kernel**: `Service::Siit = 16`, `SERVICE_COUNT = 17`. Il kernel resta
   neutro: il traduttore è un servizio userspace, nessuna syscall di rete
   aggiunta.
+
+## Completato — N5 (Resolver DNS plain)
+
+- **Core `libs/net/src/dns.rs` (nuovo)**: logica pura RFC 1035 — header
+  (id/flag/count), encode/decode nome (con compressione a puntatori),
+  question, record A/AAAA, `parse_response`. `no_std` con `alloc::vec::Vec`
+  per i nomi decodificati; nessun panic su input. 4 unit test host.
+- **Servizio `userland/dns` (nuovo)**: si registra come `Service::Dns`
+  (slot 17), apre endpoint UDP presso `net` sulla porta 53 ed espone
+  `DNS_EP_OPEN/TX/CLOSE/STATS` (tag `0x87`/`0x88`/`0x89`/`0x8A`) per i
+  clienti. N5 risolve da una **tabella statica** (`example.com` A →
+  `93.184.216.34`, `ipv6.example.com` AAAA → `2001:db8::1`); i nomi assenti
+  ricevono NXDOMAIN (rcode 3). L'inoltro upstream reale arriva con N6
+  (DoH/DoT). Spawnato solo con `net=1`.
+- **`testland/dns` (nuovo, bin `dnsprobe`)**: probe endpoint UDP presso
+  `dns`, invia una query A per `example.com` e valida che la risposta
+  contenga `93.184.216.34`. Eseguito solo con `net=1`. Il binario si chiama
+  `dnsprobe` per non collidere con il servizio `dns` (hash/manifest).
+- **Build/seed**: `build-userland.sh` costruisce `dns.bin`;
+  `build-tests.sh` costruisce `dnsprobe.bin`; `arca-tool.sh` seeda entrambi;
+  `rector` `SVC_DNS`, `TEST_DNS` e i pin `HASH_DNS`/`BLAKE_DNS`.
+- **Test**: `scripts/run-net-tests.sh` richiede anche `[dns] risultato: PASS`
+  (N5). Gate invariato (6 righe, zero FAIL); unit test host 72/72 (+4 DNS).
+- **Kernel**: `Service::Dns = 17`, `SERVICE_COUNT = 18`. Il kernel resta
+  neutro: nessuna syscall DNS, tutto in userspace sopra `net`.
 
 ## Consequences
 

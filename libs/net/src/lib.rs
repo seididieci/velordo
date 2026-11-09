@@ -23,6 +23,7 @@ static A: std::alloc::System = std::alloc::System;
 pub mod addr;
 pub mod checksum;
 pub mod config;
+pub mod dns;
 pub mod eth;
 pub mod icmpv6;
 pub mod ipv6;
@@ -34,6 +35,7 @@ pub mod udp;
 
 pub use addr::{Ipv6Addr, MacAddr};
 pub use config::Config;
+pub use dns::{build_query, parse_response, decode_question, decode_rr_a, decode_rr_aaaa, encode_question, encode_name, parse_header, TYPE_A, TYPE_AAAA, CLASS_IN, FLAG_QR, FLAG_RD, DNS_HEADER_LEN};
 pub use ipv6::{NEXT_TCP, NEXT_UDP};
 pub use net::{Event, FrameSink, Net};
 pub use siit::{siit_from_ipv4, SIIT_PREFIX, SIIT_TRANSLATOR_PORT};
