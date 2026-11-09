@@ -11,7 +11,7 @@ use civis;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, Ordering};
 
-use net::{Ipv6Addr, tcp};
+use net::Ipv6Addr;
 
 // ── Costanti endpoint (da civis) ─────────────────────────────────────
 use civis::{
@@ -26,12 +26,15 @@ const ECHO_PORT: u16 = 7;
 /// Porta di ascolto TCP (secondo endpoint per N3).
 const TCP_PORT: u16 = 8;
 
-/// Flag TCP.
-const FLAG_SYN: u8 = 0x02;
-const FLAG_ACK: u8 = 0x10;
+/// Eventi trasportati nello slot ring.
+const EV_DATA: u8 = 0;
+const EV_SYN: u8 = 1;
+const EV_SYNACK: u8 = 2;
+const EV_FIN: u8 = 3;
+const EV_RST: u8 = 4;
 
-/// Metadata per slot: [len:2][addr:16][sport:2][dport:2][seq:4][ack:4][flags:1][payload].
-const SLOT_META: usize = 31;
+/// Metadata per slot: [len:2][addr:16][sport:2][dport:2][event:1][payload].
+const SLOT_META: usize = 23; // 2+16+2+2+1
 
 /// Stato di un endpoint echo.
 struct EchoEp {
@@ -172,8 +175,9 @@ fn poll_ep(net_chan: u64, ep: &mut EchoEp, is_tcp: bool) {
         }
         let src_port = unsafe { read_volatile(p.add(18) as *const u16) };
         let dst_port = unsafe { read_volatile(p.add(20) as *const u16) };
+        let event = unsafe { read_volatile(p.add(22) as *const u8) };
 
-        // Avanza head del RX.
+        // Avanza head del RX subito.
         unsafe {
             write_volatile(
                 ring.add(NET_EP_RX_RING_OFF) as *mut u32,
@@ -184,38 +188,46 @@ fn poll_ep(net_chan: u64, ep: &mut EchoEp, is_tcp: bool) {
 
         let mut payload_buf = [0u8; NET_EP_SLOT_SIZE - SLOT_META];
         unsafe {
-            core::ptr::copy_nonoverlapping(p.add(31), payload_buf.as_mut_ptr(), payload_len);
+            core::ptr::copy_nonoverlapping(p.add(23), payload_buf.as_mut_ptr(), payload_len);
         }
 
         if is_tcp {
-            // TCP: prova a parsificare come segmento.
-            if let Some((tcp_hdr, _)) = tcp::parse(&payload_buf[..payload_len]) {
-                if tcp_hdr.flags & FLAG_SYN != 0 {
-                    // Handshake: rispondi con SYN+ACK.
-                    let my_seq: u32 = 2000;
-                    let their_seq = tcp_hdr.seq;
-                    let mut buf = [0u8; NET_EP_SLOT_SIZE - SLOT_META];
-                    let seg_len = tcp::write_checked(
-                        &mut buf,
-                        TCP_PORT,
-                        src_port,
-                        my_seq,
-                        their_seq.wrapping_add(1),
-                        FLAG_SYN | FLAG_ACK,
-                        65535,
-                        &Ipv6Addr::UNSPECIFIED,
-                        &Ipv6Addr::from_bytes(src_addr),
-                        &[],
-                    );
-                    write_tx_slot(ep, net_chan, &src_addr, src_port, my_seq, their_seq.wrapping_add(1), FLAG_SYN | FLAG_ACK, &buf[..seg_len]);
-                    continue;
-                }
+            // TCP: gestisce handshake e echo.
+            if event == EV_SYN {
+                // Handshake: rispondi con SYN+ACK al mittente (src_port = porta cliente).
+                write_tx_slot(
+                    ep,
+                    net_chan,
+                    &src_addr,
+                    src_port,
+                    EV_SYNACK,
+                    &[],
+                );
+                continue;
+            }
+            if event == EV_SYNACK {
+                // SYN+ACK ricevuto: handshake completato, ignoriamo (non facciamo echo).
+                continue;
             }
             // TCP dati non-SYN: rispecchia payload.
-            write_tx_slot(ep, net_chan, &src_addr, src_port, 0, 0, 0, &payload_buf[..payload_len]);
+            write_tx_slot(
+                ep,
+                net_chan,
+                &src_addr,
+                src_port,
+                EV_DATA,
+                &payload_buf[..payload_len],
+            );
         } else {
             // UDP: rispecchia payload.
-            write_tx_slot(ep, net_chan, &src_addr, src_port, 0, 0, 0, &payload_buf[..payload_len]);
+            write_tx_slot(
+                ep,
+                net_chan,
+                &src_addr,
+                src_port,
+                EV_DATA,
+                &payload_buf[..payload_len],
+            );
         }
     }
 }
@@ -226,9 +238,7 @@ fn write_tx_slot(
     net_chan: u64,
     dst_addr: &[u8; 16],
     dst_port: u16,
-    seq: u32,
-    ack: u32,
-    flags: u8,
+    event: u8,
     payload: &[u8],
 ) {
     let total = SLOT_META + payload.len();
@@ -249,11 +259,9 @@ fn write_tx_slot(
         write_volatile(tp as *mut u16, total as u16);
         core::ptr::copy_nonoverlapping(dst_addr.as_ptr(), tp.add(2), 16);
         write_volatile(tp.add(18) as *mut u16, dst_port);
-        write_volatile(tp.add(20) as *mut u16, 0); // src_port (sarà sovrascritto dal servizio)
-        write_volatile(tp.add(22) as *mut u32, seq);
-        write_volatile(tp.add(26) as *mut u32, ack);
-        write_volatile(tp.add(30) as *mut u8, flags);
-        core::ptr::copy_nonoverlapping(payload.as_ptr(), tp.add(31), payload.len());
+        write_volatile(tp.add(20) as *mut u16, 0); // src_port (sovrascritto dal servizio)
+        write_volatile(tp.add(22) as *mut u8, event);
+        core::ptr::copy_nonoverlapping(payload.as_ptr(), tp.add(23), payload.len());
     }
     fence(Ordering::Release);
     unsafe {
@@ -263,10 +271,6 @@ fn write_tx_slot(
         )
     };
 
-    civis::println!(
-        "[netecho] TX slot={} seq={} ack={} flags={:02x}, invio NET_EP_TX",
-        tx_slot, seq, ack, flags
-    );
     let _ = civis::send(net_chan, NET_EP_TX, ep.ep_id as u64, tx_slot as u64);
 }
 

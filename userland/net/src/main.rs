@@ -4,8 +4,8 @@
 //! drena il ring RX, passa i frame al core `net` e gestisce endpoint a
 //! capability per i client (`NET_EP_OPEN/TX/CLOSE/STATS`).
 //! IPv6-first, core puro in `libs/net`, niente syscall di rete nel kernel.
-//! Il handshake TCP è gestito dal client; il servizio consegna segmenti
-//! nei ring RX e invia segmenti dai ring TX.
+//! Il cliente scrive solo payload applicativo nello slot TX; `net` incapsula
+//! l'header TCP/UDP, costruisce i frame Ethernet e gestisce sequenze/ack.
 
 #![no_std]
 #![no_main]
@@ -45,7 +45,15 @@ const MAX_ENDPOINTS: usize = 8;
 const TCP_CLOSED: u8 = 0;
 const TCP_LISTEN: u8 = 1;
 const TCP_SYN_SENT: u8 = 2;
+const TCP_SYN_RECV: u8 = 3;
 const TCP_ESTABLISHED: u8 = 4;
+
+/// Eventi trasportati nello slot ring per endpoint TCP.
+const EV_DATA: u8 = 0;   // payload applicativo
+const EV_SYN: u8 = 1;    // handshake SYN (TX cliente → servizio)
+const EV_SYNACK: u8 = 2; // handshake SYN+ACK (RX cliente, consegnato da net)
+const EV_FIN: u8 = 3;    // fine connessione
+const EV_RST: u8 = 4;    // reset connessione
 
 /// Tabella endpoint.
 #[derive(Clone, Copy)]
@@ -63,8 +71,8 @@ struct Endpoint {
     tx_pkts: u64,
     // Stato TCP (N3).
     tcp_state: u8,
-    tcp_seq: u32,
-    tcp_ack: u32,
+    tcp_seq: u32,   // prossimo numero di sequenza da inviare
+    tcp_ack: u32,   // prossimo numero di sequenza atteso
 }
 
 impl Endpoint {
@@ -183,8 +191,9 @@ impl NetService {
     }
 
     /// Layout di uno slot ring (N2+N3):
-    /// `[len:u16][src_addr:16][src_port:2][dst_port:2][seq:4][ack:4][flags:1][payload]`.
-    const SLOT_META: usize = 31; // 2+16+2+2+4+4+1
+    /// `[len:u16][src_addr:16][src_port:2][dst_port:2][event:1][payload]`.
+    /// Per UDP `event` è sempre 0. Per TCP indica il tipo di segmento/controllo.
+    const SLOT_META: usize = 23; // 2+16+2+2+1
 
     /// Scrive uno slot nel ring RX (service → client) dato un ring base.
     fn ep_rx_write_full(
@@ -192,9 +201,7 @@ impl NetService {
         src_addr: &Ipv6Addr,
         src_port: u16,
         dst_port: u16,
-        _seq: u32,
-        _ack: u32,
-        _flags: u8,
+        event: u8,
         payload: &[u8],
     ) -> bool {
         let total = Self::SLOT_META + payload.len();
@@ -215,10 +222,8 @@ impl NetService {
             core::ptr::copy_nonoverlapping(src_addr.0.as_ptr(), p.add(2), 16);
             write_volatile(p.add(18) as *mut u16, src_port);
             write_volatile(p.add(20) as *mut u16, dst_port);
-            write_volatile(p.add(22) as *mut u32, 0); // seq (riservato per TCP)
-            write_volatile(p.add(26) as *mut u32, 0); // ack (riservato per TCP)
-            write_volatile(p.add(30) as *mut u8, 0);  // flags (riservato per TCP)
-            core::ptr::copy_nonoverlapping(payload.as_ptr(), p.add(31), payload.len());
+            write_volatile(p.add(22) as *mut u8, event);
+            core::ptr::copy_nonoverlapping(payload.as_ptr(), p.add(23), payload.len());
         }
         fence(Ordering::Release);
         unsafe {
@@ -231,12 +236,12 @@ impl NetService {
     }
 
     /// Legge uno slot dal ring TX (client → service) dato un ring base.
-    /// Ritorna (payload_len, dst_addr, dst_port, seq, ack, flags).
+    /// Ritorna (payload_len, dst_addr, dst_port, event).
     fn ep_tx_read_full(
         ring: *mut u8,
         slot_idx: usize,
         buf: &mut [u8],
-    ) -> Option<(usize, Ipv6Addr, u16, u32, u32, u8)> {
+    ) -> Option<(usize, Ipv6Addr, u16, u8)> {
         if slot_idx >= NET_EP_RING_SLOTS {
             return None;
         }
@@ -252,17 +257,15 @@ impl NetService {
             core::ptr::copy_nonoverlapping(p.add(2), addr.as_mut_ptr(), 16);
         }
         let dst_port = unsafe { read_volatile(p.add(18) as *const u16) };
-        let seq = unsafe { read_volatile(p.add(22) as *const u32) };
-        let ack = unsafe { read_volatile(p.add(26) as *const u32) };
-        let flags = unsafe { read_volatile(p.add(30) as *const u8) };
+        let event = unsafe { read_volatile(p.add(22) as *const u8) };
         let payload_len = total - Self::SLOT_META;
         if payload_len > buf.len() {
             return None;
         }
         unsafe {
-            core::ptr::copy_nonoverlapping(p.add(31), buf.as_mut_ptr(), payload_len);
+            core::ptr::copy_nonoverlapping(p.add(23), buf.as_mut_ptr(), payload_len);
         }
-        Some((payload_len, Ipv6Addr(addr), dst_port, seq, ack, flags))
+        Some((payload_len, Ipv6Addr(addr), dst_port, event))
     }
 
     /// Avanza la tail del TX ring (slot consumato) dato un ring base.
@@ -397,7 +400,7 @@ impl<'a> FrameSink for EpSink<'a> {
         payload: &[u8],
     ) {
         // Consegna diretta nel ring RX dell'endpoint in ascolto su dst_port.
-        // Il client gestisce il handshake TCP leggendo dal ring RX.
+        // Il cliente legge payload + evento dal ring RX.
         let idx = match self
             .endpoints
             .iter()
@@ -417,7 +420,7 @@ impl<'a> FrameSink for EpSink<'a> {
         let peer_chan = ep.peer_chan;
         let ep_id = ep.ep_id;
         let _ = ep;
-        if NetService::ep_rx_write_full(ring, src, src_port, dst_port, 0, 0, 0, payload) {
+        if NetService::ep_rx_write_full(ring, src, src_port, dst_port, EV_DATA, payload) {
             if peer_chan != 0 {
                 let _ = civis::send_async(peer_chan, NET_EP_TX, ep_id as u64, 0);
             }
@@ -664,7 +667,7 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
             let ep = svc.endpoints[idx]; // Copy
             let ring = ep.ring_base;
             let mut payload = [0u8; NET_EP_SLOT_SIZE - 2];
-            let (payload_len, dst, dst_port, seq, ack, flags) =
+            let (payload_len, dst, dst_port, event) =
                 match NetService::ep_tx_read_full(ring, slot_idx, &mut payload) {
                     Some(v) => v,
                     None => {
@@ -688,35 +691,15 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
                     if dst_ep.remote_port != 0 && dst_ep.remote_port != ep.local_port {
                         false
                     } else {
-                        // Per TCP, consegna il segmento completo (header + dati)
-                        // nel ring RX del destinatario.
-                        let rx_payload = if is_tcp {
-                            let mut tcp_seg = [0u8; 1500 - ipv6::IPV6_HDR - eth::ETH_HDR];
-                            let seg_len = tcp::write_checked(
-                                &mut tcp_seg,
-                                ep.local_port,
-                                dst_port,
-                                seq,
-                                ack,
-                                flags,
-                                65535,
-                                &src_addr,
-                                &dst,
-                                &payload[..payload_len],
-                            );
-                            tcp_seg[..seg_len].to_vec()
-                        } else {
-                            payload[..payload_len].to_vec()
-                        };
+                        // Per TCP, l'evento viene passato così com'è: spetta al
+                        // destinatario interpretarlo (es. SYN -> rispondi SYN+ACK).
                         if NetService::ep_rx_write_full(
                             dst_ep.ring_base,
                             &src_addr,
                             ep.local_port,
                             dst_port,
-                            seq,
-                            ack,
-                            flags,
-                            &rx_payload,
+                            event,
+                            &payload[..payload_len],
                         ) {
                             if dst_ep.peer_chan != 0 {
                                 let _ = civis::send_async(
@@ -738,6 +721,9 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
                 // Aggiorna contatori del mittente.
                 if let Some(ep_mut) = svc.find_by_id_mut(ep_id) {
                     ep_mut.tx_pkts = ep_mut.tx_pkts.saturating_add(1);
+                    if is_tcp && event == EV_SYN {
+                        ep_mut.tcp_state = TCP_SYN_RECV;
+                    }
                 }
                 let _ = civis::reply(
                     NET_EP_TX,
@@ -749,8 +735,8 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
 
             // Consegna remota: invia frame Ethernet via driver.
             let sent = if is_tcp {
-                // Per TCP, il payload contiene già l'header TCP completo (scritto
-                // dal cliente nello slot TX). Incapsula direttamente in IPv6.
+                // Per TCP, `net` incapsula il payload applicativo in un segmento
+                // completo con header TCP, sequenze e checksum.
                 let dst_mac = if dst.is_link_local() {
                     match svc.net.neighbor_lookup(dst) {
                         Some(m) => m,
@@ -768,14 +754,18 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
                         }
                     }
                 };
-                // Costruisce segmento TCP completo: header (20 byte) + dati.
+                let (flags, seq) = if event == EV_SYN {
+                    (tcp::FLAG_SYN, ep.tcp_seq)
+                } else {
+                    (tcp::FLAG_ACK, ep.tcp_seq)
+                };
                 let mut tcp_seg = [0u8; 1500 - ipv6::IPV6_HDR - eth::ETH_HDR];
                 let seg_len = tcp::write_checked(
                     &mut tcp_seg,
                     ep.local_port,
                     dst_port,
                     seq,
-                    ack,
+                    ep.tcp_ack,
                     flags,
                     65535,
                     &svc.net.link_local(),
@@ -795,6 +785,15 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
                 frame[off..off + seg_len].copy_from_slice(&tcp_seg[..seg_len]);
                 let mut sink = DriverSink { ring: svc.sink_ring };
                 sink.send(&frame[..off + seg_len]);
+
+                // Avanza stato e sequenza del mittente.
+                if let Some(ep_mut) = svc.find_by_id_mut(ep_id) {
+                    if event == EV_SYN {
+                        ep_mut.tcp_state = TCP_SYN_RECV;
+                    } else {
+                        ep_mut.tcp_seq = ep_mut.tcp_seq.wrapping_add(seg_len as u32);
+                    }
+                }
                 true
             } else {
                 svc.net.send_udp(

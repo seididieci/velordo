@@ -1,7 +1,8 @@
 //! net3 — probe di rete TCP (N3, test fuori gate).
 //!
-//! Apre un endpoint TCP CONNECT verso `::1:7` (netecho), invia un segmento
-//! SYN, valida la ricezione di una risposta e segnala TEST_DONE ad init.
+//! Apre un endpoint TCP CONNECT verso `::1:8` (netecho), invia un segmento
+//! SYN tramite il servizio `net` (che incapsula il payload applicativo),
+//! valida la ricezione del SYN+ACK e segnala TEST_DONE ad init.
 //! Eseguito solo con `net=1`.
 
 #![no_std]
@@ -17,12 +18,15 @@ use civis::{
     NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE, NET_EP_TX, NET_EP_TX_RING_OFF, NET_PROTO_TCP,
 };
 
-// Flag TCP.
-const FLAG_SYN: u8 = 0x02;
-const FLAG_ACK: u8 = 0x10;
+// Eventi trasportati nello slot ring (devono coincidere con userland/net).
+const EV_DATA: u8 = 0;
+const EV_SYN: u8 = 1;
+const EV_SYNACK: u8 = 2;
+const EV_FIN: u8 = 3;
+const EV_RST: u8 = 4;
 
-// Metadata slot: [len:2][addr:16][sport:2][dport:2][seq:4][ack:4][flags:1][payload].
-const SLOT_META: usize = 31;
+// Metadata slot: [len:2][addr:16][sport:2][dport:2][event:1][payload].
+const SLOT_META: usize = 23; // 2+16+2+2+1
 
 /// Indirizzo destinatario: `::1` (loopback).
 const DST_ADDR: [u8; 16] = [
@@ -30,8 +34,6 @@ const DST_ADDR: [u8; 16] = [
 ];
 /// Porta destinatario: echo server TCP (secondo endpoint di netecho).
 const DST_PORT: u16 = 8;
-/// Numero di sequenza iniziale del probe.
-const MY_SEQ: u32 = 1000;
 /// Numero massimo di tentativi di ricezione.
 const MAX_RETRIES: u32 = 5000;
 
@@ -61,11 +63,12 @@ fn real_main(_sp: u64) -> ! {
         finish(false);
     }
 
-    // Apre endpoint TCP CONNECT verso ::1:7.
+    // Apre endpoint TCP CONNECT verso ::1:8.
+    // local_port = 0 (ephemeral): net assegna una porta libera al client.
     let r = match civis::send(
         net_chan,
         NET_EP_OPEN,
-        (NET_PROTO_TCP as u64) << 16 | DST_PORT as u64,
+        (NET_PROTO_TCP as u64) << 16,  // porta 0 = ephemeral
         NET_EP_FLAG_CONNECT as u64,
     ) {
         Ok(r) => r,
@@ -103,8 +106,8 @@ fn real_main(_sp: u64) -> ! {
         write_volatile(ring_base.add(NET_EP_TX_RING_OFF + 4) as *mut u32, 0);
     }
 
-    // Costruisce segmento SYN nello slot TX 0.
-    // Formato: [len:2][dst_addr:16][dst_port:2][seq:4][ack:4][flags:1][payload].
+    // Scrive nello slot TX 0: solo indirizzo destino + evento SYN.
+    // net costruirà il segmento TCP completo (header + checksum).
     let total = SLOT_META; // nessun payload per SYN
     let p = unsafe {
         ring_base.add(NET_EP_TX_RING_OFF + NET_EP_RING_HDR)
@@ -114,9 +117,7 @@ fn real_main(_sp: u64) -> ! {
         core::ptr::copy_nonoverlapping(DST_ADDR.as_ptr(), p.add(2), 16);
         write_volatile(p.add(18) as *mut u16, DST_PORT);
         write_volatile(p.add(20) as *mut u16, local_port);
-        write_volatile(p.add(22) as *mut u32, MY_SEQ);
-        write_volatile(p.add(26) as *mut u32, 0); // ack
-        write_volatile(p.add(30) as *mut u8, FLAG_SYN);
+        write_volatile(p.add(22) as *mut u8, EV_SYN);
     }
     fence(Ordering::Release);
     unsafe {
@@ -143,6 +144,73 @@ fn real_main(_sp: u64) -> ! {
             println!("[net3] invio SYN fallito (IPC): FAIL");
             all_ok = false;
         }
+    }
+
+    // Aspetta risposta (SYN+ACK) nel RX ring.
+    let mut rx_head: u32 = 0;
+    let mut synack_ok = false;
+    let mut retries = 0u32;
+    for _ in 0..MAX_RETRIES {
+        retries += 1;
+        let rx_tail = unsafe { read_volatile(ring_base.add(NET_EP_RX_RING_OFF + 4) as *const u32) };
+        if rx_head != rx_tail {
+            let slot = (rx_head % NET_EP_RING_SLOTS as u32) as usize;
+            let p = unsafe {
+                ring_base.add(NET_EP_RX_RING_OFF + NET_EP_RING_HDR + slot * NET_EP_SLOT_SIZE)
+            };
+            let total = unsafe { read_volatile(p as *const u16) } as usize;
+            if total >= SLOT_META {
+                let mut src_addr = [0u8; 16];
+                unsafe {
+                    core::ptr::copy_nonoverlapping(p.add(2), src_addr.as_mut_ptr(), 16);
+                }
+                let src_port = unsafe { read_volatile(p.add(18) as *const u16) };
+                let dst_port = unsafe { read_volatile(p.add(20) as *const u16) };
+                let event = unsafe { read_volatile(p.add(22) as *const u8) };
+
+                println!(
+                    "[net3] RX: da porta={} a porta={} evento={} len={}",
+                    src_port, dst_port, event, total - SLOT_META
+                );
+
+                // Valida: SYN+ACK (evento=2) da porta DST_PORT.
+                // Nota: nel nuovo formato slot non c'è campo ack, quindi
+                // validiamo solo evento e porta sorgente.
+                if src_port == DST_PORT && event == EV_SYNACK {
+                    synack_ok = true;
+                    println!("[net3] SYN+ACK valido ricevuto da porta 8");
+                } else {
+                    println!(
+                        "[net3] segmento ricevuto: porta={} evento={} (ignoro)",
+                        src_port, event
+                    );
+                }
+            }
+            // Avanza head.
+            unsafe {
+                write_volatile(
+                    ring_base.add(NET_EP_RX_RING_OFF) as *mut u32,
+                    rx_head.wrapping_add(1),
+                )
+            };
+            rx_head = rx_head.wrapping_add(1);
+            break;
+        }
+        if retries % 1000 == 0 {
+            println!("[net3] in attesa SYN+ACK... retries={}", retries);
+        }
+        let _ = civis::futex_wait(
+            &FUTEX as *const u32 as usize,
+            0,
+            (civis::get_ticks() + 1) as u64,
+        );
+    }
+
+    if synack_ok {
+        println!("[net3] handshake TCP completato: PASS");
+    } else {
+        println!("[net3] SYN+ACK non ricevuto: FAIL");
+        all_ok = false;
     }
 
     // Chiude l'endpoint.
