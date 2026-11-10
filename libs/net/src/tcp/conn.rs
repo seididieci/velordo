@@ -71,6 +71,9 @@ pub struct Conn {
     pub local_port: u16,
     pub remote_port: u16,
     pub remote_addr: Ipv6Addr,
+    /// Indirizzo locale usato nei checksum (lo imposta il layer `Net`: dipende
+    /// dal next-hop, link-local o global).
+    pub local_addr: Ipv6Addr,
 
     // Sequenze.
     iss: u32, // initial send sequence
@@ -112,6 +115,7 @@ impl Conn {
             local_port,
             remote_port: 0,
             remote_addr: Ipv6Addr::UNSPECIFIED,
+            local_addr: Ipv6Addr::UNSPECIFIED,
             iss: 0,
             irs: 0,
             snd_una: 0,
@@ -160,6 +164,12 @@ impl Conn {
         self.fin_recv = false;
         self.closed = false;
         self.syn_sent = false;
+    }
+
+    /// Imposta l'indirizzo locale (usato nei checksum; lo calcola il layer
+    /// `Net` in base al next-hop).
+    pub fn set_local_addr(&mut self, a: Ipv6Addr) {
+        self.local_addr = a;
     }
 
     /// Restituisce lo stato attuale.
@@ -289,8 +299,8 @@ impl Conn {
             0, // checksum, calcolato dopo
         );
         let c = checksum_tcp(
+            &self.local_addr,
             &self.remote_addr,
-            &Ipv6Addr::UNSPECIFIED, // il chiamante corregge gli indirizzi IP
             &buf[..total],
         );
         buf[16..18].copy_from_slice(&c.to_be_bytes());
@@ -303,6 +313,24 @@ impl Conn {
             window: self.rcv_wnd,
             len: total,
         }
+    }
+
+    /// Serializza nel buffer del chiamante un segmento di controllo già
+    /// descritto da `TxInfo` (header TCP + checksum). `next_tx` deve sempre
+    /// lasciare i byte pronti: limitarsi a `TxInfo` emetteva segmenti vuoti.
+    fn write_ctrl_into(&self, info: &TxInfo, out: &mut [u8]) {
+        let len = write(
+            out,
+            info.src_port,
+            info.dst_port,
+            info.seq,
+            info.ack,
+            info.flags,
+            info.window,
+            0,
+        );
+        let c = checksum_tcp(&self.local_addr, &self.remote_addr, &out[..len]);
+        out[16..18].copy_from_slice(&c.to_be_bytes());
     }
 
     /// Costruisce un segmento dati (header + payload da `send_buf`).
@@ -341,8 +369,8 @@ impl Conn {
             total += payload_len;
         }
         let c = checksum_tcp(
+            &self.local_addr,
             &self.remote_addr,
-            &Ipv6Addr::UNSPECIFIED,
             &out[..total],
         );
         out[16..18].copy_from_slice(&c.to_be_bytes());
@@ -370,13 +398,15 @@ impl Conn {
             self.rto = RTO_MIN;
             self.rto_deadline = now + RTO_MIN;
             self.retries = 0;
-            return Some(self.ctrl_segment_info(
+            let info = self.ctrl_segment_info(
                 self.local_port,
                 self.remote_port,
                 self.iss,
                 0,
                 FLAG_SYN,
-            ));
+            );
+            self.write_ctrl_into(&info, out);
+            return Some(info);
         }
 
         // 2. Ritrasmissione su RTO.
@@ -391,22 +421,26 @@ impl Conn {
             }
             match self.state {
                 State::SynSent => {
-                    return Some(self.ctrl_segment_info(
+                    let info = self.ctrl_segment_info(
                         self.local_port,
                         self.remote_port,
                         self.iss,
                         0,
                         FLAG_SYN,
-                    ));
+                    );
+                    self.write_ctrl_into(&info, out);
+                    return Some(info);
                 }
                 State::SynRecv => {
-                    return Some(self.ctrl_segment_info(
+                    let info = self.ctrl_segment_info(
                         self.local_port,
                         self.remote_port,
                         self.iss,
                         self.rcv_nxt,
                         FLAG_SYN | FLAG_ACK,
-                    ));
+                    );
+                    self.write_ctrl_into(&info, out);
+                    return Some(info);
                 }
                 State::Established
                 | State::FinWait1
@@ -415,13 +449,15 @@ impl Conn {
                 | State::LastAck => {
                     if self.fin_sent && !self.fin_acked() {
                         // Ritrasmetti FIN.
-                        return Some(self.ctrl_segment_info(
+                        let info = self.ctrl_segment_info(
                             self.local_port,
                             self.remote_port,
                             self.fin_seq,
                             self.rcv_nxt,
                             FLAG_FIN | FLAG_ACK,
-                        ));
+                        );
+                        self.write_ctrl_into(&info, out);
+                        return Some(info);
                     }
                     if !self.send_buf.is_empty() {
                         // Go-back-N: ritrasmetti da snd_una.
@@ -447,13 +483,15 @@ impl Conn {
             self.rto = RTO_MIN;
             self.rto_deadline = now + RTO_MIN;
             self.retries = 0;
-            return Some(self.ctrl_segment_info(
+            let info = self.ctrl_segment_info(
                 self.local_port,
                 self.remote_port,
                 self.fin_seq,
                 self.rcv_nxt,
                 FLAG_FIN | FLAG_ACK,
-            ));
+            );
+            self.write_ctrl_into(&info, out);
+            return Some(info);
         }
 
         // 4. Invio di nuovi dati (dentro la finestra).
@@ -631,17 +669,23 @@ impl Conn {
                 }
 
                 // Elabora dati (solo in ordine).
+                let mut consumed = 0u32;
                 if !payload.is_empty() && hdr.seq == self.rcv_nxt {
                     let data_len = payload.len().min(RECV_BUF - self.recv_buf.len());
                     if data_len > 0 {
                         out.data = Some(&payload[..data_len]);
                         self.recv_buf.extend(payload[..data_len].iter().copied());
                         self.rcv_nxt = self.rcv_nxt.wrapping_add(data_len as u32);
+                        consumed = data_len as u32;
                     }
                 }
 
-                // Elabora FIN.
-                if hdr.flags & FLAG_FIN != 0 && hdr.seq.wrapping_add(1) == self.rcv_nxt {
+                // Elabora FIN: il flag occupa il seq subito dopo i dati del
+                // segmento (RFC 793 §3.3), non quello dell'ultimo byte.
+                if hdr.flags & FLAG_FIN != 0
+                    && !self.fin_recv
+                    && hdr.seq.wrapping_add(consumed) == self.rcv_nxt
+                {
                     self.fin_recv = true;
                     self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
                     self.state = State::CloseWait;

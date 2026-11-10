@@ -13,6 +13,8 @@ use crate::tcp;
 use crate::udp;
 
 const NEIGHBORS: usize = 8;
+/// Connessioni TCP concorrenti nel core (N6.1b).
+const TCP_CONNS: usize = 16;
 /// 1 s a 100 Hz.
 const RS_INTERVAL: u64 = 100;
 const ECHO_INTERVAL: u64 = 100;
@@ -33,6 +35,23 @@ pub trait FrameSink {
     /// Consegna un datagramma UDP localmente (loopback o indirizzo proprio):
     /// nessun frame Ethernet viene emesso. Default: no-op.
     fn deliver(&mut self, _src: &Ipv6Addr, _dst: &Ipv6Addr, _src_port: u16, _dst_port: u16, _payload: &[u8]) {}
+    /// Segnala un cambiamento su una connessione TCP identificata dalla
+    /// **porta locale** (N6.1b). Il dato vero si legge con `Net::tcp_read`;
+    /// qui arriva solo la notifica, così il sink non deve chiamare `Net`.
+    fn tcp_signal(&mut self, _local_port: u16, _signal: TcpSignal) {}
+}
+
+/// Evento di una connessione TCP verso il proprietario dell'endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TcpSignal {
+    /// Handshake completato (`EV_SYNACK` lato servizio).
+    Established,
+    /// Ci sono byte da leggere (`EV_DATA`).
+    Data,
+    /// Il peer ha chiuso la sua direzione: EOF (`EV_FIN`).
+    Fin,
+    /// Connessione abortita/reset (`EV_RST`).
+    Reset,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +103,7 @@ pub struct Net {
     link_up: bool,
     echo_done: bool,
     tcp_seq_counter: u32,
+    tcp: [Option<tcp::Conn>; TCP_CONNS],
 }
 
 impl Net {
@@ -107,6 +127,7 @@ impl Net {
             link_up: false,
             echo_done: false,
             tcp_seq_counter: 0x1000,
+            tcp: core::array::from_fn(|_| None),
         };
         // IID randomizzato (RFC 4941) con bit U/L = locale.
         let iid = n.next_rand() | 0x0200_0000_0000_0000;
@@ -473,13 +494,7 @@ impl Net {
             }
             NEXT_TCP => {
                 if ip.dst.is_loopback() || self.is_our_address(ip.dst) {
-                    if let Some((tcp, body)) = tcp::parse(payload) {
-                        if tcp::checksum_ok(&ip.src, &ip.dst, payload) {
-                            sink.deliver(&ip.src, &ip.dst, tcp.src_port, tcp.dst_port, body);
-                        } else {
-                            events(Event::Dropped("tcp checksum"));
-                        }
-                    }
+                    self.tcp_input(&ip.src, &ip.dst, payload, now, sink, events, 0);
                 }
             }
             _ => {}
@@ -713,6 +728,305 @@ impl Net {
         sink.send(&frame[..off + len]);
     }
 
+    // ── TCP (N6.1b): tabella connessioni, input, output ──────────────
+
+    /// Indirizzo sorgente per uscire verso `dst` (stessa regola di UDP/TCP).
+    /// Il loopback usa `::1`: è l'indirizzo a cui il peer ha indirizzato i
+    /// suoi segmenti, e quindi quello che si aspetta di vedere come mittente.
+    fn src_for(&self, dst: Ipv6Addr) -> Ipv6Addr {
+        if dst.is_loopback() {
+            Ipv6Addr::LOOPBACK
+        } else if dst == self.link_local || dst.is_link_local() {
+            self.link_local
+        } else if let Some(g) = self.global {
+            g
+        } else {
+            self.link_local
+        }
+    }
+
+    /// Connessione (non in ascolto) con porta locale `local_port`.
+    /// Il criterio è lo **stato**, non il flag di creazione: un listener che
+    /// ha accettato una SYN è a tutti gli effetti una connessione (N6.1b).
+    fn tcp_slot(&self, local_port: u16) -> Option<usize> {
+        self.tcp.iter().position(|c| {
+            c.as_ref()
+                .is_some_and(|c| c.local_port == local_port && c.state() != tcp::State::Listen)
+        })
+    }
+
+    fn tcp_listen_slot(&self, local_port: u16) -> Option<usize> {
+        self.tcp.iter().position(|c| {
+            c.as_ref()
+                .is_some_and(|c| c.local_port == local_port && c.state() == tcp::State::Listen)
+        })
+    }
+
+    /// Apre una connessione attiva verso `dst:dst_port` sulla porta locale
+    /// `local_port`. `false` se la porta è già in uso o la tabella è piena.
+    pub fn tcp_connect(&mut self, dst: Ipv6Addr, dst_port: u16, local_port: u16) -> bool {
+        if local_port == 0 || self.tcp_slot(local_port).is_some() {
+            return false;
+        }
+        let Some(free) = self.tcp.iter().position(|c| c.is_none()) else {
+            return false;
+        };
+        let iss = self.tcp_next_seq();
+        let src = self.src_for(dst);
+        let mut c = tcp::Conn::new_client(local_port);
+        c.set_local_addr(src);
+        c.open(dst, dst_port, iss, 0);
+        self.tcp[free] = Some(c);
+        true
+    }
+
+    /// Apre un listener sulla porta locale `local_port` (N6.1c).
+    pub fn tcp_listen(&mut self, local_port: u16) -> bool {
+        if local_port == 0 || self.tcp_slot(local_port).is_some() || self.tcp_listen_slot(local_port).is_some() {
+            return false;
+        }
+        let Some(free) = self.tcp.iter().position(|c| c.is_none()) else {
+            return false;
+        };
+        let mut c = tcp::Conn::new_listener(local_port);
+        c.set_local_addr(self.link_local);
+        self.tcp[free] = Some(c);
+        true
+    }
+
+    /// Stato della connessione con porta locale `local_port`.
+    pub fn tcp_state(&self, local_port: u16) -> Option<tcp::State> {
+        let i = self.tcp_slot(local_port)?;
+        self.tcp[i].as_ref().map(|c| c.state())
+    }
+
+    /// Byte leggibili dalla connessione (0 se non esiste).
+    pub fn tcp_ready(&self, local_port: u16) -> usize {
+        match self.tcp_slot(local_port) {
+            Some(i) => self.tcp[i].as_ref().map(|c| c.readable()).unwrap_or(0),
+            None => 0,
+        }
+    }
+
+    /// Bufferizza `data` per l'invio. Ritorna i byte accettati.
+    pub fn tcp_write(&mut self, local_port: u16, data: &[u8], now: u64) -> usize {
+        match self.tcp_slot(local_port) {
+            Some(i) => match self.tcp[i].as_mut() {
+                Some(c) => c.write(data, now),
+                None => 0,
+            },
+            None => 0,
+        }
+    }
+
+    /// Legge i byte ricevuti in ordine.
+    pub fn tcp_read(&mut self, local_port: u16, out: &mut [u8]) -> usize {
+        match self.tcp_slot(local_port) {
+            Some(i) => match self.tcp[i].as_mut() {
+                Some(c) => c.read(out),
+                None => 0,
+            },
+            None => 0,
+        }
+    }
+
+    /// Chiusura ordinata (FIN).
+    pub fn tcp_close(&mut self, local_port: u16) {
+        if let Some(i) = self.tcp_slot(local_port) {
+            if let Some(c) = self.tcp[i].as_mut() {
+                c.close();
+            }
+        }
+    }
+
+    /// Abort: RST e slot libero.
+    pub fn tcp_abort(&mut self, local_port: u16) {
+        if let Some(i) = self.tcp_slot(local_port) {
+            if let Some(c) = self.tcp[i].as_mut() {
+                c.abort();
+            }
+            self.tcp[i] = None;
+        }
+    }
+
+    /// Emette un segmento TCP (già serializzato) verso `dst`.
+    fn emit_tcp(&mut self, src: Ipv6Addr, dst: Ipv6Addr, seg: &[u8], sink: &mut dyn FrameSink) -> bool {
+        let dst_mac = if dst.is_link_local() {
+            match self.neighbor_lookup(dst) {
+                Some(m) => m,
+                None => return false,
+            }
+        } else {
+            match (self.router, self.router_mac) {
+                (Some(_), Some(m)) => m,
+                _ => return false,
+            }
+        };
+        let mut frame = [0u8; 1514];
+        let mut off = eth::write(&mut frame, dst_mac, self.mac, ETHERTYPE_IPV6);
+        off += ipv6::write(&mut frame[off..], NEXT_TCP, HOP_LIMIT, src, dst, seg.len() as u16);
+        if off + seg.len() > frame.len() {
+            return false;
+        }
+        frame[off..off + seg.len()].copy_from_slice(seg);
+        sink.send(&frame[..off + seg.len()]);
+        true
+    }
+
+    /// Serializza/emette un segmento TCP: se la destinazione è nostra lo
+    /// rientra in `tcp_input` (loopback, nessun frame), altrimenti emette il
+    /// frame Ethernet. `depth` limita la ricorsione del loopback.
+    fn tcp_send(
+        &mut self,
+        src: Ipv6Addr,
+        dst: Ipv6Addr,
+        seg: &[u8],
+        now: u64,
+        sink: &mut dyn FrameSink,
+        events: &mut dyn FnMut(Event),
+        depth: u8,
+    ) {
+        if dst.is_loopback() || self.is_our_address(dst) {
+            if depth < 3 {
+                self.tcp_input(&src, &dst, seg, now, sink, events, depth + 1);
+            }
+            return;
+        }
+        self.emit_tcp(src, dst, seg, sink);
+    }
+
+    /// Segmento in ingresso (NEXT_TCP). Verifica il checksum, trova la
+    /// connessione per porta locale, delega a `Conn::on_segment`, emette la
+    /// risposta e segnala gli eventi al sink.
+    fn tcp_input(
+        &mut self,
+        src: &Ipv6Addr,
+        dst: &Ipv6Addr,
+        payload: &[u8],
+        now: u64,
+        sink: &mut dyn FrameSink,
+        events: &mut dyn FnMut(Event),
+        depth: u8,
+    ) {
+        let Some((hdr, body)) = tcp::parse(payload) else {
+            return;
+        };
+        if !tcp::checksum_ok(src, dst, payload) {
+            events(Event::Dropped("tcp checksum"));
+            return;
+        }
+        let Some(i) = self
+            .tcp_slot(hdr.dst_port)
+            .or_else(|| self.tcp_listen_slot(hdr.dst_port))
+        else {
+            // Nessuna connessione: RST, ma mai in risposta a un RST (evita il
+            // ping-pong, RFC 793 §3.4).
+            if hdr.flags & tcp::FLAG_RST == 0 {
+                let mut seg = [0u8; 20];
+                let len = tcp::write_checked(
+                    &mut seg,
+                    hdr.dst_port,
+                    hdr.src_port,
+                    0,
+                    hdr.seq.wrapping_add(1),
+                    tcp::FLAG_RST | tcp::FLAG_ACK,
+                    0,
+                    dst,
+                    src,
+                    &[],
+                );
+                let seg_copy = seg[..len].to_vec();
+                self.tcp_send(*dst, *src, &seg_copy, now, sink, events, depth);
+            }
+            return;
+        };
+        let Some(mut conn) = self.tcp[i].take() else {
+            return;
+        };
+        conn.set_local_addr(*dst);
+        if conn.remote_port == 0 {
+            conn.remote_port = hdr.src_port;
+            conn.remote_addr = *src;
+        } else if conn.remote_port != hdr.src_port || conn.remote_addr != *src {
+            // Connessione di un altro peer: non toccarla.
+            self.tcp[i] = Some(conn);
+            return;
+        }
+        let out = conn.on_segment(&hdr, body, now);
+        let port = conn.local_port;
+        let closed = conn.closed;
+        if closed {
+            self.tcp[i] = None;
+        } else {
+            self.tcp[i] = Some(conn);
+        }
+        if let Some(tx) = out.tx {
+            let mut seg = [0u8; 20];
+            let len = tcp::write(
+                &mut seg,
+                tx.src_port,
+                tx.dst_port,
+                tx.seq,
+                tx.ack,
+                tx.flags,
+                tx.window,
+                0,
+            );
+            let c = crate::tcp::codec::checksum_tcp(dst, src, &seg[..len]);
+            seg[16..18].copy_from_slice(&c.to_be_bytes());
+            let seg_copy = seg[..len].to_vec();
+            self.tcp_send(*dst, *src, &seg_copy, now, sink, events, depth);
+        }
+        if out.established {
+            sink.tcp_signal(port, TcpSignal::Established);
+        }
+        if out.data.is_some() {
+            sink.tcp_signal(port, TcpSignal::Data);
+        }
+        if out.fin_recv {
+            sink.tcp_signal(port, TcpSignal::Fin);
+        }
+        if out.rst {
+            sink.tcp_signal(port, TcpSignal::Reset);
+        }
+    }
+
+    /// Drena la coda di trasmissione di tutte le connessioni: SYN, dati,
+    /// ritrasmissioni e FIN (N6.1b). Va chiamato a ogni tick e dopo una
+    /// `tcp_write`.
+    pub fn tcp_poll(&mut self, now: u64, sink: &mut dyn FrameSink) {
+        for i in 0..TCP_CONNS {
+            let Some(mut conn) = self.tcp[i].take() else {
+                continue;
+            };
+            let port = conn.local_port;
+            if conn.closed {
+                sink.tcp_signal(port, TcpSignal::Reset);
+                continue;
+            }
+            // L'indirizzo locale dipende dal next-hop e serve al checksum:
+            // va impostato prima di serializzare.
+            let dst = conn.remote_addr;
+            let src = self.src_for(dst);
+            conn.set_local_addr(src);
+            let mut buf = [0u8; 1500 - ipv6::IPV6_HDR - eth::ETH_HDR];
+            let seg = conn.next_tx(&mut buf, now);
+            let closed = conn.closed;
+            if !closed {
+                self.tcp[i] = Some(conn);
+            }
+            if let Some(info) = seg {
+                let seg_copy = buf[..info.len].to_vec();
+                let mut ev = |_e: Event| {};
+                self.tcp_send(src, dst, &seg_copy, now, sink, &mut ev, 0);
+            }
+            if closed {
+                sink.tcp_signal(port, TcpSignal::Reset);
+            }
+        }
+    }
+
+
     fn neighbor_add(&mut self, addr: Ipv6Addr, mac: MacAddr, now: u64) {
         for nb in self.neighbors.iter_mut() {
             if nb.valid && nb.addr == addr {
@@ -767,10 +1081,25 @@ mod tests {
 
     struct VecSink {
         frames: Vec<Vec<u8>>,
+        signals: Vec<(u16, TcpSignal)>,
+        loops: Vec<(u16, u16, Vec<u8>)>,
+        deliver_tcp: bool,
     }
     impl FrameSink for VecSink {
         fn send(&mut self, frame: &[u8]) {
             self.frames.push(frame.to_vec());
+        }
+        fn tcp_signal(&mut self, local_port: u16, signal: TcpSignal) {
+            self.signals.push((local_port, signal));
+        }
+        fn deliver(&mut self, src: &Ipv6Addr, dst: &Ipv6Addr, sp: u16, dp: u16, payload: &[u8]) {
+            if self.deliver_tcp {
+                let mut seg = alloc::vec![0u8; tcp::TCP_HDR + payload.len()];
+                let n = tcp::write_checked(
+                    &mut seg, sp, dp, 0, 0, tcp::FLAG_ACK, 0, src, dst, payload,
+                );
+                self.loops.push((sp, dp, seg[..n].to_vec()));
+            }
         }
     }
 
@@ -828,7 +1157,7 @@ mod tests {
     #[test]
     fn ra_slaac_e_router() {
         let mut n = Net::new(cfg());
-        let mut sink = VecSink { frames: Vec::new() };
+        let mut sink = VecSink { frames: Vec::new(), signals: Vec::new(), loops: Vec::new(), deliver_tcp: false };
         let mut evs = Vec::new();
         n.link_up(0, &mut sink, &mut |e| evs.push(e));
         assert_eq!(sink.frames.len(), 1, "RS inviato al link up");
@@ -851,7 +1180,7 @@ mod tests {
         let mut c = cfg();
         c.ra_router = Some(Ipv6Addr::from_link_local_iid(0x0200_0000_0000_0009));
         let mut n = Net::new(c);
-        let mut sink = VecSink { frames: Vec::new() };
+        let mut sink = VecSink { frames: Vec::new(), signals: Vec::new(), loops: Vec::new(), deliver_tcp: false };
         let mut evs = Vec::new();
         n.link_up(0, &mut sink, &mut |e| evs.push(e));
         let router = Ipv6Addr::from_link_local_iid(0x0200_0000_0000_0002);
@@ -864,7 +1193,7 @@ mod tests {
     #[test]
     fn echo_reply_completa_il_ping() {
         let mut n = Net::new(cfg());
-        let mut sink = VecSink { frames: Vec::new() };
+        let mut sink = VecSink { frames: Vec::new(), signals: Vec::new(), loops: Vec::new(), deliver_tcp: false };
         let mut evs = Vec::new();
         n.link_up(0, &mut sink, &mut |e| evs.push(e));
         let router = Ipv6Addr::from_link_local_iid(0x0200_0000_0000_0002);
@@ -896,7 +1225,7 @@ mod tests {
     #[test]
     fn ns_per_il_nostro_indirizzo_produce_na() {
         let mut n = Net::new(cfg());
-        let mut sink = VecSink { frames: Vec::new() };
+        let mut sink = VecSink { frames: Vec::new(), signals: Vec::new(), loops: Vec::new(), deliver_tcp: false };
         let mut evs = Vec::new();
         n.link_up(0, &mut sink, &mut |e| evs.push(e));
         let ll = n.link_local();
@@ -926,7 +1255,7 @@ mod tests {
         let mut c = cfg();
         c.ping = false;
         let mut n = Net::new(c);
-        let mut sink = VecSink { frames: Vec::new() };
+        let mut sink = VecSink { frames: Vec::new(), signals: Vec::new(), loops: Vec::new(), deliver_tcp: false };
         let router = Ipv6Addr::parse("fe80::1").unwrap();
         let rmac = MacAddr([0x02, 0, 0, 0, 0, 0x02]);
         n.link_up(0, &mut sink, &mut |_| {});
@@ -970,5 +1299,154 @@ mod tests {
             n.on_tick(base + k * NEIGHBOR_PROBE, &mut sink, &mut |_| {});
         }
         assert_eq!(n.neighbor_lookup(router), None);
+    }
+
+    // ── TCP wiring (N6.1b) ──────────────────────────────────────────
+
+    /// Net con link up e nessun ping: serve solo il TCP.
+    fn tcp_net() -> Net {
+        let mut c = cfg();
+        c.ping = false;
+        let mut n = Net::new(c);
+        let mut sink = VecSink {
+            frames: Vec::new(),
+            signals: Vec::new(),
+            loops: Vec::new(),
+            deliver_tcp: false,
+        };
+        n.link_up(0, &mut sink, &mut |_| {});
+        n
+    }
+
+    fn new_sink() -> VecSink {
+        VecSink {
+            frames: Vec::new(),
+            signals: Vec::new(),
+            loops: Vec::new(),
+            deliver_tcp: false,
+        }
+    }
+
+    /// Chiama `tcp_poll` fino a `max` volte (loopback sincrono).
+    fn poll_n(n: &mut Net, sink: &mut VecSink, now: u64, max: usize) {
+        for _ in 0..max {
+            n.tcp_poll(now, sink);
+        }
+    }
+
+    #[test]
+    fn tcp_loopback_handshake_e_dati() {
+        let mut n = tcp_net();
+        let mut sink = new_sink();
+        // Server in ascolto su 9000, client verso ::1:9000 dalla porta 9001.
+        assert!(n.tcp_listen(9000));
+        assert!(n.tcp_connect(Ipv6Addr::LOOPBACK, 9000, 9001));
+
+        // Il SYN parte, viene rientrato e produce SYN+ACK, poi l'ACK del
+        // client completa l'handshake.
+        poll_n(&mut n, &mut sink, 0, 4);
+
+        assert_eq!(n.tcp_state(9001), Some(tcp::State::Established));
+        assert!(
+            sink.frames.is_empty(),
+            "loopback non deve emettere frame Ethernet"
+        );
+
+        // Dati client -> server.
+        assert_eq!(n.tcp_write(9001, b"ciao mondo", 0), 10);
+        poll_n(&mut n, &mut sink, 0, 4);
+        let mut buf = [0u8; 32];
+        let got = n.tcp_read(9000, &mut buf);
+        assert_eq!(&buf[..got], b"ciao mondo");
+
+        // Echo: il server risponde e il client legge.
+        assert_eq!(n.tcp_write(9000, b"echo!", 0), 5);
+        poll_n(&mut n, &mut sink, 0, 4);
+        let got = n.tcp_read(9001, &mut buf);
+        assert_eq!(&buf[..got], b"echo!");
+
+        // Segnali: almeno un Established e un Data per lato.
+        assert!(sink
+            .signals
+            .iter()
+            .any(|(p, s)| *p == 9001 && *s == TcpSignal::Established));
+        assert!(sink
+            .signals
+            .iter()
+            .any(|(p, s)| *p == 9000 && *s == TcpSignal::Data));
+    }
+
+    #[test]
+    fn tcp_porta_chiusa_risponde_rst() {
+        let mut n = tcp_net();
+        let mut sink = new_sink();
+        // Client verso una porta senza listener.
+        assert!(n.tcp_connect(Ipv6Addr::LOOPBACK, 9, 9002));
+        poll_n(&mut n, &mut sink, 0, 4);
+        // Il RST rientra nel client: la connessione muore.
+        assert!(
+            sink.signals
+                .iter()
+                .any(|(p, s)| *p == 9002 && *s == TcpSignal::Reset),
+            "il client deve ricevere un reset: {:?}",
+            sink.signals
+        );
+        assert!(n.tcp_state(9002).is_none(), "slot liberato");
+    }
+
+    #[test]
+    fn tcp_close_ordinato_loopback() {
+        let mut n = tcp_net();
+        let mut sink = new_sink();
+        assert!(n.tcp_listen(9100));
+        assert!(n.tcp_connect(Ipv6Addr::LOOPBACK, 9100, 9101));
+        poll_n(&mut n, &mut sink, 0, 4);
+        assert_eq!(n.tcp_state(9101), Some(tcp::State::Established));
+
+        // Chiusura del client: FIN -> il server va in CLOSE_WAIT e segnala Fin.
+        n.tcp_close(9101);
+        poll_n(&mut n, &mut sink, 0, 4);
+        assert_eq!(n.tcp_state(9100), Some(tcp::State::CloseWait));
+        assert!(sink
+            .signals
+            .iter()
+            .any(|(p, s)| *p == 9100 && *s == TcpSignal::Fin));
+
+        // Anche il server chiude: chiusura completa.
+        n.tcp_close(9100);
+        poll_n(&mut n, &mut sink, 0, 6);
+        assert_eq!(n.tcp_state(9101), Some(tcp::State::TimeWait).or(None));
+    }
+
+    #[test]
+    fn tcp_ritrasmissione_su_link_reale() {
+        // Percorso non-loopback: il segmento va al router (se c'è) e senza
+        // risposta l'RTO ritrasmette.
+        let mut c = cfg();
+        c.ping = false;
+        let mut n = Net::new(c);
+        let mut sink = new_sink();
+        n.link_up(0, &mut sink, &mut |_| {});
+        // RA dal router per avere il next-hop.
+        let router = Ipv6Addr::parse("fe80::1").unwrap();
+        let rmac = MacAddr([0x02, 0, 0, 0, 0, 0x02]);
+        let ra = ra_frame(router, rmac, [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0]);
+        n.on_frame(&ra, 0, &mut sink, &mut |_| {});
+
+        let dst = Ipv6Addr::parse("2001:db8::42").unwrap();
+        assert!(n.tcp_connect(dst, 853, 9102));
+        sink.frames.clear();
+        n.tcp_poll(0, &mut sink);
+        assert_eq!(sink.frames.len(), 1, "SYN emesso verso il router");
+        // Il frame è IPv6 + TCP con flag SYN.
+        let (_, ip_payload) = eth::parse(&sink.frames[0]).unwrap();
+        let (_, ip) = ipv6::parse(ip_payload).unwrap();
+        let (hdr, _) = tcp::parse(ip).unwrap();
+        assert_ne!(hdr.flags & tcp::FLAG_SYN, 0);
+
+        // Nessuna risposta: dopo l'RTO rieccolo.
+        sink.frames.clear();
+        n.tcp_poll(101, &mut sink);
+        assert_eq!(sink.frames.len(), 1, "SYN ritrasmesso");
     }
 }
