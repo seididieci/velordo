@@ -991,6 +991,7 @@ impl Net {
         };
         let Some(i) = slot else { return };
 
+
         let Some(mut conn) = self.tcp[i].take() else {
             return;
         };

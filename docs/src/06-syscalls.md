@@ -299,7 +299,7 @@ vedi [IPC](./07-ipc.md) e [ADR-0039](./adr/0039-logging-l1.md). Nota: il
 kernel embedda anche `vestigia` (boot-TCB con init/block/cardo: deve partire
 prima che il FS esista).
 
-### Rete — servizi e tag IPC (nessuna syscall nuova, N1–N6.0)
+### Rete — servizi e tag IPC (nessuna syscall nuova, N1–N6.1)
 
 Lo stack di rete (ADR-0068/0069) non aggiunge numeri di syscall: driver e
 servizi sono processi userspace che usano `service_register`/`service_lookup`/
@@ -321,6 +321,21 @@ resta neutro (nessun parser di protocolli). Tag dei servizi:
 | 0x89 | `DNS_EP_CLOSE` | `dns` | chiude l'endpoint e libera il ring (N5) |
 | 0x8A | `DNS_EP_STATS` | `dns` | statistiche endpoint DNS (N5) |
 | 0x8B | `NET_ADDR` | `net` | indirizzo IPv6 del nodo (`w0` byte 0..8, `w1` 8..16; `w0` = selettore: 0 link-local, 1 global, 2 router) (N6.0) |
+
+**TCP (N6.1)**: `NET_EP_OPEN` con `NET_PROTO_TCP` crea un listener (flag
+`LISTEN`) o un endpoint che apre la connessione al primo `NET_EP_TX` (flag
+`CONNECT`; la destinazione sta nello slot come per UDP). Per TCP il valore di
+ritorno di `NET_EP_TX` significa "preso in carico": `0` = bufferizzato e
+ritrasmesso se serve, `!0` = buffer pieno o non connesso. Uno slot TX con
+evento `EV_FIN` chiede la chiusura ordinata. Eventi consegnati nel ring RX:
+
+| Evento | Valore | Significato |
+|--------|--------|-------------|
+| `EV_DATA` | 0 | payload (dati in ordine) |
+| `EV_SYNACK` | 2 | connessione stabilita |
+| `EV_FIN` | 3 | EOF: il peer ha chiuso |
+| `EV_RST` | 4 | reset |
+| `EV_ACCEPT` | 5 | nuova connessione su un listener: payload `[ep_id:2][ring_id:4]` del figlio |
 
 `NET_ADDR` esiste perché un client deve poter uscire verso il default router
 senza conoscerne l'indirizzo (es. `upstream = auto` in `sys:dns.conf`): due

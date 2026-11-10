@@ -126,6 +126,7 @@ seed_bin testland/build/identistest.bin test/idtest.bin tst test/idtest.bin
 seed_bin testland/build/netudp.bin test/netudp.bin tst test/netudp.bin
 seed_bin testland/build/net3.bin test/net3.bin tst test/net3.bin
 seed_bin testland/build/net4.bin test/net4.bin tst test/net4.bin
+seed_bin testland/build/nettcp.bin test/nettcp.bin tst test/nettcp.bin
 seed_bin testland/build/dnsprobe.bin test/dnsprobe.bin tst test/dnsprobe.bin
 seed_bin testland/build/userforeign.bin test/foreign.bin
 seed_bin flavours/posix/tests/build/userposixtests.bin test/posixtst.bin tst test/posixtst.bin
@@ -280,6 +281,15 @@ fi
 # passt traduce verso l'host loopback (`--map-host-loopback`). Seedato solo se
 # il chiamante dichiara la porta: senza, il resolver resta in tabella statica
 # (N5) e `NET=1 ./run.sh` manuale si comporta come prima.
+# Peer TCP di rete reale (N6.1d): `sys:nettcp.conf` = `<ipv6|auto> <porta>
+# [echo|dnstcp]`. Seedato solo se il chiamante dichiara il peer (il gate no).
+if [ -n "${NET_TCP_ECHO_PORT:-}" ]; then
+    printf '%s %s dnstcp\n' "${NET_TCP_ECHO_ADDR:-auto}" "$NET_TCP_ECHO_PORT" \
+        > "$ROOT/build-meta/nettcp.conf"
+    SEED_NS+=( "sys:nettcp.conf=$ROOT/build-meta/nettcp.conf" )
+    echo "[arca] + sys:nettcp.conf (peer TCP ${NET_TCP_ECHO_ADDR:-auto}:$NET_TCP_ECHO_PORT)"
+fi
+
 if [ -n "${NET_DNS_UPSTREAM_PORT:-}" ]; then
     printf 'upstream = auto\nport = %s\nmode = plain\ntimeout_ms = 2000\n' \
         "$NET_DNS_UPSTREAM_PORT" > "$ROOT/build-meta/dns.conf"

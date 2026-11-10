@@ -5,9 +5,10 @@
 Accepted (2026-11). **N1 implementata** (virtio-net + IPv6/NDP/ICMPv6 +
 ping6 con passt). **N2 implementata** (UDP + endpoint a capability + ring,
 echo server nativo `netecho`, probe `netudp`). **N3 implementata** (TCP
-minimale). **N4 implementata** (traduttore SIIT/NAT64). **N5 implementata**
-(resolver DNS plain). **N6.0 implementata** (inoltro upstream plain UDP nel
-resolver, con la forma che avrà il DoT). N6.5–N8 restano la traiettoria.
+minimale, sostituito da N6.1). **N4 implementata** (traduttore SIIT/NAT64).
+**N5 implementata** (resolver DNS plain). **N6.0 implementata** (inoltro
+upstream plain UDP). **N6.1 implementata** (TCP reale: client + listener,
+macchina a stati in `libs/net`, `EV_ACCEPT`). N6.2–N8 restano la traiettoria.
 Dipende da ADR-0068 (threat model/invarianti) e ADR-0070 (config `sys:*`,
 non ancora implementata: N1 usa una config compilata; `sys:net.conf` per N2
 è seedato a build-time con fail-closed).
@@ -137,9 +138,11 @@ non conosce POSIX.
 - **N5**: resolver DNS plain separato. **Completata.**
 - **N6**: DoH/DoT con TLS. Spezzata in: **N6.0** inoltro upstream plain UDP
   nella stessa forma del futuro DoT (ephemeral endpoint, single-flight,
-  deadline, txid rimappato) — **Completata**; **N6.5** DoT dentro `dns` con
-  il crate separato `libs/tls` (X.509 con clock reale da `usertime`); **N6.6**
-  DoH se servirà (stessa API di trasporto).
+  deadline, txid rimappato) — **Completata**; **N6.1** TCP reale in
+  `libs/net` (client + listener, macchina a stati, `EV_ACCEPT`) —
+  **Completata**; **N6.2** crate separato `libs/tls` (client-only, trasporto
+  iniettato, X.509 con clock reale da `usertime`); **N6.3** DoT dentro
+  `dns`; **N6.4** DoH se servirà (stessa API di trasporto).
 - **N7**: personalità POSIX socket.
 - **N8**: VT-d/IOMMU.
 
@@ -298,7 +301,7 @@ trasporto (plain → TLS) non deve toccare la logica di risoluzione.
 - **Config `sys:dns.conf`** (bucket `sys`, righe `chiave = valore`, `#`
   commento): `upstream = auto|<ipv6>`, `port`, `mode = plain|dot|off`,
   `timeout_ms`. `mode = dot` è **riconosciuta** e per ora degrada a tabella
-  statica con una riga di log: la config resta valida per N6.5. Una chiave
+  statica con una riga di log: la config resta valida per N6.3. Una chiave
   sconosciuta non invalida il file (le chiavi TLS future si aggiungono
   senza rompere le vecchie immagini).
 - **`upstream = auto`**: il default router si chiede a `net` con il nuovo
@@ -335,6 +338,68 @@ trasporto (plain → TLS) non deve toccare la logica di risoluzione.
 - **Kernel**: invariato (nessuna syscall, nessun tag nuovo nel kernel:
   `NET_ADDR` è un tag IPC del servizio `net`).
 
+## Completato — N6.1 (TCP reale: client + listener)
+
+Il TCP di N3 era uno shim: `net` costruiva segmenti con solo `SYN` o `ACK`, il
+payload arrivava grezzo al cliente, nessun ACK, nessuna ritrasmissione, e
+`netecho` fingeva il SYN+ACK rimettendo uno slot. Sopra quello nessun TLS può
+stare. N6.1 lo sostituisce con una macchina a stati vera, in quattro passi con
+commit separati (`817aacc`, `7dbf3e3`, `8d2c52b`, questo).
+
+- **Core puro `libs/net/src/tcp/conn.rs`** (N6.1a): stati Closed/Listen/
+  SynSent/SynRecv/Established/FinWait1/FinWait2/CloseWait/LastAck/TimeWait;
+  `snd_una`/`snd_nxt`/`rcv_nxt` con confronto circolare a 32 bit e `data_base`
+  (seq del primo byte dati: SYN e FIN consumano un seq ma non stanno in coda);
+  finestra di invio limitata da `snd_wnd` del peer e finestra di ricezione =
+  spazio libero del buffer (window 0 naturale); go-back-N su RTO 1s→2s→4s con
+  max 3 tentativi; FIN/ACK, half-close, TIME_WAIT 5 s, RST; **ricezione solo
+  in-order** (duplicati e fuori ordine rispondono con ACK di `rcv_nxt`).
+  `next_tx(out)` scrive header+payload e ritorna `TxInfo`; `on_segment`
+  ritorna `RxOutcome` (segmento di risposta, dati, eventi). Il core non
+  conosce né `FrameSink` né `eth`/`ipv6`.
+- **Wiring nel layer `Net`** (N6.1b): tabella `[Option<Conn>; 16]` identificata
+  da un **id**, non dalla porta (un listener e i suoi figli condividono la
+  porta: distinguerli per porta impedirebbe due client in parallelo).
+  `NEXT_TCP` parsa, verifica il checksum, cerca la connessione per
+  (porta locale, peer) e delega; porta sconosciuta → RST (mai in risposta a un
+  RST). `tcp_poll` drena SYN/dati/ritrasmissioni/FIN. Il loopback (destinazione
+  nostra o `::1`) rientra in `tcp_input` senza frame Ethernet, con un tetto
+  alla ricorsione: due processi del guest si parlano davvero.
+- **Listener** (N6.1c): SYN su un listener → figlio in SYN_RECV
+  (`TCP_BACKLOG = 4`, SYN oltre il backlog → RST), listener sempre in ascolto;
+  segnale `TcpSignal::Accepted(porta)`, il servizio crea l'endpoint del figlio
+  (ring nuovo, stessa porta) e manda `EV_ACCEPT = 5` con
+  `[ep_id:2][ring_id:4]`. `netecho` ora fa solo `tcp_read`/`tcp_write`.
+- **API adapters**: `FrameSink::tcp_signal(id, segnale)` (solo notifica; il
+  dato si legge con `tcp_read`, così il servizio non rientra in `Net` mentre è
+  in prestito); uno slot TX con evento `EV_FIN` chiede la chiusura ordinata.
+
+**Bug veri emersi dai test** (tutti corretti qui): i segmenti di controllo di
+`next_tx` ritornavano `TxInfo` senza scrivere i byte (segmenti vuoti sul
+link); il FIN occupa il seq *dopo* i dati del segmento (la condizione di uno
+era sbagliata: chiusura mai completata); il loopback deve usare `::1` come
+sorgente; il flag "creato come listener" non è lo stato (dopo l'handshake la
+connessione non si trovava più); il figlio in SYN_RECV non emetteva il suo
+SYN+ACK; il client azzerava il ring del figlio cancellando i byte già scritti
+dal servizio; `NetService` e i buffer di 2 KiB mandavano il servizio in
+**stack overflow** (guard page: `net` ripartiva in loop) → `NetService` e i
+buffer su heap.
+
+**Limiti dichiarati**: niente congestion control (RTO-only), niente fast
+retransmit/SACK/timestamps/window scaling, nessuna coda di riordino, MSS fisso
+1440, backlog 4, solo IPv6, RST rate-limited solo dal backlog.
+
+**Test**: 48 unit test host nel crate `net` (totale 96) — handshake client e
+listener, dati in ordine, duplicati, fuori ordine + recupero, RTO con resa,
+ACK e finestra, window 0 e riapertura, chiusura client e server-first,
+segmento verso porta chiusa, wrap a 32 bit, buffer pieno, scrittura prima
+dell'handshake, input arbitrari in ogni stato, handshake+dati in loopback,
+backlog. `testland/net3` valida handshake **ed** eco end-to-end sul core.
+`testland/nettcp` (N6.1d) prova il TCP verso l'esterno con una query DNS over
+TCP (stesso trasporto di DoT), ma resta **opzionale**: passt non inoltra il
+TCP al loopback dell'host e in questa ambientazione anche un peer pubblico
+risponde RST — il probe si salta se non si dichiara `NET_TCP_PEER`.
+
 ## Consequences
 
 ### Positive
@@ -353,6 +418,12 @@ trasporto (plain → TLS) non deve toccare la logica di risoluzione.
   delay. Sufficiente per un gateway stabile, da rivedere su hardware con
   MAC mobili.
 - Single-thread: throughput limitato; multi-queue dopo.
+- TCP: niente congestion control, fast retransmit, SACK, timestamps,
+  window scaling né coda di riordino; MSS fisso 1440; backlog 4. È il subset
+  che serve a un client TLS e a un server di test — non a un server di
+  produzione.
+- Il probe TCP verso l'esterno non è nel gate né obbligatorio nei net tests:
+  dipende dall'ambientazione (passt non inoltra il TCP al loopback dell'host).
 
 ## Riferimenti
 

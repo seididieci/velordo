@@ -18,6 +18,9 @@ TIMEOUT="${NET_TIMEOUT:-180}"
 # Porta dell'upstream DNS di prova (unprivileged, nessun root richiesto).
 UPSTREAM_PORT="${NET_DNS_UPSTREAM_PORT:-5353}"
 
+# Porta dell'echo server TCP di rete reale (N6.1d).
+TCP_ECHO_PORT="${NET_TCP_ECHO_PORT:-5354}"
+
 DNS_SRV_PID=""
 DNS_SRV_PY=""
 cleanup() {
@@ -76,15 +79,41 @@ if ! kill -0 "$DNS_SRV_PID" 2>/dev/null; then
 fi
 export NET_DNS_UPSTREAM_PORT="$UPSTREAM_PORT"
 
-echo "[net-tests] boot con virtio-net + passt (timeout ${TIMEOUT}s, upstream DNS host:${UPSTREAM_PORT})"
+# ── Peer TCP di rete reale (N6.1d, opzionale) ───────────────────────────
+# Il TCP verso l'esterno dipende dall'ambientazione: passt **non** inoltra il
+# TCP al loopback dell'host (l'UDP del DNS sì) e in questa sandbox anche un
+# peer pubblico IPv6 risponde RST. Perciò il probe si esegue solo se chi
+# chiama dichiara un peer raggiungibile, e solo allora diventa obbligatorio:
+#   NET_TCP_PEER=<ipv6> [NET_TCP_ECHO_PORT=53] ./scripts/run-net-tests.sh
+if [ -n "${NET_TCP_PEER:-}" ]; then
+    export NET_TCP_ECHO_ADDR="$NET_TCP_PEER"
+    export NET_TCP_ECHO_PORT="${NET_TCP_ECHO_PORT:-53}"
+    PEER_DESC="peer TCP ${NET_TCP_PEER}:${NET_TCP_ECHO_PORT}"
+else
+    PEER_DESC="peer TCP esterno non configurato (probe saltato)"
+fi
+
+echo "[net-tests] boot con virtio-net + passt (timeout ${TIMEOUT}s, upstream DNS host:${UPSTREAM_PORT}, ${PEER_DESC})"
 NET=1 RUN_TESTS=1 RUN_DISPLAY=none timeout "$TIMEOUT" ./run.sh >"$LOG" 2>&1 || true
 
-if rg -q '\[net\] echo reply' "$LOG" && rg -q '\[netudp\] risultato: PASS' "$LOG" && rg -q '\[net3\] risultato: PASS' "$LOG" && rg -q '\[net4\] risultato: PASS' "$LOG" && rg -q '\[dns\] risultato: PASS' "$LOG" && rg -q '\[dns\] upstream: PASS' "$LOG"; then
-    echo "[net-tests] PASS: echo reply + UDP echo + TCP SYN + IPv4 SIIT + DNS probe + upstream DNS"
-    rg '\[net\]|\[netdev\]|\[netecho\]|\[netudp\]|\[net3\]|\[net4\]|\[siit\]|\[dns\]|\[dns-host\]' "$LOG" | tail -40
+fail=0
+rg -q '\[net\] echo reply' "$LOG" || { echo "[net-tests] manca: echo reply (N1)"; fail=1; }
+rg -q '\[netudp\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: UDP echo (N2)"; fail=1; }
+rg -q '\[net3\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: TCP loopback (N3/N6.1)"; fail=1; }
+rg -q '\[net4\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: SIIT (N4)"; fail=1; }
+rg -q '\[dns\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: DNS (N5)"; fail=1; }
+rg -q '\[dns\] upstream: PASS' "$LOG" || { echo "[net-tests] manca: upstream DNS (N6.0)"; fail=1; }
+if [ -n "${NET_TCP_PEER:-}" ]; then
+    rg -q '\[nettcp\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: TCP rete reale (N6.1d)"; fail=1; }
+fi
+
+LOGRE='\[net\]|\[netdev\]|\[netecho\]|\[netudp\]|\[net3\]|\[net4\]|\[nettcp\]|\[siit\]|\[dns\]|\[dns-host\]'
+if [ "$fail" = "0" ]; then
+    echo "[net-tests] PASS: echo reply + UDP echo + TCP (handshake e echo reali) + IPv4 SIIT + DNS probe + upstream DNS${NET_TCP_PEER:+ + TCP rete reale}"
+    rg "$LOGRE" "$LOG" | tail -45
     exit 0
 fi
 
-echo "[net-tests] FAIL: mancante echo reply, UDP echo, TCP SYN, IPv4 SIIT, DNS probe o upstream DNS"
-rg '\[net\]|\[netdev\]|\[netecho\]|\[netudp\]|\[net3\]|\[net4\]|\[siit\]|\[dns\]|\[dns-host\]|\[init\] net' "$LOG" | tail -50 || true
+echo "[net-tests] FAIL"
+rg "$LOGRE|\[init\] net" "$LOG" | tail -50 || true
 exit 1

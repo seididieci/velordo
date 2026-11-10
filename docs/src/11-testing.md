@@ -254,7 +254,8 @@ log seriale.
   parole, `copy_from`/`shift_rows_up` con clipping, `draw_ink` che non tocca
   il background), `libs/net` (IPv6/NDP/TCP/SIIT/DNS, `Ipv6Addr::parse` e
   cache dei vicini STALE con NS di verifica), `libs/valloc` e
-  `blake2s` (**75 test** in tutto). Girano da una
+  `blake2s` (**96 test** in tutto; `libs/net` ne ha 48, 20 dei quali sulla
+  macchina a stati TCP e sul wiring). Girano da una
   **directory neutra**: il `.cargo/config.toml` del repo impone
   `build.target = x86_64-unknown-none` + `build-std` in base alla directory
   corrente, e da dentro il repo `cargo test` proverebbe a compilare l'harness
@@ -266,7 +267,7 @@ log seriale.
   allo schermo, lontano dal punto in cui l'utente stava scrivendo
   (ADR-0061 §4, corretto in D5/ADR-0062).
 
-- **rete N1+N2+N3+N4+N5+N6.0** (`scripts/run-net-tests.sh`, ADR-0068/0069): boot con
+- **rete N1–N6.1** (`scripts/run-net-tests.sh`, ADR-0068/0069): boot con
   `-netdev passt` + virtio-net (IPv6 reale, unprivileged), **fuori dal
   gate** perché `passt` è una dipendenza host. Il guest fa SLAAC/NDP e
   ping6 verso il router; PASS se il log contiene `[net] echo reply` (N1),
@@ -287,6 +288,15 @@ log seriale.
   Risultato N5: `dns` apre endpoint UDP porta 53, `dnsprobe` (endpoint
   ephemeral presso `dns`) invia una query A per `example.com` e valida che
   la risposta contenga `93.184.216.34` (tabella statica N5).
+  Risultato N6.1: `netecho` è un listener TCP vero (handshake nel core,
+  firma `EV_ACCEPT`), `net3` invia un payload e valida `EV_SYNACK` **e**
+  l'eco end-to-end — handshake, ACK, dati e chiusura passano tutti dalla
+  macchina a stati. Il probe `nettcp` (query DNS over TCP verso un peer
+  esterno, stesso trasporto di DoT) è **opzionale**: passt non inoltra il TCP
+  al loopback dell'host e in questa ambientazione anche un peer pubblico
+  risponde RST, quindi si esegue solo dichiarando
+  `NET_TCP_PEER=<ipv6> NET_TCP_ECHO_PORT=53 ./scripts/run-net-tests.sh`
+  (che rende `[nettcp] risultato: PASS` obbligatorio).
   Risultato N6.0: `dnsprobe` invia anche una query A per `upstream.test`,
   nome fuori tabella; `dns` la inoltra via UDP plain all'upstream
   configurato e restituisce l'indirizzo `198.51.100.7`. L'upstream è un

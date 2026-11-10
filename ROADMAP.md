@@ -753,7 +753,24 @@ Voci con scope e vittoria dichiarati (non date).
       seed di `sys:dns.conf` è gated su `NET_DNS_UPSTREAM_PORT`). Gate
       invariato (6 righe, zero FAIL); unit test host 75/75 (+2 parse,
       +1 NDP stale). Kernel invariato.
-- [ ] **Rete N6.5–N8** (pianificata, ADR-0068/0069/0070): DoT dentro `dns`
+- [x] **Rete N6.1 — TCP reale (client + listener)** (completata,
+      ADR-0068/0069): macchina a stati pura in `libs/net/src/tcp/conn.rs`
+      (10 stati, `data_base`, finestra 2–4 segmenti, go-back-N su RTO
+      1s→2s→4s max 3, FIN/RST/TIME_WAIT, ricezione solo in-order), wiring nel
+      layer `Net` (tabella di 16 connessioni identificata da **id**, `NEXT_TCP`
+      → `on_segment`, `tcp_poll`, loopback nel core, RST su porta sconosciuta),
+      listener con backlog 4 e figli (`EV_ACCEPT = 5` con
+      `[ep_id:2][ring_id:4]`), `netecho` riscritto (niente più SYN+ACK
+      applicativo), `net3` che valida handshake **ed** eco end-to-end,
+      `testland/nettcp` (query DNS over TCP su rete reale, opzionale: passt
+      non inoltra TCP al loopback dell'host). Semantica `NET_EP_TX` TCP: 0 =
+      preso in carico, `!0` = buffer pieno; slot TX con `EV_FIN` = chiusura
+      ordinata. Bug veri corretti: segmenti di controllo non serializzati,
+      FIN sbagliato di un seq, sorgente loopback, criterio listener,
+      SYN+ACK del figlio, ring del figlio azzerato dal client, stack overflow
+      del servizio (buffer su heap). Unit test host 96/96 (`libs/net` 48).
+      Net tests PASS; gate 6/6, zero FAIL/PANIC/FAULT.
+- [ ] **Rete N6.2–N8** (pianificata, ADR-0068/0069/0070): DoT dentro `dns`
       con crate separato `libs/tls` (X.509 con clock reale da `usertime`);
       DoH sulla stessa API di trasporto; personalità POSIX socket;
       VT-d/IOMMU.

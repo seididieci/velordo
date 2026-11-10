@@ -3308,3 +3308,53 @@
       mostrare; e la prima diagnosi ("timeout") era sbagliata — la mancanza
       del log di timeout ha detto subito che il guasto era *prima* della
       rete.
+- [x] **N6.1 — TCP reale: client + listener** (2026-11, ADR-0068/0069):
+      quarto passo verso DoT, in quattro commit (`817aacc` core, `7dbf3e3`
+      wiring, `8d2c52b` listener, questo con test/docs). Il TCP di N3 era uno
+      shim (solo SYN o ACK, payload grezzo al cliente, `netecho` che fingeva
+      il SYN+ACK): sopra non ci sta nessun TLS. Decisioni: macchina a stati
+      **pura in `libs/net`** (`tcp/conn.rs`, testabile host), client **e**
+      listener, finestra 2–4 segmenti, ricezione **solo in-order** con
+      go-back-N su RTO 1s→2s→4s (max 3), TIME_WAIT 5 s, MSS 1440, buffer
+      4 KiB per direzione, 16 connessioni, backlog 4. Le connessioni si
+      identificano con un **id** e non con la porta: un listener e i suoi
+      figli condividono la porta locale (è quella che il client ha chiamato),
+      e distinguerli per porta impedirebbe due client in parallelo.
+      **Loopback nel core**: destinazione nostra o `::1` rientra in
+      `tcp_input` senza frame Ethernet (con tetto alla ricorsione), così due
+      processi del guest si parlano davvero — è ciò che rende `net3` un test
+      di TCP vero e non più una finzione cooperativa.
+      **Bug veri trovati dai test** (tutti nella prima versione del codice):
+      (1) i segmenti di **controllo** di `next_tx` ritornavano `TxInfo` senza
+      scrivere i byte in `out` → sul link partivano segmenti vuoti; (2) il
+      **FIN** occupa il seq subito *dopo* i dati del segmento, non quello
+      dell'ultimo byte: la condizione era sbagliata di uno e la chiusura non
+      si completava mai (connessione ferma in ESTABLISHED); (3) il loopback
+      usava il link-local come sorgente invece di `::1` e il peer scartava la
+      risposta; (4) "creato come listener" non è lo **stato**: dopo
+      l'handshake la connessione non si trovava più (il criterio giusto è
+      `state != Listen`); (5) il figlio creato in SYN_RECV non aveva un caso
+      in `next_tx` per emettere il proprio SYN+ACK; (6) il client azzerava il
+      ring del figlio alla ricezione di `EV_ACCEPT`, cancellando i byte che il
+      servizio ci aveva già scritto (il server risponde **prima** che il
+      client abbia mappato il ring: il ring lo inizializza solo il servizio);
+      (7) `NetService` con la tabella TCP andava in **stack overflow** sullo
+      stack user da 16 KiB (guard page → `#PF` → `net` ripartiva in loop):
+      ora `NetService` e i buffer di 2 KiB vivono sull'heap.
+      **Eventi nuovi**: `EV_SYNACK` (connessione stabilita), `EV_FIN` (EOF e,
+      in TX, richiesta di chiusura ordinata), `EV_RST`, `EV_ACCEPT = 5` con
+      `[ep_id:2][ring_id:4]` del figlio. Semantica `NET_EP_TX` per TCP: `0` =
+      preso in carico (bufferizzato, ritrasmesso se serve), `!0` = buffer
+      pieno. **`libs/net`**: +21 unit test host (net 27 → 48, totale 96).
+      **Test di rete**: `netecho` riscritto come listener vero, `net3`
+      valida handshake ed eco end-to-end; nuovo `testland/nettcp` (probe TCP
+      su rete reale con query DNS over TCP — lo stesso trasporto di DoT),
+      **opzionale** perché passt non inoltra il TCP al loopback dell'host e
+      in questa ambientazione anche un peer pubblico IPv6 risponde RST (il
+      SYN è stato verificato a mano: checksum corretto): si esegue con
+      `NET_TCP_PEER=<ipv6> ./scripts/run-net-tests.sh`. Gate 6/6, zero
+      FAIL/PANIC/FAULT. **Lezione**: il loopback nel core (invece di
+      consegnare payload grezzi al cliente) ha trasformato un test
+      cooperativo in un test vero, e ha fatto emergere cinque bug che nessun
+      test applicativo avrebbe visto; il sesto (ring azzerato) è il classico
+      ordine-di-arrivo fra chi scrive e chi mappa la memoria condivisa.

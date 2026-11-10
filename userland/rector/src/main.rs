@@ -721,6 +721,10 @@ const TEST_NET3: SvcMeta = SvcMeta { bin: b"net3", obj: Some((b"tst", b"test/net
 // Probe IPv4/SIIT (N4, ADR-0069): eseguito solo con `net=1`, dopo net3.
 #[cfg(not(feature = "skip_tests"))]
 const TEST_NET4: SvcMeta = SvcMeta { bin: b"net4", obj: Some((b"tst", b"test/net4.bin")), prio: 16, io: &[] };
+// Probe TCP su rete reale (N6.1d): solo con `net=1`, dopo net4; si salta da
+// solo se manca `sys:nettcp.conf` (echo server sull'host).
+#[cfg(not(feature = "skip_tests"))]
+const TEST_NETTCP: SvcMeta = SvcMeta { bin: b"nettcp", obj: Some((b"tst", b"test/nettcp.bin")), prio: 16, io: &[] };
 // Resolver DNS (N5, ADR-0069): eseguito solo con `net=1`, dopo net4.
 const TEST_DNS: SvcMeta = SvcMeta { bin: b"dnsprobe", obj: Some((b"tst", b"test/dnsprobe.bin")), prio: 16, io: &[] };
 #[cfg(not(feature = "skip_tests"))]
@@ -948,6 +952,7 @@ fn real_main(_sp: u64) -> ! {
             run_test(&TEST_NETUDP, &mut supervised);
             run_test(&TEST_NET3, &mut supervised);
             run_test(&TEST_NET4, &mut supervised);
+            run_test(&TEST_NETTCP, &mut supervised);
             run_test(&TEST_DNS, &mut supervised);
         }
         run_test(&TESTS, &mut supervised);
