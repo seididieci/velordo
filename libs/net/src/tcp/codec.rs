@@ -140,7 +140,7 @@ pub fn checksum_ok(src: &Ipv6Addr, dst: &Ipv6Addr, pkt: &[u8]) -> bool {
 
 /// Calcola il checksum TCP da inserire nell'header.
 /// `segment` è l'intero segmento TCP (header con checksum a zero + payload).
-fn checksum_tcp(src: &Ipv6Addr, dst: &Ipv6Addr, segment: &[u8]) -> u16 {
+pub fn checksum_tcp(src: &Ipv6Addr, dst: &Ipv6Addr, segment: &[u8]) -> u16 {
     let mut sum = 0u32;
     // Pseudo-header IPv6.
     sum = checksum::sum16(&src.0, sum);
