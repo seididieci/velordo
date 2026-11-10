@@ -78,9 +78,12 @@ pub struct Conn {
     // Sequenze.
     iss: u32, // initial send sequence
     irs: u32, // initial receive sequence
-    snd_una: u32, // primo byte non ancora acknowledged
-    snd_nxt: u32, // prossimo byte da inviare
-    rcv_nxt: u32, // prossimo byte atteso
+    snd_una: u32,  // più vecchio byte non confermato (include SYN/FIN)
+    snd_nxt: u32,  // prossimo byte da spedire (include SYN/FIN)
+    rcv_nxt: u32,  // prossimo byte atteso
+    /// Numero di sequenza del **primo byte dati** in `send_buf`. Il buffer
+    /// contiene solo dati: SYN e FIN consumano un seq ma non sono in coda.
+    data_base: u32,
 
     // Finestre.
     snd_wnd: u16, // finestra pubblicata dal receiver (limita snd_nxt - snd_una)
@@ -103,8 +106,9 @@ pub struct Conn {
     fin_recv: bool,   // FIN ricevuto dal peer
     pub closed: bool, // connessione definitivamente chiusa
 
-    listener: bool, // true se creata da new_listener
-    syn_sent: bool, // SYN iniziale già inviato (stato SynSent)
+    listener: bool,   // true se creata da new_listener
+    syn_sent: bool,   // SYN iniziale già inviato (stato SynSent)
+    synack_sent: bool, // SYN+ACK già inviato (figlio di listener, SynRecv)
 }
 
 impl Conn {
@@ -121,6 +125,7 @@ impl Conn {
             snd_una: 0,
             snd_nxt: 0,
             rcv_nxt: 0,
+            data_base: 0,
             snd_wnd: 65535,
             rcv_wnd: RECV_BUF as u16,
             send_buf: VecDeque::new(),
@@ -135,6 +140,7 @@ impl Conn {
             closed: false,
             listener: false,
             syn_sent: false,
+            synack_sent: false,
         }
     }
 
@@ -154,6 +160,7 @@ impl Conn {
         self.iss = iss;
         self.irs = 0;
         self.snd_una = iss;
+        self.data_base = iss;
         self.snd_nxt = iss + 1; // SYN consuma un seq
         self.state = State::SynSent;
         self.rto = RTO_MIN;
@@ -172,6 +179,32 @@ impl Conn {
         self.local_addr = a;
     }
 
+    /// Connessione passiva di un figlio di listener: indirizzi già noti dal
+    /// segmento SYN (N6.1c).
+    pub fn adopt(&mut self, local: Ipv6Addr, remote: Ipv6Addr, remote_port: u16) {
+        self.local_addr = local;
+        self.remote_addr = remote;
+        self.remote_port = remote_port;
+    }
+
+    /// Apre una connessione passiva dopo aver ricevuto la SYN `peer_seq`
+    /// (usata dal figlio del listener): risponde in SYN_RECV.
+    pub fn open_passive(&mut self, _remote: Ipv6Addr, _remote_port: u16, iss: u32, peer_seq: u32, now: u64) {
+        self.iss = iss;
+        self.irs = peer_seq;
+        self.snd_una = iss;
+        self.data_base = iss;
+        self.snd_nxt = iss.wrapping_add(1);
+        self.rcv_nxt = peer_seq.wrapping_add(1);
+        self.state = State::SynRecv;
+        self.rto = RTO_MIN;
+        self.rto_deadline = now + RTO_MIN;
+        self.retries = 0;
+        self.syn_sent = true; // il figlio non deve emettere un SYN attivo
+        self.synack_sent = false; // ...ma deve emettere il SYN+ACK
+        self.closed = false;
+    }
+
     /// Restituisce lo stato attuale.
     pub fn state(&self) -> State {
         self.state
@@ -187,7 +220,13 @@ impl Conn {
     /// entrano davvero in volo (`snd_nxt` = prossimo byte da spedire,
     /// `snd_una` = più vecchio non confermato).
     pub fn write(&mut self, data: &[u8], _now: u64) -> usize {
-        if self.state != State::Established && self.state != State::CloseWait {
+        // In SynSent/SynRecv i dati vengono bufferizzati e partono appena
+        // l'handshake si chiude (è ciò che fa un client che scrive subito
+        // dopo `connect`, come il probe TCP).
+        if !matches!(
+            self.state,
+            State::Established | State::CloseWait | State::SynSent | State::SynRecv
+        ) {
             return 0;
         }
         let max_send = SEND_BUF.saturating_sub(self.send_buf.len());
@@ -354,7 +393,7 @@ impl Conn {
             window,
             0,
         );
-        let payload_start = seq.wrapping_sub(self.snd_una) as usize;
+        let payload_start = seq.wrapping_sub(self.data_base) as usize;
         let max_payload = out.len().saturating_sub(total).min(MSS);
         let available = self.send_buf.len().saturating_sub(payload_start);
         let payload_len = max_payload.min(available);
@@ -404,6 +443,23 @@ impl Conn {
                 self.iss,
                 0,
                 FLAG_SYN,
+            );
+            self.write_ctrl_into(&info, out);
+            return Some(info);
+        }
+
+        // 1b. Figlio di listener: primo SYN+ACK (la SYN è già arrivata).
+        if self.state == State::SynRecv && !self.synack_sent {
+            self.synack_sent = true;
+            self.rto = RTO_MIN;
+            self.rto_deadline = now + RTO_MIN;
+            self.retries = 0;
+            let info = self.ctrl_segment_info(
+                self.local_port,
+                self.remote_port,
+                self.iss,
+                self.rcv_nxt,
+                FLAG_SYN | FLAG_ACK,
             );
             self.write_ctrl_into(&info, out);
             return Some(info);
@@ -522,9 +578,27 @@ impl Conn {
         None
     }
 
+    /// Avanza il fronte di ACK: toglie dal buffer i byte dati confermati
+    /// (`ack - data_base`), al massimo quanti ne contiene. Un ACK che copre
+    /// anche il FIN non tocca i dati.
+    fn ack_advance(&mut self, ack: u32) {
+        if self.send_buf.is_empty() {
+            self.snd_una = ack;
+            self.data_base = ack;
+            return;
+        }
+        let n = ack.wrapping_sub(self.data_base) as usize;
+        let n = n.min(self.send_buf.len());
+        for _ in 0..n {
+            self.send_buf.pop_front();
+        }
+        self.data_base = self.data_base.wrapping_add(n as u32);
+        self.snd_una = ack;
+    }
+
     /// Ritorna true se il FIN è stato acknowledged (snd_una passato fin_seq).
     fn fin_acked(&self) -> bool {
-        self.fin_sent && Self::seq_after(self.snd_una, self.fin_seq)
+        self.fin_sent && !Self::seq_after(self.fin_seq, self.snd_una)
     }
 
     /// Elabora un segmento in arrivo. Ritorna le azioni da compiere.
@@ -583,6 +657,7 @@ impl Conn {
                     self.snd_nxt = self.iss.wrapping_add(1);
                     self.remote_port = hdr.src_port;
                     self.state = State::SynRecv;
+                    self.synack_sent = true;
                     self.rto = RTO_MIN;
                     self.rto_deadline = now + RTO_MIN;
                     self.retries = 0;
@@ -601,7 +676,9 @@ impl Conn {
                     self.irs = hdr.seq;
                     self.rcv_nxt = hdr.seq.wrapping_add(1);
                     self.snd_una = hdr.ack;
-                    self.send_buf.clear();
+                    // Il SYN è confermato: i dati bufferizzati durante
+                    // l'attesa partono da qui (non si buttano).
+                    self.data_base = hdr.ack;
                     self.state = State::Established;
                     self.rto = RTO_MIN;
                     self.rto_deadline = now + RTO_MIN;
@@ -631,7 +708,7 @@ impl Conn {
             State::SynRecv => {
                 if hdr.flags & FLAG_ACK != 0 && Self::seq_after(hdr.ack, self.snd_una) {
                     self.snd_una = hdr.ack;
-                    self.send_buf.clear();
+                    self.data_base = hdr.ack;
                     self.state = State::Established;
                     self.rto = RTO_MIN;
                     self.rto_deadline = now + RTO_MIN;
@@ -658,11 +735,7 @@ impl Conn {
             State::Established => {
                 // Elabora ACK (avanza snd_una).
                 if hdr.flags & FLAG_ACK != 0 && Self::seq_after(hdr.ack, self.snd_una) {
-                    let acked = hdr.ack.wrapping_sub(self.snd_una);
-                    self.snd_una = hdr.ack;
-                    for _ in 0..acked {
-                        self.send_buf.pop_front();
-                    }
+                    self.ack_advance(hdr.ack);
                     self.rto = RTO_MIN;
                     self.rto_deadline = now + RTO_MIN;
                     self.retries = 0;
@@ -705,11 +778,7 @@ impl Conn {
             }
             State::FinWait1 => {
                 if hdr.flags & FLAG_ACK != 0 && Self::seq_after(hdr.ack, self.snd_una) {
-                    let acked = hdr.ack.wrapping_sub(self.snd_una);
-                    self.snd_una = hdr.ack;
-                    for _ in 0..acked {
-                        self.send_buf.pop_front();
-                    }
+                    self.ack_advance(hdr.ack);
                     self.rto = RTO_MIN;
                     self.rto_deadline = now + RTO_MIN;
                     self.retries = 0;
@@ -759,11 +828,7 @@ impl Conn {
             State::CloseWait => {
                 // In attesa che il chiamante invochi close().
                 if hdr.flags & FLAG_ACK != 0 && Self::seq_after(hdr.ack, self.snd_una) {
-                    let acked = hdr.ack.wrapping_sub(self.snd_una);
-                    self.snd_una = hdr.ack;
-                    for _ in 0..acked {
-                        self.send_buf.pop_front();
-                    }
+                    self.ack_advance(hdr.ack);
                     self.rto = RTO_MIN;
                     self.rto_deadline = now + RTO_MIN;
                     self.retries = 0;
@@ -771,8 +836,7 @@ impl Conn {
             }
             State::LastAck => {
                 if hdr.flags & FLAG_ACK != 0 && Self::seq_after(hdr.ack, self.snd_una) {
-                    self.snd_una = hdr.ack;
-                    self.send_buf.clear();
+                    self.ack_advance(hdr.ack);
                     self.state = State::Closed;
                     self.closed = true;
                     out.closed = true;
@@ -977,6 +1041,7 @@ mod tests {
         c.rcv_nxt = 2001;
         c.snd_una = 1001;
         c.snd_nxt = 1001;
+        c.data_base = 1001;
         c.rto_deadline = 10000; // lontano, niente RTO
 
         c.write(b"abcdefghij", 0);
@@ -1007,6 +1072,7 @@ mod tests {
         c.state = State::Established;
         c.snd_una = 1000;
         c.snd_nxt = 1000;
+        c.data_base = 1000;
         c.rcv_nxt = 2000;
         c.rto_deadline = 10000;
 
@@ -1066,6 +1132,7 @@ mod tests {
         c.state = State::Established;
         c.snd_una = 0;
         c.snd_nxt = 0;
+        c.data_base = 0;
         c.rto_deadline = 10000;
 
         let data = [0xAAu8; SEND_BUF * 2];
@@ -1121,6 +1188,7 @@ mod tests {
         c.state = State::Established;
         c.snd_una = 1000;
         c.snd_nxt = 1000;
+        c.data_base = 1000;
         c.rcv_nxt = 2000;
         c.rto_deadline = u64::MAX / 2;
 
@@ -1197,6 +1265,7 @@ mod tests {
         c.state = State::CloseWait;
         c.snd_una = 1000;
         c.snd_nxt = 1000;
+        c.data_base = 1000;
         c.rcv_nxt = 2000;
         c.rto_deadline = 10000;
 

@@ -15,6 +15,8 @@ use crate::udp;
 const NEIGHBORS: usize = 8;
 /// Connessioni TCP concorrenti nel core (N6.1b).
 const TCP_CONNS: usize = 16;
+/// Figli simultanei per un listener (N6.1c).
+const TCP_BACKLOG: usize = 4;
 /// 1 s a 100 Hz.
 const RS_INTERVAL: u64 = 100;
 const ECHO_INTERVAL: u64 = 100;
@@ -35,15 +37,19 @@ pub trait FrameSink {
     /// Consegna un datagramma UDP localmente (loopback o indirizzo proprio):
     /// nessun frame Ethernet viene emesso. Default: no-op.
     fn deliver(&mut self, _src: &Ipv6Addr, _dst: &Ipv6Addr, _src_port: u16, _dst_port: u16, _payload: &[u8]) {}
-    /// Segnala un cambiamento su una connessione TCP identificata dalla
-    /// **porta locale** (N6.1b). Il dato vero si legge con `Net::tcp_read`;
+    /// Segnala un cambiamento su una connessione TCP identificata dall'**id**
+    /// di connessione (N6.1b/c). Il dato vero si legge con `Net::tcp_read`;
     /// qui arriva solo la notifica, così il sink non deve chiamare `Net`.
-    fn tcp_signal(&mut self, _local_port: u16, _signal: TcpSignal) {}
+    fn tcp_signal(&mut self, _id: u8, _signal: TcpSignal) {}
 }
 
 /// Evento di una connessione TCP verso il proprietario dell'endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TcpSignal {
+    /// Una SYN è arrivata su un listener: è nato un figlio in SYN_RECV.
+    /// Porta la **porta locale** del listener (il servizio crea l'endpoint
+    /// del figlio e manda `EV_ACCEPT`).
+    Accepted(u16),
     /// Handshake completato (`EV_SYNACK` lato servizio).
     Established,
     /// Ci sono byte da leggere (`EV_DATA`).
@@ -104,6 +110,9 @@ pub struct Net {
     echo_done: bool,
     tcp_seq_counter: u32,
     tcp: [Option<tcp::Conn>; TCP_CONNS],
+    /// Buffer di serializzazione dei segmenti in uscita: sull'heap, perché
+    /// 1,4 KiB di stack per chiamata sbordano lo stack user da 16 KiB.
+    tcp_tx: alloc::vec::Vec<u8>,
 }
 
 impl Net {
@@ -128,6 +137,7 @@ impl Net {
             echo_done: false,
             tcp_seq_counter: 0x1000,
             tcp: core::array::from_fn(|_| None),
+            tcp_tx: alloc::vec![0u8; 1500 - ipv6::IPV6_HDR - eth::ETH_HDR],
         };
         // IID randomizzato (RFC 4941) con bit U/L = locale.
         let iid = n.next_rand() | 0x0200_0000_0000_0000;
@@ -728,7 +738,12 @@ impl Net {
         sink.send(&frame[..off + len]);
     }
 
-    // ── TCP (N6.1b): tabella connessioni, input, output ──────────────
+    // ── TCP (N6.1b/c): tabella connessioni, input, output ───────────
+    //
+    // Le connessioni si identificano con un **id** (indice di slot). La
+    // chiave non può essere la porta locale: un listener e i suoi figli
+    // condividono la porta (il client ha chiamato *quella*), e distinguerli
+    // per porta renderebbe impossibile servire due client in parallelo.
 
     /// Indirizzo sorgente per uscire verso `dst` (stessa regola di UDP/TCP).
     /// Il loopback usa `::1`: è l'indirizzo a cui il peer ha indirizzato i
@@ -745,107 +760,101 @@ impl Net {
         }
     }
 
-    /// Connessione (non in ascolto) con porta locale `local_port`.
-    /// Il criterio è lo **stato**, non il flag di creazione: un listener che
-    /// ha accettato una SYN è a tutti gli effetti una connessione (N6.1b).
-    fn tcp_slot(&self, local_port: u16) -> Option<usize> {
+    fn tcp_free_slot(&self) -> Option<usize> {
+        self.tcp.iter().position(|c| c.is_none())
+    }
+
+    /// Connessione (non in ascolto) su `local_port` con questo peer.
+    fn tcp_match(&self, local_port: u16, remote: &Ipv6Addr, remote_port: u16) -> Option<usize> {
         self.tcp.iter().position(|c| {
-            c.as_ref()
-                .is_some_and(|c| c.local_port == local_port && c.state() != tcp::State::Listen)
+            c.as_ref().is_some_and(|c| {
+                c.local_port == local_port
+                    && c.state() != tcp::State::Listen
+                    && c.remote_port == remote_port
+                    && c.remote_addr == *remote
+            })
         })
     }
 
-    fn tcp_listen_slot(&self, local_port: u16) -> Option<usize> {
+    /// Listener su `local_port`.
+    fn tcp_listener(&self, local_port: u16) -> Option<usize> {
         self.tcp.iter().position(|c| {
             c.as_ref()
                 .is_some_and(|c| c.local_port == local_port && c.state() == tcp::State::Listen)
         })
     }
 
-    /// Apre una connessione attiva verso `dst:dst_port` sulla porta locale
-    /// `local_port`. `false` se la porta è già in uso o la tabella è piena.
-    pub fn tcp_connect(&mut self, dst: Ipv6Addr, dst_port: u16, local_port: u16) -> bool {
-        if local_port == 0 || self.tcp_slot(local_port).is_some() {
-            return false;
+    /// Apre una connessione attiva verso `dst:dst_port`. Ritorna l'id.
+    pub fn tcp_connect(&mut self, dst: Ipv6Addr, dst_port: u16, local_port: u16) -> Option<u8> {
+        if local_port == 0 || self.tcp_match(local_port, &dst, dst_port).is_some() {
+            return None;
         }
-        let Some(free) = self.tcp.iter().position(|c| c.is_none()) else {
-            return false;
-        };
+        let slot = self.tcp_free_slot()?;
         let iss = self.tcp_next_seq();
         let src = self.src_for(dst);
         let mut c = tcp::Conn::new_client(local_port);
         c.set_local_addr(src);
         c.open(dst, dst_port, iss, 0);
-        self.tcp[free] = Some(c);
-        true
+        self.tcp[slot] = Some(c);
+        Some(slot as u8)
     }
 
-    /// Apre un listener sulla porta locale `local_port` (N6.1c).
-    pub fn tcp_listen(&mut self, local_port: u16) -> bool {
-        if local_port == 0 || self.tcp_slot(local_port).is_some() || self.tcp_listen_slot(local_port).is_some() {
-            return false;
+    /// Apre un listener su `local_port`. Ritorna l'id.
+    pub fn tcp_listen(&mut self, local_port: u16) -> Option<u8> {
+        if local_port == 0 || self.tcp_listener(local_port).is_some() {
+            return None;
         }
-        let Some(free) = self.tcp.iter().position(|c| c.is_none()) else {
-            return false;
-        };
+        let slot = self.tcp_free_slot()?;
         let mut c = tcp::Conn::new_listener(local_port);
         c.set_local_addr(self.link_local);
-        self.tcp[free] = Some(c);
-        true
+        self.tcp[slot] = Some(c);
+        Some(slot as u8)
     }
 
-    /// Stato della connessione con porta locale `local_port`.
-    pub fn tcp_state(&self, local_port: u16) -> Option<tcp::State> {
-        let i = self.tcp_slot(local_port)?;
-        self.tcp[i].as_ref().map(|c| c.state())
+    fn tcp_conn(&self, id: u8) -> Option<&tcp::Conn> {
+        self.tcp.get(id as usize).and_then(|c| c.as_ref())
     }
 
-    /// Byte leggibili dalla connessione (0 se non esiste).
-    pub fn tcp_ready(&self, local_port: u16) -> usize {
-        match self.tcp_slot(local_port) {
-            Some(i) => self.tcp[i].as_ref().map(|c| c.readable()).unwrap_or(0),
-            None => 0,
-        }
+    /// Stato della connessione `id`.
+    pub fn tcp_state(&self, id: u8) -> Option<tcp::State> {
+        self.tcp_conn(id).map(|c| c.state())
+    }
+
+    /// Byte leggibili sulla connessione `id`.
+    pub fn tcp_ready(&self, id: u8) -> usize {
+        self.tcp_conn(id).map(|c| c.readable()).unwrap_or(0)
     }
 
     /// Bufferizza `data` per l'invio. Ritorna i byte accettati.
-    pub fn tcp_write(&mut self, local_port: u16, data: &[u8], now: u64) -> usize {
-        match self.tcp_slot(local_port) {
-            Some(i) => match self.tcp[i].as_mut() {
-                Some(c) => c.write(data, now),
-                None => 0,
-            },
+    pub fn tcp_write(&mut self, id: u8, data: &[u8], now: u64) -> usize {
+        match self.tcp.get_mut(id as usize).and_then(|c| c.as_mut()) {
+            Some(c) => c.write(data, now),
             None => 0,
         }
     }
 
     /// Legge i byte ricevuti in ordine.
-    pub fn tcp_read(&mut self, local_port: u16, out: &mut [u8]) -> usize {
-        match self.tcp_slot(local_port) {
-            Some(i) => match self.tcp[i].as_mut() {
-                Some(c) => c.read(out),
-                None => 0,
-            },
+    pub fn tcp_read(&mut self, id: u8, out: &mut [u8]) -> usize {
+        match self.tcp.get_mut(id as usize).and_then(|c| c.as_mut()) {
+            Some(c) => c.read(out),
             None => 0,
         }
     }
 
     /// Chiusura ordinata (FIN).
-    pub fn tcp_close(&mut self, local_port: u16) {
-        if let Some(i) = self.tcp_slot(local_port) {
-            if let Some(c) = self.tcp[i].as_mut() {
-                c.close();
-            }
+    pub fn tcp_close(&mut self, id: u8) {
+        if let Some(c) = self.tcp.get_mut(id as usize).and_then(|c| c.as_mut()) {
+            c.close();
         }
     }
 
     /// Abort: RST e slot libero.
-    pub fn tcp_abort(&mut self, local_port: u16) {
-        if let Some(i) = self.tcp_slot(local_port) {
-            if let Some(c) = self.tcp[i].as_mut() {
-                c.abort();
-            }
-            self.tcp[i] = None;
+    pub fn tcp_abort(&mut self, id: u8) {
+        if let Some(c) = self.tcp.get_mut(id as usize).and_then(|c| c.as_mut()) {
+            c.abort();
+        }
+        if let Some(slot) = self.tcp.get_mut(id as usize) {
+            *slot = None;
         }
     }
 
@@ -895,9 +904,8 @@ impl Net {
         self.emit_tcp(src, dst, seg, sink);
     }
 
-    /// Segmento in ingresso (NEXT_TCP). Verifica il checksum, trova la
-    /// connessione per porta locale, delega a `Conn::on_segment`, emette la
-    /// risposta e segnala gli eventi al sink.
+    /// Segmento in ingresso (NEXT_TCP): checksum, connessione per (porta,
+    /// peer) o listener, `Conn::on_segment`, risposta ed eventi.
     fn tcp_input(
         &mut self,
         src: &Ipv6Addr,
@@ -915,45 +923,80 @@ impl Net {
             events(Event::Dropped("tcp checksum"));
             return;
         }
-        let Some(i) = self
-            .tcp_slot(hdr.dst_port)
-            .or_else(|| self.tcp_listen_slot(hdr.dst_port))
-        else {
-            // Nessuna connessione: RST, ma mai in risposta a un RST (evita il
-            // ping-pong, RFC 793 §3.4).
-            if hdr.flags & tcp::FLAG_RST == 0 {
-                let mut seg = [0u8; 20];
-                let len = tcp::write_checked(
-                    &mut seg,
-                    hdr.dst_port,
-                    hdr.src_port,
-                    0,
-                    hdr.seq.wrapping_add(1),
-                    tcp::FLAG_RST | tcp::FLAG_ACK,
-                    0,
-                    dst,
-                    src,
-                    &[],
-                );
-                let seg_copy = seg[..len].to_vec();
-                self.tcp_send(*dst, *src, &seg_copy, now, sink, events, depth);
+
+        // Connessione esistente, oppure listener che accetta una SYN.
+        let slot = match self.tcp_match(hdr.dst_port, src, hdr.src_port) {
+            Some(i) => Some(i),
+            None => {
+                let Some(l) = self.tcp_listener(hdr.dst_port) else {
+                    // Nessuno in ascolto: RST (mai in risposta a un RST).
+                    if hdr.flags & tcp::FLAG_RST == 0 {
+                        let mut seg = [0u8; 20];
+                        let len = tcp::write_checked(
+                            &mut seg,
+                            hdr.dst_port,
+                            hdr.src_port,
+                            0,
+                            hdr.seq.wrapping_add(1),
+                            tcp::FLAG_RST | tcp::FLAG_ACK,
+                            0,
+                            dst,
+                            src,
+                            &[],
+                        );
+                        let seg_copy = seg[..len].to_vec();
+                        self.tcp_send(*dst, *src, &seg_copy, now, sink, events, depth);
+                    }
+                    return;
+                };
+                if hdr.flags & tcp::FLAG_SYN == 0 {
+                    return; // un listener risponde solo alle SYN
+                }
+                // Backlog: al massimo `TCP_BACKLOG` figli per listener.
+                let children = self.tcp.iter().flatten().filter(|c| {
+                    c.local_port == hdr.dst_port && c.state() != tcp::State::Listen
+                }).count();
+                if children >= TCP_BACKLOG {
+                    if hdr.flags & tcp::FLAG_RST == 0 {
+                        let mut seg = [0u8; 20];
+                        let len = tcp::write_checked(
+                            &mut seg,
+                            hdr.dst_port,
+                            hdr.src_port,
+                            0,
+                            hdr.seq.wrapping_add(1),
+                            tcp::FLAG_RST | tcp::FLAG_ACK,
+                            0,
+                            dst,
+                            src,
+                            &[],
+                        );
+                        let seg_copy = seg[..len].to_vec();
+                        self.tcp_send(*dst, *src, &seg_copy, now, sink, events, depth);
+                    }
+                    return;
+                }
+                let Some(free) = self.tcp_free_slot() else {
+                    return;
+                };
+                let iss = self.tcp_next_seq();
+                let mut child = tcp::Conn::new_client(hdr.dst_port);
+                child.adopt(*dst, *src, hdr.src_port);
+                child.open_passive(*src, hdr.src_port, iss, hdr.seq, now);
+                self.tcp[free] = Some(child);
+                // Il figlio, entrando in SYN_RECV, produce SYN+ACK da solo.
+                sink.tcp_signal(free as u8, TcpSignal::Accepted(hdr.dst_port));
+                Some(free)
             }
-            return;
         };
+        let Some(i) = slot else { return };
+
         let Some(mut conn) = self.tcp[i].take() else {
             return;
         };
         conn.set_local_addr(*dst);
-        if conn.remote_port == 0 {
-            conn.remote_port = hdr.src_port;
-            conn.remote_addr = *src;
-        } else if conn.remote_port != hdr.src_port || conn.remote_addr != *src {
-            // Connessione di un altro peer: non toccarla.
-            self.tcp[i] = Some(conn);
-            return;
-        }
         let out = conn.on_segment(&hdr, body, now);
-        let port = conn.local_port;
+        let id = i as u8;
         let closed = conn.closed;
         if closed {
             self.tcp[i] = None;
@@ -978,54 +1021,58 @@ impl Net {
             self.tcp_send(*dst, *src, &seg_copy, now, sink, events, depth);
         }
         if out.established {
-            sink.tcp_signal(port, TcpSignal::Established);
+            sink.tcp_signal(id, TcpSignal::Established);
         }
         if out.data.is_some() {
-            sink.tcp_signal(port, TcpSignal::Data);
+            sink.tcp_signal(id, TcpSignal::Data);
         }
         if out.fin_recv {
-            sink.tcp_signal(port, TcpSignal::Fin);
+            sink.tcp_signal(id, TcpSignal::Fin);
         }
         if out.rst {
-            sink.tcp_signal(port, TcpSignal::Reset);
+            sink.tcp_signal(id, TcpSignal::Reset);
         }
     }
 
     /// Drena la coda di trasmissione di tutte le connessioni: SYN, dati,
-    /// ritrasmissioni e FIN (N6.1b). Va chiamato a ogni tick e dopo una
-    /// `tcp_write`.
-    pub fn tcp_poll(&mut self, now: u64, sink: &mut dyn FrameSink) {
+    /// ritrasmissioni e FIN. Va chiamato a ogni tick e dopo una `tcp_write`.
+    pub fn tcp_poll(&mut self, now: u64, sink: &mut dyn FrameSink, events: &mut dyn FnMut(Event)) {
         for i in 0..TCP_CONNS {
             let Some(mut conn) = self.tcp[i].take() else {
                 continue;
             };
-            let port = conn.local_port;
+            let id = i as u8;
             if conn.closed {
-                sink.tcp_signal(port, TcpSignal::Reset);
+                sink.tcp_signal(id, TcpSignal::Reset);
+                continue;
+            }
+            let dst = conn.remote_addr;
+            if conn.state() == tcp::State::Listen {
+                // Un listener non trasmette: resta in tabella.
+                self.tcp[i] = Some(conn);
                 continue;
             }
             // L'indirizzo locale dipende dal next-hop e serve al checksum:
             // va impostato prima di serializzare.
-            let dst = conn.remote_addr;
             let src = self.src_for(dst);
             conn.set_local_addr(src);
-            let mut buf = [0u8; 1500 - ipv6::IPV6_HDR - eth::ETH_HDR];
+            let mut buf = core::mem::take(&mut self.tcp_tx);
             let seg = conn.next_tx(&mut buf, now);
             let closed = conn.closed;
             if !closed {
                 self.tcp[i] = Some(conn);
             }
+            self.tcp_tx = buf;
             if let Some(info) = seg {
-                let seg_copy = buf[..info.len].to_vec();
-                let mut ev = |_e: Event| {};
-                self.tcp_send(src, dst, &seg_copy, now, sink, &mut ev, 0);
+                let seg_copy = self.tcp_tx[..info.len].to_vec();
+
+                self.tcp_send(src, dst, &seg_copy, now, sink, events, 0);
             }
             if closed {
-                sink.tcp_signal(port, TcpSignal::Reset);
+                sink.tcp_signal(id, TcpSignal::Reset);
             }
         }
     }
-
 
     fn neighbor_add(&mut self, addr: Ipv6Addr, mac: MacAddr, now: u64) {
         for nb in self.neighbors.iter_mut() {
@@ -1081,7 +1128,7 @@ mod tests {
 
     struct VecSink {
         frames: Vec<Vec<u8>>,
-        signals: Vec<(u16, TcpSignal)>,
+        signals: Vec<(u8, TcpSignal)>,
         loops: Vec<(u16, u16, Vec<u8>)>,
         deliver_tcp: bool,
     }
@@ -1089,8 +1136,8 @@ mod tests {
         fn send(&mut self, frame: &[u8]) {
             self.frames.push(frame.to_vec());
         }
-        fn tcp_signal(&mut self, local_port: u16, signal: TcpSignal) {
-            self.signals.push((local_port, signal));
+        fn tcp_signal(&mut self, id: u8, signal: TcpSignal) {
+            self.signals.push((id, signal));
         }
         fn deliver(&mut self, src: &Ipv6Addr, dst: &Ipv6Addr, sp: u16, dp: u16, payload: &[u8]) {
             if self.deliver_tcp {
@@ -1301,19 +1348,14 @@ mod tests {
         assert_eq!(n.neighbor_lookup(router), None);
     }
 
-    // ── TCP wiring (N6.1b) ──────────────────────────────────────────
+    // ── TCP wiring (N6.1b/c) ────────────────────────────────────────
 
     /// Net con link up e nessun ping: serve solo il TCP.
     fn tcp_net() -> Net {
         let mut c = cfg();
         c.ping = false;
         let mut n = Net::new(c);
-        let mut sink = VecSink {
-            frames: Vec::new(),
-            signals: Vec::new(),
-            loops: Vec::new(),
-            deliver_tcp: false,
-        };
+        let mut sink = new_sink();
         n.link_up(0, &mut sink, &mut |_| {});
         n
     }
@@ -1327,10 +1369,10 @@ mod tests {
         }
     }
 
-    /// Chiama `tcp_poll` fino a `max` volte (loopback sincrono).
+    /// Chiama `tcp_poll` più volte (loopback sincrono).
     fn poll_n(n: &mut Net, sink: &mut VecSink, now: u64, max: usize) {
         for _ in 0..max {
-            n.tcp_poll(now, sink);
+            n.tcp_poll(now, sink, &mut |_| {});
         }
     }
 
@@ -1338,84 +1380,142 @@ mod tests {
     fn tcp_loopback_handshake_e_dati() {
         let mut n = tcp_net();
         let mut sink = new_sink();
-        // Server in ascolto su 9000, client verso ::1:9000 dalla porta 9001.
-        assert!(n.tcp_listen(9000));
-        assert!(n.tcp_connect(Ipv6Addr::LOOPBACK, 9000, 9001));
+        let srv = n.tcp_listen(9000).expect("listener");
+        poll_n(&mut n, &mut sink, 0, 2);
+        let cli = n.tcp_connect(Ipv6Addr::LOOPBACK, 9000, 9001).expect("connect");
 
-        // Il SYN parte, viene rientrato e produce SYN+ACK, poi l'ACK del
-        // client completa l'handshake.
-        poll_n(&mut n, &mut sink, 0, 4);
+        poll_n(&mut n, &mut sink, 0, 6);
 
-        assert_eq!(n.tcp_state(9001), Some(tcp::State::Established));
+        assert_eq!(n.tcp_state(cli), Some(tcp::State::Established));
+        assert_eq!(n.tcp_state(srv), Some(tcp::State::Listen), "il listener resta in ascolto");
         assert!(
             sink.frames.is_empty(),
             "loopback non deve emettere frame Ethernet"
         );
 
-        // Dati client -> server.
-        assert_eq!(n.tcp_write(9001, b"ciao mondo", 0), 10);
+        // Il figlio accettato è una connessione distinta dall'id del listener.
+        let child = sink
+            .signals
+            .iter()
+            .find(|(_, s)| matches!(s, TcpSignal::Accepted(_)))
+            .map(|(id, _)| *id)
+            .expect("Accepted");
+        assert_ne!(child, srv);
+        assert_eq!(n.tcp_state(child), Some(tcp::State::Established));
+
+        // Dati client -> figlio del server.
+        assert_eq!(n.tcp_write(cli, b"ciao mondo", 0), 10);
         poll_n(&mut n, &mut sink, 0, 4);
         let mut buf = [0u8; 32];
-        let got = n.tcp_read(9000, &mut buf);
+        let got = n.tcp_read(child, &mut buf);
         assert_eq!(&buf[..got], b"ciao mondo");
 
-        // Echo: il server risponde e il client legge.
-        assert_eq!(n.tcp_write(9000, b"echo!", 0), 5);
+        // Echo: il figlio risponde e il client legge.
+        assert_eq!(n.tcp_write(child, b"echo!", 0), 5);
         poll_n(&mut n, &mut sink, 0, 4);
-        let got = n.tcp_read(9001, &mut buf);
+        let got = n.tcp_read(cli, &mut buf);
         assert_eq!(&buf[..got], b"echo!");
 
-        // Segnali: almeno un Established e un Data per lato.
         assert!(sink
             .signals
             .iter()
-            .any(|(p, s)| *p == 9001 && *s == TcpSignal::Established));
+            .any(|(id, s)| *id == cli && *s == TcpSignal::Established));
         assert!(sink
             .signals
             .iter()
-            .any(|(p, s)| *p == 9000 && *s == TcpSignal::Data));
+            .any(|(id, s)| *id == child && *s == TcpSignal::Data));
+    }
+
+    #[test]
+    fn tcp_scrittura_prima_dell_handshake() {
+        // Un client che scrive subito dopo `connect` (come il probe net3):
+        // i dati vanno bufferizzati e partono a handshake chiuso.
+        let mut n = tcp_net();
+        let mut sink = new_sink();
+        let _srv = n.tcp_listen(9400).expect("listener");
+        poll_n(&mut n, &mut sink, 0, 2);
+        let cli = n.tcp_connect(Ipv6Addr::LOOPBACK, 9400, 9401).expect("connect");
+        assert_eq!(n.tcp_write(cli, b"early", 0), 5);
+        poll_n(&mut n, &mut sink, 0, 8);
+        assert_eq!(n.tcp_state(cli), Some(tcp::State::Established));
+        let child = sink
+            .signals
+            .iter()
+            .find(|(_, s)| matches!(s, TcpSignal::Accepted(_)))
+            .map(|(id, _)| *id)
+            .expect("Accepted");
+        let mut buf = [0u8; 16];
+        let got = n.tcp_read(child, &mut buf);
+        assert_eq!(&buf[..got], b"early", "i dati bufferizzati devono partire");
     }
 
     #[test]
     fn tcp_porta_chiusa_risponde_rst() {
         let mut n = tcp_net();
         let mut sink = new_sink();
-        // Client verso una porta senza listener.
-        assert!(n.tcp_connect(Ipv6Addr::LOOPBACK, 9, 9002));
+        let cli = n.tcp_connect(Ipv6Addr::LOOPBACK, 9, 9002).expect("connect");
         poll_n(&mut n, &mut sink, 0, 4);
-        // Il RST rientra nel client: la connessione muore.
         assert!(
             sink.signals
                 .iter()
-                .any(|(p, s)| *p == 9002 && *s == TcpSignal::Reset),
+                .any(|(id, s)| *id == cli && *s == TcpSignal::Reset),
             "il client deve ricevere un reset: {:?}",
             sink.signals
         );
-        assert!(n.tcp_state(9002).is_none(), "slot liberato");
+        assert!(n.tcp_state(cli).is_none(), "slot liberato");
     }
 
     #[test]
     fn tcp_close_ordinato_loopback() {
         let mut n = tcp_net();
         let mut sink = new_sink();
-        assert!(n.tcp_listen(9100));
-        assert!(n.tcp_connect(Ipv6Addr::LOOPBACK, 9100, 9101));
-        poll_n(&mut n, &mut sink, 0, 4);
-        assert_eq!(n.tcp_state(9101), Some(tcp::State::Established));
+        let srv = n.tcp_listen(9100).expect("listener");
+        poll_n(&mut n, &mut sink, 0, 2);
+        let cli = n.tcp_connect(Ipv6Addr::LOOPBACK, 9100, 9101).expect("connect");
+        poll_n(&mut n, &mut sink, 0, 6);
+        let child = sink
+            .signals
+            .iter()
+            .find(|(_, s)| matches!(s, TcpSignal::Accepted(_)))
+            .map(|(id, _)| *id)
+            .expect("Accepted");
+        assert_eq!(n.tcp_state(cli), Some(tcp::State::Established));
+        assert_eq!(n.tcp_state(child), Some(tcp::State::Established));
+        assert_eq!(n.tcp_state(srv), Some(tcp::State::Listen));
 
-        // Chiusura del client: FIN -> il server va in CLOSE_WAIT e segnala Fin.
-        n.tcp_close(9101);
+        // Chiusura del client: FIN -> il figlio va in CLOSE_WAIT e segnala Fin.
+        n.tcp_close(cli);
         poll_n(&mut n, &mut sink, 0, 4);
-        assert_eq!(n.tcp_state(9100), Some(tcp::State::CloseWait));
+        assert_eq!(n.tcp_state(child), Some(tcp::State::CloseWait));
         assert!(sink
             .signals
             .iter()
-            .any(|(p, s)| *p == 9100 && *s == TcpSignal::Fin));
+            .any(|(id, s)| *id == child && *s == TcpSignal::Fin));
 
-        // Anche il server chiude: chiusura completa.
-        n.tcp_close(9100);
+        // Anche il server chiude: il client passa in TIME_WAIT.
+        n.tcp_close(child);
         poll_n(&mut n, &mut sink, 0, 6);
-        assert_eq!(n.tcp_state(9101), Some(tcp::State::TimeWait).or(None));
+        assert_eq!(n.tcp_state(cli), Some(tcp::State::TimeWait));
+    }
+
+    #[test]
+    fn tcp_listener_backlog_bounded() {
+        let mut n = tcp_net();
+        let mut sink = new_sink();
+        let srv = n.tcp_listen(9200).expect("listener");
+        poll_n(&mut n, &mut sink, 0, 2);
+        // Più client di quanti il backlog consente (TCP_BACKLOG).
+        let mut ok = 0;
+        for k in 0..(TCP_BACKLOG as u16 + 2) {
+            let port = 9300 + k;
+            let c = n.tcp_connect(Ipv6Addr::LOOPBACK, 9200, port).expect("connect");
+            poll_n(&mut n, &mut sink, 0, 3);
+            if n.tcp_state(c) == Some(tcp::State::Established) {
+                ok += 1;
+            }
+        }
+        assert_eq!(ok, TCP_BACKLOG, "il backlog limita i figli simultanei");
+        assert_eq!(n.tcp_state(srv), Some(tcp::State::Listen));
     }
 
     #[test]
@@ -1427,18 +1527,16 @@ mod tests {
         let mut n = Net::new(c);
         let mut sink = new_sink();
         n.link_up(0, &mut sink, &mut |_| {});
-        // RA dal router per avere il next-hop.
         let router = Ipv6Addr::parse("fe80::1").unwrap();
         let rmac = MacAddr([0x02, 0, 0, 0, 0, 0x02]);
         let ra = ra_frame(router, rmac, [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0]);
         n.on_frame(&ra, 0, &mut sink, &mut |_| {});
 
         let dst = Ipv6Addr::parse("2001:db8::42").unwrap();
-        assert!(n.tcp_connect(dst, 853, 9102));
+        assert!(n.tcp_connect(dst, 853, 9102).is_some());
         sink.frames.clear();
-        n.tcp_poll(0, &mut sink);
+        n.tcp_poll(0, &mut sink, &mut |_| {});
         assert_eq!(sink.frames.len(), 1, "SYN emesso verso il router");
-        // Il frame è IPv6 + TCP con flag SYN.
         let (_, ip_payload) = eth::parse(&sink.frames[0]).unwrap();
         let (_, ip) = ipv6::parse(ip_payload).unwrap();
         let (hdr, _) = tcp::parse(ip).unwrap();
@@ -1446,7 +1544,7 @@ mod tests {
 
         // Nessuna risposta: dopo l'RTO rieccolo.
         sink.frames.clear();
-        n.tcp_poll(101, &mut sink);
+        n.tcp_poll(101, &mut sink, &mut |_| {});
         assert_eq!(sink.frames.len(), 1, "SYN ritrasmesso");
     }
 }

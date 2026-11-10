@@ -106,51 +106,31 @@ fn real_main(_sp: u64) -> ! {
         write_volatile(ring_base.add(NET_EP_TX_RING_OFF + 4) as *mut u32, 0);
     }
 
-    // Scrive nello slot TX 0: solo indirizzo destino + evento SYN.
-    // net costruirà il segmento TCP completo (header + checksum).
-    let total = SLOT_META; // nessun payload per SYN
-    let p = unsafe {
-        ring_base.add(NET_EP_TX_RING_OFF + NET_EP_RING_HDR)
-    };
-    unsafe {
-        write_volatile(p as *mut u16, total as u16);
-        core::ptr::copy_nonoverlapping(DST_ADDR.as_ptr(), p.add(2), 16);
-        write_volatile(p.add(18) as *mut u16, DST_PORT);
-        write_volatile(p.add(20) as *mut u16, local_port);
-        write_volatile(p.add(22) as *mut u8, EV_SYN);
-    }
-    fence(Ordering::Release);
-    unsafe {
-        write_volatile(
-            ring_base.add(NET_EP_TX_RING_OFF + 4) as *mut u32,
-            1, // tail = 1
-        )
-    };
-
-    // Notifica net di trasmettere il segmento SYN (slot 0).
-    // Se NET_EP_TX risponde OK, il segmento è stato accettato dal servizio:
-    // l'endpoint TCP è funzionante e può inviare dati.
-    let reply = civis::send(net_chan, NET_EP_TX, ep_id as u64, 0);
-    match reply {
-        Ok(r) if r.w0 == 0 => {
-            println!("[net3] segmento SYN accettato dal servizio: PASS");
-            all_ok = true;
-        }
+    // N6.1c: il handshake è del core. Inviamo un payload: il servizio apre la
+    // connessione al primo `NET_EP_TX`, il core fa SYN/SYN+ACK e poi spedisce
+    // i dati. Il riscontro dell'handshake arriva come evento `EV_SYNACK`.
+    const HELLO: &[u8] = b"net3-hello";
+    let mut tx_slot_idx = 0usize;
+    write_slot(ring_base, tx_slot_idx, DST_PORT, EV_DATA, HELLO);
+    tx_slot_idx += 1;
+    match civis::send(net_chan, NET_EP_TX, ep_id as u64, 0) {
+        Ok(r) if r.w0 == 0 => println!("[net3] payload accettato dal servizio: PASS"),
         Ok(r) => {
-            println!("[net3] segmento SYN rifiutato dal servizio (w0={}): FAIL", r.w0);
+            println!("[net3] payload rifiutato dal servizio (w0={}): FAIL", r.w0);
             all_ok = false;
         }
         Err(_) => {
-            println!("[net3] invio SYN fallito (IPC): FAIL");
+            println!("[net3] invio payload fallito (IPC): FAIL");
             all_ok = false;
         }
     }
 
-    // Aspetta risposta (SYN+ACK) nel RX ring.
+    // Attende SYNACK (handshake) e poi l'eco dei dati.
     let mut rx_head: u32 = 0;
     let mut synack_ok = false;
+    let mut echo_ok = false;
     let mut retries = 0u32;
-    for _ in 0..MAX_RETRIES {
+    while retries < MAX_RETRIES && !(synack_ok && echo_ok) {
         retries += 1;
         let rx_tail = unsafe { read_volatile(ring_base.add(NET_EP_RX_RING_OFF + 4) as *const u32) };
         if rx_head != rx_tail {
@@ -160,33 +140,38 @@ fn real_main(_sp: u64) -> ! {
             };
             let total = unsafe { read_volatile(p as *const u16) } as usize;
             if total >= SLOT_META {
-                let mut src_addr = [0u8; 16];
-                unsafe {
-                    core::ptr::copy_nonoverlapping(p.add(2), src_addr.as_mut_ptr(), 16);
-                }
                 let src_port = unsafe { read_volatile(p.add(18) as *const u16) };
-                let dst_port = unsafe { read_volatile(p.add(20) as *const u16) };
                 let event = unsafe { read_volatile(p.add(22) as *const u8) };
-
+                let plen = total - SLOT_META;
                 println!(
-                    "[net3] RX: da porta={} a porta={} evento={} len={}",
-                    src_port, dst_port, event, total - SLOT_META
+                    "[net3] RX: da porta={} evento={} len={}",
+                    src_port, event, plen
                 );
-
-                // Valida: SYN+ACK (evento=2) da porta DST_PORT.
-                // Nota: nel nuovo formato slot non c'è campo ack, quindi
-                // validiamo solo evento e porta sorgente.
-                if src_port == DST_PORT && event == EV_SYNACK {
-                    synack_ok = true;
-                    println!("[net3] SYN+ACK valido ricevuto da porta 8");
-                } else {
-                    println!(
-                        "[net3] segmento ricevuto: porta={} evento={} (ignoro)",
-                        src_port, event
-                    );
+                if src_port == DST_PORT {
+                    match event {
+                        EV_SYNACK => {
+                            synack_ok = true;
+                            println!("[net3] handshake TCP completato (SYNACK)");
+                        }
+                        EV_DATA => {
+                            let mut buf = [0u8; 64];
+                            let n = plen.min(buf.len());
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    p.add(SLOT_META),
+                                    buf.as_mut_ptr(),
+                                    n,
+                                );
+                            }
+                            if &buf[..n] == HELLO {
+                                echo_ok = true;
+                                println!("[net3] eco TCP valido ({} byte)", n);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
-            // Avanza head.
             unsafe {
                 write_volatile(
                     ring_base.add(NET_EP_RX_RING_OFF) as *mut u32,
@@ -194,10 +179,7 @@ fn real_main(_sp: u64) -> ! {
                 )
             };
             rx_head = rx_head.wrapping_add(1);
-            break;
-        }
-        if retries % 1000 == 0 {
-            println!("[net3] in attesa SYN+ACK... retries={}", retries);
+            continue;
         }
         let _ = civis::futex_wait(
             &FUTEX as *const u32 as usize,
@@ -212,11 +194,38 @@ fn real_main(_sp: u64) -> ! {
         println!("[net3] SYN+ACK non ricevuto: FAIL");
         all_ok = false;
     }
+    if echo_ok {
+        println!("[net3] echo TCP end-to-end: PASS");
+    } else {
+        println!("[net3] echo TCP non ricevuto: FAIL");
+        all_ok = false;
+    }
 
     // Chiude l'endpoint.
     let _ = civis::send(net_chan, NET_EP_CLOSE, ep_id as u64, 0);
 
     finish(all_ok);
+}
+
+/// Scrive lo slot TX `slot` con destinazione `dst_port`, evento e payload.
+fn write_slot(ring_base: *mut u8, slot: usize, dst_port: u16, event: u8, payload: &[u8]) {
+    let total = SLOT_META + payload.len();
+    let p = unsafe { ring_base.add(NET_EP_TX_RING_OFF + NET_EP_RING_HDR + slot * NET_EP_SLOT_SIZE) };
+    unsafe {
+        write_volatile(p as *mut u16, total as u16);
+        core::ptr::copy_nonoverlapping(DST_ADDR.as_ptr(), p.add(2), 16);
+        write_volatile(p.add(18) as *mut u16, dst_port);
+        write_volatile(p.add(20) as *mut u16, 0); // sorgente: la assegna il servizio
+        write_volatile(p.add(22) as *mut u8, event);
+        core::ptr::copy_nonoverlapping(payload.as_ptr(), p.add(SLOT_META), payload.len());
+    }
+    fence(Ordering::Release);
+    unsafe {
+        write_volatile(
+            ring_base.add(NET_EP_TX_RING_OFF + 4) as *mut u32,
+            (slot + 1) as u32,
+        )
+    };
 }
 
 /// Termina il probe e segnala TEST_DONE ad init.
