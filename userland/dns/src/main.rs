@@ -1,12 +1,15 @@
-//! dns — resolver DNS plain (N5, ADR-0069).
+//! dns — resolver DNS plain (N5+N6.0, ADR-0069).
 //!
 //! Servizio userspace che risolve nomi a indirizzi IPv6/IPv4 tramite query
 //! DNS. Espone endpoint a capability (`DNS_EP_OPEN/TX/CLOSE/STATS`) per i
 //! clienti; niente syscall di rete nel kernel, tutto in userspace.
 //!
 //! N5: la risoluzione usa una tabella statica (`example.com` A,
-//! `ipv6.example.com` AAAA). Le query non presenti rispondono NXDOMAIN.
-//! L'inoltro verso un resolver upstream arriverà con DoH/DoT (N6+).
+//! `ipv6.example.com` AAAA). N6.0: i nomi fuori tabella vengono inoltrati a
+//! un resolver upstream via UDP plain, se `sys:dns.conf` lo configura.
+//! Senza config il servizio resta in tabella statica (fail-closed) e risponde
+//! NXDOMAIN; con config ma upstream irraggiungibile risponde SERVFAIL.
+//! DoT/TLS arriva con N6.5 (`mode = dot`).
 
 #![no_std]
 #![no_main]
@@ -16,25 +19,33 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use civis;
-use civis::println;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, Ordering};
 
 use net::{dns, Ipv6Addr};
 
 use civis::{
-    DNS_CLOSE, DNS_OPEN, DNS_PORT, DNS_STATS, DNS_TX, NET_EP_RX_RING_OFF, NET_EP_RING_HDR,
-    NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE, NET_EP_TX_RING_OFF, NET_PROTO_UDP,
+    DNS_CLOSE, DNS_OPEN, DNS_PORT, DNS_STATS, DNS_TX, NET_ADDR_ROUTER, NET_EP_FLAG_EPHEMERAL,
+    NET_EP_RX_RING_OFF, NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE, NET_EP_TX,
+    NET_EP_TX_RING_OFF, NET_PROTO_UDP,
 };
 
 use net::{CLASS_IN, DNS_HEADER_LEN, FLAG_QR, FLAG_RD, TYPE_A, TYPE_AAAA};
 
-// Metadata slot endpoint: [len:2][ipv4:4][port:2][port:2][evento:1][payload].
+// Metadata slot endpoint del servizio `net`: [len:2][addr:16][sport:2][dport:2][evento:1].
+const NET_SLOT_META: usize = 23;
+// Metadata slot endpoint dei clienti DNS: [len:2][ipv4:4][port:2][port:2][evento:1].
 const SLOT_META: usize = 11;
 // Evento dati nello slot.
 const EV_DATA: u8 = 0;
 // Numero massimo di endpoint clienti concorrenti.
 const MAX_ENDPOINTS: usize = 8;
+// Dimensione massima di una query/risposta DNS accettata dall'upstream.
+const MAX_DNS: usize = 512;
+// Rcode: SERVFAIL (upstream configurato ma non raggiungibile/risposta invalida).
+const RCODE_SERVFAIL: u16 = 2;
+// Rcode: NXDOMAIN (nessun upstream configurato, nome fuori tabella).
+const RCODE_NXDOMAIN: u16 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EpState {
@@ -69,10 +80,50 @@ impl Ep {
     }
 }
 
+/// Modalità di risoluzione (N6.0): la config le dichiara, il servizio le
+/// applica. `Dot` è riconosciuta per compatibilità in avanti ma non ancora
+/// implementata: in quel caso si resta su tabella statica (fail-closed).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Static,
+    Plain,
+    Dot,
+}
+
+/// Config del resolver, da `sys:dns.conf`. `Static` = N5 puro.
+#[derive(Clone, Copy)]
+struct Config {
+    mode: Mode,
+    upstream: Ipv6Addr,
+    port: u16,
+    timeout_ticks: u64,
+}
+
+impl Config {
+    const fn off() -> Self {
+        Self {
+            mode: Mode::Static,
+            upstream: Ipv6Addr::UNSPECIFIED,
+            port: 0,
+            timeout_ticks: 0,
+        }
+    }
+
+    /// L'inoltro è utilizzabile solo con upstream e porta validi.
+    fn active(&self) -> bool {
+        self.mode == Mode::Plain && !self.upstream.is_unspecified() && self.port != 0
+    }
+}
+
 struct DnsService {
     net_chan: u64,
-    net_ep_id: u16,
-    net_ep_ring: *mut u8,
+    /// Endpoint effimero presso `net` usato come client verso l'upstream.
+    up_ep_id: u16,
+    up_ring: *mut u8,
+    cfg: Config,
+    /// Contatore dei transaction id verso l'upstream (rimappati: due client
+    /// con lo stesso id non si confondono).
+    txid: u16,
     endpoints: [Ep; MAX_ENDPOINTS],
     next_ep_id: u16,
 }
@@ -81,11 +132,22 @@ impl DnsService {
     fn new() -> Self {
         Self {
             net_chan: 0,
-            net_ep_id: 0,
-            net_ep_ring: core::ptr::null_mut(),
+            up_ep_id: 0,
+            up_ring: core::ptr::null_mut(),
+            cfg: Config::off(),
+            txid: 0x4000,
             endpoints: [Ep::free(); MAX_ENDPOINTS],
             next_ep_id: 1,
         }
+    }
+
+    fn next_txid(&mut self) -> u16 {
+        let id = self.txid;
+        self.txid = self.txid.wrapping_add(1);
+        if self.txid < 0x4000 {
+            self.txid = 0x4000;
+        }
+        id
     }
 
     fn alloc_endpoint(&mut self, peer_chan: u64) -> Option<usize> {
@@ -259,6 +321,251 @@ fn lookup(name: &[u8], qtype: u16) -> Option<(Option<[u8; 4]>, Option<[u8; 16]>)
     }
 }
 
+// ── Upstream plain UDP (N6.0) ──────────────────────────────────────
+
+/// Interroga `net` sugli indirizzi del nodo (`NET_ADDR`): 16 byte in due
+/// parole. `None` se il selettore non ha indirizzo o il servizio è morto.
+fn query_addr(net_chan: u64, selector: u64) -> Option<Ipv6Addr> {
+    let r = civis::send(net_chan, civis::NET_ADDR, selector, 0).ok()?;
+    if r.w0 == 0 && r.w1 == 0 {
+        return None;
+    }
+    let mut b = [0u8; 16];
+    b[..8].copy_from_slice(&r.w0.to_be_bytes());
+    b[8..].copy_from_slice(&r.w1.to_be_bytes());
+    Some(Ipv6Addr::from_bytes(b))
+}
+
+/// Legge `sys:dns.conf` dal bucket `sys`. File assente o invalido = tabella
+/// statica: la config non è mai parziale (fail-closed).
+///
+/// Formato: `chiave = valore` per riga, `#` commento.
+/// `upstream = auto|<ipv6>`, `port = 853|5353|53`, `mode = plain|dot|off`,
+/// `timeout_ms = 2000`. `auto` = default router corrente (test passt).
+fn load_config(net_chan: u64) -> Config {
+    let Ok(data) = civis::obj_get(b"sys", b"dns.conf") else {
+        return Config::off();
+    };
+    let Ok(txt) = core::str::from_utf8(&data) else {
+        return Config::off();
+    };
+    let mut upstream_txt: Option<&str> = None;
+    let mut port = DNS_PORT;
+    let mut mode = Mode::Plain;
+    let mut timeout_ms = 2000u64;
+    for line in txt.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            return Config::off();
+        };
+        let (k, v) = (k.trim(), v.trim());
+        match k {
+            "upstream" => upstream_txt = Some(v),
+            "port" => match v.parse::<u16>() {
+                Ok(p) if p != 0 => port = p,
+                _ => return Config::off(),
+            },
+            "mode" => match v {
+                "plain" => mode = Mode::Plain,
+                "dot" => mode = Mode::Dot,
+                "off" | "static" => mode = Mode::Static,
+                _ => return Config::off(),
+            },
+            "timeout_ms" => match v.parse::<u64>() {
+                Ok(t) if t >= 100 => timeout_ms = t,
+                _ => return Config::off(),
+            },
+            // Chiavi future (`sni`, `ca` per DoT): le leggerà la fase che le
+            // implementa, qui non invalidano la config.
+            _ => {}
+        }
+    }
+    let Some(u) = upstream_txt else {
+        return Config::off();
+    };
+    if mode == Mode::Dot {
+        let _ = civis::print_string(b"[dns] mode=dot non implementato (N6.5): tabella statica\n");
+        return Config::off();
+    }
+    let upstream = if u == "auto" {
+        match query_addr(net_chan, NET_ADDR_ROUTER) {
+            Some(a) => a,
+            None => {
+                let _ = civis::print_string(b"[dns] upstream=auto senza router: tabella statica\n");
+                return Config::off();
+            }
+        }
+    } else {
+        match Ipv6Addr::parse(u) {
+            Some(a) => a,
+            None => {
+                let _ = civis::print_string(b"[dns] upstream non valido: tabella statica\n");
+                return Config::off();
+            }
+        }
+    };
+    Config {
+        mode,
+        upstream,
+        port,
+        timeout_ticks: (timeout_ms / 10).max(1),
+    }
+}
+
+/// Apre l'endpoint UDP effimero presso `net` e ne mappa il ring.
+fn open_upstream(net_chan: u64) -> Option<(u16, *mut u8)> {
+    let r = civis::send(
+        net_chan,
+        civis::NET_EP_OPEN,
+        (NET_PROTO_UDP as u64) << 16,
+        NET_EP_FLAG_EPHEMERAL as u64,
+    )
+    .ok()?;
+    if r.w0 == !0u64 {
+        return None;
+    }
+    let ring_id = (r.w1 & 0xffff_ffff) as u32;
+    let ring = civis::shm_map(ring_id, 0, civis::PROT_READ | civis::PROT_WRITE).ok()? as *mut u8;
+    unsafe {
+        write_volatile(ring.add(NET_EP_RX_RING_OFF) as *mut u32, 0);
+        write_volatile(ring.add(NET_EP_RX_RING_OFF + 4) as *mut u32, 0);
+        write_volatile(ring.add(NET_EP_TX_RING_OFF) as *mut u32, 0);
+        write_volatile(ring.add(NET_EP_TX_RING_OFF + 4) as *mut u32, 0);
+    }
+    Some((r.w0 as u16, ring))
+}
+
+/// Scrive uno slot nel ring TX dell'endpoint upstream (formato `net`):
+/// `[len:2][addr:16][dport:2][sport:2][evento:1][payload]`.
+/// Ritorna l'indice di slot, o `None` se il ring è pieno.
+fn up_tx_write(ring: *mut u8, dst: &Ipv6Addr, dst_port: u16, payload: &[u8]) -> Option<usize> {
+    let total = NET_SLOT_META + payload.len();
+    if total > NET_EP_SLOT_SIZE {
+        return None;
+    }
+    let head = unsafe { read_volatile(ring.add(NET_EP_TX_RING_OFF) as *const u32) };
+    let tail = unsafe { read_volatile(ring.add(NET_EP_TX_RING_OFF + 4) as *const u32) };
+    if tail.wrapping_sub(head) >= NET_EP_RING_SLOTS as u32 {
+        return None;
+    }
+    let slot = (tail % NET_EP_RING_SLOTS as u32) as usize;
+    let p = unsafe { ring.add(NET_EP_TX_RING_OFF + NET_EP_RING_HDR + slot * NET_EP_SLOT_SIZE) };
+    unsafe {
+        write_volatile(p as *mut u16, total as u16);
+        core::ptr::copy_nonoverlapping(dst.0.as_ptr(), p.add(2), 16);
+        write_volatile(p.add(18) as *mut u16, dst_port);
+        write_volatile(p.add(20) as *mut u16, 0); // sorgente: la sceglie `net`
+        write_volatile(p.add(22) as *mut u8, EV_DATA);
+        core::ptr::copy_nonoverlapping(payload.as_ptr(), p.add(NET_SLOT_META), payload.len());
+    }
+    fence(Ordering::Release);
+    unsafe {
+        write_volatile(
+            ring.add(NET_EP_TX_RING_OFF + 4) as *mut u32,
+            tail.wrapping_add(1),
+        )
+    };
+    Some(slot)
+}
+
+/// Drena il ring RX dell'upstream e cerca la risposta alla query `txid`:
+/// verifica sorgente (indirizzo e porta configurati), `QR` e id. Copia il
+/// payload in `out` ripristinando il transaction id del cliente.
+fn up_take_reply(svc: &DnsService, txid: u16, client_id: u16, out: &mut [u8]) -> Option<usize> {
+    let ring = svc.up_ring;
+    if ring.is_null() {
+        return None;
+    }
+    let mut head = unsafe { read_volatile(ring.add(NET_EP_RX_RING_OFF) as *const u32) };
+    let tail = unsafe { read_volatile(ring.add(NET_EP_RX_RING_OFF + 4) as *const u32) };
+    let mut found = None;
+    while head != tail {
+        let slot = (head % NET_EP_RING_SLOTS as u32) as usize;
+        let p = unsafe { ring.add(NET_EP_RX_RING_OFF + NET_EP_RING_HDR + slot * NET_EP_SLOT_SIZE) };
+        let total = unsafe { read_volatile(p as *const u16) } as usize;
+        if total >= NET_SLOT_META {
+            let mut src = [0u8; 16];
+            unsafe { core::ptr::copy_nonoverlapping(p.add(2), src.as_mut_ptr(), 16) };
+            let src_port = unsafe { read_volatile(p.add(18) as *const u16) };
+            let payload_len = total - NET_SLOT_META;
+            if src == svc.cfg.upstream.0
+                && src_port == svc.cfg.port
+                && payload_len >= DNS_HEADER_LEN
+                && payload_len <= out.len()
+                && found.is_none()
+            {
+                let payload =
+                    unsafe { core::slice::from_raw_parts(p.add(NET_SLOT_META), payload_len) };
+                if let Some(hdr) = dns::parse_header(payload) {
+                    if hdr.id == txid && hdr.flags & FLAG_QR != 0 {
+                        out[..payload_len].copy_from_slice(payload);
+                        out[0..2].copy_from_slice(&client_id.to_be_bytes());
+                        found = Some(payload_len);
+                    }
+                }
+            }
+        }
+        head = head.wrapping_add(1);
+        unsafe { write_volatile(ring.add(NET_EP_RX_RING_OFF) as *mut u32, head) };
+    }
+    found
+}
+
+/// Inoltra `query` all'upstream (plain UDP) e attende la risposta entro il
+/// timeout. **Bloccante sul processo** (single-flight, deadline breve): il
+/// resolver non serve altri clienti mentre aspetta; il bound è la garanzia.
+/// Ritorna la lunghezza della risposta in `out`.
+fn forward_plain(
+    svc: &mut DnsService,
+    query: &[u8],
+    client_id: u16,
+    out: &mut [u8],
+) -> Option<usize> {
+    if !svc.cfg.active() || query.len() < DNS_HEADER_LEN || query.len() > MAX_DNS {
+        return None;
+    }
+    let txid = svc.next_txid();
+    let mut wire = [0u8; MAX_DNS];
+    wire[..query.len()].copy_from_slice(query);
+    wire[0..2].copy_from_slice(&txid.to_be_bytes());
+
+    let slot = match up_tx_write(svc.up_ring, &svc.cfg.upstream, svc.cfg.port, &wire[..query.len()])
+    {
+        Some(s) => s,
+        None => {
+            let _ = civis::print_string(b"[dns] upstream: ring TX pieno\n");
+            return None;
+        }
+    };
+    match civis::send(svc.net_chan, NET_EP_TX, svc.up_ep_id as u64, slot as u64) {
+        Ok(r) if r.w0 == 0 => {}
+        Ok(r) => {
+            civis::println!("[dns] upstream: TX rifiutato w0={}", r.w0);
+            return None;
+        }
+        Err(_) => {
+            let _ = civis::print_string(b"[dns] upstream: net morto\n");
+            return None;
+        }
+    }
+
+    let deadline = civis::get_ticks() as u64 + svc.cfg.timeout_ticks;
+    loop {
+        if let Some(len) = up_take_reply(svc, txid, client_id, out) {
+            return Some(len);
+        }
+        let now = civis::get_ticks() as u64;
+        if now >= deadline {
+            let _ = civis::print_string(b"[dns] upstream timeout\n");
+            return None;
+        }
+        let _ = civis::futex_wait(&FUTEX as *const u32 as usize, 0, now + 1);
+    }
+}
+
 civis::entry!(real_main);
 
 fn real_main(_sp: u64) -> ! {
@@ -288,46 +595,34 @@ fn real_main(_sp: u64) -> ! {
         civis::exit(1);
     }
     svc.net_chan = net_chan;
+    svc.cfg = load_config(net_chan);
 
-    // Endpoint UDP presso `net`: riceve le risposte dell'upstream (N6+).
-    let r = match civis::send(
-        net_chan,
-        civis::NET_EP_OPEN,
-        (NET_PROTO_UDP as u64) << 16 | DNS_PORT as u64,
-        0,
-    ) {
-        Ok(r) => r,
-        Err(_) => {
-            let _ = civis::print_string(b"[dns] open net fallito (IPC)\n");
-            civis::exit(1);
+    // Endpoint UDP effimero presso `net`: è il lato *client* verso l'upstream
+    // (N6.0). Senza upstream non si apre nulla: il servizio resta tabella
+    // statica esattamente come in N5.
+    if svc.cfg.active() {
+        match open_upstream(net_chan) {
+            Some((ep_id, ring)) => {
+                svc.up_ep_id = ep_id;
+                svc.up_ring = ring;
+                civis::println!(
+                    "[dns] upstream plain {}:{} timeout={} tick",
+                    svc.cfg.upstream,
+                    svc.cfg.port,
+                    svc.cfg.timeout_ticks
+                );
+            }
+            None => {
+                svc.cfg = Config::off();
+                let _ = civis::print_string(b"[dns] upstream non apribile: tabella statica\n");
+            }
         }
-    };
-    if r.w0 == !0u64 {
-        let _ = civis::print_string(b"[dns] open net rifiutato\n");
-        civis::exit(1);
-    }
-    svc.net_ep_id = r.w0 as u16;
-    let ring_id = (r.w1 & 0xffff_ffff) as u32;
-    let ring_base = match civis::shm_map(ring_id, 0, civis::PROT_READ | civis::PROT_WRITE) {
-        Ok(b) => b,
-        Err(_) => {
-            let _ = civis::print_string(b"[dns] shm map net fallito\n");
-            civis::exit(1);
-        }
-    } as *mut u8;
-    svc.net_ep_ring = ring_base;
-    unsafe {
-        write_volatile(ring_base.add(NET_EP_RX_RING_OFF) as *mut u32, 0);
-        write_volatile(ring_base.add(NET_EP_RX_RING_OFF + 4) as *mut u32, 0);
-        write_volatile(ring_base.add(NET_EP_TX_RING_OFF) as *mut u32, 0);
-        write_volatile(ring_base.add(NET_EP_TX_RING_OFF + 4) as *mut u32, 0);
+    } else {
+        let _ = civis::print_string(b"[dns] tabella statica (nessun upstream)\n");
     }
 
     civis::signal_ready(1);
-    civis::println!(
-        "[dns] resolver attivo, porta UDP {} (tabella statica N5)",
-        DNS_PORT
-    );
+    civis::println!("[dns] resolver attivo, porta UDP {}", DNS_PORT);
 
     loop {
         let now = civis::get_ticks() as u64;
@@ -422,18 +717,41 @@ fn handle_client(svc: &mut DnsService, m: civis::IpcMsg) {
                 }
             };
 
-            let mut resp = [0u8; 512];
-            let resp_len = match core::str::from_utf8(&name)
-                .ok()
-                .and_then(|n| lookup(&name, qtype).and_then(|(a, aaaa)| {
-                    build_response(&mut resp, id, n, qtype, a, aaaa, 0)
-                })) {
-                Some(len) => len,
-                None => {
-                    // NXDOMAIN: nome non in tabella (o query malformata).
-                    let n = core::str::from_utf8(&name).unwrap_or("");
-                    build_response(&mut resp, id, n, qtype, None, None, 3).unwrap_or(0)
-                }
+            let mut resp = [0u8; MAX_DNS];
+            let resp_len = match core::str::from_utf8(&name) {
+                Ok(n) => match lookup(&name, qtype) {
+                    Some((a, aaaa)) => {
+                        build_response(&mut resp, id, n, qtype, a, aaaa, 0).unwrap_or(0)
+                    }
+                    // N6.0: nome fuori tabella → upstream (plain UDP). Senza
+                    // upstream configurato resta il comportamento N5
+                    // (NXDOMAIN); con upstream che non risponde → SERVFAIL.
+                    None if svc.cfg.active() => match forward_plain(svc, query, id, &mut resp) {
+                        Some(len) => len,
+                        None => build_response(
+                            &mut resp,
+                            id,
+                            n,
+                            qtype,
+                            None,
+                            None,
+                            RCODE_SERVFAIL,
+                        )
+                        .unwrap_or(0),
+                    },
+                    None => build_response(
+                        &mut resp,
+                        id,
+                        n,
+                        qtype,
+                        None,
+                        None,
+                        RCODE_NXDOMAIN,
+                    )
+                    .unwrap_or(0),
+                },
+                // Nome non UTF-8: non è un nome DNS valido.
+                Err(_) => 0,
             };
 
             if resp_len > 0 {

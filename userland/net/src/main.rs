@@ -24,7 +24,8 @@ use net::eth::{self, ETHERTYPE_IPV6};
 
 // ── Costanti endpoint (da civis/syscall-numbers) ───────────────────
 use civis::{
-    NET_EP_CLOSE, NET_EP_FLAG_CONNECT, NET_EP_FLAG_EPHEMERAL, NET_EP_FLAG_LISTEN, NET_EP_OPEN,
+    NET_ADDR, NET_ADDR_GLOBAL, NET_ADDR_LINK_LOCAL, NET_ADDR_ROUTER, NET_EP_CLOSE,
+    NET_EP_FLAG_CONNECT, NET_EP_FLAG_EPHEMERAL, NET_EP_FLAG_LISTEN, NET_EP_OPEN,
     NET_EP_RX_RING_OFF, NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE, NET_EP_STATS,
     NET_EP_TX, NET_EP_TX_RING_OFF, NET_PROTO_TCP, NET_PROTO_UDP,
 };
@@ -830,6 +831,22 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
                 let _ = civis::reply(NET_EP_STATS, !0u64, 0);
             }
         }
+        NET_ADDR => {
+            // Indirizzi del nodo in due parole (16 byte): chi deve uscire
+            // verso il router senza conoscerne l'indirizzo (es. `dns` con
+            // `upstream = auto`) non ha altri modi per ottenerlo.
+            let addr = match m.w0 {
+                NET_ADDR_ROUTER => svc.net.router(),
+                NET_ADDR_GLOBAL => svc.net.global(),
+                NET_ADDR_LINK_LOCAL => Some(svc.net.link_local()),
+                _ => None,
+            };
+            let (w0, w1) = match addr {
+                Some(a) => split_addr(&a),
+                None => (0, 0),
+            };
+            let _ = civis::reply(NET_ADDR, w0, w1);
+        }
         civis::EXIT_NOTIFY => {
             let dead_chan = m.channel;
             for i in 0..MAX_ENDPOINTS {
@@ -842,6 +859,15 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
         }
         _ => {}
     }
+}
+
+/// Spezza un indirizzo IPv6 in due parole (byte 0..8, 8..16) per l'IPC.
+fn split_addr(a: &Ipv6Addr) -> (u64, u64) {
+    let mut hi = [0u8; 8];
+    let mut lo = [0u8; 8];
+    hi.copy_from_slice(&a.0[..8]);
+    lo.copy_from_slice(&a.0[8..]);
+    (u64::from_be_bytes(hi), u64::from_be_bytes(lo))
 }
 
 fn log_event(e: Event) {

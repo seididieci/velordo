@@ -3260,3 +3260,51 @@
       test host 72/72 (+4 DNS). Kernel: `Service::Dns = 17`,
       `SERVICE_COUNT = 18`. Il kernel resta neutro: nessuna syscall DNS,
       tutto in userspace sopra `net`.
+- [x] **N6.0 — Inoltro upstream DNS plain UDP** (2026-11, ADR-0068/0069):
+      primo pezzo di N6, costruito nella forma che avrà il DoT (cambiare il
+      trasporto non deve toccare la risoluzione). Decisioni: tabella
+      statica N5 sempre vincente; nome fuori tabella + upstream configurato
+      → inoltro; upstream muto o risposta invalida → **SERVFAIL** (mai un
+      NXDOMAIN silenzioso); config assente/invalida → N5 puro
+      (fail-closed); endpoint UDP **effimero** (la porta 53 che il servizio
+      apriva in N5 era vestigiale), single-flight, attesa bloccante con
+      deadline, `txid` rimappato con contatore interno e ripristinato nel
+      reply, risposta validata su sorgente (indirizzo + porta), `QR` e id;
+      nessuna syscall nuova. **Config `sys:dns.conf`** in formato
+      `chiave = valore` (`upstream = auto|<ipv6>`, `port`,
+      `mode = plain|dot|off`, `timeout_ms`; `mode = dot` riconosciuta e per
+      ora degradata a tabella statica con log, così la config resta valida
+      per N6.5; chiavi future ignorate, non invalidanti).
+      **`upstream = auto`** → nuovo tag IPC **`NET_ADDR` (0x8B)** sul
+      servizio `net`: selettore 0 link-local / 1 global / 2 router, reply in
+      due parole (byte 0..8, 8..16). Serve perché un client deve poter
+      uscire verso il default router senza conoscerne l'indirizzo, e non
+      volevamo né una syscall né un pacchetto IPv4-only per scoprirlo.
+      **Core `libs/net/src/addr.rs`**: `Ipv6Addr::parse` (RFC 4291 §2.2, una
+      sola `::`, niente IPv4-mapped/scope-id) + 2 unit test host.
+      **Bug vero trovato dal test (NDP)**: la cache dei vicini buttava la
+      entry dopo 30 s e il router si re-imparava solo da un RA (passt lo
+      manda su richiesta): a ~95 s qualunque `send_udp` verso il router
+      falliva in `neighbor_lookup` e il DNS rispondeva SERVFAIL **senza
+      nemmeno provare** (nessun log di timeout: la strada era chiusa prima
+      della rete). Fix RFC 4861 §7.3.3 semplificato: oltre il TTL la entry
+      diventa **STALE** (il MAC resta usabile, il primo pacchetto parte
+      comunque), NS di verifica ogni secondo, scarto solo dopo 3 NS senza
+      risposta. Le NA **senza** opzione target-link-layer (passt non la
+      mette, benché sollecitata) confermano la entry col MAC sorgente del
+      frame Ethernet. **Test**: `dnsprobe` fa due fasi — `example.com`
+      (tabella, `93.184.216.34`) e `upstream.test` (inoltro,
+      `198.51.100.7`), con esito `PASS`/`SKIP` (nessun upstream → NXDOMAIN =
+      N5)/`FAIL`; `run-net-tests.sh` avvia un responder DNS Python su
+      `[::]:5353` (passt lo mappa sul gateway) ed esporta
+      `NET_DNS_UPSTREAM_PORT`, che è anche l'interruttore del seed di
+      `sys:dns.conf` in `arca-tool.sh` — senza quella variabile un
+      `NET=1 ./run.sh` manuale resta N5. Test di rete PASS (echo reply,
+      netudp, net3, net4, dns, upstream). Gate invariato (6 righe, zero
+      FAIL); unit test host **75/75** (+2 parse, +1 NDP stale). Kernel
+      invariato: `NET_ADDR` è un tag IPC, non una syscall.
+      **Lezione**: un test end-to-end su rete reale ha trovato in un colpo
+      un bug di aging NDP che nessun unit test a tempo zero poteva
+      mostrare; e la prima diagnosi ("timeout") era sbagliata — la mancanza
+      del log di timeout ha detto subito che il guasto era *prima* della
+      rete.

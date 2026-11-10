@@ -84,6 +84,96 @@ impl Ipv6Addr {
         b[15] = self.0[15];
         Self(b)
     }
+
+    /// Parsa un indirizzo IPv6 testuale (RFC 4291 §2.2): gruppi esadecimali
+    /// separati da `:`, con al piu' una compressione `::`. Forme rifiutate:
+    /// IPv4-mapped (`::ffff:1.2.3.4`), scope id (`%eth0`), gruppi vuoti o
+    /// oltre 4 cifre. Puro: nessun panic su input arbitrario.
+    pub fn parse(text: &str) -> Option<Self> {
+        let bytes = text.as_bytes();
+        if bytes.is_empty() {
+            return None;
+        }
+        let mut groups = [0u16; 8];
+        let mut n = 0usize; // gruppi letti
+        let mut gap: Option<usize> = None; // posizione di `::`
+        let mut i = 0usize;
+        if bytes[0] == b':' {
+            if bytes.len() < 2 || bytes[1] != b':' {
+                return None;
+            }
+            gap = Some(0);
+            i = 2;
+        }
+        while i < bytes.len() {
+            if n >= 8 {
+                return None;
+            }
+            let start = i;
+            let mut v: u16 = 0;
+            while i < bytes.len() {
+                let d = match bytes[i] {
+                    b'0'..=b'9' => bytes[i] - b'0',
+                    b'a'..=b'f' => bytes[i] - b'a' + 10,
+                    b'A'..=b'F' => bytes[i] - b'A' + 10,
+                    _ => break,
+                };
+                v = v.checked_mul(16)?.checked_add(d as u16)?;
+                i += 1;
+            }
+            if i == start || i - start > 4 {
+                return None;
+            }
+            groups[n] = v;
+            n += 1;
+            if i == bytes.len() {
+                break;
+            }
+            if bytes[i] != b':' {
+                return None;
+            }
+            i += 1;
+            if i < bytes.len() && bytes[i] == b':' {
+                if gap.is_some() {
+                    return None;
+                }
+                gap = Some(n);
+                i += 1;
+            } else if i == bytes.len() {
+                return None; // `:` singolo finale
+            }
+        }
+        let mut full = [0u16; 8];
+        match gap {
+            Some(g) => {
+                let tail = n - g;
+                if g + tail > 7 {
+                    return None; // `::` deve comprimere almeno un gruppo
+                }
+                for k in 0..g {
+                    full[k] = groups[k];
+                }
+                for k in 0..tail {
+                    full[8 - tail + k] = groups[g + k];
+                }
+            }
+            None => {
+                if n != 8 {
+                    return None;
+                }
+                for k in 0..8 {
+                    full[k] = groups[k];
+                }
+            }
+        }
+        let mut out = [0u8; 16];
+        for k in 0..8 {
+            let g = full[k].to_be_bytes();
+            out[2 * k] = g[0];
+            out[2 * k + 1] = g[1];
+        }
+        Some(Self(out))
+    }
 }
 
 impl fmt::Debug for Ipv6Addr {
@@ -202,5 +292,61 @@ impl fmt::Display for MacAddr {
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             self.0[0], self.0[1], self.0[2], self.0[3], self.0[4], self.0[5]
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(s: &str) -> Option<[u8; 16]> {
+        Ipv6Addr::parse(s).map(|a| a.0)
+    }
+
+    #[test]
+    fn parse_full_and_compressed() {
+        assert_eq!(
+            p("2001:db8:1:2:3:4:5:6"),
+            Some([0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6])
+        );
+        assert_eq!(p("::"), Some([0; 16]));
+        assert_eq!(p("::1"), Some(Ipv6Addr::LOOPBACK.0));
+        assert_eq!(
+            p("fe80::1"),
+            Some([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+        );
+        assert_eq!(
+            p("2001:db8::"),
+            Some([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        );
+        // Compressione in mezzo: `64:ff9b::7` (prefisso SIIT).
+        assert_eq!(
+            p("64:ff9b::7"),
+            Some([0, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7])
+        );
+        // Maiuscole accettate.
+        assert_eq!(p("FE80::ABCD"), p("fe80::abcd"));
+    }
+
+    #[test]
+    fn parse_rejects_malformed() {
+        for s in [
+            "",
+            ":",
+            ":::",
+            "1:2:3:4:5:6:7",         // 7 gruppi senza `::`
+            "1:2:3:4:5:6:7:8:9",     // 9 gruppi
+            "1:2:3:4:5:6:7:8::",     // `::` non comprime nulla
+            "1::2::3",               // due compressioni
+            "12345::1",              // gruppo oltre 4 cifre
+            "fe80::1%eth0",          // scope id non supportato
+            "::ffff:1.2.3.4",        // forma IPv4-mapped non supportata
+            "1:2:3:4:5:6:7:",        // `:` finale
+            "1:2:3:4:5:6:7:8:",      // `:` finale dopo 8 gruppi
+            "g::1",                  // cifra non esadecimale
+            " ::1",                  // spazio iniziale
+        ] {
+            assert_eq!(p(s), None, "doveva fallire: {s:?}");
+        }
     }
 }

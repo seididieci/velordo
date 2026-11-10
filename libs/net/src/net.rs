@@ -17,8 +17,12 @@ const NEIGHBORS: usize = 8;
 const RS_INTERVAL: u64 = 100;
 const ECHO_INTERVAL: u64 = 100;
 const MAX_TRIES: u8 = 3;
-/// 30 s a 100 Hz.
+/// 30 s a 100 Hz: oltre, la entry è STALE (MAC ancora usabile, da verificare).
 const NEIGHBOR_TTL: u64 = 3000;
+/// 1 s a 100 Hz: intervallo fra due Neighbor Solicitation di verifica.
+const NEIGHBOR_PROBE: u64 = 100;
+/// Massimo numero di NS senza risposta prima di scartare la entry.
+const NEIGHBOR_MAX_PROBES: u8 = 3;
 const ECHO_ID: u16 = 0x5645; // "VE"
 const ECHO_DATA: &[u8] = b"velordo";
 
@@ -52,7 +56,13 @@ struct Neighbor {
     addr: Ipv6Addr,
     mac: MacAddr,
     valid: bool,
+    /// Ultima conferma di raggiungibilità (RA/NS/NA): oltre `NEIGHBOR_TTL`
+    /// la entry è STALE, non morta.
     last: u64,
+    /// NS di verifica inviate senza risposta.
+    probes: u8,
+    /// Istante dell'ultima NS di verifica.
+    probed: u64,
 }
 
 pub struct Net {
@@ -348,11 +358,52 @@ impl Net {
             self.echo_done = true;
             events(Event::EchoTimeout);
         }
+        // Aging (RFC 4861 §7.3.3 semplificato): oltre il TTL la entry diventa
+        // STALE, non muore. Il MAC resta usabile (rifiutare l'invio blocca il
+        // traffico per sempre se il peer non parla più: un RA non arriva a
+        // comando), ma si verifica con NS; senza risposta dopo
+        // `NEIGHBOR_MAX_PROBES` la entry si scarta.
+        let mut to_probe = [Ipv6Addr::UNSPECIFIED; NEIGHBORS];
+        let mut n_probe = 0usize;
         for nb in self.neighbors.iter_mut() {
-            if nb.valid && now.saturating_sub(nb.last) > NEIGHBOR_TTL {
-                nb.valid = false;
+            if !nb.valid || now.saturating_sub(nb.last) <= NEIGHBOR_TTL {
+                continue;
             }
+            if now.saturating_sub(nb.probed) < NEIGHBOR_PROBE {
+                continue;
+            }
+            if nb.probes >= NEIGHBOR_MAX_PROBES {
+                nb.valid = false;
+                continue;
+            }
+            nb.probes += 1;
+            nb.probed = now;
+            to_probe[n_probe] = nb.addr;
+            n_probe += 1;
         }
+        for addr in &to_probe[..n_probe] {
+            self.send_ns(*addr, sink);
+        }
+    }
+
+    /// Neighbor Solicitation verso il solicited-node multicast di `target`.
+    fn send_ns(&mut self, target: Ipv6Addr, sink: &mut dyn FrameSink) {
+        let dst = target.solicited_node_multicast();
+        let dst_mac = MacAddr::multicast_for(&dst);
+        let mut frame = [0u8; 128];
+        let mut off = eth::write(&mut frame, dst_mac, self.mac, ETHERTYPE_IPV6);
+        let mut icmp = [0u8; 64];
+        let len = ndp::write_ns(&mut icmp, target, self.mac, &self.link_local, &dst);
+        off += ipv6::write(
+            &mut frame[off..],
+            NEXT_ICMPV6,
+            255,
+            self.link_local,
+            dst,
+            len as u16,
+        );
+        frame[off..off + len].copy_from_slice(&icmp[..len]);
+        sink.send(&frame[..off + len]);
     }
 
     /// Frame ricevuto dal driver.
@@ -401,7 +452,7 @@ impl Net {
                             events(Event::Dropped("na hop"));
                             return;
                         }
-                        self.on_na(&ip, msg.body, now);
+                        self.on_na(&eth, &ip, msg.body, now);
                     }
                     TYPE_ECHO_REQUEST => self.on_echo_request(&eth, &ip, msg.body, sink),
                     TYPE_ECHO_REPLY => self.on_echo_reply(&ip, msg.body, events),
@@ -524,13 +575,22 @@ impl Net {
         sink.send(&frame[..off + len]);
     }
 
-    fn on_na(&mut self, _ip: &ipv6::Ipv6Header, body: &[u8], now: u64) {
+    /// Neighbor Advertisement: conferma la raggiungibilità di `target`.
+    /// Senza l'opzione target-link-layer (RFC 4861 §4.4 la rende
+    /// obbligatoria nelle NA sollecitate, ma non tutti la mettono: passt no)
+    /// si usa il MAC sorgente del frame Ethernet, che per una NA sollecitata
+    /// è il link-layer del target.
+    fn on_na(
+        &mut self,
+        eth: &eth::EthHeader,
+        _ip: &ipv6::Ipv6Header,
+        body: &[u8],
+        now: u64,
+    ) {
         let Some((target, _flags, ll)) = ndp::parse_na(body) else {
             return;
         };
-        if let Some(m) = ll {
-            self.neighbor_add(target, m, now);
-        }
+        self.neighbor_add(target, ll.unwrap_or(eth.src), now);
     }
 
     fn on_echo_request(
@@ -658,6 +718,8 @@ impl Net {
             if nb.valid && nb.addr == addr {
                 nb.mac = mac;
                 nb.last = now;
+                nb.probes = 0;
+                nb.probed = now;
                 return;
             }
         }
@@ -668,6 +730,8 @@ impl Net {
                     mac,
                     valid: true,
                     last: now,
+                    probes: 0,
+                    probed: now,
                 };
                 return;
             }
@@ -683,6 +747,8 @@ impl Net {
             mac,
             valid: true,
             last: now,
+            probes: 0,
+            probed: now,
         };
     }
 
@@ -853,5 +919,56 @@ mod tests {
         let (_, icmp) = ipv6::parse(ip_payload).unwrap();
         let msg = icmpv6::parse(icmp).unwrap();
         assert_eq!(msg.typ, TYPE_NA);
+    }
+
+    #[test]
+    fn neighbor_stale_resta_usabile_e_si_verifica() {
+        let mut c = cfg();
+        c.ping = false;
+        let mut n = Net::new(c);
+        let mut sink = VecSink { frames: Vec::new() };
+        let router = Ipv6Addr::parse("fe80::1").unwrap();
+        let rmac = MacAddr([0x02, 0, 0, 0, 0, 0x02]);
+        n.link_up(0, &mut sink, &mut |_| {});
+        let ra = ra_frame(router, rmac, [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0]);
+        n.on_frame(&ra, 0, &mut sink, &mut |_| {});
+        assert_eq!(n.neighbor_lookup(router), Some(rmac));
+
+        // Oltre il TTL la entry è STALE: il MAC resta usabile e parte una NS.
+        sink.frames.clear();
+        n.on_tick(NEIGHBOR_TTL + 1, &mut sink, &mut |_| {});
+        assert_eq!(n.neighbor_lookup(router), Some(rmac));
+        let mut has_ns = false;
+        for f in &sink.frames {
+            let (_, ip_payload) = eth::parse(f).unwrap();
+            let (_, icmp) = ipv6::parse(ip_payload).unwrap();
+            if icmpv6::parse(icmp).map(|m| m.typ) == Some(TYPE_NS) {
+                has_ns = true;
+            }
+        }
+        assert!(has_ns, "NS di verifica inviata");
+
+        // La NA di risposta può non avere l'opzione target link-layer (passt
+        // non la mette): il MAC si prende dall'Ethernet sorgente e la entry
+        // torna fresca (nessuna nuova NS al tick successivo).
+        let mut na = alloc::vec![0u8; 8 + 16];
+        na[0] = TYPE_NA;
+        na[4] = 0x60;
+        na[8..24].copy_from_slice(&router.0);
+        let c = crate::checksum::icmpv6(&router, &n.link_local(), &na);
+        na[2..4].copy_from_slice(&c.to_be_bytes());
+        let frame = wrap_ipv6(n.mac(), rmac, router, n.link_local(), &na);
+        n.on_frame(&frame, NEIGHBOR_TTL + 2, &mut sink, &mut |_| {});
+        assert_eq!(n.neighbor_lookup(router), Some(rmac));
+        sink.frames.clear();
+        n.on_tick(NEIGHBOR_TTL + 2 + NEIGHBOR_PROBE, &mut sink, &mut |_| {});
+        assert!(sink.frames.is_empty(), "entry fresca: nessuna NS");
+
+        // Nessuna risposta: dopo NEIGHBOR_MAX_PROBES la entry si scarta.
+        let base = 2 * NEIGHBOR_TTL + 3;
+        for k in 0..=NEIGHBOR_MAX_PROBES as u64 {
+            n.on_tick(base + k * NEIGHBOR_PROBE, &mut sink, &mut |_| {});
+        }
+        assert_eq!(n.neighbor_lookup(router), None);
     }
 }

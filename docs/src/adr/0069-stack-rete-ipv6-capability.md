@@ -4,7 +4,10 @@
 
 Accepted (2026-11). **N1 implementata** (virtio-net + IPv6/NDP/ICMPv6 +
 ping6 con passt). **N2 implementata** (UDP + endpoint a capability + ring,
-echo server nativo `netecho`, probe `netudp`). N3–N8 restano la traiettoria.
+echo server nativo `netecho`, probe `netudp`). **N3 implementata** (TCP
+minimale). **N4 implementata** (traduttore SIIT/NAT64). **N5 implementata**
+(resolver DNS plain). **N6.0 implementata** (inoltro upstream plain UDP nel
+resolver, con la forma che avrà il DoT). N6.5–N8 restano la traiettoria.
 Dipende da ADR-0068 (threat model/invarianti) e ADR-0070 (config `sys:*`,
 non ancora implementata: N1 usa una config compilata; `sys:net.conf` per N2
 è seedato a build-time con fail-closed).
@@ -132,7 +135,11 @@ non conosce POSIX.
 - **N3**: TCP minimale; API stream nativa. **Completata.**
 - **N4**: traduttore IPv4 (SIIT/NAT64) separato. **Completata.**
 - **N5**: resolver DNS plain separato. **Completata.**
-- **N6**: DoH/DoT con TLS.
+- **N6**: DoH/DoT con TLS. Spezzata in: **N6.0** inoltro upstream plain UDP
+  nella stessa forma del futuro DoT (ephemeral endpoint, single-flight,
+  deadline, txid rimappato) — **Completata**; **N6.5** DoT dentro `dns` con
+  il crate separato `libs/tls` (X.509 con clock reale da `usertime`); **N6.6**
+  DoH se servirà (stessa API di trasporto).
 - **N7**: personalità POSIX socket.
 - **N8**: VT-d/IOMMU.
 
@@ -279,6 +286,55 @@ non conosce POSIX.
 - **Kernel**: `Service::Dns = 17`, `SERVICE_COUNT = 18`. Il kernel resta
   neutro: nessuna syscall DNS, tutto in userspace sopra `net`.
 
+## Completato — N6.0 (inoltro upstream plain UDP)
+
+Primo pezzo di N6, con la **stessa forma** che avrà il DoT: cambiare il
+trasporto (plain → TLS) non deve toccare la logica di risoluzione.
+
+- **Semantica**: la tabella statica N5 vince sempre. Nome fuori tabella +
+  upstream configurato → inoltro; upstream che non risponde o risposta
+  invalida → **SERVFAIL** (rcode 2), mai un NXDOMAIN silenzioso. Config
+  assente/invalida → comportamento N5 puro (NXDOMAIN), fail-closed.
+- **Config `sys:dns.conf`** (bucket `sys`, righe `chiave = valore`, `#`
+  commento): `upstream = auto|<ipv6>`, `port`, `mode = plain|dot|off`,
+  `timeout_ms`. `mode = dot` è **riconosciuta** e per ora degrada a tabella
+  statica con una riga di log: la config resta valida per N6.5. Una chiave
+  sconosciuta non invalida il file (le chiavi TLS future si aggiungono
+  senza rompere le vecchie immagini).
+- **`upstream = auto`**: il default router si chiede a `net` con il nuovo
+  tag **`NET_ADDR` (0x8B)** — selettore 0 link-local, 1 global, 2 router —
+  reply in due parole (`w0` byte 0..8, `w1` 8..16). Nessuna syscall nuova e
+  niente pacchetti IPv4-only per scoprire il gateway.
+- **Trasporto**: endpoint UDP **effimero** presso `net` (la porta 53 che il
+  servizio apriva prima era vestigiale: il servizio non fa da server UDP),
+  una query in volo, attesa **bloccante con deadline** (`timeout_ms`,
+  default 2000), `txid` rimappato con un contatore interno e ripristinato
+  nel reply, risposta validata su sorgente (indirizzo + porta), `QR` e id.
+  Le mutation del pacchetto avvengono in uno stack buffer di 512 B.
+- **`Ipv6Addr::parse`** (core `libs/net/src/addr.rs`): RFC 4291 §2.2, una
+  sola compressione `::`, niente IPv4-mapped/scope-id; 2 unit test host
+  (forme valide + rifiuti).
+- **Bug vero trovato dal test (NDP)**: la cache dei vicini scadeva a 30 s e
+  la entry veniva **buttata**; il router si re-imparava solo da un RA, che
+  passt manda su richiesta. Passati ~30 s qualunque `send_udp` verso il
+  router falliva (`neighbor_lookup` → `None`) — il DNS rispondeva SERVFAIL
+  senza nemmeno provare. Fix **RFC 4861 §7.3.3 semplificato**: oltre il TTL
+  la entry diventa **STALE** (il MAC resta usabile: il primo pacchetto
+  parte comunque), si verifica con una Neighbor Solicitation ogni secondo e
+  si scarta solo dopo 3 NS senza risposta. Le NA **senza** opzione
+  target-link-layer (passt non la mette, benché sollecitata) confermano la
+  entry usando il MAC sorgente del frame Ethernet.
+- **Test**: `dnsprobe` fa due fasi — `example.com` (tabella) e
+  `upstream.test` → `198.51.100.7` (inoltro); esito `PASS`/`SKIP` (nessun
+  upstream → NXDOMAIN, comportamento N5)/`FAIL` (SERVFAIL o timeout).
+  `run-net-tests.sh` avvia un responder Python su `[::]:5353` (mappato da
+  passt sul gateway) ed esporta `NET_DNS_UPSTREAM_PORT`, che è anche
+  l'interruttore del seed di `sys:dns.conf` in `arca-tool.sh`: senza quella
+  variabile un `NET=1 ./run.sh` manuale resta identico a N5. Gate invariato
+  (6 righe, zero FAIL); unit test host 75/75 (+2 parse, +1 NDP stale).
+- **Kernel**: invariato (nessuna syscall, nessun tag nuovo nel kernel:
+  `NET_ADDR` è un tag IPC del servizio `net`).
+
 ## Consequences
 
 ### Positive
@@ -292,6 +348,10 @@ non conosce POSIX.
 - Prerequisiti kernel (DMA/MMIO/MSI-X) prima del driver.
 - Niente IPv4 nel core: il mondo IPv4 richiede il traduttore (N4).
 - Niente frammentazione/DAD/SACK: subset dichiarato.
+- NUD semplificato: oltre il TTL la entry è STALE e viene verificata con NS
+  (max 3, 1 s); niente multicast NS in burst né reachability confirm
+  delay. Sufficiente per un gateway stabile, da rivedere su hardware con
+  MAC mobili.
 - Single-thread: throughput limitato; multi-queue dopo.
 
 ## Riferimenti

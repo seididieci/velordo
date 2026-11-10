@@ -731,9 +731,32 @@ Voci con scope e vittoria dichiarati (non date).
       zero FAIL); unit test host 72/72 (+4 DNS).
       Kernel: `Service::Dns = 17`, `SERVICE_COUNT = 18`. Il kernel resta
       neutro: nessuna syscall DNS, tutto in userspace sopra `net`.
-      Nota: l'inoltro upstream reale arriva con N6 (DoH/DoT).
-- [ ] **Rete N6–N8** (pianificata, ADR-0068/0069/0070): DoH/DoT con TLS;
-      personalità POSIX socket; VT-d/IOMMU.
+- [x] **Rete N6.0 — Inoltro upstream DNS plain UDP** (completata,
+      ADR-0068/0069): primo pezzo di N6, nella forma che avrà il DoT.
+      Semantica: tabella statica N5 sempre vincente; nome fuori tabella +
+      upstream configurato → inoltro; upstream muto/invalido → SERVFAIL
+      (mai NXDOMAIN silenzioso); config assente/invalida → N5 puro.
+      Config `sys:dns.conf` (`upstream = auto|<ipv6>`, `port`,
+      `mode = plain|dot|off`, `timeout_ms`; `mode = dot` riconosciuta e per
+      ora degradata a statica con log). `upstream = auto` risolve il default
+      router col nuovo tag IPC `NET_ADDR` (0x8B, selettore link-local/
+      global/router, 16 byte in due parole). Trasporto: endpoint UDP
+      effimero, single-flight, attesa bloccante con deadline, `txid`
+      rimappato e validazione su sorgente/`QR`/id. `Ipv6Addr::parse`
+      (RFC 4291) con 2 unit test host. Fix NDP: la cache dei vicini non si
+      butta più a 30 s ma diventa **STALE** (MAC usabile) con NS di verifica
+      ogni secondo e scarto dopo 3 senza risposta; le NA senza opzione
+      target-LL (passt) confermano col MAC Ethernet sorgente. Test:
+      `dnsprobe` fa due fasi (`example.com` statica + `upstream.test` →
+      `198.51.100.7`); `run-net-tests.sh` avvia un responder DNS Python su
+      `[::]:5353` e richiede `[dns] upstream: PASS` (fuori dal gate; il
+      seed di `sys:dns.conf` è gated su `NET_DNS_UPSTREAM_PORT`). Gate
+      invariato (6 righe, zero FAIL); unit test host 75/75 (+2 parse,
+      +1 NDP stale). Kernel invariato.
+- [ ] **Rete N6.5–N8** (pianificata, ADR-0068/0069/0070): DoT dentro `dns`
+      con crate separato `libs/tls` (X.509 con clock reale da `usertime`);
+      DoH sulla stessa API di trasporto; personalità POSIX socket;
+      VT-d/IOMMU.
       Config `sys:net` con policy di subtree in cardo (`sys:identis` rinomina
       `identis:config`, chiude il debito ADR-0058).
 

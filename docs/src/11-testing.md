@@ -252,8 +252,9 @@ log seriale.
   testo; **surface**: il layer 0 viene composto riga per riga rispettando
   l'alpha dell'immagine e i colori sono `0xRRGGBBAA`; **T2/T3**: fill a
   parole, `copy_from`/`shift_rows_up` con clipping, `draw_ink` che non tocca
-  il background), `libs/valloc` e
-  `blake2s` (72 test in tutto). Girano da una
+  il background), `libs/net` (IPv6/NDP/TCP/SIIT/DNS, `Ipv6Addr::parse` e
+  cache dei vicini STALE con NS di verifica), `libs/valloc` e
+  `blake2s` (**75 test** in tutto). Girano da una
   **directory neutra**: il `.cargo/config.toml` del repo impone
   `build.target = x86_64-unknown-none` + `build-std` in base alla directory
   corrente, e da dentro il repo `cargo test` proverebbe a compilare l'harness
@@ -265,12 +266,13 @@ log seriale.
   allo schermo, lontano dal punto in cui l'utente stava scrivendo
   (ADR-0061 §4, corretto in D5/ADR-0062).
 
-- **rete N1+N2+N3+N4+N5** (`scripts/run-net-tests.sh`, ADR-0068/0069): boot con
+- **rete N1+N2+N3+N4+N5+N6.0** (`scripts/run-net-tests.sh`, ADR-0068/0069): boot con
   `-netdev passt` + virtio-net (IPv6 reale, unprivileged), **fuori dal
   gate** perché `passt` è una dipendenza host. Il guest fa SLAAC/NDP e
   ping6 verso il router; PASS se il log contiene `[net] echo reply` (N1),
   `[netudp] risultato: PASS` (N2), `[net3] risultato: PASS` (N3),
-  `[net4] risultato: PASS` (N4) e `[dns] risultato: PASS` (N5).
+  `[net4] risultato: PASS` (N4), `[dns] risultato: PASS` (N5) e
+  `[dns] upstream: PASS` (N6.0).
   Risultato N1: indirizzo `2a01:e11:2430:7af0:...`, RA da
   `fe80::3a07:16ff:fe2c:71ea`, echo reply dallo stesso router.
   Risultato N2: `netecho` apre endpoint porta 7, `netudp` (endpoint
@@ -284,8 +286,14 @@ log seriale.
   il segmento (`SIIT_EP_TX` risponde OK).
   Risultato N5: `dns` apre endpoint UDP porta 53, `dnsprobe` (endpoint
   ephemeral presso `dns`) invia una query A per `example.com` e valida che
-  la risposta contenga `93.184.216.34` (tabella statica N5; l'inoltro
-  upstream arriva con N6).
+  la risposta contenga `93.184.216.34` (tabella statica N5).
+  Risultato N6.0: `dnsprobe` invia anche una query A per `upstream.test`,
+  nome fuori tabella; `dns` la inoltra via UDP plain all'upstream
+  configurato e restituisce l'indirizzo `198.51.100.7`. L'upstream è un
+  responder Python sull'host (`[::]:5353`, mappato da `passt` sul
+  gateway); `arca-tool.sh` seeda `sys:dns.conf` (`upstream = auto`,
+  `port = 5353`) **solo** se chi chiama esporta
+  `NET_DNS_UPSTREAM_PORT`, cosicché un `NET=1 ./run.sh` manuale resti N5.
   I servizi `netdev`/`net`/`netecho`/`siit`/`dns` partono solo con `net=1`
   in cmdline (il gate non lo setta).
 

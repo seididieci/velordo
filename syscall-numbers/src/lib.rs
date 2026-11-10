@@ -549,6 +549,16 @@ pub const NET_EP_CLOSE: u64 = 0x81;
 /// `NET_EP_STATS {ep_id}` → statistiche endpoint.
 /// `w0` = endpoint_id. Reply: `w0` = rx_pkts, `w1` = tx_pkts.
 pub const NET_EP_STATS: u64 = 0x82;
+/// `NET_ADDR {selector}` → indirizzo IPv6 del nodo (N6.0). Serve a un client
+/// che deve uscire verso il default router senza conoscerne l'indirizzo (es.
+/// `upstream = auto` nel resolver DNS).
+/// Reply: `w0` = byte 0..8, `w1` = byte 8..16 (big-endian in ogni parola);
+/// selettore senza indirizzo → `w0 = w1 = 0` (`::`).
+pub const NET_ADDR: u64 = 0x8B;
+/// Selettori di `NET_ADDR`.
+pub const NET_ADDR_LINK_LOCAL: u64 = 0;
+pub const NET_ADDR_GLOBAL: u64 = 1;
+pub const NET_ADDR_ROUTER: u64 = 2;
 
 // ── Ring per endpoint (SPSC, shm) ──────────────────────────────────
 /// Slot del ring per endpoint (per direzione).

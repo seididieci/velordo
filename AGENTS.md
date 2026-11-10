@@ -222,10 +222,12 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `VecDeque` (`hexdump /bg.bmp` 5,2 MB: ~38 min → 31 s).
   Prossimo: console server con mirror seriale e routing POSIX
   stdout→device (l'hook `persona`), poi il DE.
-- **Rete (N1–N5, ADR-0068/0069)**: stack nativo in userspace — `libs/net`
+- **Rete (N1–N6.0, ADR-0068/0069)**: stack nativo in userspace — `libs/net`
   core `no_std` 100% safe (Ethernet/IPv6/ICMPv6/NDP, SLAAC, RA guard,
-  neighbor cache, IID randomizzato, no DAD; 24 unit test host
-  IPv6/NDP/TCP/SIIT/DNS), `userland/netdev` driver virtio-net (1 RX + 1 TX,
+  neighbor cache **STALE + NS di verifica** (non si butta la entry a 30 s:
+  il MAC resta usabile, si scarta dopo 3 NS senza risposta), IID
+  randomizzato, no DAD; 27 unit test host IPv6/NDP/TCP/SIIT/DNS +
+  `Ipv6Addr::parse`), `userland/netdev` driver virtio-net (1 RX + 1 TX,
   64 descrittori, 2048 B, no offload, MSI-X, ring condiviso via shm),
   `userland/net` servizio (attach, poll, SLAAC, ping6 + endpoint a
   capability: `NET_EP_OPEN/TX/CLOSE/STATS`, tag `0x6F`/`0x73`/`0x81`/`0x82`,
@@ -233,10 +235,17 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   semplificati), `userland/netecho` (echo UDP porta 7 + TCP LISTEN porta 8),
   `userland/siit` (traduttore IPv4 SIIT/NAT64, `Service::Siit` slot 16,
   endpoint UDP porta 30000, tabella NAPT, API `SIIT_EP_OPEN/TX/CLOSE`,
-  tag `0x84`/`0x85`/`0x86`), `userland/dns` (resolver N5, `Service::Dns`
+  tag `0x84`/`0x85`/`0x86`), `userland/dns` (resolver, `Service::Dns`
   slot 17, API `DNS_EP_OPEN/TX/CLOSE/STATS`, tag `0x87`/`0x88`/`0x89`/`0x8A`,
-  tabella statica `example.com` A e `ipv6.example.com` AAAA, NXDOMAIN per il
-  resto; l'inoltro upstream arriva con N6/DoH). Kernel:
+  tabella statica `example.com` A e `ipv6.example.com` AAAA; **N6.0**:
+  inoltro upstream **plain UDP** per i nomi fuori tabella, config
+  `sys:dns.conf` (`upstream = auto|<ipv6>`, `port`, `mode = plain|dot|off`,
+  `timeout_ms`), endpoint UDP effimero + single-flight + deadline + `txid`
+  rimappato, SERVFAIL se l'upstream è configurato ma muto/invalido,
+  NXDOMAIN solo senza upstream; `mode = dot` riconosciuta, degrada a
+  statica fino a N6.5; `upstream = auto` usa il tag **`NET_ADDR` (0x8B)**
+  di `net` (selettore link-local/global/router, 16 byte in due parole)).
+  Kernel:
   `Service::Net=14`/`NetDev=15`/`Siit=16`/`Dns=17`, `MSI_VECTOR_NET=0x51`,
   finestra MMIO per servizio, grant DMA per NetDev, `SERVICE_COUNT=18`.
   I servizi partono solo con `net=1` in cmdline (run dedicato, fuori dal
@@ -247,8 +256,12 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   SYN accettato, server `netecho` TCP su porta 8), `[net4] risultato: PASS`
   (N4: endpoint UDP presso `siit` verso indirizzo IPv4 in formato SIIT
   `64:ff9b::/96`, validazione accettazione payload), `[dns] risultato: PASS`
-  (N5: query A per `example.com` e validazione di `93.184.216.34`).
-  Prossimo: N6 (DoH/DoT), poi personalità POSIX di rete, VT-d.
+  + `[dns] upstream: PASS` (N5/N6.0: query A per `example.com` →
+  `93.184.216.34` e per `upstream.test` → `198.51.100.7` via responder
+  Python sull'host su `[::]:5353`, seed di `sys:dns.conf` gated su
+  `NET_DNS_UPSTREAM_PORT`).
+  Prossimo: N6.5 (DoT dentro `dns` con `libs/tls`), poi personalità POSIX di
+  rete, VT-d.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
@@ -449,7 +462,7 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
 
 ```bash
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term (rasterizer + cursore + surface/layer 0 + T2/T3), net (IPv6/NDP/TCP/SIIT/DNS), valloc, blake2s: 72 test
+./scripts/run-unit-tests.sh   # term (rasterizer + cursore + surface/layer 0 + T2/T3), net (IPv6/NDP/TCP/SIIT/DNS/parse), valloc, blake2s: 75 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh

@@ -276,6 +276,17 @@ print('%016X' % h)
     echo "[arca] + sys:net.conf (netecho -> porta 7)"
 fi
 
+# Upstream DNS (N6.0, ADR-0069): `sys:dns.conf` punta al default router, che
+# passt traduce verso l'host loopback (`--map-host-loopback`). Seedato solo se
+# il chiamante dichiara la porta: senza, il resolver resta in tabella statica
+# (N5) e `NET=1 ./run.sh` manuale si comporta come prima.
+if [ -n "${NET_DNS_UPSTREAM_PORT:-}" ]; then
+    printf 'upstream = auto\nport = %s\nmode = plain\ntimeout_ms = 2000\n' \
+        "$NET_DNS_UPSTREAM_PORT" > "$ROOT/build-meta/dns.conf"
+    SEED_NS+=( "sys:dns.conf=$ROOT/build-meta/dns.conf" )
+    echo "[arca] + sys:dns.conf (upstream auto:$NET_DNS_UPSTREAM_PORT)"
+fi
+
 # Seed bucket Identis (ADR-0055): utente root con hash BLAKE2s-256 di "root".
 # Seedato sempre (gate inclusi): il volume parte con un utente valido.
 IDENTIS_CFG="$(mktemp)"
