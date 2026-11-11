@@ -48,7 +48,13 @@ embedded nel kernel via `include_bytes!` (`kernel/src/user_binary.rs`).
 ```bash
 ./run-tests.sh           # gate di regressione: boot CON la suite + QEMU
 ./run.sh                 # produzione: boot SENZA test, shell subito usabile
+KVM=1 ./run-tests.sh     # idem, accelerato (richiede /dev/kvm accessibile)
 ```
+
+L'accelerazione e' **opt-in** (`KVM=1` in `run.sh` → `-enable-kvm -cpu host`;
+senza `/dev/kvm` avvisa e resta su TCG). Il default resta TCG perche' il gate
+deve girare identico su macchine senza KVM: i numeri cambiano, il contratto no
+(gate validato su entrambi: `append512` `dt=5631` su TCG, `4926` su KVM).
 
 Di default (`./run.sh`) init SALTA i test (feature `skip_tests`, shell subito
 usabile in ~2 s); con `RUN_TESTS=1` (`./run-tests.sh`) init spawa i test in
@@ -89,6 +95,15 @@ Righe di gate:
 [usertests] PASS 60/60
 [threadtest] PASS 12/12
 ```
+
+Il build userland (servizi nativi, test suite, flavour POSIX) usa
+`targets/x86_64-unknown-velordo-user.json`: clone di `x86_64-unknown-none`
+con `+sse,+sse2,+fxsr` e **senza** soft-float (N6.2.0, ADR-0071); il kernel
+resta `x86_64-unknown-none`. Con SSE2 LLVM emette libcall `mem*` invece di
+espanderle inline, quindi i simboli sono nostri in `libs/civis/src/rt.rs`
+(bulk `rep movsb`/`rep stosb`, taglie piccole `movdqu`); **non** si abilita
+`-Zbuild-std-features=compiler-builtins-mem` (la sua versione costa +46% su
+`testsarca` append 512 KiB sotto QEMU TCG).
 
 > Write-path ArcaFS (Fase 1a/1b): il test `append 512KiB sequenziale` e'
 > tornato sotto il bound dopo free a un settore + header-ext differita

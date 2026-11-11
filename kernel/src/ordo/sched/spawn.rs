@@ -66,18 +66,25 @@ pub fn spawn(name: &'static str, priority: Priority, entry: crate::ordo::process
 }
 
 /// Crea un thread 1:1 nel gruppo del chiamante (S-T, ADR-0046): `entry` =
-/// RIP user iniziale, `stack` = RSP iniziale (mappato dal chiamante, di
-/// solito mmap), `fs` = base TLS (0 = nessuna). Il gruppo e' quello del
-/// chiamante (un thread puo' spawnare fratelli). Solo chiamanti user (i
-/// processi kernel non hanno address space condivisibile). Ritorna il tid.
+/// RIP user iniziale, `stack` = TOP dello stack (past-the-end, mappato dal
+/// chiamante, di solito mmap), `fs` = base TLS (0 = nessuna). Il gruppo e'
+/// quello del chiamante (un thread puo' spawnare fratelli). Solo chiamanti
+/// user (i processi kernel non hanno address space condivisibile). Ritorna
+/// il tid.
 pub fn spawn_thread(entry: u64, stack: u64, fs: u64) -> Option<usize> {
     if entry == 0 || stack == 0 {
         return None;
     }
-    // Lo stack e' il TOP (un past-the-end: il primo push scrive [top-8]):
-    // valida l'ultima qword mappabile. La mappatura effettiva faulta loud
-    // al primo uso se invalida — mai UB nel kernel.
-    if !crate::arc::vmm_user::is_user_range(stack.wrapping_sub(8), 8) {
+    // L'ABI SysV vuole RSP ≡ 8 (mod 16) all'ingresso di una funzione (dopo
+    // il push del return address). Il TOP di uno stack e' tipicamente
+    // 16-allineato (mmap): usarlo com'e' darebbe RSP ≡ 0 e ogni `movaps`
+    // su uno slot 16-allineato andrebbe in #GP. Non era visibile finche' lo
+    // userland era soft-float (nessun XMM): con SSE2 (N6.2.0, ADR-0071) il
+    // primo thread moriva con #GP sul primo `movaps [rsp+0x30]`.
+    let rsp = (stack & !0xF).wrapping_sub(8);
+    // Il primo push scrive [rsp-8]: valida quella qword. La mappatura
+    // effettiva faulta loud al primo uso se invalida — mai UB nel kernel.
+    if !crate::arc::vmm_user::is_user_range(rsp.wrapping_sub(8), 8) {
         return None;
     }
     // FS nulla o user-range (canonica: niente basi kernel come TLS).
@@ -105,7 +112,7 @@ pub fn spawn_thread(entry: u64, stack: u64, fs: u64) -> Option<usize> {
     let thread = match unsafe {
         Process::create_thread(
             name, name_owned, name_len, priority, group, cr3, tss_slot,
-            cbs, text_id, img, entry, stack, fs,
+            cbs, text_id, img, entry, rsp, fs,
         )
     } {
         Some(t) => t,
@@ -117,8 +124,8 @@ pub fn spawn_thread(entry: u64, stack: u64, fs: u64) -> Option<usize> {
     sched.place_process(id, thread);
     sched.set_ready(id);
     crate::serial_println!(
-        "[ordo] thread '{}' (tid {}), gruppo {} | entry={:#x} stack={:#x} fs={:#x}",
-        sched.processes[group].name_str(), id, group, entry, stack, fs
+        "[ordo] thread '{}' (tid {}), gruppo {} | entry={:#x} rsp={:#x} fs={:#x}",
+        sched.processes[group].name_str(), id, group, entry, rsp, fs
     );
     Some(id)
 }

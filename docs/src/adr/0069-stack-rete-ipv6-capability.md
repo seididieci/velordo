@@ -8,7 +8,9 @@ echo server nativo `netecho`, probe `netudp`). **N3 implementata** (TCP
 minimale, sostituito da N6.1). **N4 implementata** (traduttore SIIT/NAT64).
 **N5 implementata** (resolver DNS plain). **N6.0 implementata** (inoltro
 upstream plain UDP). **N6.1 implementata** (TCP reale: client + listener,
-macchina a stati in `libs/net`, `EV_ACCEPT`). N6.2–N8 restano la traiettoria.
+macchina a stati in `libs/net`, `EV_ACCEPT`). N6.2–N8 restano la traiettoria:
+N6.2.0 = SSE2 nello userland (ADR-0071, prerequisito), N6.2 = `libs/tls`
+adattatore sopra `embedded-tls` 0.19 (ADR-0072), N6.3 = DoT dentro `dns`.
 Dipende da ADR-0068 (threat model/invarianti) e ADR-0070 (config `sys:*`,
 non ancora implementata: N1 usa una config compilata; `sys:net.conf` per N2
 è seedato a build-time con fail-closed).
@@ -141,8 +143,10 @@ non conosce POSIX.
   deadline, txid rimappato) — **Completata**; **N6.1** TCP reale in
   `libs/net` (client + listener, macchina a stati, `EV_ACCEPT`) —
   **Completata**; **N6.2** crate separato `libs/tls` (client-only, trasporto
-  iniettato, X.509 con clock reale da `usertime`); **N6.3** DoT dentro
-  `dns`; **N6.4** DoH se servirà (stessa API di trasporto).
+  iniettato, X.509 con clock reale da `usertime`) — **ridisegnata**: adattatore
+  sopra `embedded-tls` 0.19 dietro un target userland con SSE2 (ADR-0071,
+  ADR-0072); **N6.3** DoT dentro `dns`; **N6.4** DoH se servirà (stessa API di
+  trasporto).
 - **N7**: personalità POSIX socket.
 - **N8**: VT-d/IOMMU.
 

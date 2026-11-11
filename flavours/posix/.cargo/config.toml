@@ -1,12 +1,19 @@
 [build]
-target = "x86_64-unknown-none"
+target = "../../../targets/x86_64-unknown-velordo-user.json"
 
-# Config condiviso dei crate userspace.
+[unstable]
+json-target-spec = true
+
+# Config condiviso dei crate della personalita' POSIX.
 #
-# Le rustflags (relocation-model=pic, -T<demo.ld>, ecc.) NON stanno qui: vengono
-# impostate in modo esplicito da scripts/build-userland.sh tramite la var
-# d'ambiente CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS. Cosi' c'e' una sola
-# fonte di verita' e non si duplicano/concatenano con quelle di altri crate.
+# N6.2.0 (ADR-0071): lo userland usa un target proprio con SSE2
+# (`targets/x86_64-unknown-velordo-user.json`); il kernel resta su
+# `x86_64-unknown-none` (soft-float).
+#
+# Le rustflags (relocation-model=pic, -T<*.ld>, ecc.) NON stanno qui: vengono
+# impostate in modo esplicito da scripts/build-posix.sh tramite la var
+# d'ambiente CARGO_TARGET_X86_64_UNKNOWN_VELORDO_USER_RUSTFLAGS. Cosi' c'e' una
+# sola fonte di verita' e non si duplicano/concatenano con quelle di altri crate.
 #
 # `[build] target` qui e `[unstable] build-std` nella radice vengono scoperti
-# risalendo da questa directory (il build userland gira con CWD=userland/demo).
+# risalendo da questa directory.

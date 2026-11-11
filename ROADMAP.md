@@ -770,10 +770,44 @@ Voci con scope e vittoria dichiarati (non date).
       SYN+ACK del figlio, ring del figlio azzerato dal client, stack overflow
       del servizio (buffer su heap). Unit test host 96/96 (`libs/net` 48).
       Net tests PASS; gate 6/6, zero FAIL/PANIC/FAULT.
-- [ ] **Rete N6.2–N8** (pianificata, ADR-0068/0069/0070): DoT dentro `dns`
-      con crate separato `libs/tls` (X.509 con clock reale da `usertime`);
-      DoH sulla stessa API di trasporto; personalità POSIX socket;
-      VT-d/IOMMU.
+- [x] **Rete N6.2.0 — SSE2 nello userland** (completata, ADR-0071):
+      target separato `targets/x86_64-unknown-velordo-user.json`
+      (`-mmx,+sse,+sse2,+fxsr,-avx,-avx2`, niente soft-float) per servizi
+      nativi, test suite e flavour POSIX; `build_one` passa
+      `--target <json> -Zjson-target-spec` e la var rustflags diventa
+      `CARGO_TARGET_X86_64_UNKNOWN_VELORDO_USER_RUSTFLAGS` (i
+      `.cargo/config.toml` dei crate user puntano allo stesso JSON). Il kernel
+      resta `x86_64-unknown-none` soft-float. Motivazione misurata: con SSE2
+      disabilitato LLVM non legalizza i vettori a 128 bit e
+      `poly1305`/`polyval`/`aes`/`curve25519-dalek` non compilano (errore
+      `Do not know how to split the result of this operator`); il kernel però
+      salva già XMM (`CR4.OSFXSR` + `fxsave`/`fxrstor` per pid, S2.5b).
+      Con SSE2 LLVM emette libcall `mem*` invece di espanderle inline: i
+      simboli stanno in `libs/civis/src/rt.rs` (bulk `rep movsb`/`rep stosb`,
+      taglie piccole `movdqu`), **non** `compiler-builtins-mem` (la sua
+      versione `rep movsb`+`rep movsq` costa +46% su `testsarca` append
+      512 KiB sotto TCG). Vittoria: `./run-tests.sh` 6/6, zero
+      FAIL/PANIC/FAULT, net tests e shell base/native verdi col nuovo target;
+      nessun bloat (cardo 313872 B contro 317968 B del target vecchio).
+- [ ] **Rete N6.2 — `libs/tls` (adattatore TLS 1.3)** (pianificata,
+      ADR-0072): dentro `embedded-tls` 0.19 (versione pinnata), fuori un'API
+      piccola: trait `Transport` + impl `embedded_io::Read/Write`, provider
+      (`CryptoProvider` con DRBG ChaCha20 seminato da RDRAND, fallback
+      dichiarato debole sotto TCG), `TlsClock` iniettato (`usertime`),
+      `pki::CertVerifier` con `set_hostname_verification`, ALPN `dot`,
+      suite `Aes128GcmSha256`. Trust anchor: ISRG Root X1 compilata +
+      `ca = <path>` in `sys:dns.conf`. Vittoria: test host (DRBG, config,
+      catena, framing) verdi; handshake provato in QEMU.
+- [ ] **Rete N6.3 — DoT dentro `dns`** (pianificata, ADR-0072):
+      `forward_dot()` con framing a prefisso di 2 byte (RFC 7858) sopra
+      l'endpoint TCP, stessa forma di `forward_plain` (single-flight,
+      deadline, txid rimappato); TLS rotto o certificato invalido →
+      SERVFAIL, `mode = dot` senza `sni` → fail-closed con log (mai degrado
+      silenzioso a plain). Fase `[dns] dot: PASS` in `run-net-tests.sh`
+      contro un `openssl s_server -tls1_3` locale con CA di test (fuori dal
+      gate). ADR-0072 → Accepted.
+- [ ] **Rete N6.4–N8** (pianificata, ADR-0068/0069/0070): DoH sulla stessa
+      API di trasporto; personalità POSIX socket; VT-d/IOMMU.
       Config `sys:net` con policy di subtree in cardo (`sys:identis` rinomina
       `identis:config`, chiude il debito ADR-0058).
 

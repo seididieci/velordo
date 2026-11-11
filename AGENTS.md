@@ -264,8 +264,9 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `93.184.216.34` e per `upstream.test` → `198.51.100.7` via responder
   Python sull'host su `[::]:5353`, seed di `sys:dns.conf` gated su
   `NET_DNS_UPSTREAM_PORT`).
-  Prossimo: N6.2 (crate `libs/tls`), N6.3 DoT dentro `dns`, poi personalità
-  POSIX di rete, VT-d.
+  Prossimo: N6.2 (`libs/tls` adattatore sopra `embedded-tls` 0.19,
+  ADR-0072; prerequisito N6.2.0 = SSE2 nello userland, **completato**,
+  ADR-0071), N6.3 DoT dentro `dns`, poi personalità POSIX di rete, VT-d.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
@@ -500,7 +501,9 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 #   [identistest] PASS 11/11
 #   [usertests] PASS 60/60
 #   [threadtest] PASS 12/12
-timeout 150 ./run-tests.sh > /tmp/boot.log
+# KVM=1 accelera (-enable-kvm -cpu host, opt-in; senza /dev/kvm resta TCG).
+# Il timeout chiude il boot al prompt del login: il contratto sono le PASS.
+timeout 300 ./run-tests.sh > /tmp/boot.log
 rg '\[testfs\] PASS 5/5|\[testsarca\] PASS 64/64|\[posixtests\] PASS 4/4|\[identistest\] PASS 11/11|\[usertests\] PASS 60/60|\[threadtest\] PASS 12/12' /tmp/boot.log
 test "$(rg -c 'FAIL|PANIC|#.* FAULT' /tmp/boot.log)" = "0"
 ```
@@ -545,3 +548,16 @@ test "$(rg -c 'FAIL|PANIC|#.* FAULT' /tmp/boot.log)" = "0"
    Lo spin va bene solo per bound di microsecondi (continuazioni ESC) e
    durante un comando foreground (`wait_fg`/`cancel_job`). Le fasi shell
    `base`/`native` campionano la CPU di QEMU e falliscono sopra il 50%.
+10. **SSE2 userland e `mem*` (ADR-0071)**: lo userland compila con
+    `targets/x86_64-unknown-velordo-user.json` (SSE2), il kernel resta
+    `x86_64-unknown-none` soft-float. Con SSE2 LLVM **non** espande più
+    `memcpy`/`memmove`/`memset`/`memcmp` inline: emette libcall, e i simboli
+    sono nostri in `libs/civis/src/rt.rs` (bulk `rep movsb`/`rep stosb`,
+    taglie piccole `movdqu`). Non abilitare
+    `-Zbuild-std-features=compiler-builtins-mem`: la sua versione
+    (`rep movsb`+`rep movsq`+`rep movsb`) è +46% su `testsarca` append 512 KiB
+    sotto QEMU TCG. Conseguenza: **ogni crate user deve linkare `civis`**
+    (senza, link fallisce con `undefined symbol: memcpy`). Se si aggiunge un
+    crate che non linka `civis`, o si aggiunge la dipendenza o si forniscono
+    i simboli. I target JSON sono pinnati: `-Zjson-target-spec` +
+    `[unstable] json-target-spec = true` nei `.cargo/config.toml`.

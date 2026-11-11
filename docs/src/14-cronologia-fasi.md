@@ -3358,3 +3358,49 @@
       cooperativo in un test vero, e ha fatto emergere cinque bug che nessun
       test applicativo avrebbe visto; il sesto (ring azzerato) è il classico
       ordine-di-arrivo fra chi scrive e chi mappa la memoria condivisa.
+- [x] **N6.2.0 — SSE2 nello userland** (2026-11, ADR-0071): prerequisito di
+      N6.2, in due parti (il target e i `mem*`; poi il bug dei thread).
+      **Il target**: `targets/x86_64-unknown-velordo-user.json`, clone di
+      `x86_64-unknown-none` con `-mmx,+sse,+sse2,+fxsr,-avx,-avx2` e **senza**
+      `+soft-float`; il kernel resta soft-float. `build_one` passa
+      `--target <json> -Zjson-target-spec` e la var rustflags diventa
+      `CARGO_TARGET_X86_64_UNKNOWN_VELORDO_USER_RUSTFLAGS` (i cinque
+      `.cargo/config.toml` dei crate user puntano allo stesso JSON con
+      `json-target-spec = true`). Motivazione misurata (probe fuori dal
+      repo): senza SSE2 LLVM non legalizza i vettori a 128 bit e
+      `poly1305`/`polyval`/`aes`/`curve25519-dalek` non compilano
+      (`Do not know how to split the result of this operator`), mentre
+      `sha2`/`chacha20`/`p256`/`rsa`/`x509-cert`/`rustls-webpki` sì; con SSE2
+      compilano tutti, `embedded-tls` 0.19 compreso. `-C
+      target-feature=+sse2` via RUSTFLAGS **non** è un'alternativa: rompe
+      `build-std` (`compiler_builtins`: *"Do not know how to soften this
+      operator's operand"*). Nessun bloat: cardo 313872 B contro 317968 B.
+      **I `mem*`**: con SSE2 LLVM smette di espandere `memcpy`/`memset`
+      inline ed emette libcall, quindi i simboli vanno forniti — e la forma
+      conta più dell'istruzione. Misure su `testsarca` append 512 KiB (host
+      TCG, limite 6000): target vecchio 5971; `compiler-builtins-mem`
+      (`rep movsb`+`rep movsq`+`rep movsb`) **8738**; loop `movdqu` a 64 B
+      **6854**; ibrido (`rep movsb` per il bulk + `movdqu` < 64 B) **6659**;
+      `rep movsb` + `rep stosq` **5663**. Due lezioni: (1) contano i byte per
+      iterazione dell'helper TCG, non il numero di istruzioni — `rep stosb`
+      per un `memset` di blocco costa 8× `stosq`, ed era *quello* il residuo,
+      non le copie; (2) il loop `movdqu` esplicito, che sembrerebbe il più
+      veloce, è più lento del `rep movsb` (helper in C, banda di memoria).
+      Scelta finale: `civis::rt` con `rep movsb`/`rep stosq` (testa/coda a
+      byte per l'allineamento) e `memcmp` a parole. `compiler-builtins-mem`
+      **non** si abilita (e ogni crate user deve linkare `civis`).
+      **Il bug vero (thread)**: `testsarca` verde ma `threadtest` sparito —
+      il thread di test 9 moriva con `#GP err=0` e code 139, e il gate non
+      lo vede perché `#GP` non è `FAIL`/`PANIC`/`FAULT` (il segnale è la riga
+      `PASS` mancante). Causa: i thread nascevano con `RSP ≡ 0 (mod 16)`
+      (il TOP dell'`mmap`, 16-allineato) mentre l'ABI SysV vuole `≡ 8`
+      all'ingresso di una funzione: con SSE2 il primo `movaps [rsp+0x30]`
+      va in #GP. Invisibile prima perché lo userland soft-float non toccava
+      XMM. Fix in `spawn_thread`: `rsp = (stack & !0xF) - 8` + validazione
+      della qword del primo push. Il main thread era già corretto
+      (`USER_STACK_TOP - 24`). **Validazione**: gate 6/6, zero
+      FAIL/PANIC/FAULT; `testsarca` append 512 KiB `dt=5631` (run di gate;
+      5663 in quella precedente, entrambe sotto il riferimento senza SSE2).
+      Ripetuto su KVM (knob opt-in `KVM=1` in `run.sh`, `-enable-kvm -cpu
+      host`; default TCG invariato perché il gate deve girare anche su host
+      senza `/dev/kvm`): 6/6, `dt=4926`.

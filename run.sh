@@ -61,6 +61,22 @@ fi
 KERNEL=target/x86_64-unknown-none/release/velord
 DISPLAY="${RUN_DISPLAY:-none}"   # RUN_DISPLAY=gtk per vedere la VGA in locale
 
+# Accelerazione (opt-in): `KVM=1` usa -enable-kvm -cpu host. Il default resta
+# TCG (nessuna dipendenza da /dev/kvm): il gate deve girare identico su
+# macchine senza KVM. Con `-cpu host` i flag del kernel vengono dall'host:
+# FSGSBASE/rdrand/rdseed sono richiesti dallo userland (TLS + getrandom) e se
+# mancassero il boot fallisce loud, come in TCG.
+KVM_ARGS=""
+CPU_ARGS="-cpu qemu64,+fsgsbase,+rdrand,+rdseed"
+if [ "${KVM:-0}" = "1" ]; then
+    if [ -w /dev/kvm ]; then
+        KVM_ARGS="-enable-kvm"
+        CPU_ARGS="-cpu host"
+    else
+        echo "[run] KVM=1 ma /dev/kvm non e' accessibile: uso TCG" >&2
+    fi
+fi
+
 # Boot diretto via protocollo PVH (ELF64 + nota XEN_ELFNOTE_PHYS32_ENTRY):
 # QEMU carica il kernel e trasferisce il controllo in protected mode 32-bit.
 # Drive IDE: il volume ArcaFS root (sda) SEMPRE; le derivate (GPT/MBR)
@@ -171,7 +187,8 @@ fi
 # shellcheck disable=SC2086
 exec qemu-system-x86_64 \
     -m ${RUN_MEM:-256M} \
-    -cpu qemu64,+fsgsbase,+rdrand,+rdseed \
+    $KVM_ARGS \
+    $CPU_ARGS \
     -display "$DISPLAY" \
     -serial stdio \
     -no-reboot \

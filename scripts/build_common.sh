@@ -49,16 +49,29 @@ build_one() {
     local extra_flags="${*:5}"  # flag cargo extra opzionali (es. --no-default-features)
 
     local LD_ABS="$(pwd)/$ld"
-    export CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS="\
+    # N6.2.0 (ADR-0071): lo userland usa un target proprio con SSE2
+    # (`targets/x86_64-unknown-velordo-user.json`). Il kernel resta su
+    # `x86_64-unknown-none` soft-float: la separazione e' voluta. SSE2 qui e'
+    # sicuro perche' il kernel salva/ripristina XMM (CR4.OSFXSR +
+    # fxsave/fxrstor per pid, S2.5b).
+    local USER_TARGET_JSON="$(pwd)/targets/x86_64-unknown-velordo-user.json"
+    local USER_TARGET_NAME="x86_64-unknown-velordo-user"
+    export CARGO_TARGET_X86_64_UNKNOWN_VELORDO_USER_RUSTFLAGS="\
 -C relocation-model=pic \
 -C link-arg=-T${LD_ABS} \
 -C link-arg=--apply-dynamic-relocs"
 
-    echo "[build] $elfname (freestanding, PIC @ USER_CODE)"
+    echo "[build] $elfname (freestanding, PIC @ USER_CODE, SSE2)"
     # shellcheck disable=SC2086
-    cargo build --release --manifest-path "$crate/Cargo.toml" $extra_flags
+    # Niente `compiler-builtins-mem`: con SSE2 LLVM emette chiamate a
+    # memcpy/memset/memcmp e i simboli li fornisce `civis::rt` (rep movsb /
+    # rep stosq, la stessa forma che LLVM inlinea senza SSE). Il default di
+    # compiler_builtins su x86_64 (rep movsb + rep movsq + rep movsb) costa
+    # +46% su `testsarca` append 512 KiB sotto QEMU TCG (ADR-0071).
+    cargo build --release --manifest-path "$crate/Cargo.toml" \
+        --target "$USER_TARGET_JSON" -Zjson-target-spec $extra_flags
 
-    local ELF="$TARGET_DIR/x86_64-unknown-none/release/$elfname"
+    local ELF="$TARGET_DIR/$USER_TARGET_NAME/release/$elfname"
     local OUT="$BUILD/$out_name"
     mkdir -p "$BUILD"
     local OBJCOPY

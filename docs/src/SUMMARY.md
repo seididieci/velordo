@@ -98,3 +98,5 @@
 - [ADR-0068: Threat model e invarianti dello stack di rete](./adr/0068-threat-model-stack-rete.md)
 - [ADR-0069: Stack di rete nativo — IPv6-first, servizi netdev/net, API a capability](./adr/0069-stack-rete-ipv6-capability.md)
 - [ADR-0070: Policy di subtree per hash in cardo e bucket `sys:*`](./adr/0070-policy-subtree-bucket-sys.md)
+- [ADR-0071: SSE2 nello userland (target separato) e crypto di sistema](./adr/0071-sse2-userland.md)
+- [ADR-0072: TLS per DoT — `embedded-tls` dietro `libs/tls`, fiducia e limiti](./adr/0072-tls-dot-embedded-tls.md)

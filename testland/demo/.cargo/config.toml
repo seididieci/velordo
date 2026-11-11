@@ -1,6 +1,10 @@
 [build]
-target = "x86_64-unknown-none"
+target = "../../targets/x86_64-unknown-velordo-user.json"
 
-# Le rustflags di link a USER_CODE (relocation-model=pic, -Tsrc/demo.ld) sono
-# impostate da scripts/build-userland.sh (CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS):
+[unstable]
+json-target-spec = true
+
+# N6.2.0 (ADR-0071): userland con SSE2. Le rustflags di link a USER_CODE
+# (relocation-model=pic, -Tsrc/demo.ld) sono impostate da
+# scripts/build-userland.sh (CARGO_TARGET_X86_64_UNKNOWN_VELORDO_USER_RUSTFLAGS):
 # vedi userland/.cargo/config.toml.

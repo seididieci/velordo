@@ -224,6 +224,12 @@ pub use arcafs::format::{
 // consentito meccanismo→personalita' (hook di routing, installato al bordo).
 // Una seconda personalita' riusa `civis` invariato.
 
+/// `memcpy`/`memmove`/`memset`/`memcmp` SSE2 (N6.2.0, ADR-0071): con SSE2
+/// LLVM emette chiamate alla libc, e il default di `compiler_builtins` su
+/// x86_64 (`rep movsq`) e' lento sotto QEMU TCG. Simboli forti, al posto di
+/// `-Zbuild-std-features=compiler-builtins-mem`.
+pub mod rt;
+
 /// Allocatore globale on-demand (free-list + `sbrk`): unico per tutto il
 /// userland. Vive qui cosi' ogni binario che linka `civis` lo usa senza
 /// duplicare codice.
