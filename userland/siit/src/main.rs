@@ -169,9 +169,14 @@ impl SiitService {
 
     fn free_endpoint(&mut self, idx: usize) {
         let ep = self.endpoints[idx];
-        if ep.ring_id != 0 && !ep.ring_base.is_null() {
+        if ep.ring_id != 0 {
             let ring_len = NET_EP_RING_HDR * 2 + NET_EP_RING_SLOTS * NET_EP_SLOT_SIZE * 2;
-            let _ = civis::munmap(ep.ring_base as usize, ring_len);
+            if !ep.ring_base.is_null() {
+                let _ = civis::munmap(ep.ring_base as usize, ring_len);
+            }
+            // Fase 30.1: l'owner chiude il ring (i client che lo mappano
+            // tengono il loro ref finche' non fanno `munmap`).
+            let _ = civis::shm_destroy(ep.ring_id);
         }
         self.endpoints[idx] = Ep::free();
     }

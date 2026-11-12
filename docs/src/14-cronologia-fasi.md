@@ -1062,6 +1062,17 @@
     non ha un FS (e' in userfs) e non puo' leggere file; servirebbe COW o IPC
     FS dal kernel (fuori ADR-0005). La parte "errore del processo → muore il
     processo" e' stata fatta in 29b (OOM e #GP → kill).
+- [x] Fase 30.1: ownership + `shm_destroy` (ADR-0073).
+  - `shm_create` registra l'owner (pid) e prende il riferimento iniziale
+    (`refs = 1`); `SYS_SHM_DESTROY (63)` e' owner-only: marca `destroyed`
+    (i `shm_map` successivi falliscono) e rilascia il ref dell'owner. Se non
+    ci sono mappature i frame vanno via subito; altrimenti restano finche'
+    l'ultimo `munmap`/teardown non scende a 0. Il teardown rilascia i ref
+    owner del processo morto: creazione senza `shm_map` non e' piu' un leak.
+  - `civis::shm_destroy`; `net`/`dns`/`siit` `free_endpoint` lo chiamano
+    (il `munmap` del proprio ring resta, ma il ref owner non e' piu' orfano).
+    t65: create+destroy senza map (riuso), destroy con map (mappa viva,
+    nuovi map rifiutati), non-owner rifiutato. Suite → 61/61.
 - [x] Fase 31: loader ELF per-segmento (W^X del binario; ADR-0021).
   - Obiettivo: mappare il binario utente per segmento con i flag dell'ELF
     (`R E`→RX, `R`→RO, `RW`→RW, NX su tutto tranne il codice), invece di un

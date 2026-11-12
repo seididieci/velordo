@@ -103,6 +103,12 @@ pub const SYS_SHM_CREATE: u64 = 42;
 /// Mappa una regione condivisa (Fase 30): `(id, hint, prot, flags)` → base o
 /// -1. Le pagine sono le stesse per tutti i mappatori (zero-copy tra processi).
 pub const SYS_SHM_MAP: u64 = 43;
+/// Chiude una regione condivisa (Fase 30.1, owner-only): `(id)` → 0 o -1.
+/// Marca `destroyed` (i `shm_map` successivi falliscono) e rilascia il
+/// riferimento dell'owner: i frame vanno via subito se non ci sono mappature,
+/// altrimenti all'ultimo `munmap`/teardown. Il teardown del processo rilascia
+/// comunque i riferimenti owner delle regioni che possiede.
+pub const SYS_SHM_DESTROY: u64 = 63;
 /// Contatori shared text (Fase 32, debug/test): ritorna `hits` in rax,
 /// `misses` in rdi, `live` in rsi (nessun argomento).
 pub const SYS_TEXT_STATS: u64 = 44;

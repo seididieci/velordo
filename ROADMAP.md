@@ -48,6 +48,7 @@ zero FAIL/PANIC/FAULT. La suite FAT32 e' **fuori dal gate** (ADR-0059:
 | 28 | `mmap` anonimo nel basso canonico (payoff higher-half) | ✅ Completata |
 | 29 | Protezioni di memoria (`mprotect`/NX, fault→kill del processo) | ✅ Completata |
 | 30 | Memoria condivisa tra processi (`shm_create`/`shm_map`) | ✅ Completata |
+| 30.1 | Ownership + `shm_destroy` (owner-only, refcount, teardown) | ✅ Completata |
 | 31 | Loader ELF per-segmento (W^X del binario, ADR-0021) | ✅ Completata |
 | 32 | Shared text ELF (segmenti immutabili condivisi, ADR-0022) | ✅ Completata |
 | 33 | Infrastruttura COW (frame refcount + COW fault, ADR-0023) | ✅ Completata |

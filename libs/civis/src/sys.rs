@@ -153,6 +153,21 @@ pub fn shm_map(id: u32, hint: usize, prot: u64) -> Result<usize, Error> {
     }
 }
 
+/// Fase 30.1 — `shm_destroy(id)`: chiude la regione condivisa `id` (solo
+/// l'owner). Marca `destroyed` (i `shm_map` successivi falliscono) e rilascia
+/// il riferimento dell'owner: i frame vanno via subito se non ci sono
+/// mappature, altrimenti all'ultimo `munmap`/teardown. Il teardown del
+/// processo rilascia comunque i riferimenti owner delle regioni che possiede.
+#[inline]
+pub fn shm_destroy(id: u32) -> Result<(), Error> {
+    let r = unsafe { syscall4(SYS_SHM_DESTROY, id as u64, 0, 0, 0) };
+    if r < 0 {
+        Err(Error::Invalid)
+    } else {
+        Ok(())
+    }
+}
+
 /// Fase 33 — `shm_map_cow(id, hint)`: mappa la regione condivisa `id` in
 /// copy-on-write (sempre `PROT_READ`): le pagine sono gli STESSI frame per
 /// tutti finche' nessuno scrive; al primo write il kernel materializza una

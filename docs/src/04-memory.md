@@ -169,11 +169,17 @@ con zero-fill lazy (stesso contratto di `sbrk`: VA subito, frame al fault).
 - Refcount per regione (`SHM_TABLE` statica, 16 slot): ogni `shm_map` +1,
   ogni `munmap`/teardown -1; a 0 i frame contigui sono liberati. Le VMA
   condivise portano l'id nel record (`shm`), il teardown le rilascia.
+- **Fase 30.1 (ownership)**: `shm_create` registra l'owner (pid) e prende un
+  riferimento (`refs = 1`); `shm_destroy(id)` (63) e' owner-only: marca la
+  regione `destroyed` (i `shm_map` successivi falliscono) e rilascia il
+  riferimento dell'owner. Se non ci sono mappature i frame vanno via subito,
+  altrimenti restano finche' l'ultimo `munmap`/teardown non scende a 0. Il
+  teardown del processo rilascia i riferimenti owner delle regioni che
+  possiede: chi crea e muore non lascia frame orfani (la creazione senza
+  `shm_map` non e' piu' un leak).
 - `munmap`/teardown staccano le PTE condivise (non-owned) senza liberarle: il
   free e' solo a refcount. `mprotect` su condivise ammette RO↔RW, non NONE
   (drop di mappatura non supportato, rifiutato senza stato).
-- Limite dichiarato: la creazione mai mappata resta finche' il processo non
-  mappa (caso d'uso normale = create+map).
 
 ## Caricamento ELF (Fase 31, ADR-0021)
 

@@ -158,7 +158,7 @@ velordo/
 
 ## Stato corrente
 
-Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 60/60` + `[threadtest] PASS 12/12` + shell nativa (fase `native` di `test-shell-all.sh`; le fasi POSIX sono storiche dal login nativo, ADR-0062), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
+Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 61/61` + `[threadtest] PASS 12/12` + shell nativa (fase `native` di `test-shell-all.sh`; le fasi POSIX sono storiche dal login nativo, ADR-0062), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
 - **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
   BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
@@ -291,8 +291,8 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   feature `civis-clock`) e un `&mut T: Transport` lascia il socket al
   chiamante. Framing RFC 7858 (`frame_tcp`/`tcp_prefix_len` in
   `libs/net::dns`), **una connessione per query ma endpoint persistente**
-  (`shm_create` non ha `destroy`: il ring si mappa una volta; `EV_ABORT`
-  libera lo slot TCP e azzera `conn_id`). Config `sys:dns.conf` con `sni`,
+  (il ring si mappa una volta; `EV_ABORT` libera lo slot TCP e azzera
+  `conn_id`). Config `sys:dns.conf` con `sni`,
   CA obbligatoria da `sys:ca.der`, `mode = dot` mal configurato o
   TLS/certificato invalido → **SERVFAIL** (mai NXDOMAIN, mai plaintext).
   Due invariant di `net` corretti: su RST l'endpoint CONNECT non viene più
@@ -444,6 +444,14 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   ring (NON il tag FS_NOTIFY); cardo legge il prefix dalla request ring del
   driver (primo elemento della coppia `(req, resp)` registrata — attenzione a
   non confonderlo col response ring).
+- **Memoria condivisa: owner + destroy (Fase 30.1, ADR-0073)** — `shm_create`
+  registra l'owner e prende il riferimento iniziale (`refs = 1`);
+  `shm_destroy` (63) e' owner-only: marca `destroyed` (i `shm_map` successivi
+  falliscono) e rilascia il ref owner; i frame restano vivi finche' l'ultimo
+  `munmap`/teardown non scende a 0. Il teardown rilascia i ref owner del
+  processo morto: creazione senza `shm_map` non e' piu' un leak. `net`/`dns`/
+  `siit` `free_endpoint` lo chiamano; i client non distruggono (solo
+  `munmap`).
 - **Reattivita' shell**: a valle del boot i soli processi `Normal` sono i
   servizi interattivi (console, fs, devfs, shell), tutti bloccati in attesa IPC;
   init resta bloccato in `recv`, `useruptime` e' `Low`. Quantum scheduler = 2
@@ -532,12 +540,12 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 60/60
+#   [usertests] PASS 61/61
 #   [threadtest] PASS 12/12
 # KVM=1 accelera (-enable-kvm -cpu host, opt-in; senza /dev/kvm resta TCG).
 # Il timeout chiude il boot al prompt del login: il contratto sono le PASS.
 timeout 300 ./run-tests.sh > /tmp/boot.log
-rg '\[testfs\] PASS 5/5|\[testsarca\] PASS 64/64|\[posixtests\] PASS 4/4|\[identistest\] PASS 11/11|\[usertests\] PASS 60/60|\[threadtest\] PASS 12/12' /tmp/boot.log
+rg '\[testfs\] PASS 5/5|\[testsarca\] PASS 64/64|\[posixtests\] PASS 4/4|\[identistest\] PASS 11/11|\[usertests\] PASS 61/61|\[threadtest\] PASS 12/12' /tmp/boot.log
 test "$(rg -c 'FAIL|PANIC|#.* FAULT' /tmp/boot.log)" = "0"
 ```
 

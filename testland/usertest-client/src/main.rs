@@ -449,6 +449,7 @@ fn real_main(sp: u64) -> ! {
                 M_FLOOD => run_flood(parent),
                 M_SHMDEMO => run_shmdemo(rounds as u32),
                 M_COWDEMO => run_cowdemo(rounds as u32),
+                M_SHDESTROY => run_shmdestroy(rounds as u32),
                 M_FORKDEMO => run_forkdemo(),
                 M_HARDEN => run_harden(rounds as i64),
                 M_DUPCLAIM => run_dupclaim(rounds as u64),
@@ -482,6 +483,15 @@ fn run_shmdemo(id: u32) -> (bool, usize) {
     }
     unsafe { core::ptr::write_volatile((base + 4096) as *mut u8, 0xAB); }
     (true, 0)
+}
+
+/// Fase 30.1: prova a chiudere una regione di cui NON e' owner (deve
+/// fallire). `id` arriva in `param`; il parent resta l'owner.
+fn run_shmdestroy(id: u32) -> (bool, usize) {
+    match civis::shm_destroy(id) {
+        Ok(()) => (false, 1), // non deve riuscire
+        Err(_) => (true, 0),
+    }
 }
 
 /// Fase 33: mappa la regione `id` in COW, verifica il pattern del parent

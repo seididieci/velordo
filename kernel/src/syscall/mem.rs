@@ -30,9 +30,21 @@ pub(super) fn sys_mmap(hint: u64, len: usize, prot: u64, flags: u64) -> i64 {
 /// shm_create(len): crea una regione di memoria condivisa (Fase 30) di `len`
 /// byte (frame contigui azzerati, max 256 KiB), ritorna l'id (>= 1) o -1.
 pub(super) fn sys_shm_create(len: u64) -> i64 {
-    match crate::arc::vmm_user::shm_create(len) {
+    match crate::arc::vmm_user::shm_create(len, crate::syscall::current_id()) {
         Some(id) => id as i64,
         None => -1,
+    }
+}
+
+/// shm_destroy(id): chiude la regione condivisa `id` (Fase 30.1, owner-only).
+/// Marca `destroyed` (i `shm_map` successivi falliscono) e rilascia il
+/// riferimento dell'owner: i frame vanno via subito se non ci sono mappature,
+/// altrimenti all'ultimo `munmap`/teardown. Ritorna 0 o -1.
+pub(super) fn sys_shm_destroy(id: u64) -> i64 {
+    if crate::arc::vmm_user::shm_destroy(id as u32, crate::syscall::current_id()) {
+        0
+    } else {
+        -1
     }
 }
 
@@ -67,6 +79,9 @@ pub(super) fn sys_shm_map(id: u64, hint: u64, prot: u64, flags: u64) -> i64 {
         return -1;
     }
     let fixed = flags & MMAP_FIXED != 0;
+    if crate::arc::vmm_user::shm_destroyed(id) {
+        return -1;
+    }
     let (phys, frames) = match crate::arc::vmm_user::shm_region(id) {
         Some(r) => r,
         None => return -1,

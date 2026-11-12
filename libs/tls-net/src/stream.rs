@@ -13,8 +13,7 @@
 //!   per-query del DoT senza aspettare FIN/TIME_WAIT.
 //!
 //! L'endpoint resta aperto per tutta la vita del processo: il ring si mappa
-//! una volta (ricrearlo per query vorrebbe dire `shm_create` senza
-//! `destroy`, cioe' frame persi a ogni query).
+//! una volta (endpoint persistente: ricrearlo per query non serve).
 
 use alloc::vec::Vec;
 use core::ptr::{read_volatile, write_volatile};

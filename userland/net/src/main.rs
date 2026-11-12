@@ -55,8 +55,8 @@ const EV_RST: u8 = 4;    // reset connessione
 const EV_ACCEPT: u8 = 5;
 /// Chiusura immediata della **connessione** lasciando vivo l'endpoint
 /// (N6.3): il client la usa per riaprire una connessione nuova sullo stesso
-/// endpoint senza aspettare FIN/TIME_WAIT. L'endpoint resta mappato: il shm
-/// non si puo' ricreare per query (`shm_create` non ha `destroy`).
+/// endpoint senza aspettare FIN/TIME_WAIT. L'endpoint resta mappato (endpoint
+/// persistente: il ring non si ricrea per query).
 const EV_ABORT: u8 = 6;
 /// Nessuna connessione TCP associata all'endpoint.
 const NO_CONN: u8 = 0xff;
@@ -200,10 +200,15 @@ impl NetService {
     /// Libera un endpoint.
     pub fn free_endpoint(&mut self, idx: usize) {
         let ep = self.endpoints[idx];
-        if ep.ring_id != 0 && !ep.ring_base.is_null() {
+        if ep.ring_id != 0 {
             let ring_len = NET_EP_RING_HDR * 2
                 + NET_EP_RING_SLOTS * NET_EP_SLOT_SIZE * 2;
-            let _ = civis::munmap(ep.ring_base as usize, ring_len);
+            if !ep.ring_base.is_null() {
+                let _ = civis::munmap(ep.ring_base as usize, ring_len);
+            }
+            // Fase 30.1: l'owner chiude il ring (i client che lo mappano
+            // tengono il loro ref finche' non fanno `munmap`).
+            let _ = civis::shm_destroy(ep.ring_id);
         }
         self.endpoints[idx] = Endpoint::free();
     }
@@ -589,9 +594,10 @@ fn apply_tcp_signal(svc: &mut NetService, conn: u8, signal: TcpSignal) {
             push(EV_RST, &[]);
             // Un endpoint CONNECT sopravvive alla propria connessione: chi lo
             // possiede (DoT, N6.3) riapre con il prossimo `NET_EP_TX`.
-            // Liberarlo lascerebbe il client con un ring **smappato** (e il
-            // ring non si puo' ricreare per query: `shm_create` non ha
-            // `destroy`). I figli di un listener restano come prima.
+            // Liberarlo lascerebbe il client con un ring **smappato** (i
+            // client hanno mappato il ring: distruggerlo qui renderebbe il
+            // loro mapping invalido fino all'unmap). I figli di un listener
+            // restano come prima.
             if ep.flags & NET_EP_FLAG_CONNECT != 0 {
                 svc.net.tcp_abort(conn);
                 if let Some(ep_mut) = svc.find_by_id_mut(ep.ep_id) {

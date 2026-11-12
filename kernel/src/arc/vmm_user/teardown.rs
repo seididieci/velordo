@@ -96,6 +96,9 @@ pub unsafe fn teardown_user_space(cr3: u64, pid: usize) {    let kernel_pml4 = k
     // VMA: dimentica i record (i frame owned cadono col walk sopra, che
     // libera tutte le foglie owned private — le pagine mappate lo sono).
     vma_clear(pid);
+    // Fase 30.1: rilascia il riferimento owner delle regioni condivise che
+    // il processo ha creato (le mappature di altri restano vive).
+    super::shm::release_owner(pid as u64);
     // Ring: free via record (le PTE ring sono NON-owned, il walk le salta).
     free_ring_pages(pid);
     // Staging DMA (38.1): stesso pattern dei ring (NON-owned + record).

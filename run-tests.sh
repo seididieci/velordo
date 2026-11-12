@@ -11,9 +11,9 @@
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 60/60
+#   [usertests] PASS 61/61
 #   [threadtest] PASS 12/12
-# (D4: la suite e' cresciuta di una riga: [usertests] 60/60 con t63+t64)
+# (Fase 30.1: t65 shm ownership + destroy; la suite e' cresciuta di una riga)
 # D5/ADR-0062: dopo la suite il boot finisce al **prompt del login** (il
 # login e' il gate: la shell parte solo dopo l'autenticazione) — il gate si
 # chiude col timeout, il contratto sono le righe PASS sopra.

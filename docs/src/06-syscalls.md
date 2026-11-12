@@ -110,6 +110,7 @@ La numerazione e' definita nel dispatch di `syscall_handler` in `kernel/src/sysc
 | 41 | `mprotect(addr, len, prot)` | cambia le protezioni di VMA intere (Fase 29): RO↔RW flippa il bit W, `PROT_NONE` fa cadere le pagine (riuso a zeri); stesse regole di `munmap`; ritorna 0 o -1 |
 | 42 | `shm_create(len)` | crea una regione di memoria condivisa (Fase 30, max 256 KiB, frame contigui azzerati) → id (>= 1) o -1 |
 | 43 | `shm_map(id, hint, prot, flags)` | mappa la regione condivisa `id` come VMA (prot R/RW, PTE non-owned pre-materializzate): le pagine sono le stesse per tutti i mappatori (scritture visibili); refcount, a 0 i frame sono liberati; con `MAP_COW` (Fase 33, solo `PROT_READ`) le pagine sono `RO`+`COW` (stessi frame finche' nessuno scrive, copia privata al primo write) con refcount per-frame; ritorna la base o -1 |
+| 63 | `shm_destroy(id)` | chiude una regione condivisa (Fase 30.1, owner-only): marca `destroyed` (i `shm_map` successivi falliscono) e rilascia il riferimento dell'owner; i frame vanno via subito se non ci sono mappature, altrimenti all'ultimo `munmap`/teardown; il teardown del processo rilascia comunque i riferimenti owner delle regioni che possiede; 0 o -1 |
 | 44 | `text_stats()` | contatori shared text (Fase 32, debug/test): `hits` in rax, `misses` in rdi, `live` in rsi; dalla Fase 33 `rdx` = fault COW gestiti (`cow_count`) |
 | 45 | `spawn_copy()` | figlio-copia in COW (Fase 34, nessun argomento): padre `(pid_figlio, canale)` (rax + rdi multi-registro), figlio `(0, canale)`; -1 su PID/canali/OOM esauriti |
 | 46 | `peer_pid(chan)` | pid del peer del canale `chan` (0 = nascita), o -1 (Fase 35, hardening: i server attribuiscono le richieste; abilita la policy `FS_REGISTER`) |
@@ -240,6 +241,7 @@ extern "C" fn syscall_handler() -> i64 {
 | `shm_create` | 42 | Crea una regione di memoria condivisa (Fase 30) → id |
 | `shm_map` | 43 | Mappa una regione condivisa (Fase 30) → base (zero-copy tra processi) |
 | `shm_map_cow` | 43 | Mappa una regione in COW (Fase 33, `MAP_COW`, solo `PROT_READ`) → base (copia privata al primo write) |
+| `shm_destroy` | 63 | Chiude una regione condivisa (Fase 30.1, owner-only) → `Ok`/`Err` |
 | `spawn_copy` | 45 | Figlio-copia in COW (Fase 34) → padre `(pid, chan)`, figlio `(0, chan)` |
 | `peer_pid` | 46 | Pid del peer di un canale (Fase 35) → pid o `Err` |
 | `peer_info` | 47 | Hash immagine del peer di un canale (Fase 36) → hash o `Err` |
@@ -539,7 +541,8 @@ implementa: `0=exit`, `2=write`, `8=getpid`, `16=send`, `17=recv`, `18=reply`,
 `56=futex_wait`, `57=futex_wake`, `58=thread_set_fs` (S-T, ADR-0046),
 `59=chdir`, `60=getcwd` (S1.1, cwd nel PCB), `61=map_mmio` (L0b,
 ADR-0057: grant UC delle BAR all'owner di `Gpu`), `62=dma_free` (D4,
-ADR-0061: libera uno slot device).
+ADR-0061: libera uno slot device), `63=shm_destroy` (Fase 30.1: chiude una
+regione condivisa, owner-only).
 
 Le vecchie syscall 3-7/23-24 (FS relay) sono state rimosse con la Fase 9.6:
 le operazioni FS sono ora IPC dirette client→cardo.

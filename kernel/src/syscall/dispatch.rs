@@ -7,7 +7,7 @@ use super::spawn::{sys_spawn, sys_spawn_image, sys_spawn_copy};
 use super::exec::sys_exec;
 use super::cwd::{sys_chdir, sys_getcwd};
 use super::thread::{sys_thread_create, sys_thread_exit, sys_thread_set_fs};
-use super::mem::{sys_mmap, sys_munmap, sys_mprotect, sys_shm_create, sys_shm_map, sys_map_physical, sys_map_mmio, sys_sbrk, sys_ring_alloc, sys_map_in, sys_dma_alloc, sys_dma_free};
+use super::mem::{sys_mmap, sys_munmap, sys_mprotect, sys_shm_create, sys_shm_destroy, sys_shm_map, sys_map_physical, sys_map_mmio, sys_sbrk, sys_ring_alloc, sys_map_in, sys_dma_alloc, sys_dma_free};
 use super::misc::{sys_exit, sys_write, sys_getpid, sys_kill, sys_suspend, sys_resume, sys_get_ticks, sys_cbs_create, sys_cbs_attach, sys_cbs_get_info, sys_ps_info, sys_text_stats, sys_meminfo, sys_boot_cmdline};
 
 /// Handler di dispatch: legge gli argomenti riempiti dall'entry e chiama la
@@ -70,6 +70,7 @@ pub(super) extern "C" fn syscall_handler() -> i64 {
             // Fase 30: memoria condivisa tra processi.
             syscall_numbers::SYS_SHM_CREATE => sys_shm_create((*p).arg1),
             syscall_numbers::SYS_SHM_MAP => sys_shm_map((*p).arg1, (*p).arg2, (*p).arg3, (*p).arg4),
+            syscall_numbers::SYS_SHM_DESTROY => sys_shm_destroy((*p).arg1),
             // Fase 32: contatori shared text (debug/test).
             syscall_numbers::SYS_TEXT_STATS => sys_text_stats(),
             // Fase 34: figlio-copia COW dell'address space.

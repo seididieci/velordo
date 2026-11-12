@@ -413,6 +413,11 @@ pub fn t_shm() -> bool {
     if civis::munmap(base, 8192).is_err() {
         return false;
     }
+    // Fase 30.1: l'owner chiude la regione (il ref del create non e' un
+    // mapping: senza `shm_destroy` la regione resterebbe viva).
+    if civis::shm_destroy(id).is_err() {
+        return false;
+    }
     // Error path: id inesistente rifiutato.
     if civis::shm_map(9999, 0, civis::PROT_READ).is_ok() {
         return false;
@@ -428,6 +433,9 @@ pub fn t_shm() -> bool {
             // Fresca = zeri (frame nuovi azzerati alla creazione).
             let zero = unsafe { core::ptr::read_volatile(b2 as *const u8) } == 0;
             let _ = civis::munmap(b2, 4096);
+            // Fase 30.1: anche il secondo create ha il ref owner: senza
+            // destroy lo slot resterebbe occupato fino al teardown.
+            let _ = civis::shm_destroy(id2);
             zero
         }
         Err(_) => false,
@@ -529,6 +537,11 @@ pub fn t_cow() -> bool {
     if civis::munmap(base, 8192).is_err() {
         return false;
     }
+    // Fase 30.1: l'owner chiude la regione (il ref del create non e' un
+    // mapping: senza `shm_destroy` la regione resterebbe viva).
+    if civis::shm_destroy(id).is_err() {
+        return false;
+    }
     // Error path: COW su id inesistente rifiutato.
     if civis::shm_map_cow(9999, 0).is_ok() {
         return false;
@@ -542,7 +555,79 @@ pub fn t_cow() -> bool {
             };
             let zero = unsafe { core::ptr::read_volatile(b2 as *const u8) } == 0;
             let _ = civis::munmap(b2, 4096);
+            // Fase 30.1: anche il secondo create ha il ref owner: senza
+            // destroy lo slot resterebbe occupato fino al teardown.
+            let _ = civis::shm_destroy(id2);
             zero
+        }
+        Err(_) => false,
+    }
+}
+
+/// Fase 30.1 — ownership + destroy: `shm_create` senza `shm_map` non lascia
+/// frame orfani; `shm_destroy` e' owner-only, chiude la regione (i `shm_map`
+/// successivi falliscono, le mappature esistenti restano valide); un
+/// non-owner non puo' chiudere. La regione si libera all'ultimo `munmap`.
+pub fn t_shm_destroy() -> bool {
+    // 1. create + destroy senza map: i frame tornano subito (slot riusabile).
+    let id = match civis::shm_create(4096) {
+        Ok(i) => i,
+        Err(_) => return false,
+    };
+    if civis::shm_destroy(id).is_err() {
+        return false;
+    }
+    // Idempotenza: un secondo destroy fallisce (gia' chiusa).
+    if civis::shm_destroy(id).is_ok() {
+        return false;
+    }
+    // 2. create + map + destroy: la mappa resta valida, i nuovi map no.
+    let id = match civis::shm_create(4096) {
+        Ok(i) => i,
+        Err(_) => return false,
+    };
+    let base = match civis::shm_map(id, 0, civis::PROT_READ | civis::PROT_WRITE) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    unsafe { core::ptr::write_volatile(base as *mut u8, 0x5A); }
+    if civis::shm_destroy(id).is_err() {
+        return false;
+    }
+    // La mappa esistente resta leggibile/scrivibile (i frame non sono
+    // liberati finche' il mapper non fa `munmap`).
+    if unsafe { core::ptr::read_volatile(base as *const u8) } != 0x5A {
+        return false;
+    }
+    unsafe { core::ptr::write_volatile(base as *mut u8, 0xA5); }
+    if unsafe { core::ptr::read_volatile(base as *const u8) } != 0xA5 {
+        return false;
+    }
+    // Nuovi `shm_map` su una regione chiusa falliscono (fail-closed).
+    if civis::shm_map(id, 0, civis::PROT_READ).is_ok() {
+        return false;
+    }
+    // 3. destroy da non-owner: fallisce (helper spawnato).
+    helpers::drain_stray();
+    let (chan, _pid) = match helpers::spawn_cfg(
+        "/test/testcli.bin", "utcli", 16, helpers::M_SHDESTROY, id as u64,
+    ) {
+        Some(x) => x,
+        None => return false,
+    };
+    let (ok, _) = helpers::recv_done(&[chan]);
+    if !ok {
+        return false;
+    }
+    // 4. Il mapper rilascia: `munmap` libera i frame (owner ref gia' caduto).
+    if civis::munmap(base, 4096).is_err() {
+        return false;
+    }
+    // 5. Riuso: lo slot e' libero (un nuovo create deve riuscire).
+    match civis::shm_create(4096) {
+        Ok(id2) => {
+            let _ = civis::shm_destroy(id2);
+            true
         }
         Err(_) => false,
     }

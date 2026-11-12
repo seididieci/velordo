@@ -67,6 +67,8 @@ pub const M_SEEKDENY: u64 = 29;
 pub const M_SUSPENDENY: u64 = 30;
 pub const M_SIGCATCH: u64 = 31;
 pub const M_GRANTDENY: u64 = 32;
+// Fase 30.1: prova a chiudere una regione di cui NON e' owner (deve fallire).
+pub const M_SHDESTROY: u64 = 33;
 
 // ── VA per i test map_physical/aliasing ──────────────────────────────
 // Zona libera tra USER_FS_BUFFER e lo heap:
