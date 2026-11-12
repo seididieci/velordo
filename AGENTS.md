@@ -561,3 +561,10 @@ test "$(rg -c 'FAIL|PANIC|#.* FAULT' /tmp/boot.log)" = "0"
     crate che non linka `civis`, o si aggiunge la dipendenza o si forniscono
     i simboli. I target JSON sono pinnati: `-Zjson-target-spec` +
     `[unstable] json-target-spec = true` nei `.cargo/config.toml`.
+    **Allineamento RSP**: con SSE2 ogni `movaps` su uno slot 16-allineato
+    assume l'ABI SysV (RSP ≡ 8 mod 16 all'ingresso). I tre punti che calcolano
+    l'RSP iniziale sono stati tutti corretti (thread: `(stack & !0xF) - 8`;
+    `layout_argv`: `arr` arrotondato a 16 con `argc` dispari; main:
+    `USER_STACK_TOP - 24`): se ne aggiungi un quarto, verifica la parità o lo
+    userland muore con `#GP` code 139 — che **non** è `FAIL`/`PANIC`/`FAULT`,
+    quindi il gate lo vede solo come riga `PASS` mancante.

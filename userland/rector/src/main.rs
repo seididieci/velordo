@@ -921,7 +921,18 @@ fn real_main(_sp: u64) -> ! {
     ];
     let net_enabled = cmdline_has_net();
     for e in supervised.iter_mut() {
-        if matches!(e.svc, civis::Service::Net | civis::Service::NetDev) {
+        // Tutti i servizi di rete (non solo netdev/net): senza `net=1` non
+        // sono mai stati spawnati, e senza `disabled` la supervisione li
+        // vedrebbe "assenti all'avvio" e li riavvierebbe in loop — `siit`/
+        // `dns` morivano con "servizio net non trovato" ogni ~4 s, e il
+        // login (ultimo della sequenza) arrivava dopo oltre un minuto.
+        if matches!(
+            e.svc,
+            civis::Service::Net
+                | civis::Service::NetDev
+                | civis::Service::Siit
+                | civis::Service::Dns
+        ) {
             e.disabled = !net_enabled;
         }
         e.pid = civis::service_pid(e.svc).unwrap_or(-1);

@@ -3404,3 +3404,19 @@
       Ripetuto su KVM (knob opt-in `KVM=1` in `run.sh`, `-enable-kvm -cpu
       host`; default TCG invariato perché il gate deve girare anche su host
       senza `/dev/kvm`): 6/6, `dt=4926`.
+      **Secondo bug della stessa classe** (emerso rifacendo girare i test
+      shell `base`/`native`, che dal login gate non partivano più): con
+      `argc` dispari `layout_argv` lasciava l'RSP ≡ 0 invece di ≡ 8 e il
+      primo `movaps` di `usershell` (spawnato dalla shell nativa) andava in
+      `#GP`. Fix: `arr` arrotondato a 16 prima di `rsp = arr - 8` (vale anche
+      per `exec`). In più, senza `net=1` la supervisione di `init` riavviava
+      `siit`/`dns` in loop ("servizio net non trovato" ogni ~4 s) e il login
+      arrivava dopo oltre 40 s: i servizi di rete ora sono `disabled` quando
+      `net=1` manca. Con i due fix: `base` e `native` PASS (login root/root,
+      shell nativa, spawn POSIX da bucket `usr`) e gate KVM 6/6.
+      **Bound `append512`**: il tempo assoluto varia con la latenza IRQ
+      dell'host (`4926 -> 9032` tick sullo stesso codice), quindi il criterio
+      e' ora strutturale (seconda meta' `<= 2*prima + 400`, il layout
+      quadratico costa ~3x) con bound assoluto largo a `12000`, e
+      `arca-tool.sh` prealloca `arca.img` (`fallocate`) per non far allocare
+      blocchi all'host a ogni run. Gate finale: `dt=5637`, `half1=2077`.

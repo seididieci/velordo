@@ -99,7 +99,14 @@ pub(crate) unsafe fn layout_argv(
             env_addrs.push(sp_str);
         }
     }
-    let arr = (sp_str & !15) - 8 * (parsed.argc + 1) - 8 * (parsed.envc + 1);
+    // `rsp` deve essere ≡ 8 (mod 16) all'ingresso di `_start` (ABI SysV:
+    // dopo il push del return address da una CALL). `arr` e' l'indirizzo di
+    // argv[0], cioe' `rsp + 8`: serve `arr` 16-allineato, altrimenti con
+    // `argc` dispari lo stack nasce disallineato e il primo `movaps` dello
+    // userland SSE2 va in #GP (bug osservato su `usershell`, spawnato con
+    // argv). L'arrotondamento verso il basso non tocca le stringhe (stanno
+    // sopra `sp_str`) ne' l'array (scritto da `arr` in su).
+    let arr = ((sp_str & !15) - 8 * (parsed.argc + 1) - 8 * (parsed.envc + 1)) & !15;
     for (i, &a) in arg_addrs.iter().enumerate() {
         unsafe { core::ptr::write((arr + i as u64 * 8).wrapping_add(delta) as *mut u64, a) };
     }

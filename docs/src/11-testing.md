@@ -110,6 +110,16 @@ espanderle inline, quindi i simboli sono nostri in `libs/civis/src/rt.rs`
 > (`dt=5697` su KVM, limite `6000`; prima `6571`). Il bound non e' stato
 > toccato e `testsarca` resta `62/62`.
 >
+> **Bound append512 (N6.2.0)**: il tempo assoluto dipende dalla latenza IRQ
+> del guest e dal filesystem host (misurato `4926 -> 9032` tick sullo stesso
+> codice), quindi il criterio e' ora **strutturale**: `half1` (prima meta'
+> delle 512 append) contro `half2` (`half2 <= 2*half1 + 400`). Con gli extent
+> ogni op tocca O(1) blocchi e le due meta' costano uguale; il layout
+> quadratico fa crescere il file e la seconda meta' costa ~3x. Il bound
+> assoluto resta largo (`12000`) come guardia. Inoltre `scripts/arca-tool.sh`
+> prealloca `arca.img` con `fallocate`: senza, il file sparso faceva allocare
+> blocchi all'host a ogni run e il timing cambiava tra un gate e l'altro.
+>
 > L0a (LAPIC + convivenza PIC, ADR-0056): nessuna nuova riga di suite. Il
 > gate esistente valida PIC/PIT/IRQ1/IRQ14/15; il marker di boot e'
 > `[lapic] base=0xfee00000 id=... svr=0x1ff LINT0=ExtINT`. La build
@@ -245,7 +255,12 @@ la guardia CPU di ADR-0067: al prompt il processo QEMU deve stare sotto il
 il kernel
 embedda init/fs/disk, quindi va ricompilato DOPO `build-userland.sh` — ordine
 di `run.sh` — altrimenti il manifest Strato 2 di init non matcha i binari su
-disco e il boot fallisce loud.
+disco e il boot fallisce loud. `_boot_start` fa il **login** (root/root, ADR-0062)
+e aspetta `Nome utente:`: senza quel passo i test si fermano al gate di
+autenticazione. Se il kernel su disco e' l'ultimo build **con i test**
+(`run-tests.sh`), il boot esegue la suite e il login arriva dopo: ricompila in
+produzione (`./scripts/build-userland.sh && cargo build --release`) prima di
+`./scripts/test-shell-all.sh base native`.
 
 > Timing adattivi (`shell_harness.py`): su KVM (`/dev/kvm`) gli sleep sono
 > corti (tasti 0.06s, drain 0.25s, run 0.4s), su TCG restano i valori storici

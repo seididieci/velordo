@@ -1263,6 +1263,7 @@ fn real_main(_sp: u64) -> ! {
             let mut good = true;
             let mut pos = 0usize;
             let mut dt = -1i64;
+            let mut d1 = -1i64;
             if civis::mkdir("/arca/r59").is_ok() {
                 match civis::open("/arca/r59/f", civis::OPEN_CREATE) {
                     Ok(fd) => {
@@ -1278,6 +1279,9 @@ fn real_main(_sp: u64) -> ! {
                                     println!("[testsarca] append512 wfail pos={} r={:?}", pos, other);
                                     good = false;
                                 }
+                            }
+                            if pos == TOTAL / 2 {
+                                d1 = civis::get_ticks() - t0;
                             }
                         }
                         dt = civis::get_ticks() - t0;
@@ -1322,10 +1326,18 @@ fn real_main(_sp: u64) -> ! {
             } else {
                 good = false;
             }
-            println!("[testsarca] append512: pos={} dt={}", pos, dt);
+            println!("[testsarca] append512: pos={} dt={} half1={}", pos, dt, d1);
             // 512 append da 4K: W6 (blocchi 64 KiB) misura ~3800 tick,
-            // bound ~1.5x per assorbire il jitter di QEMU.
-            good && pos == TOTAL && dt >= 0 && dt < 6000
+            // ma il tempo assoluto dipende dalla latenza IRQ del guest
+            // (host sotto carico: misurato 4926 -> 9032 tick sullo stesso
+            // codice), quindi il criterio **strutturale** e' il rapporto
+            // prima/seconda meta': con gli extent ogni op tocca O(1) blocchi
+            // (le due meta' costano uguale), con il layout quadratico il file
+            // cresce e la seconda meta' costa ~3x. Il bound assoluto resta
+            // largo (12000) come guardia contro il caso patologico.
+            let (h1, h2) = if d1 > 0 { (d1, dt - d1) } else { (0, 0) };
+            let structural = d1 > 0 && h2 <= h1 * 2 + 400;
+            good && pos == TOTAL && dt >= 0 && dt < 12000 && structural
         };
         c.ok("append 512KiB sequenziale", v59);
         // Istogramma layout + cache (W2/W3 tuning): informativo, mai FAIL.

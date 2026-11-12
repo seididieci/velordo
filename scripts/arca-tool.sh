@@ -41,6 +41,15 @@ fi
 # dichiarato (vuoto: la root la sceglie la cmdline, non il volume).
 $TOOL_BIN create "$OUT" --uuid 4152434100000001 --size-mib "${ARCA_SIZE_MIB:-128}" \
     --label SYSTEM --mountpoint ""
+# Preallocazione (non sparse): `create` fa `set_len`, quindi il file nasce
+# sparso e le scritture del guest in aree nuove costringono l'host ad
+# allocare blocchi a ogni run — il timing del gate (append512, bound 6000
+# tick) diventava dipendente dal filesystem host (misurato 4926 -> 9032 tick
+# sullo stesso codice). `fallocate` alloca subito: scritture in-place,
+# gate deterministico. Fallback silenzioso se il tool non c'e'.
+if command -v fallocate >/dev/null 2>&1; then
+    fallocate -l "${ARCA_SIZE_MIB:-128}MiB" "$OUT" 2>/dev/null || true
+fi
 echo "[arca] tool in $TOOL_BIN, immagine $OUT"
 
 # Seed del volume con i file di boot (Fase 2 + D1): `/bin` + `/bin/posix` +

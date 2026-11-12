@@ -91,18 +91,32 @@ ragionevole quando non c'era FPU eager; oggi non lo è più.
   stato corretto (sotto).
 - `testsarca` non peggiora: 5631–5663 tick contro 5971 del target vecchio.
 
-### Bug trovato (thread e allineamento dello stack)
+### Bug trovati (allineamento dell'RSP iniziale)
 
 Con SSE2 il codice user contiene `movaps`/`movdqa` su slot 16-allineati, che
 assumono la parità dell'ABI SysV (**RSP ≡ 8 mod 16 all'ingresso di una
-funzione**). I thread creati da `SYS_THREAD_CREATE` ricevevano invece l'RSP
-grezzo passato dal chiamante — il TOP di un `mmap`, cioè 16-allineato — e il
-primo `movaps [rsp+0x30]` finiva in **#GP** (thread morto con code 139,
-silenzioso per il gate: `#GP` non è `FAIL`/`PANIC`/`FAULT`). Non era visibile
-prima perché lo userland era soft-float e non toccava XMM. Fix in
-`kernel/src/ordo/sched/spawn.rs::spawn_thread`: `rsp = (stack & !0xF) - 8`,
-con validazione della qword che il primo push scrive. Il main thread non era
-affetto (`setup_user_stack` restituisce già `USER_STACK_TOP - 24`).
+funzione**). Il soft-float non toccava XMM, quindi tre calcoli di RSP iniziale
+sbagliati erano rimasti invisibili; SSE2 li ha fatti emergere tutti come `#GP`
+(code 139, silenzioso per il gate: `#GP` non è `FAIL`/`PANIC`/`FAULT`).
+
+1. **Thread** (`SYS_THREAD_CREATE`): ricevevano l'RSP grezzo del chiamante —
+   il TOP di un `mmap`, 16-allineato — e il primo `movaps [rsp+0x30]` del
+   thread andava in `#GP`. Fix in
+   `kernel/src/ordo/sched/spawn.rs::spawn_thread`: `rsp = (stack & !0xF) - 8`,
+   con validazione della qword che il primo push scrive. Emerso in
+   `threadtest` t9–t12.
+2. **Processi con `argv`** (`layout_argv`): l'array veniva appoggiato a
+   `(sp & !15) - 8*(argc+1) - 8*(envc+1)` e l'RSP era `arr - 8`: con `argc`
+   **dispari** l'RSP risultava ≡ 0 invece di ≡ 8. Il primo `movaps` della
+   catena (in `usershell`, appena spawnato dalla shell nativa) andava in
+   `#GP`. Fix: `arr` arrotondato a 16 (`& !15`) prima di `rsp = arr - 8`, così
+   la parità è corretta per ogni `argc`/`envc`. Vale anche per `exec`.
+3. **Main thread senza `argv`**: già corretto (`setup_user_stack` restituisce
+   `USER_STACK_TOP - 24`, con `USER_STACK_TOP` 16-allineato).
+
+La lezione: l'RSP iniziale è un contratto dell'ABI, non un dettaglio del
+chiamante — ogni punto che lo calcola (thread, argv, `spawn_copy`, `exec`)
+va verificato per parità.
 
 ### Negative
 
