@@ -6,16 +6,7 @@ edition = "2024"
 # Crate fuori dal workspace del kernel: build freestanding separata.
 [workspace]
 
-[features]
-# `civis-clock`: orologio reale (servizio `Time`) per la validita' dei
-# certificati. E' una feature perche' i test host del crate devono restare
-# senza `civis` (che porta con se' allocatore e syscall): il crate e' puro e
-# il sistema reale inietta solo questo aggancio.
-default = []
-civis-clock = ["dep:civis"]
-
 [dependencies]
-civis = { path = "../civis", optional = true }
 # ADR-0072: la strada no_std e' il modulo `pki` (feature `rustpki`);
 # `webpki` e' std-only. `rsa` implica `rustpki` + `alloc` ed e' necessario
 # per le catene firmate RSA (ISRG Root X1 e' RSA-4096).

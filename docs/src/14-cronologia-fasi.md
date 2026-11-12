@@ -3477,3 +3477,47 @@
       lato server); unit test host 109/109 (12 nuovi in `libs/tls`, 1 di
       regressione TCP); net tests N1–N6.0 PASS (il fix TCP non regredisce);
       gate 6/6, zero FAIL/PANIC/FAULT.
+- [x] **N6.3 — DoT dentro `dns`** (2026-11, ADR-0072): il resolver parla
+      TLS 1.3 una connessione per query. Il trasporto TCP smette di essere
+      codice del probe e diventa un crate: **`libs/tls-net`** (`TcpStream`
+      sull'endpoint `net`, `impl tls::Transport`, `SystemClock`), mentre
+      `libs/tls` torna puro (via la feature `civis-clock`). Piccola aggiunta
+      all'adattatore: `impl<T: Transport + ?Sized> Transport for &mut T`, così
+      `connect(&mut stream, …)` non consuma il socket e il chiamante lo riusa
+      per la query successiva.
+      **Due invarianti di `net` scoperte implementando il reconnect**:
+      (1) su `TcpSignal::Reset` il servizio faceva `free_endpoint` (`munmap`)
+      anche per gli endpoint CONNECT: chi riusa l'endpoint restava con un ring
+      smappato. Ora un CONNECT sopravvive alla connessione (i figli dei
+      listener restano come prima). (2) Il ring **non** si può ricreare per
+      query (`shm_create` non ha `destroy`: si perderebbero frame), quindi
+      l'endpoint è persistente e si ricicla con un evento `EV_ABORT` che
+      libera lo slot TCP del core (`tcp_abort`, niente TIME_WAIT sulla stessa
+      tupla) e azzera `conn_id`. Il primo tentativo senza `EV_ABORT` chiudeva
+      la query successiva con `BrokenPipe`: l'`EV_FIN` del server precedente
+      era ancora nel ring e il primo `read` del nuovo handshake la prendeva
+      per EOF. `TcpStream::abort()` drena il ring RX e azzera lo stato di
+      stream.
+      **Config e fiducia**: `sys:dns.conf` accetta `sni`; la trust anchor è
+      l'oggetto `sys:ca.der` (DER) e basta — niente root store compilato
+      (un solo root coprirebbe una parte delle catene reali e darebbe una
+      falsa garanzia). `mode = dot` con SNI o CA mancanti è `broken`:
+      **SERVFAIL** sui nomi fuori tabella, mai NXDOMAIN (un resolver che
+      degrada in silenzio mente al client) né plaintext. Framing RFC 7858
+      (`[len:2][messaggio]`) come helper puri in `libs/net::dns`, con unit
+      test host.
+      **La prova** (un solo boot, `scripts/run-tls-tests.sh`): due server
+      sull'host — HTTP 8443 per `tlsprobe` e DoT 8853 per il resolver — con
+      un leaf a SAN multipli (`tls.test,dns.test`) da `tools/tls-test-certs`
+      e un leaf self-signed "cattivo". Il responder DoT conta le connessioni:
+      le prime tre (N6.0 `upstream.test` + due query `dot.test`) presentano il
+      certificato buono, dalla quarta quello fuori trust. Risultato:
+      `[dns] dot: PASS`, `[dns] dot: PASS (reconnect)`,
+      `[dns] dot: handshake fallito: Tls(InvalidCertificate)` →
+      `[dns] dotfail: PASS (certificato rifiutato)`, `[dns] risultato: PASS`,
+      e lato server tre handshake con `alpn='dot'` e la quarta connessione
+      rifiutata. **Nessun secondo boot**: il caso fail-closed costa ~0,3 s.
+      **Validazione**: `[tls-tests] PASS` (handshake + HTTP + DoT +
+      reconnect + fail-closed); unit test host 111/111 (2 nuovi sul framing
+      RFC 7858); net tests N1–N6.0 PASS (il cambio in `userland/net` non
+      regredisce il plain); gate 6/6, zero FAIL/PANIC/FAULT.

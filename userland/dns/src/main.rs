@@ -16,7 +16,10 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
+
+use tls_net::TcpStream;
 
 use civis;
 use core::ptr::{read_volatile, write_volatile};
@@ -80,15 +83,18 @@ impl Ep {
     }
 }
 
-/// Modalità di risoluzione (N6.0): la config le dichiara, il servizio le
-/// applica. `Dot` è riconosciuta per compatibilità in avanti ma non ancora
-/// implementata: in quel caso si resta su tabella statica (fail-closed).
+/// Modalità di risoluzione: la config la dichiara, il servizio la applica.
+/// `Static` = tabella N5 pura, `Plain` = inoltro UDP (N6.0), `Dot` = TLS
+/// (N6.3): una connessione per query, mai fallback silenzioso al plain.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Static,
     Plain,
     Dot,
 }
+
+/// Lunghezza massima del nome da verificare nel certificato (SNI).
+const SNI_MAX: usize = 96;
 
 /// Config del resolver, da `sys:dns.conf`. `Static` = N5 puro.
 #[derive(Clone, Copy)]
@@ -97,6 +103,13 @@ struct Config {
     upstream: Ipv6Addr,
     port: u16,
     timeout_ticks: u64,
+    /// SNI per DoT (`sni = <nome>`), in chiaro: niente alloc nella config.
+    sni: [u8; SNI_MAX],
+    sni_len: usize,
+    /// `mode = dot` dichiarato ma non utilizzabile (SNI o trust anchor
+    /// mancanti): i nomi fuori tabella rispondono **SERVFAIL**. Mai NXDOMAIN:
+    /// un resolver che degrada in silenzio mente al client.
+    broken: bool,
 }
 
 impl Config {
@@ -106,12 +119,38 @@ impl Config {
             upstream: Ipv6Addr::UNSPECIFIED,
             port: 0,
             timeout_ticks: 0,
+            sni: [0; SNI_MAX],
+            sni_len: 0,
+            broken: false,
         }
     }
 
-    /// L'inoltro è utilizzabile solo con upstream e porta validi.
+    /// `mode = dot` dichiarato ma inutilizzabile: fail-closed (SERVFAIL).
+    const fn dot_broken() -> Self {
+        Self {
+            mode: Mode::Dot,
+            upstream: Ipv6Addr::UNSPECIFIED,
+            port: 0,
+            timeout_ticks: 0,
+            sni: [0; SNI_MAX],
+            sni_len: 0,
+            broken: true,
+        }
+    }
+
+    /// L'inoltro **plain** è utilizzabile solo con upstream e porta validi.
     fn active(&self) -> bool {
         self.mode == Mode::Plain && !self.upstream.is_unspecified() && self.port != 0
+    }
+
+    /// Modalità DoT (anche nello stato `broken`: la dispatch resta SERVFAIL).
+    fn dot(&self) -> bool {
+        self.mode == Mode::Dot
+    }
+
+    /// Nome da verificare nel certificato, se c'è.
+    fn sni(&self) -> Option<&str> {
+        core::str::from_utf8(&self.sni[..self.sni_len]).ok()
     }
 }
 
@@ -121,6 +160,13 @@ struct DnsService {
     up_ep_id: u16,
     up_ring: *mut u8,
     cfg: Config,
+    /// DoT (N6.3): endpoint TCP **persistente** (il ring si mappa una volta;
+    /// la connessione si riapre per query con `TcpStream::abort`), trust
+    /// anchor X.509 in DER e buffer record TLS nell'heap.
+    dot: Option<TcpStream>,
+    ca: Vec<u8>,
+    tls_rbuf: Option<Box<[u8]>>,
+    tls_wbuf: Option<Box<[u8]>>,
     /// Contatore dei transaction id verso l'upstream (rimappati: due client
     /// con lo stesso id non si confondono).
     txid: u16,
@@ -135,6 +181,10 @@ impl DnsService {
             up_ep_id: 0,
             up_ring: core::ptr::null_mut(),
             cfg: Config::off(),
+            dot: None,
+            ca: Vec::new(),
+            tls_rbuf: None,
+            tls_wbuf: None,
             txid: 0x4000,
             endpoints: [Ep::free(); MAX_ENDPOINTS],
             next_ep_id: 1,
@@ -341,7 +391,9 @@ fn query_addr(net_chan: u64, selector: u64) -> Option<Ipv6Addr> {
 ///
 /// Formato: `chiave = valore` per riga, `#` commento.
 /// `upstream = auto|<ipv6>`, `port = 853|5353|53`, `mode = plain|dot|off`,
-/// `timeout_ms = 2000`. `auto` = default router corrente (test passt).
+/// `timeout_ms = 2000`, `sni = <nome>` (obbligatorio con `dot`). `auto` =
+/// default router corrente (test passt). La trust anchor DoT è l'oggetto
+/// `sys:ca.der` (DER), letta all'avvio.
 fn load_config(net_chan: u64) -> Config {
     let Ok(data) = civis::obj_get(b"sys", b"dns.conf") else {
         return Config::off();
@@ -350,6 +402,7 @@ fn load_config(net_chan: u64) -> Config {
         return Config::off();
     };
     let mut upstream_txt: Option<&str> = None;
+    let mut sni_txt: Option<&str> = None;
     let mut port = DNS_PORT;
     let mut mode = Mode::Plain;
     let mut timeout_ms = 2000u64;
@@ -378,41 +431,68 @@ fn load_config(net_chan: u64) -> Config {
                 Ok(t) if t >= 100 => timeout_ms = t,
                 _ => return Config::off(),
             },
-            // Chiavi future (`sni`, `ca` per DoT): le leggerà la fase che le
-            // implementa, qui non invalidano la config.
+            "sni" => sni_txt = Some(v),
             _ => {}
         }
     }
+    // Da qui in poi un errore di config con `mode = dot` NON torna alla
+    // tabella statica: è fail-closed (SERVFAIL sui nomi fuori tabella).
     let Some(u) = upstream_txt else {
-        return Config::off();
+        return if mode == Mode::Dot {
+            let _ = civis::print_string(b"[dns] mode=dot senza upstream: SERVFAIL\n");
+            Config::dot_broken()
+        } else {
+            Config::off()
+        };
     };
-    if mode == Mode::Dot {
-        let _ = civis::print_string(b"[dns] mode=dot non implementato (N6.5): tabella statica\n");
-        return Config::off();
-    }
     let upstream = if u == "auto" {
         match query_addr(net_chan, NET_ADDR_ROUTER) {
             Some(a) => a,
             None => {
-                let _ = civis::print_string(b"[dns] upstream=auto senza router: tabella statica\n");
-                return Config::off();
+                let _ = civis::print_string(b"[dns] upstream=auto senza router\n");
+                return if mode == Mode::Dot {
+                    Config::dot_broken()
+                } else {
+                    Config::off()
+                };
             }
         }
     } else {
         match Ipv6Addr::parse(u) {
             Some(a) => a,
             None => {
-                let _ = civis::print_string(b"[dns] upstream non valido: tabella statica\n");
-                return Config::off();
+                let _ = civis::print_string(b"[dns] upstream non valido\n");
+                return if mode == Mode::Dot {
+                    Config::dot_broken()
+                } else {
+                    Config::off()
+                };
             }
         }
     };
-    Config {
+    let timeout_ticks = (timeout_ms / 10).max(1);
+    let mut cfg = Config {
         mode,
         upstream,
         port,
-        timeout_ticks: (timeout_ms / 10).max(1),
+        timeout_ticks,
+        sni: [0; SNI_MAX],
+        sni_len: 0,
+        broken: false,
+    };
+    if mode == Mode::Dot {
+        let Some(sni) = sni_txt else {
+            let _ = civis::print_string(b"[dns] mode=dot senza sni: SERVFAIL (fail-closed)\n");
+            return Config::dot_broken();
+        };
+        if sni.is_empty() || sni.len() > SNI_MAX {
+            let _ = civis::print_string(b"[dns] sni non valido: SERVFAIL (fail-closed)\n");
+            return Config::dot_broken();
+        }
+        cfg.sni[..sni.len()].copy_from_slice(sni.as_bytes());
+        cfg.sni_len = sni.len();
     }
+    cfg
 }
 
 /// Apre l'endpoint UDP effimero presso `net` e ne mappa il ring.
@@ -566,6 +646,117 @@ fn forward_plain(
     }
 }
 
+// ── Upstream DoT (N6.3) ────────────────────────────────────────────
+//
+// Una connessione per query (ADR-0072): niente keep-alive né resumption.
+// L'**endpoint** TCP invece è persistente: il ring si mappa una volta e la
+// connessione si riapre con `TcpStream::abort` (il shm non si può ricreare
+// per query: `shm_create` non ha `destroy`).
+
+/// Arma il client DoT: trust anchor da `sys:ca.der`, endpoint TCP verso
+/// l'upstream, buffer record TLS nell'heap (16 KiB l'uno, mai sullo stack).
+/// Qualsiasi fallimento = `broken` → SERVFAIL, mai tabella statica.
+fn open_dot(svc: &mut DnsService) {
+    match civis::obj_get(b"sys", b"ca.der") {
+        Ok(ca) if !ca.is_empty() => svc.ca = ca,
+        _ => {
+            let _ = civis::print_string(b"[dns] DoT senza sys:ca.der: SERVFAIL (fail-closed)\n");
+            svc.cfg = Config::dot_broken();
+            return;
+        }
+    }
+    let Some(sni) = svc.cfg.sni() else {
+        svc.cfg = Config::dot_broken();
+        return;
+    };
+    let Some(mut stream) = TcpStream::connect(svc.net_chan, svc.cfg.upstream.0, svc.cfg.port)
+    else {
+        let _ = civis::print_string(b"[dns] DoT: endpoint TCP non apribile\n");
+        svc.cfg = Config::dot_broken();
+        return;
+    };
+    stream.set_timeout(svc.cfg.timeout_ticks, svc.cfg.timeout_ticks);
+    svc.tls_rbuf = Some(alloc::vec![0u8; tls::RECORD_READ_BUF].into_boxed_slice());
+    svc.tls_wbuf = Some(alloc::vec![0u8; tls::RECORD_WRITE_BUF].into_boxed_slice());
+    let ep = stream.ep_id();
+    civis::println!(
+        "[dns] upstream dot sni={} {}:{} ca={}B timeout={} tick (endpoint {})",
+        sni,
+        svc.cfg.upstream,
+        svc.cfg.port,
+        svc.ca.len(),
+        svc.cfg.timeout_ticks,
+        ep
+    );
+    svc.dot = Some(stream);
+}
+
+/// Scambio applicativo su una sessione aperta: query framed, risposta
+/// framed, id del client ripristinato, `QR` obbligatorio.
+fn dot_exchange(
+    sess: &mut tls::Session<'_, &mut TcpStream>,
+    frame: &[u8],
+    client_id: u16,
+    out: &mut [u8],
+) -> Option<usize> {
+    sess.write_all(frame).ok()?;
+    let mut prefix = [0u8; dns::TCP_LEN_PREFIX];
+    sess.read_exact(&mut prefix).ok()?;
+    let len = dns::tcp_prefix_len(&prefix)?;
+    if len < DNS_HEADER_LEN || len > out.len() {
+        return None;
+    }
+    sess.read_exact(&mut out[..len]).ok()?;
+    let hdr = dns::parse_header(&out[..len])?;
+    if hdr.flags & FLAG_QR == 0 {
+        return None;
+    }
+    out[0..2].copy_from_slice(&client_id.to_be_bytes());
+    Some(len)
+}
+
+/// Inoltra `query` via DoT: handshake con **catena e hostname verificati**
+/// (non `NoVerify`), framing RFC 7858, `close_notify`. `None` = SERVFAIL.
+fn forward_dot(
+    stream: &mut TcpStream,
+    ca: &[u8],
+    sni: &str,
+    rbuf: &mut [u8],
+    wbuf: &mut [u8],
+    query: &[u8],
+    client_id: u16,
+    out: &mut [u8],
+) -> Option<usize> {
+    let mut frame = [0u8; MAX_DNS + dns::TCP_LEN_PREFIX];
+    let flen = dns::frame_tcp(&mut frame, query)?;
+    let cfg = tls::Config {
+        server_name: sni,
+        ca_der: ca,
+        alpn: &[&b"dot"[..]],
+    };
+    let mut sess = match tls::connect::<&mut TcpStream, tls_net::SystemClock>(
+        &mut *stream,
+        &cfg,
+        rbuf,
+        wbuf,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            civis::println!("[dns] dot: handshake fallito: {:?}", e);
+            stream.abort();
+            return None;
+        }
+    };
+    let res = dot_exchange(&mut sess, &frame[..flen], client_id, out);
+    let _ = sess.close();
+    // Sempre: la connessione e' finita. `abort` libera lo slot TCP del core e
+    // azzera `conn_id` (la prossima query ne apre una nuova) e scarta gli
+    // eventi stantii della precedente: senza, l'EV_FIN del server arrivava
+    // al primo read dell'handshake successivo e lo chiudeva (BrokenPipe).
+    stream.abort();
+    res
+}
+
 civis::entry!(real_main);
 
 fn real_main(_sp: u64) -> ! {
@@ -597,10 +788,19 @@ fn real_main(_sp: u64) -> ! {
     svc.net_chan = net_chan;
     svc.cfg = load_config(net_chan);
 
-    // Endpoint UDP effimero presso `net`: è il lato *client* verso l'upstream
-    // (N6.0). Senza upstream non si apre nulla: il servizio resta tabella
-    // statica esattamente come in N5.
-    if svc.cfg.active() {
+    // DoT (N6.3): armato solo con config valida; altrimenti fail-closed.
+    // L'endpoint UDP effimero è il lato *client* dell'inoltro plain (N6.0).
+    // Senza upstream non si apre nulla: il servizio resta tabella statica
+    // esattamente come in N5.
+    if svc.cfg.dot() {
+        if svc.cfg.broken {
+            let _ = civis::print_string(
+                b"[dns] DoT non armato: SERVFAIL sui nomi fuori tabella\n",
+            );
+        } else {
+            open_dot(&mut svc);
+        }
+    } else if svc.cfg.active() {
         match open_upstream(net_chan) {
             Some((ep_id, ring)) => {
                 svc.up_ep_id = ep_id;
@@ -723,9 +923,35 @@ fn handle_client(svc: &mut DnsService, m: civis::IpcMsg) {
                     Some((a, aaaa)) => {
                         build_response(&mut resp, id, n, qtype, a, aaaa, 0).unwrap_or(0)
                     }
-                    // N6.0: nome fuori tabella → upstream (plain UDP). Senza
-                    // upstream configurato resta il comportamento N5
-                    // (NXDOMAIN); con upstream che non risponde → SERVFAIL.
+                    // Nome fuori tabella → upstream. Plain UDP (N6.0) o DoT
+                    // (N6.3, una connessione per query). Se l'upstream è
+                    // configurato ma non risponde (o TLS/certificato
+                    // falliscono) → SERVFAIL: mai NXDOMAIN, che sarebbe una
+                    // risposta sbagliata data per buona.
+                    None if svc.cfg.dot() => {
+                        let mut len = 0;
+                        let mut stream = svc.dot.take();
+                        if let Some(st) = stream.as_mut() {
+                            if let (Some(sni), Some(rbuf), Some(wbuf)) = (
+                                svc.cfg.sni(),
+                                svc.tls_rbuf.as_mut(),
+                                svc.tls_wbuf.as_mut(),
+                            ) {
+                                if let Some(n) =
+                                    forward_dot(st, &svc.ca, sni, rbuf, wbuf, query, id, &mut resp)
+                                {
+                                    len = n;
+                                }
+                            }
+                        }
+                        svc.dot = stream;
+                        if len == 0 {
+                            build_response(&mut resp, id, n, qtype, None, None, RCODE_SERVFAIL)
+                                .unwrap_or(0)
+                        } else {
+                            len
+                        }
+                    }
                     None if svc.cfg.active() => match forward_plain(svc, query, id, &mut resp) {
                         Some(len) => len,
                         None => build_response(

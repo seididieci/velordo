@@ -1,10 +1,15 @@
 //! dns — probe di rete DNS (N5+N6.0, test fuori gate).
 //!
-//! Apre un endpoint UDP presso il servizio `dns` e valida due risoluzioni:
+//! Apre un endpoint UDP presso il servizio `dns` e valida tre risoluzioni:
 //! 1. `example.com` A → 93.184.216.34 (tabella statica N5);
 //! 2. `upstream.test` A → 198.51.100.7 (inoltro upstream, N6.0): PASS se
 //!    risponde, SKIP se il resolver non ha upstream configurato (NXDOMAIN),
 //!    FAIL se l'upstream è configurato ma non risponde (SERVFAIL).
+//! 3. `dot.test` A → 203.0.113.9 (DoT, N6.3): due query buone (la seconda
+//!    prova il **reconnect** sullo stesso endpoint) e una terza in cui il
+//!    server presenta un certificato fuori dalla trust anchor → deve dare
+//!    **SERVFAIL** (`[dns] dotfail: PASS`: fail-closed, mai risposta in
+//!    chiaro né NXDOMAIN). Con un upstream plain il terzo blocco è SKIP.
 //! Segnala TEST_DONE ad init. Eseguito solo con `net=1`.
 
 #![no_std]
@@ -31,6 +36,13 @@ const SLOT_META: usize = 11; // 2+4+2+2+1
 const MAX_TICKS_LOCAL: u32 = 100;
 /// Attesa massima di una risposta inoltrata all'upstream (timeout config 2 s).
 const MAX_TICKS_UPSTREAM: u32 = 400;
+/// Attesa massima di una risposta DoT: handshake + verifica certificato +
+/// query, con il timeout del resolver a 5 s (500 tick).
+const MAX_TICKS_DOT: u32 = 800;
+
+/// Indirizzo A atteso per `dot.test` (TEST-NET-3, RFC 5737): lo serve solo
+/// il responder DoT, quindi distingue il percorso TLS da un upstream plain.
+const DOT_A: [u8; 4] = [203, 0, 113, 9];
 
 /// Rcode DNS.
 const RCODE_SERVFAIL: u16 = 2;
@@ -177,6 +189,77 @@ fn real_main(_sp: u64) -> ! {
         }
         None => {
             println!("[dns] upstream: FAIL (nessuna risposta)");
+            all_ok = false;
+        }
+    }
+
+    // ── 3) DoT (N6.3) ─────────────────────────────────────────────
+    // Nome fuori tabella servito solo dal responder DoT. Con un upstream
+    // plain la risposta non contiene DOT_A: SKIP, non un errore.
+    let qlen = build_a_query(&mut query, 0x3456, b"dot.test");
+    let first = ask(
+        dns_chan,
+        ep_id,
+        ring_base,
+        &mut rx_head,
+        1,
+        &query[..qlen],
+        &DOT_A,
+        MAX_TICKS_DOT,
+    );
+    match first {
+        Some((len, rcode, matches)) => {
+            println!("[dns] risposta dot: len={} rcode={}", len, rcode);
+            if matches {
+                println!("[dns] dot: PASS");
+                // Seconda query: il resolver deve riaprire la connessione
+                // (una per query) sullo stesso endpoint.
+                let l = build_a_query(&mut query, 0x3457, b"dot.test");
+                match ask(
+                    dns_chan, ep_id, ring_base, &mut rx_head, 2, &query[..l], &DOT_A,
+                    MAX_TICKS_DOT,
+                ) {
+                    Some((_, _, true)) => println!("[dns] dot: PASS (reconnect)"),
+                    Some((_, rc, _)) => {
+                        println!("[dns] dot: FAIL (reconnect rcode={})", rc);
+                        all_ok = false;
+                    }
+                    None => {
+                        println!("[dns] dot: FAIL (reconnect: nessuna risposta)");
+                        all_ok = false;
+                    }
+                }
+                // Terza: il server presenta un certificato fuori trust →
+                // SERVFAIL. Qualunque altra risposta è un fallimento.
+                let l = build_a_query(&mut query, 0x3458, b"dot.test");
+                match ask(
+                    dns_chan, ep_id, ring_base, &mut rx_head, 3, &query[..l], &DOT_A,
+                    MAX_TICKS_DOT,
+                ) {
+                    Some((_, rc, _)) if rc == RCODE_SERVFAIL => {
+                        println!("[dns] dotfail: PASS (certificato rifiutato)")
+                    }
+                    Some((_, rc, _)) => {
+                        println!("[dns] dotfail: FAIL (rcode={}, atteso SERVFAIL)", rc);
+                        all_ok = false;
+                    }
+                    None => {
+                        println!("[dns] dotfail: FAIL (nessuna risposta)");
+                        all_ok = false;
+                    }
+                }
+            } else if rcode == RCODE_SERVFAIL {
+                // DoT configurato ma non funzionante: fail-closed corretto.
+                println!("[dns] dotfail: PASS (SERVFAIL)");
+            } else if rcode == RCODE_NXDOMAIN {
+                // Nessun upstream (N5): il resolver non mente, non c'è DoT.
+                println!("[dns] dot: SKIP (nessun upstream)");
+            } else {
+                println!("[dns] dot: SKIP (upstream non DoT)");
+            }
+        }
+        None => {
+            println!("[dns] dot: FAIL (nessuna risposta)");
             all_ok = false;
         }
     }

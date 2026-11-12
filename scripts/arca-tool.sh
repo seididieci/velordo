@@ -301,7 +301,16 @@ if [ -n "${NET_TCP_ECHO_PORT:-}" ]; then
     echo "[arca] + sys:nettcp.conf (peer TCP ${NET_TCP_ECHO_ADDR:-auto}:$NET_TCP_ECHO_PORT)"
 fi
 
-if [ -n "${NET_DNS_UPSTREAM_PORT:-}" ]; then
+# DoT (N6.3, ADR-0072) vince sul plain: il resolver usa una connessione TLS
+# per query verso il server sull'host. `timeout_ms` copre handshake + query
+# (la verifica RSA sotto TCG e' la voce lenta).
+if [ -n "${NET_DNS_DOT_PORT:-}" ]; then
+    printf 'upstream = auto\nport = %s\nmode = dot\nsni = %s\ntimeout_ms = %s\n' \
+        "$NET_DNS_DOT_PORT" "${NET_DNS_DOT_SNI:-dns.test}" "${NET_DNS_DOT_TIMEOUT_MS:-5000}" \
+        > "$ROOT/build-meta/dns.conf"
+    SEED_NS+=( "sys:dns.conf=$ROOT/build-meta/dns.conf" )
+    echo "[arca] + sys:dns.conf (dot auto:$NET_DNS_DOT_PORT sni=${NET_DNS_DOT_SNI:-dns.test})"
+elif [ -n "${NET_DNS_UPSTREAM_PORT:-}" ]; then
     printf 'upstream = auto\nport = %s\nmode = plain\ntimeout_ms = 2000\n' \
         "$NET_DNS_UPSTREAM_PORT" > "$ROOT/build-meta/dns.conf"
     SEED_NS+=( "sys:dns.conf=$ROOT/build-meta/dns.conf" )

@@ -190,12 +190,13 @@ fn spawn_object(bucket: &[u8], key: &[u8]) -> Option<alloc::vec::Vec<u8>> {
 
 /// Binari che vogliono lo stack grande (`BIGSTACK_FRAMES` = 8 MiB).
 ///
-/// Il probe TLS (N6.2) costruisce il verifier con due `heapless::Vec` da
-/// 4 KiB (`OwnedCertificate<CERT_SIZE>`), ~8 KiB di frame: con i 16 KiB
-/// di stack di default e' al limite. La lista e' per nome perche' i manifest
-/// da disco sono costruiti inline e non hanno un campo dedicato.
+/// Il probe TLS (N6.2) e il resolver DoT (N6.3) costruiscono il verifier del
+/// certificato (`OwnedCertificate<CERT_SIZE>`, ~4.9 KiB di `Provider` piu'
+/// lo stato dell'handshake): con i 16 KiB di stack di default sono al limite
+/// (il probe andava in overflow silenzioso). La lista e' per nome perche' i
+/// manifest da disco sono costruiti inline e non hanno un campo dedicato.
 fn wants_big_stack(name: &str) -> bool {
-    name == "tlsprobe"
+    matches!(name, "tlsprobe" | "dns")
 }
 
 /// Spawna un binario da un vettore di byte (Fase 55, N0).

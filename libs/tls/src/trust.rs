@@ -2,7 +2,9 @@
 //!
 //! La verifica X.509 e' **di `embedded-tls`** (modulo `pki`, feature
 //! `rustpki`): qui c'e' solo il cablaggio — trust anchor in DER, orologio
-//! reale, nome da verificare — e la scelta fail-loud delle dimensioni.
+//! iniettato dal chiamante, nome da verificare — e la scelta fail-loud delle
+//! dimensioni. L'orologio reale (`civis::time`) vive in `libs/tls-net`, cosi'
+//! questo crate resta puro e testabile sull'host.
 
 use embedded_tls::blocking::{Aes128GcmSha256, Certificate, TlsClock};
 use embedded_tls::pki::CertVerifier;
@@ -13,7 +15,8 @@ use embedded_tls::pki::CertVerifier;
 /// **Fail-loud**: una catena piu' grande fa fallire l'handshake con
 /// `OutOfMemory`, mai un handshake "riuscito" senza verifica. 4 KiB copre
 /// una catena Let's Encrypt (leaf + intermediate ~2.7 KiB) e lascia margine;
-/// il buffer e' nel `Box` del provider (vedi `session.rs`), non sullo stack.
+/// il `Provider` che lo contiene sta sullo stack del chiamante (vedi
+/// `session.rs`), non nell'heap del crate.
 pub const CERT_SIZE: usize = 4096;
 
 /// Buffer record in lettura: 16640 e' il massimo di un record TLS 1.3
@@ -39,22 +42,6 @@ where
     C: TlsClock,
 {
     CertVerifier::new(Certificate::X509(ca_der))
-}
-
-/// Orologio di sistema (feature `civis-clock`): epoch UTC dal servizio
-/// `Time` (`civis::time`). La verifica di validita' dei certificati e' quindi
-/// reale, non "sempre valido".
-#[cfg(feature = "civis-clock")]
-pub struct SystemClock;
-
-#[cfg(feature = "civis-clock")]
-impl TlsClock for SystemClock {
-    fn now() -> Option<u64> {
-        // `None` (servizio Time assente) = niente controllo date: la catena
-        // e' comunque verificata crittograficamente. Meglio di un panic in
-        // handshake; il chiamante puo' loggare il degrado.
-        civis::time::wall_secs().ok()
-    }
 }
 
 #[cfg(test)]

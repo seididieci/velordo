@@ -8,6 +8,10 @@ edition = "2024"
 [dependencies]
 civis = { path = "../../libs/civis" }
 net = { path = "../../libs/net" }
+# DoT (N6.3, ADR-0072): adattatore TLS puro + trasporto TCP sull'endpoint
+# `net` (condiviso con il probe tlsprobe).
+tls = { path = "../../libs/tls" }
+tls-net = { path = "../../libs/tls-net" }
 
 [profile.dev]
 panic = "abort"

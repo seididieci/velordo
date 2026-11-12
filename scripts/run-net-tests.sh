@@ -7,6 +7,10 @@
 # sulla porta dell'upstream (`--map-host-loopback` = indirizzo del gateway).
 # Il probe verifica che il servizio `dns` inoltri un nome fuori tabella.
 #
+# N6.3 (DoT) NON e' qui: il resolver in `mode = dot` ha bisogno di un server
+# TLS sull'host e i certificati di test, quindi vive in
+# `scripts/run-tls-tests.sh` (un solo boot con TLS 1.3 e DoT).
+#
 # Uso: ./scripts/run-net-tests.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."

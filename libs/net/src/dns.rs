@@ -317,6 +317,45 @@ pub fn parse_response(pkt: &[u8]) -> Option<(Vec<[u8; 4]>, Vec<[u8; 16]>)> {
     Some((ipv4, ipv6))
 }
 
+// ── Framing DNS over TCP (RFC 7858 §3.3, che eredita RFC 1035 §4.2.2) ──
+//
+// Su TCP (e quindi su DoT) ogni messaggio e' preceduto dalla sua lunghezza
+// in due byte big-endian. Senza il prefisso il receiver non sa dove finisce
+// un messaggio; con il prefisso sbagliato legge il messaggio successivo.
+
+/// Lunghezza del prefisso di framing su TCP.
+pub const TCP_LEN_PREFIX: usize = 2;
+
+/// Scrive `[len:2][payload]` in `out` e ritorna la lunghezza totale.
+///
+/// `None` se il payload non e' rappresentabile (0 = nessun messaggio, o
+/// > 65535 = fuori dal campo a 16 bit) o se `out` non basta. Fail-loud: mai
+/// un frame troncato che il receiver leggerebbe come messaggio successivo.
+pub fn frame_tcp(out: &mut [u8], payload: &[u8]) -> Option<usize> {
+    if payload.is_empty() || payload.len() > u16::MAX as usize {
+        return None;
+    }
+    let total = TCP_LEN_PREFIX + payload.len();
+    if out.len() < total {
+        return None;
+    }
+    out[..2].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+    out[2..total].copy_from_slice(payload);
+    Some(total)
+}
+
+/// Legge la lunghezza annunciata dal prefisso di un frame TCP.
+///
+/// `None` se il prefisso non c'e' ancora (meno di 2 byte: il chiamante deve
+/// leggerne altri) o se annuncia `0` (frame vuoto: protocollo violato).
+pub fn tcp_prefix_len(buf: &[u8]) -> Option<usize> {
+    if buf.len() < TCP_LEN_PREFIX {
+        return None;
+    }
+    let n = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+    if n == 0 { None } else { Some(n) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +400,30 @@ mod tests {
         assert_eq!(ipv4.len(), 1);
         assert_eq!(ipv4[0], [192, 168, 1, 1]);
         assert_eq!(ipv6.len(), 0);
+    }
+
+    #[test]
+    fn tcp_frame_roundtrip() {
+        let q = b"\x12\x34\x01\x00";
+        let mut frame = [0u8; 16];
+        let n = frame_tcp(&mut frame, q).expect("frame");
+        assert_eq!(n, 2 + q.len());
+        assert_eq!(&frame[..2], &[0x00, 0x04]);
+        assert_eq!(&frame[2..n], q);
+        assert_eq!(tcp_prefix_len(&frame[..n]), Some(q.len()));
+    }
+
+    #[test]
+    fn tcp_frame_rejects_empty_and_oversize() {
+        let mut frame = [0u8; 16];
+        assert!(frame_tcp(&mut frame, &[]).is_none(), "payload vuoto");
+        // Buffer troppo piccolo: fail-loud, mai frame troncato.
+        assert!(frame_tcp(&mut frame[..3], b"abcdef").is_none());
+        // Prefisso parziale o nullo.
+        assert!(tcp_prefix_len(&[]).is_none());
+        assert!(tcp_prefix_len(&[0x00]).is_none());
+        assert!(tcp_prefix_len(&[0x00, 0x00]).is_none(), "lunghezza 0");
+        assert_eq!(tcp_prefix_len(&[0x02, 0x00]), Some(512));
     }
 
     #[test]

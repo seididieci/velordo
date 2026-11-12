@@ -55,6 +55,23 @@ pub trait Transport {
 /// Ponte fra `Transport` e `embedded_io` (blocking).
 pub struct Adapter<T: Transport>(pub T);
 
+/// Un trasporto preso per riferimento e' ancora un trasporto: permette a
+/// `connect(&mut stream, …)` di lasciare il socket **al chiamante** (che lo
+/// riusa per la connessione successiva, es. DoT una connessione per query).
+impl<T: Transport + ?Sized> Transport for &mut T {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+        (**self).read(buf)
+    }
+
+    fn write(&mut self, buf: &[u8]) -> Result<usize, IoError> {
+        (**self).write(buf)
+    }
+
+    fn flush(&mut self) -> Result<(), IoError> {
+        (**self).flush()
+    }
+}
+
 impl<T: Transport> embedded_io::ErrorType for Adapter<T> {
     type Error = IoError;
 }

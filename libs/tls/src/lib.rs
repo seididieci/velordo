@@ -4,7 +4,8 @@
 //! trasporto (nel sistema reale l'endpoint TCP del servizio `net`) e
 //! l'orologio (nel sistema reale `civis::time`) sono **iniettati**: cosi' il
 //! crate si prova sull'host in millisecondi (`scripts/run-unit-tests.sh`)
-//! senza boot e senza allocatore di sistema.
+//! senza boot e senza allocatore di sistema. Il collante col sistema reale
+//! (endpoint TCP + orologio) e' il crate `libs/tls-net`.
 //!
 //! Confini:
 //! - `transport`: `trait Transport` + adapter `embedded-io` blocking;
@@ -36,12 +37,9 @@ pub use session::{connect, Config, Session};
 pub use transport::{IoError, Transport};
 pub use trust::{CERT_SIZE, RECORD_READ_BUF, RECORD_WRITE_BUF};
 
-#[cfg(feature = "civis-clock")]
-pub use trust::SystemClock;
-
 pub use embedded_tls::blocking::TlsError;
-/// Orologio iniettato: `clock::now()` = secondi epoch UTC. Il sistema reale
-/// usa `SystemClock` (feature `civis-clock`); i test host un clock fisso.
+/// Orologio iniettato: `now()` = secondi epoch UTC. Il sistema reale usa
+/// `tls_net::SystemClock`; i test host un clock fisso.
 pub use embedded_tls::blocking::TlsClock;
 
 /// Errore dell'adattatore.

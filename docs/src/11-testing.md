@@ -286,8 +286,8 @@ log seriale.
   cache dei vicini STALE con NS di verifica), `libs/valloc`, `blake2s` e
   `libs/tls` (trasporto/adapter, DRBG ChaCha20, fail-closed della
   configurazione: SNI/CA mancanti e buffer record troppo piccoli danno
-  `Error::Config`) (**109 test** in tutto; `libs/net` ne ha 49, 21 dei quali
-  sulla macchina a stati TCP e sul wiring). Girano da una
+  `Error::Config`) (**111 test** in tutto; `libs/net` ne ha 51, 21 dei quali
+  sulla macchina a stati TCP e sul wiring, 2 sul framing RFC 7858). Girano da una
   **directory neutra**: il `.cargo/config.toml` del repo impone
   `build.target = x86_64-unknown-none` + `build-std` in base alla directory
   corrente, e da dentro il repo `cargo test` proverebbe a compilare l'harness
@@ -339,27 +339,39 @@ log seriale.
   I servizi `netdev`/`net`/`netecho`/`siit`/`dns` partono solo con `net=1`
   in cmdline (il gate non lo setta).
 
-- **TLS 1.3 reale** (`scripts/run-tls-tests.sh`, N6.2, ADR-0072): boot con
-  `tls=1` (+ `net=1`) e virtio-net/passt. Il server TLS gira **sull'host**:
-  la sandbox non ha il binario `openssl`, quindi i certificati (CA + leaf
-  RSA-2048, SAN `DNS:tls.test`, EKU serverAuth) li genera il tool host
-  `tools/tls-test-certs` (puro Rust: `x509-cert` + `rsa`), e il server è
+- **TLS 1.3 + DoT reali** (`scripts/run-tls-tests.sh`, N6.2/N6.3,
+  ADR-0072): boot con `tls=1` (+ `net=1`) e virtio-net/passt. I server TLS
+  girano **sull'host**: la sandbox non ha il binario `openssl`, quindi i
+  certificati (CA + leaf RSA-2048 con SAN multipli `tls.test,dns.test` +
+  un leaf self-signed "cattivo") li genera il tool host
+  `tools/tls-test-certs` (puro Rust: `x509-cert` + `rsa`), e i server sono
   Python `ssl` (OpenSSL 3.x, TLS 1.3, ALPN `dot`). `arca-tool.sh` seeda
   `sys:tls.conf` (`sni`, `port`) e `sys:ca.der` **solo** se chi chiama
-  esporta `TLS_TEST_CA`, cosicché il gate resti identico. `tlsprobe`
-  (testland, stack grande) apre un endpoint TCP verso il gateway di passt
-  (`NET_ADDR_ROUTER`, stessa strada del responder DNS N6.0), fa l'handshake
-  con catena **e hostname verificati** (non `NoVerify`), invia
-  `GET / HTTP/1.0` e valida una risposta `HTTP/`. PASS se il log contiene
-  `[tlsprobe] handshake: PASS`, `[tlsprobe] appdata: PASS`,
-  `[tlsprobe] risultato: PASS` **e** il server ha registrato
-  `alpn='dot'` (un probe saltato non è una vittoria: `SKIP` = FAIL).
-  Il probe ha trovato un **bug TCP vero**: `Conn::next_tx` mandava i dati
-  bufferizzati anche in `SynSent`, quando l'ACK del peer non è ancora noto
-  (segmento con ACK=0 → passt resetta la connessione). Sul loopback era
-  invisibile perché il SYN+ACK viene processato in modo sincrono nella
-  stessa `tcp_send`. Corretto e coperto da
-  `no_data_before_handshake_completes` (unit test host).
+  esporta `TLS_TEST_CA`, e `sys:dns.conf` in `mode = dot` **solo** con
+  `NET_DNS_DOT_PORT`: il gate resta identico.
+  In **un solo boot** si provano due cose:
+  1. `tlsprobe` (stack grande) apre un endpoint TCP verso il gateway di passt
+     (`NET_ADDR_ROUTER`, stessa strada del responder DNS N6.0), fa
+     l'handshake con catena **e hostname verificati** (non `NoVerify`),
+     invia `GET / HTTP/1.0` e valida una risposta `HTTP/`. PASS con
+     `[tlsprobe] handshake: PASS` + `appdata: PASS` + `risultato: PASS`
+     **e** `alpn='dot'` nel log del server (un probe saltato non è una
+     vittoria: `SKIP` = FAIL).
+  2. il resolver `dns` in `mode = dot` (una connessione per query, framing
+     RFC 7858) risolve `dot.test` **due volte** (la seconda prova il
+     reconnect sullo stesso endpoint) e una terza volta contro un certificato
+     fuori dalla trust anchor: deve rispondere **SERVFAIL**
+     (`[dns] dotfail: PASS`), mai una risposta in chiaro né NXDOMAIN. Il
+     responder sceglie il certificato per numero di connessione, quindi
+     nessun secondo boot; lo script verifica anche che la quarta connessione
+     **non** abbia completato l'handshake.
+  I probe hanno trovato tre **bug veri**: (a) `next_tx` mandava dati anche in
+  `SynSent` (ACK=0 → passt resetta; invisibile sul loopback perché il SYN+ACK
+  è sincrono), coperto da `no_data_before_handshake_completes`; (b) su RST il
+  servizio `net` liberava l'endpoint, lasciando il client con un ring
+  smappato (ora un endpoint CONNECT sopravvive alla connessione); (c) gli
+  eventi stantii della connessione precedente chiudevano il primo read della
+  successiva (ora `EV_ABORT` libera lo slot TCP e scarta il ring RX).
 
 - **hello std** (S1.3…S2.4): `scripts/build-pal.sh` (PAL + sysroot in
   `$PAL_WORK`) produce `pal/build/hello-std.bin`, seedato come

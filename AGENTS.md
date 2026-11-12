@@ -222,13 +222,13 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `VecDeque` (`hexdump /bg.bmp` 5,2 MB: ~38 min → 31 s).
   Prossimo: console server con mirror seriale e routing POSIX
   stdout→device (l'hook `persona`), poi il DE.
-- **Rete (N1–N6.2, ADR-0068/0069/0072)**: stack nativo in userspace — `libs/net`
+- **Rete (N1–N6.3, ADR-0068/0069/0072)**: stack nativo in userspace — `libs/net`
   core `no_std` 100% safe (Ethernet/IPv6/ICMPv6/NDP, SLAAC, RA guard,
   neighbor cache **STALE + NS di verifica** (non si butta la entry a 30 s:
   il MAC resta usabile, si scarta dopo 3 NS senza risposta), IID
   randomizzato, no DAD; **TCP reale** (N6.1: `tcp/conn.rs`, macchina a stati
   pura con 10 stati, finestra 2–4 segmenti, go-back-N RTO 1/2/4 s, solo
-  in-order, FIN/RST/TIME_WAIT, listener + backlog 4); 49 unit test host
+  in-order, FIN/RST/TIME_WAIT, listener + backlog 4); 51 unit test host
   IPv6/NDP/TCP/SIIT/DNS/parse), `userland/netdev` driver virtio-net (1 RX + 1 TX,
   64 descrittori, 2048 B, no offload, MSI-X, ring condiviso via shm),
   `userland/net` servizio (attach, poll, SLAAC, ping6 + endpoint a
@@ -246,9 +246,10 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `sys:dns.conf` (`upstream = auto|<ipv6>`, `port`, `mode = plain|dot|off`,
   `timeout_ms`), endpoint UDP effimero + single-flight + deadline + `txid`
   rimappato, SERVFAIL se l'upstream è configurato ma muto/invalido,
-  NXDOMAIN solo senza upstream; `mode = dot` riconosciuta, degrada a
-  statica fino a N6.3; `upstream = auto` usa il tag **`NET_ADDR` (0x8B)**
-  di `net` (selettore link-local/global/router, 16 byte in due parole)).
+  NXDOMAIN solo senza upstream; **N6.3**: `mode = dot` reale (una connessione
+  TLS per query, vedi sotto); `upstream = auto` usa il tag **`NET_ADDR`
+  (0x8B)** di `net` (selettore link-local/global/router, 16 byte in due
+  parole)).
   Kernel:
   `Service::Net=14`/`NetDev=15`/`Siit=16`/`Dns=17`, `MSI_VECTOR_NET=0x51`,
   finestra MMIO per servizio, grant DMA per NetDev, `SERVICE_COUNT=18`.
@@ -284,9 +285,21 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `no_data_before_handshake_completes`. **Nota heap**: `ChaCha20Rng` ha
   align 16 e l'heap di civis accetta solo align ≤ 8 → il DRBG lo avvolge in
   un wrapper a align 8.
-  Prossimo: N6.3 DoT dentro `dns` (framing RFC 7858 sopra lo stesso
-  trasporto, SERVFAIL su TLS/certificato invalido, fail-closed senza `sni`),
-  poi personalità POSIX di rete, VT-d.
+  **N6.3 (ADR-0072, completato, → Accepted)**: `dns` in `mode = dot` —
+  `libs/tls-net` (`TcpStream` sull'endpoint `net` + `impl tls::Transport` +
+  `SystemClock`) condiviso con `tlsprobe`; `libs/tls` resta puro (via la
+  feature `civis-clock`) e un `&mut T: Transport` lascia il socket al
+  chiamante. Framing RFC 7858 (`frame_tcp`/`tcp_prefix_len` in
+  `libs/net::dns`), **una connessione per query ma endpoint persistente**
+  (`shm_create` non ha `destroy`: il ring si mappa una volta; `EV_ABORT`
+  libera lo slot TCP e azzera `conn_id`). Config `sys:dns.conf` con `sni`,
+  CA obbligatoria da `sys:ca.der`, `mode = dot` mal configurato o
+  TLS/certificato invalido → **SERVFAIL** (mai NXDOMAIN, mai plaintext).
+  Due invariant di `net` corretti: su RST l'endpoint CONNECT non viene più
+  liberato (ring smappato per il client) e gli eventi stantii vanno scartati
+  al reconnect. Prova in `scripts/run-tls-tests.sh` (un boot): `dot: PASS`
+  ×2 (query + reconnect) + `dotfail: PASS` con certificato fuori trust.
+  Prossimo: personalità POSIX di rete, DoH (N6.4), VT-d.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
@@ -487,7 +500,7 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
 
 ```bash
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term (rasterizer + cursore + surface), net (IPv6/NDP/TCP/SIIT/DNS/parse), valloc, blake2s: 96 test
+./scripts/run-unit-tests.sh   # term, net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), valloc, blake2s, tls: 111 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh

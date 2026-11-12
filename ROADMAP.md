@@ -111,6 +111,12 @@ zero FAIL/PANIC/FAULT. La suite FAT32 e' **fuori dal gate** (ADR-0059:
   tempo). `[console] stats:` misura ogni 64 flush (T0). Fix trovato in
   validazione: `TRANSFER_TO_HOST_2D.offset` deve essere `y*stride + x*4`,
   non 0
+- **DoT — `dns` in `mode = dot`** (N6.3, ADR-0072): `libs/tls-net`
+  (`TcpStream` + `SystemClock`) condiviso con `tlsprobe`, framing RFC 7858
+  nel core, una connessione per query con endpoint persistente, CA da
+  `sys:ca.der` e fail-closed (SERVFAIL) su TLS/certificato invalido. Prova in
+  QEMU: due query DoT (query + reconnect) e una con certificato fuori trust →
+  SERVFAIL, tutto in un boot solo
 - **TLS 1.3 — adattatore `libs/tls`** (N6.2, ADR-0072): crate puro sopra
   `embedded-tls` 0.19 (`rustpki`+`rsa`+`alloc`), trasporto e orologio
   iniettati, DRBG ChaCha20 (RDRAND con gate CPUID), verifica catena +
@@ -819,14 +825,24 @@ Voci con scope e vittoria dichiarati (non date).
       resettava (invisibile sul loopback). Vittoria: `[tlsprobe] risultato:
       PASS` + `alpn='dot'` lato server; unit test 109/109; net tests PASS;
       gate 6/6, zero FAIL/PANIC/FAULT.
-- [ ] **Rete N6.3 — DoT dentro `dns`** (pianificata, ADR-0072):
-      `forward_dot()` con framing a prefisso di 2 byte (RFC 7858) sopra
-      l'endpoint TCP, stessa forma di `forward_plain` (single-flight,
-      deadline, txid rimappato); TLS rotto o certificato invalido →
-      SERVFAIL, `mode = dot` senza `sni` → fail-closed con log (mai degrado
-      silenzioso a plain). Fase `[dns] dot: PASS` in `run-net-tests.sh`
-      contro un `openssl s_server -tls1_3` locale con CA di test (fuori dal
-      gate). ADR-0072 → Accepted.
+- [x] **Rete N6.3 — DoT dentro `dns`** (completata, ADR-0072):
+      `libs/tls-net` (glue: `TcpStream` sull'endpoint `net` +
+      `impl tls::Transport` + `SystemClock`; `libs/tls` resta puro e perde
+      la feature `civis-clock`), un trasporto `&mut T` è ancora un
+      `Transport` (la sessione non consuma il socket), `forward_dot()` con
+      framing RFC 7858 (`frame_tcp`/`tcp_prefix_len` in `libs/net::dns`,
+      unit test), una connessione per query ma **endpoint persistente**
+      (ring mappato una volta; `EV_ABORT` libera lo slot TCP e azzera
+      `conn_id`); su RST un endpoint CONNECT non viene più liberato (il
+      client resterebbe con un ring smappato). Config `sys:dns.conf` con
+      `sni`, CA obbligatoria da `sys:ca.der`; `mode = dot` mal configurato o
+      TLS/certificato invalido → **SERVFAIL** (mai NXDOMAIN, mai plaintext).
+      Prova in `scripts/run-tls-tests.sh` (un solo boot): `[dns] dot: PASS`
+      ×2 (query + reconnect), `[dns] dotfail: PASS` con certificato fuori
+      trust, `alpn='dot'` lato server e quarta connessione senza handshake.
+      Bug veri: dati TCP in `SynSent` (ACK=0), endpoint liberato su RST,
+      eventi stantii al reconnect. Unit test 111/111; net tests PASS; gate
+      6/6, zero FAIL/PANIC/FAULT. ADR-0072 → Accepted.
 - [ ] **Rete N6.4–N8** (pianificata, ADR-0068/0069/0070): DoH sulla stessa
       API di trasporto; personalità POSIX socket; VT-d/IOMMU.
       Config `sys:net` con policy di subtree in cardo (`sys:identis` rinomina

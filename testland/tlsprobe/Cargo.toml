@@ -7,9 +7,10 @@ edition = "2024"
 
 [dependencies]
 civis = { path = "../../libs/civis" }
-# `civis-clock`: orologio reale (servizio Time) per la validita' dei
-# certificati. Il crate resta puro: l'aggancio e' una feature (ADR-0072).
-tls = { path = "../../libs/tls", features = ["civis-clock"] }
+# Adattatore TLS puro + collante col sistema reale (endpoint TCP di `net`,
+# orologio da `usertime`). Vedi ADR-0072.
+tls = { path = "../../libs/tls" }
+tls-net = { path = "../../libs/tls-net" }
 
 [profile.dev]
 panic = "abort"

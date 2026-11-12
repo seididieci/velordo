@@ -2,9 +2,9 @@
 
 ## Status
 
-Proposed (2026-11). **N6.2 completato** (crate `libs/tls` + prova handshake
-TLS 1.3 reale in QEMU, `scripts/run-tls-tests.sh`). Diventa Accepted a
-chiusura di N6.3 (DoT dentro `dns`).
+**Accepted** (2026-11). N6.2 (crate `libs/tls` + handshake TLS 1.3 reale in
+QEMU) e N6.3 (`dns` in `mode = dot`, una connessione per query) sono
+completati e provati da `scripts/run-tls-tests.sh` in un solo boot.
 
 ## Context
 
@@ -52,12 +52,16 @@ sicurezza nostro, la parte dove un errore costa di più.
    Trasporto **e** orologio sono iniettati: trait `Transport { read; write;
    flush }` + adapter `embedded_io::Read/Write`, e `TlsClock` generico. Così
    il crate si prova sull'host in millisecondi (`cargo test`, 12 test) senza
-   boot. L'unico aggancio al sistema è la feature `civis-clock` (dipendenza
-   opzionale) che fornisce `tls::SystemClock` (`civis::time::wall_secs()`):
-   i test host girano senza, il sistema reale la attiva.
-   In `dns`/`tlsprobe` il trasporto è l'endpoint TCP di `net`
-   (`NET_EP_OPEN` + `NET_EP_FLAG_CONNECT`, ring 16×2048, `NET_EP_TX`,
-   attesa RX con deadline via `futex_wait`, ADR-0067).
+   boot. Il collante col sistema reale è un crate a parte, **`libs/tls-net`**:
+   `TcpStream` (endpoint TCP di `net`: `NET_EP_OPEN` +
+   `NET_EP_FLAG_CONNECT`, ring 16×2048, `NET_EP_TX`, attesa RX con deadline
+   via `futex_wait`, ADR-0067) + `impl tls::Transport` + `SystemClock`
+   (`civis::time::wall_secs()`). Un solo posto per il codice `unsafe` dei
+   ring, condiviso da `dns` e `tlsprobe`; `tls` non dipende da `civis`
+   nemmeno opzionalmente.
+   Un trasporto preso **per riferimento** (`&mut TcpStream`) implementa
+   `Transport` a sua volta: la sessione TLS usa il socket senza consumarlo,
+   così chi chiama lo riusa per la query successiva.
 3. **Suite**: `Aes128GcmSha256` (inclusa da `embedded-tls`); ALPN dal
    chiamante (`dot` per DoT). Un solo named group: `secp256r1` (è ciò che
    `embedded-tls` offre).
@@ -66,8 +70,12 @@ sicurezza nostro, la parte dove un errore costa di più.
    `server_name` del `TlsConfig`), catena bounded (`CERT_SIZE` 4 KiB,
    fail-loud oltre: `OutOfMemory`, mai handshake "riuscito" senza verifica).
    Buffer record `RECORD_READ_BUF` 16640 / `RECORD_WRITE_BUF` 16384, nel
-   `Box` (heap civis), mai sullo stack. Trust anchor obbligatoria: vuota →
-   `Error::Config` (fail-closed). In N6.3 la CA arriverà da `sys:ca.der`.
+   `Box` (heap civis), mai sullo stack. Trust anchor **esplicita e
+   obbligatoria**: l'oggetto `sys:ca.der` (DER) in ArcaFS. Assente o vuota →
+   il resolver dichiara `mode = dot` **broken** e risponde SERVFAIL sui nomi
+   fuori tabella (fail-closed), mai NXDOMAIN e mai plaintext. Nessun root
+   store compilato: un solo root (es. ISRG X1) coprirebbe solo una parte
+   delle catene reali e darebbe una falsa garanzia; la CA si dichiara.
 5. **Entropia**: DRBG ChaCha20 (`rand_chacha`, `rand_core` 0.6 — lo stesso
    di `embedded-tls`) seminato da RDRAND (gate CPUID leaf 1 ECX bit 30:
    senza supporto l'istruzione fa `#UD`); fallback `rdtsc ^ mix`. Reseed
@@ -82,7 +90,14 @@ sicurezza nostro, la parte dove un errore costa di più.
    `mode = dot` senza `sni` valido → fail-closed con log (mai degrado
    silenzioso a plain).
 7. **Una connessione per query** (apertura, query, risposta, `close_notify`):
-   niente keep-alive né resumption in questa fase.
+   niente keep-alive né resumption in questa fase. Framing RFC 7858
+   (`[len:2][messaggio]`, helper puri in `libs/net::dns` con unit test). Il
+   **socket** è per-query, l'**endpoint** è persistente: il ring si mappa una
+   volta (`shm_create` non ha `destroy`: ricrearlo per query perderebbe frame)
+   e la connessione si chiude con un evento `EV_ABORT` che libera lo slot TCP
+   del core e azzera `conn_id`, così la query successiva ne apre una nuova.
+   Per questo `userland/net` non libera più l'endpoint su RST quando è un
+   CONNECT: liberarlo lascerebbe il client con un ring **smappato**.
 
 ## Consequences
 
@@ -92,9 +107,14 @@ sicurezza nostro, la parte dove un errore costa di più.
   mantenuto da terzi, non nostro; `libs/tls` resta piccolo e verificabile.
 - Il trasporto e l'orologio iniettati rendono il client testabile su host con
   un mock (12 unit test, senza boot) **e** in QEMU con un server TLS locale
-  (`scripts/run-tls-tests.sh`: `tools/tls-test-certs` genera CA+leaf RSA-2048,
-  Python `ssl` fa da server TLS 1.3 con ALPN `dot`). La prova QEMU copre
-  handshake, verifica catena+hostname e un record applicativo (HTTP).
+  (`scripts/run-tls-tests.sh`: `tools/tls-test-certs` genera CA+leaf RSA-2048
+  con SAN multipli, Python `ssl` fa da server TLS 1.3 con ALPN `dot`).
+  Un **solo boot** copre: handshake + verifica catena/hostname + record
+  applicativo HTTP (`tlsprobe`); DoT reale con due query (la seconda prova il
+  **reconnect** sullo stesso endpoint) e una terza in cui il responder
+  presenta un leaf fuori dalla trust anchor → `InvalidCertificate` →
+  **SERVFAIL** (`[dns] dotfail: PASS`). Niente secondo boot: il responder
+  sceglie il certificato per numero di connessione.
 - Il clock reale c'è già (`usertime`), quindi la validità dei certificati è
   vera e non "ignorata".
 - **Bug TCP trovato dalla prova reale**: `Conn::next_tx` emetteva i dati
@@ -120,14 +140,21 @@ sicurezza nostro, la parte dove un errore costa di più.
   Rust `tools/tls-test-certs` per non dipendere da `openssl` in nessun passo.
 - La prova QEMU dipende da `passt` (come la suite di rete) e da un server TLS
   sull'host: fuori dal gate, come N1–N6.
+- DoT senza keep-alive: ogni query paga un handshake completo (RSA/P-256 sulla
+  verifica: misurato ~200 ms sotto TCG). Accettabile per un resolver, da
+  rivedere se il traffico cresce.
+- `dns` cresce a ~318 KiB (embedded-tls + rsa + p256) e usa lo stack grande
+  come `tlsprobe`: il `Provider` (~4.9 KiB) sta sullo stack durante
+  l'handshake.
 
 ### Neutral
 
 - Il kernel resta neutro: nessuna syscall nuova, TLS è tutto userspace.
-- `tlsprobe` (testland) usa lo stack grande (`SPAWN_FLAG_BIGSTACK`): il
-  verifier contiene `OwnedCertificate<CERT_SIZE>` (~8 KiB). La lista è per
-  nome (`rector::wants_big_stack`), i manifest da disco non hanno un campo
-  dedicato.
+- `tlsprobe` e `dns` usano lo stack grande (`SPAWN_FLAG_BIGSTACK`): il
+  verifier contiene `OwnedCertificate<CERT_SIZE>` e l'handshake ha frame
+  profondi. La lista è per nome (`rector::wants_big_stack`), i manifest da
+  disco non hanno un campo dedicato.
+- `libs/tls-net` non è nel gate: è provato dai due run dedicati (TLS e rete).
 
 ## Alternatives Considered
 
@@ -150,6 +177,9 @@ sicurezza nostro, la parte dove un errore costa di più.
   subtree), ADR-0071 (SSE2 nello userland).
 - RFC 7858 (DNS over TLS), RFC 8446 (TLS 1.3), RFC 5280 (X.509).
 - `libs/tls/` (N6.2: `transport`/`drbg`/`trust`/`session`),
+  `libs/tls-net/` (N6.3: `TcpStream` + `SystemClock`),
   `testland/tlsprobe/`, `tools/tls-test-certs/`,
   `scripts/run-tls-tests.sh`.
-- `userland/dns/src/main.rs` (N6.0: `forward_plain`, config `sys:dns.conf`).
+- `userland/dns/src/main.rs` (N6.0 `forward_plain`, N6.3 `forward_dot`,
+  config `sys:dns.conf` + `sys:ca.der`).
+- `libs/net/src/dns.rs` (framing RFC 7858: `frame_tcp`/`tcp_prefix_len`).

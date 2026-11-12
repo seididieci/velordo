@@ -53,6 +53,11 @@ const EV_RST: u8 = 4;    // reset connessione
 /// Nuova connessione accettata su un listener (N6.1c): payload dello slot =
 /// `[ep_id:2][ring_id:4]` del figlio.
 const EV_ACCEPT: u8 = 5;
+/// Chiusura immediata della **connessione** lasciando vivo l'endpoint
+/// (N6.3): il client la usa per riaprire una connessione nuova sullo stesso
+/// endpoint senza aspettare FIN/TIME_WAIT. L'endpoint resta mappato: il shm
+/// non si puo' ricreare per query (`shm_create` non ha `destroy`).
+const EV_ABORT: u8 = 6;
 /// Nessuna connessione TCP associata all'endpoint.
 const NO_CONN: u8 = 0xff;
 
@@ -582,9 +587,19 @@ fn apply_tcp_signal(svc: &mut NetService, conn: u8, signal: TcpSignal) {
         TcpSignal::Accepted(_) => {} // gestito da `apply_accepted`
         TcpSignal::Reset => {
             push(EV_RST, &[]);
-            // Connessione morta: libera l'endpoint del figlio (il listener
-            // resta dov'è, in ascolto).
-            if ep.flags & NET_EP_FLAG_LISTEN == 0 {
+            // Un endpoint CONNECT sopravvive alla propria connessione: chi lo
+            // possiede (DoT, N6.3) riapre con il prossimo `NET_EP_TX`.
+            // Liberarlo lascerebbe il client con un ring **smappato** (e il
+            // ring non si puo' ricreare per query: `shm_create` non ha
+            // `destroy`). I figli di un listener restano come prima.
+            if ep.flags & NET_EP_FLAG_CONNECT != 0 {
+                svc.net.tcp_abort(conn);
+                if let Some(ep_mut) = svc.find_by_id_mut(ep.ep_id) {
+                    ep_mut.conn_id = NO_CONN;
+                }
+            } else if ep.flags & NET_EP_FLAG_LISTEN == 0 {
+                // Connessione morta: libera l'endpoint del figlio (il
+                // listener resta dov'è, in ascolto).
                 svc.free_endpoint(idx);
             }
         }
@@ -884,6 +899,19 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
             // apre la connessione alla prima scrittura; un listener non
             // trasmette (risponde il core con SYN+ACK).
             if is_tcp {
+                if event == EV_ABORT {
+                    // N6.3: chiude la connessione, tiene l'endpoint. Il
+                    // prossimo `NET_EP_TX` ne apre una nuova.
+                    if ep.conn_id != NO_CONN {
+                        svc.net.tcp_abort(ep.conn_id);
+                        if let Some(ep_mut) = svc.find_by_id_mut(ep_id) {
+                            ep_mut.conn_id = NO_CONN;
+                        }
+                    }
+                    NetService::ep_tx_consume_raw(ring);
+                    let _ = civis::reply(NET_EP_TX, 0, 0);
+                    return;
+                }
                 if ep.conn_id == NO_CONN {
                     if ep.flags & NET_EP_FLAG_LISTEN != 0 {
                         match svc.net.tcp_listen(ep.local_port) {

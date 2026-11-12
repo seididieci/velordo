@@ -22,38 +22,11 @@
 extern crate alloc;
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
-use civis::println;
-use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{fence, Ordering};
-
-use civis::{
-    NET_ADDR, NET_ADDR_ROUTER, NET_EP_CLOSE, NET_EP_FLAG_CONNECT, NET_EP_OPEN, NET_EP_RX_RING_OFF,
-    NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE, NET_EP_TX, NET_EP_TX_RING_OFF,
-    NET_PROTO_TCP,
-};
-use tls::{IoError, Transport};
+use civis::{println, NET_ADDR, NET_ADDR_ROUTER};
+use tls_net::TcpStream;
 
 static FUTEX: u32 = 0;
-
-const EV_DATA: u8 = 0;
-const EV_SYNACK: u8 = 2;
-const EV_FIN: u8 = 3;
-const EV_RST: u8 = 4;
-
-/// Metadata slot: `[len:2][addr:16][dport:2][sport:2][evento:1][payload]`.
-const SLOT_META: usize = 23;
-
-/// Chunk di scrittura: <= `SEND_BUF` del core TCP (4096) meno il margine,
-/// cosi' un chunk entra sempre nel buffer di invio. Il servizio non riporta
-/// quanti byte ha accettato: un parziale non e' distinguibile (vedi sotto).
-const WRITE_CHUNK: usize = 1024;
-
-/// Attesa massima per un record in arrivo (10 s a 100 Hz).
-const READ_TICKS: u64 = 1000;
-/// Attesa massima per far posto nel buffer di invio TCP.
-const WRITE_TICKS: u64 = 300;
 
 civis::entry!(real_main);
 
@@ -99,53 +72,15 @@ fn real_main(_sp: u64) -> ! {
     println!("[tlsprobe] handshake verso {}:{} sni={}", fmt_addr(&dst), port, sni);
 
     // ── Endpoint TCP CONNECT (porta effimera) ──────────────────────────
-    let r = match civis::send(
-        net_chan,
-        NET_EP_OPEN,
-        (NET_PROTO_TCP as u64) << 16,
-        NET_EP_FLAG_CONNECT as u64,
-    ) {
-        Ok(r) => r,
-        Err(_) => {
-            println!("[tlsprobe] FAIL: open (IPC)");
+    // Trasporto condiviso con `dns` (N6.3): `libs/tls-net`.
+    let mut transport = match TcpStream::connect(net_chan, dst, port) {
+        Some(t) => t,
+        None => {
+            println!("[tlsprobe] FAIL: endpoint TCP non aperto");
             finish(false);
         }
     };
-    if r.w0 == !0u64 {
-        println!("[tlsprobe] FAIL: open rifiutato");
-        finish(false);
-    }
-    let ep_id = r.w0 as u16;
-    let ring_id = (r.w1 & 0xffff_ffff) as u32;
-    let local_port = (r.w1 >> 32) as u16;
-    println!("[tlsprobe] endpoint TCP id={} porta={}", ep_id, local_port);
-
-    let ring_base = match civis::shm_map(ring_id, 0, civis::PROT_READ | civis::PROT_WRITE) {
-        Ok(b) => b,
-        Err(_) => {
-            println!("[tlsprobe] FAIL: shm map");
-            finish(false);
-        }
-    } as *mut u8;
-    unsafe {
-        write_volatile(ring_base.add(NET_EP_RX_RING_OFF) as *mut u32, 0);
-        write_volatile(ring_base.add(NET_EP_RX_RING_OFF + 4) as *mut u32, 0);
-        write_volatile(ring_base.add(NET_EP_TX_RING_OFF) as *mut u32, 0);
-        write_volatile(ring_base.add(NET_EP_TX_RING_OFF + 4) as *mut u32, 0);
-    }
-
-    let transport = NetTcp {
-        net_chan,
-        ep_id,
-        ring: ring_base,
-        dst,
-        port,
-        tx_seq: 0,
-        rx_head: 0,
-        pending: Vec::new(),
-        ppos: 0,
-        eof: false,
-    };
+    println!("[tlsprobe] endpoint TCP id={}", transport.ep_id());
 
     // Buffer record nel Box (heap civis): 16 KiB l'uno, mai sullo stack.
     let mut rbuf = alloc::vec![0u8; tls::RECORD_READ_BUF].into_boxed_slice();
@@ -156,8 +91,10 @@ fn real_main(_sp: u64) -> ! {
         alpn: &[&b"dot"[..]],
     };
 
-    let mut sess = match tls::connect::<NetTcp, tls::SystemClock>(
-        transport,
+    // `&mut`: il socket resta nostro anche se l'handshake fallisce (lo
+    // chiudiamo esplicitamente, senza lasciare la connessione appesa).
+    let mut sess = match tls::connect::<&mut TcpStream, tls_net::SystemClock>(
+        &mut transport,
         &cfg,
         &mut rbuf[..],
         &mut wbuf[..],
@@ -165,7 +102,8 @@ fn real_main(_sp: u64) -> ! {
         Ok(s) => s,
         Err(e) => {
             println!("[tlsprobe] FAIL: handshake: {:?}", e);
-            let _ = civis::send(net_chan, NET_EP_CLOSE, ep_id as u64, 0);
+            transport.abort();
+            transport.shutdown();
             finish(false);
         }
     };
@@ -175,7 +113,8 @@ fn real_main(_sp: u64) -> ! {
     let req = b"GET / HTTP/1.0\r\n\r\n";
     if let Err(e) = sess.write_all(req) {
         println!("[tlsprobe] FAIL: write applicativo: {:?}", e);
-        let _ = civis::send(net_chan, NET_EP_CLOSE, ep_id as u64, 0);
+        transport.abort();
+        transport.shutdown();
         finish(false);
     }
     let mut resp = [0u8; 512];
@@ -183,7 +122,8 @@ fn real_main(_sp: u64) -> ! {
         Ok(n) => n,
         Err(e) => {
             println!("[tlsprobe] FAIL: read applicativo: {:?}", e);
-            let _ = civis::send(net_chan, NET_EP_CLOSE, ep_id as u64, 0);
+            transport.abort();
+            transport.shutdown();
             finish(false);
         }
     };
@@ -196,152 +136,8 @@ fn real_main(_sp: u64) -> ! {
 
     // Chiusura ordinata (close_notify) + endpoint TCP.
     let _ = sess.close();
-    let _ = civis::send(net_chan, NET_EP_CLOSE, ep_id as u64, 0);
+    transport.shutdown();
     finish(http);
-}
-
-// ── Trasporto: endpoint TCP di `net` come stream ──────────────────────
-
-struct NetTcp {
-    net_chan: u64,
-    ep_id: u16,
-    ring: *mut u8,
-    dst: [u8; 16],
-    port: u16,
-    /// Indice di slot TX (modulo `NET_EP_RING_SLOTS`).
-    tx_seq: u32,
-    rx_head: u32,
-    /// Payload di uno slot RX piu' grande della richiesta: il resto va qui
-    /// (semantica di stream, mai byte persi).
-    pending: Vec<u8>,
-    ppos: usize,
-    eof: bool,
-}
-
-impl NetTcp {
-    fn take(&mut self, buf: &mut [u8]) -> usize {
-        let n = buf.len().min(self.pending.len() - self.ppos);
-        buf[..n].copy_from_slice(&self.pending[self.ppos..self.ppos + n]);
-        self.ppos += n;
-        n
-    }
-
-    fn wait_tick() {
-        let _ = civis::futex_wait(
-            &FUTEX as *const u32 as usize,
-            0,
-            (civis::get_ticks() + 1) as u64,
-        );
-    }
-}
-
-impl Transport for NetTcp {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
-        if self.ppos < self.pending.len() {
-            return Ok(self.take(buf));
-        }
-        if self.eof {
-            return Err(IoError::Closed);
-        }
-        let deadline = civis::get_ticks() as u64 + READ_TICKS;
-        loop {
-            let tail = unsafe {
-                read_volatile(self.ring.add(NET_EP_RX_RING_OFF + 4) as *const u32)
-            };
-            if self.rx_head != tail {
-                let slot = (self.rx_head % NET_EP_RING_SLOTS as u32) as usize;
-                let p = unsafe {
-                    self.ring
-                        .add(NET_EP_RX_RING_OFF + NET_EP_RING_HDR + slot * NET_EP_SLOT_SIZE)
-                };
-                let total = unsafe { read_volatile(p as *const u16) } as usize;
-                let event = if total >= SLOT_META {
-                    unsafe { read_volatile(p.add(22)) }
-                } else {
-                    0xff
-                };
-                let len = total.saturating_sub(SLOT_META);
-                self.pending.clear();
-                self.ppos = 0;
-                if event == EV_DATA && len > 0 {
-                    self.pending.extend_from_slice(unsafe {
-                        core::slice::from_raw_parts(p.add(SLOT_META), len)
-                    });
-                }
-                unsafe {
-                    write_volatile(
-                        self.ring.add(NET_EP_RX_RING_OFF) as *mut u32,
-                        self.rx_head.wrapping_add(1),
-                    )
-                };
-                self.rx_head = self.rx_head.wrapping_add(1);
-                match event {
-                    EV_DATA if len > 0 => return Ok(self.take(buf)),
-                    EV_SYNACK => continue, // handshake: il core lo ha gia' chiuso
-                    EV_RST | EV_FIN => {
-                        self.eof = true;
-                        return Err(IoError::Closed);
-                    }
-                    _ => continue,
-                }
-            }
-            if civis::get_ticks() as u64 >= deadline {
-                return Err(IoError::Failed);
-            }
-            Self::wait_tick();
-        }
-    }
-
-    fn write(&mut self, buf: &[u8]) -> Result<usize, IoError> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        let chunk = buf.len().min(WRITE_CHUNK);
-        let deadline = civis::get_ticks() as u64 + WRITE_TICKS;
-        loop {
-            let slot = (self.tx_seq % NET_EP_RING_SLOTS as u32) as usize;
-            write_slot(self.ring, slot, &self.dst, self.port, EV_DATA, &buf[..chunk]);
-            match civis::send(self.net_chan, NET_EP_TX, self.ep_id as u64, slot as u64) {
-                Ok(r) if r.w0 == 0 => {
-                    self.tx_seq = self.tx_seq.wrapping_add(1);
-                    return Ok(chunk);
-                }
-                _ => {
-                    // Buffer di invio TCP pieno (o handshake non ancora
-                    // avviabile): si riprova lo stesso slot dopo un tick. Il
-                    // servizio non riporta l'accettazione parziale; con
-                    // chunk <= WRITE_CHUNK e buffer quasi vuoto non accade,
-                    // e se accadesse il record TLS sarebbe invalido (fallisce
-                    // loud, non silenzioso).
-                    if civis::get_ticks() as u64 >= deadline {
-                        return Err(IoError::Failed);
-                    }
-                    Self::wait_tick();
-                }
-            }
-        }
-    }
-}
-
-/// Scrive lo slot TX `slot` (payload applicativo).
-fn write_slot(ring: *mut u8, slot: usize, dst: &[u8; 16], port: u16, event: u8, payload: &[u8]) {
-    let total = SLOT_META + payload.len();
-    let p = unsafe { ring.add(NET_EP_TX_RING_OFF + NET_EP_RING_HDR + slot * NET_EP_SLOT_SIZE) };
-    unsafe {
-        write_volatile(p as *mut u16, total as u16);
-        core::ptr::copy_nonoverlapping(dst.as_ptr(), p.add(2), 16);
-        write_volatile(p.add(18) as *mut u16, port);
-        write_volatile(p.add(20) as *mut u16, 0);
-        write_volatile(p.add(22) as *mut u8, event);
-        core::ptr::copy_nonoverlapping(payload.as_ptr(), p.add(SLOT_META), payload.len());
-    }
-    fence(Ordering::Release);
-    unsafe {
-        write_volatile(
-            ring.add(NET_EP_TX_RING_OFF + 4) as *mut u32,
-            (slot + 1) as u32,
-        )
-    };
 }
 
 // ── Config e utility ─────────────────────────────────────────────────
