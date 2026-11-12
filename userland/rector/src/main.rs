@@ -188,6 +188,16 @@ fn spawn_object(bucket: &[u8], key: &[u8]) -> Option<alloc::vec::Vec<u8>> {
     }
 }
 
+/// Binari che vogliono lo stack grande (`BIGSTACK_FRAMES` = 8 MiB).
+///
+/// Il probe TLS (N6.2) costruisce il verifier con due `heapless::Vec` da
+/// 4 KiB (`OwnedCertificate<CERT_SIZE>`), ~8 KiB di frame: con i 16 KiB
+/// di stack di default e' al limite. La lista e' per nome perche' i manifest
+/// da disco sono costruiti inline e non hanno un campo dedicato.
+fn wants_big_stack(name: &str) -> bool {
+    name == "tlsprobe"
+}
+
 /// Spawna un binario da un vettore di byte (Fase 55, N0).
 fn spawn_image_from_vec(img: &[u8], meta: &SvcMeta) -> Option<i64> {
     if img.len() > civis::syscall_numbers::SPAWN_IMAGE_MAX {
@@ -211,6 +221,10 @@ fn spawn_image_from_vec(img: &[u8], meta: &SvcMeta) -> Option<i64> {
         Some(m) => m,
         None => return None,
     };
+    // Stack grande per i binari con frame profondi: il probe TLS costruisce
+    // un verifier con `OwnedCertificate<4096>` (~8 KiB) e con i 4 frame di
+    // default (16 KiB) sarebbe al limite.
+    let sm = if wants_big_stack(name) { sm.bigstack() } else { sm };
     match civis::spawn_image(img, &sm) {
         Ok(chan) => {
             if pinned {
@@ -256,6 +270,24 @@ fn cmdline_has_s25() -> bool {
     let mut i = 0usize;
     while i + 5 <= cmd.len() {
         if &cmd[i..i + 5] == b"s25=1"
+            && (i == 0 || cmd[i - 1] == b' ' || cmd[i - 1] == 0)
+            && (i + 5 == cmd.len() || cmd[i + 5] == b' ' || cmd[i + 5] == 0)
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Cerca il token `tls=1` nella cmdline (N6.2: run TLS dedicato, fuori dal
+/// gate; richiede anche `net=1`). Stesso match a token intero di `net=1`.
+#[cfg(not(feature = "skip_tests"))]
+fn cmdline_has_tls() -> bool {
+    let cmd = civis::boot_cmdline();
+    let mut i = 0usize;
+    while i + 5 <= cmd.len() {
+        if &cmd[i..i + 5] == b"tls=1"
             && (i == 0 || cmd[i - 1] == b' ' || cmd[i - 1] == 0)
             && (i + 5 == cmd.len() || cmd[i + 5] == b' ' || cmd[i + 5] == 0)
         {
@@ -727,6 +759,10 @@ const TEST_NET4: SvcMeta = SvcMeta { bin: b"net4", obj: Some((b"tst", b"test/net
 const TEST_NETTCP: SvcMeta = SvcMeta { bin: b"nettcp", obj: Some((b"tst", b"test/nettcp.bin")), prio: 16, io: &[] };
 // Resolver DNS (N5, ADR-0069): eseguito solo con `net=1`, dopo net4.
 const TEST_DNS: SvcMeta = SvcMeta { bin: b"dnsprobe", obj: Some((b"tst", b"test/dnsprobe.bin")), prio: 16, io: &[] };
+// Probe TLS 1.3 (N6.2, ADR-0072): solo con `net=1` **e** `tls=1`; si salta da
+// solo se manca `sys:tls.conf` (server TLS sull'host, script dedicato).
+#[cfg(not(feature = "skip_tests"))]
+const TEST_TLSPROBE: SvcMeta = SvcMeta { bin: b"tlsprobe", obj: Some((b"tst", b"test/tlsprobe.bin")), prio: 16, io: &[] };
 #[cfg(not(feature = "skip_tests"))]
 const TESTS: SvcMeta = SvcMeta { bin: b"usertests", obj: Some((b"tst", b"test/tests.bin")), prio: 16, io: &[] };
 // Thread 1:1 (S-T, ADR-0046): dopo usertests (nessuna dipendenza dai diritti),
@@ -965,6 +1001,11 @@ fn real_main(_sp: u64) -> ! {
             run_test(&TEST_NET4, &mut supervised);
             run_test(&TEST_NETTCP, &mut supervised);
             run_test(&TEST_DNS, &mut supervised);
+            // TLS 1.3 reale (N6.2): solo con `tls=1` in cmdline, dopo il
+            // probe DNS. Il server TLS sta sull'host (script dedicato).
+            if cmdline_has_tls() {
+                run_test(&TEST_TLSPROBE, &mut supervised);
+            }
         }
         run_test(&TESTS, &mut supervised);
         run_test(&TEST_THREADS, &mut supervised);

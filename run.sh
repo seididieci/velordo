@@ -124,6 +124,14 @@ if [ -f userland/disk/arca.img ]; then
     if [ "${NET:-0}" = "1" ]; then
         APPEND="$APPEND net=1"
     fi
+    # TLS (N6.2, ADR-0072): run dedicato con server TLS sull'host. Richiede
+    # `net=1` (il probe usa il servizio `net`); `TLS=1` da solo lo aggiunge.
+    if [ "${TLS:-0}" = "1" ]; then
+        if [ "${NET:-0}" != "1" ]; then
+            APPEND="$APPEND net=1"
+        fi
+        APPEND="$APPEND tls=1"
+    fi
 else
     APPEND=""
 fi
@@ -181,7 +189,7 @@ fi
 # fuori dal gate). `NET=1` aggiunge anche `net=1` alla cmdline (init spawana
 # netdev/net). Senza, il boot e' identico al gate.
 NET_DEV=""
-if [ "${NET:-0}" = "1" ]; then
+if [ "${NET:-0}" = "1" ] || [ "${TLS:-0}" = "1" ]; then
     NET_DEV="-netdev passt,id=n0 -device virtio-net-pci,netdev=n0,disable-legacy=on"
 fi
 # shellcheck disable=SC2086

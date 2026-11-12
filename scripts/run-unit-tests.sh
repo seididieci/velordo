@@ -4,8 +4,10 @@
 # Il gate (`run-tests.sh`) e' QEMU: verifica il sistema in esecuzione, non la
 # matematica dei crate. Alcune parti pero' si provano meglio sull'host, in
 # millisecondi e senza boot: il rasterizzatore del font (`libs/term`), il
-# core di rete (`libs/net`: IPv6/NDP), la core dell'allocatore (`libs/valloc`),
-# BLAKE2s (`blake2s`).
+# core di rete (`libs/net`: IPv6/NDP/TCP), la core dell'allocatore
+# (`libs/valloc`), BLAKE2s (`blake2s`) e l'adattatore TLS (`libs/tls`:
+# trasporto, DRBG, fail-closed della configurazione — l'handshake reale e'
+# nel test QEMU dedicato `scripts/run-tls-tests.sh`).
 #
 # Perche' serve uno script: il repo ha `.cargo/config.toml` con
 # `build.target = x86_64-unknown-none` + `build-std`, e quella config si
@@ -26,7 +28,7 @@ export CARGO_TARGET_DIR="$ROOT/target/unit-tests"
 # Crate con `#[cfg(test)] mod tests` (il primo e' quello nato dalla
 # regressione della copertura: il rasterizer perdeva l'ultimo pixel di ogni
 # span e il testo risultava assottigliato).
-CRATES=(libs/term libs/net libs/valloc blake2s)
+CRATES=(libs/term libs/net libs/valloc blake2s libs/tls)
 
 FAIL=0
 TOT_PASS=0

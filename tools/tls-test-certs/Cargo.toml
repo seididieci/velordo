@@ -1,0 +1,19 @@
+[package]
+name = "tls-test-certs"
+version = "0.1.0"
+edition = "2021"
+
+# Tool host (std) del test TLS (N6.2, ADR-0072): genera la CA di test e il
+# certificato leaf con SAN, in puro Rust. Serve perche' in questa sandbox non
+# c'e' il binario `openssl`: la stessa libreria (OpenSSL) arriva via Python
+# `ssl` per il *server*, ma la generazione dei certificati e' qui.
+[workspace]
+
+[dependencies]
+const-oid = { version = "0.9", features = ["db"] }
+der = { version = "0.7", features = ["alloc", "pem", "std"] }
+rand = "0.8"
+rsa = { version = "0.9", features = ["sha2"] }
+sha2 = { version = "0.10", features = ["oid"] }
+spki = "0.7"
+x509-cert = { version = "0.2.5", features = ["builder", "pem"] }

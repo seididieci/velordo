@@ -530,8 +530,10 @@ impl Conn {
             }
         }
 
-        // 3. Invio FIN (se in coda).
-        if self.fin_queued && !self.fin_sent {
+        // 3. Invio FIN (se in coda). Solo a dati svuotati: il FIN consuma il
+        // seq subito dopo i dati (RFC 793 §3.3) e anticiparlo invierebbe il
+        // FIN prima dei byte ancora in coda.
+        if self.fin_queued && !self.fin_sent && self.send_buf.is_empty() {
             self.fin_queued = false;
             self.fin_sent = true;
             self.fin_seq = self.snd_nxt;
@@ -550,8 +552,13 @@ impl Conn {
             return Some(info);
         }
 
-        // 4. Invio di nuovi dati (dentro la finestra).
-        if !self.send_buf.is_empty() {
+        // 4. Invio di nuovi dati (dentro la finestra). Solo a handshake
+        // concluso: in SynSent/SynRecv i byte restano bufferizzati (l'ACK
+        // non è ancora noto: un segmento dati con ACK=0 è invalido e il peer
+        // lo resetta — bug trovato sul percorso passt, N6.2).
+        if matches!(self.state, State::Established | State::CloseWait)
+            && !self.send_buf.is_empty()
+        {
             let available = self.snd_wnd_available();
             if available > 0 {
                 let in_flight = self.snd_nxt.wrapping_sub(self.snd_una) as usize;
@@ -939,6 +946,42 @@ mod tests {
         assert_eq!(c.state, State::SynSent);
 
         complete_handshake(&mut c, &mut s, 0);
+    }
+
+    /// Regressione N6.2 (bug trovato sul percorso reale passt): un client che
+    /// scrive subito dopo `connect` NON deve emettere dati finché l'handshake
+    /// non è chiuso. In SynSent l'ACK non è noto: un segmento dati con ACK=0
+    /// è invalido e il peer (passt) lo resetta. Sul loopback il bug non si
+    /// vedeva perché il SYN+ACK viene processato in modo sincrono.
+    #[test]
+    fn no_data_before_handshake_completes() {
+        let mut c = Conn::new_client(50001);
+        c.open(Ipv6Addr::LOOPBACK, 50002, 1000, 0);
+        assert_eq!(c.write(b"hello", 0), 5);
+
+        let mut buf = [0u8; 200];
+        let syn = c.next_tx(&mut buf, 0).expect("SYN");
+        assert_eq!(syn.flags, FLAG_SYN);
+
+        // Nessun dato finché resta in SynSent (più tick, tutti None).
+        for now in [0, 10, 50] {
+            assert!(
+                c.next_tx(&mut buf, now).is_none(),
+                "nessun dato deve partire in SynSent (now={now})"
+            );
+        }
+
+        // Arriva il SYN+ACK: Established, ora i dati partono con l'ACK giusto.
+        let hdr = make_hdr(50002, 50001, 2000, 1001, FLAG_SYN | FLAG_ACK);
+        let res = c.on_segment(&hdr, &[], 0);
+        assert!(res.established);
+        assert_eq!(c.rcv_nxt, 2001);
+
+        let data = c.next_tx(&mut buf, 0).expect("dati dopo l'handshake");
+        assert_eq!(data.flags, FLAG_ACK);
+        assert_eq!(data.ack, 2001, "ACK del segmento dati = rcv_nxt");
+        assert_eq!(data.len, 20 + 5);
+        assert_eq!(&buf[20..25], b"hello");
     }
 
     #[test]

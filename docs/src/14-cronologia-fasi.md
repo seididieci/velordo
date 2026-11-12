@@ -3420,3 +3420,60 @@
       quadratico costa ~3x) con bound assoluto largo a `12000`, e
       `arca-tool.sh` prealloca `arca.img` (`fallocate`) per non far allocare
       blocchi all'host a ogni run. Gate finale: `dt=5637`, `half1=2077`.
+- [x] **N6.2 — `libs/tls`: adattatore TLS 1.3 + handshake vero in QEMU**
+      (2026-11, ADR-0072): il crate è **puro** (niente `civis`), con
+      trasporto e orologio iniettati: così si prova sull'host in millisecondi
+      e il sistema reale aggancia solo `civis::time` (feature `civis-clock`,
+      dipendenza opzionale). Dentro, `embedded-tls` `=0.19.0` con
+      `default-features = false` e feature `rustpki`+`rsa`+`alloc`: `webpki`
+      è std-only, `rsa` implica `rustpki`+`alloc` ed è necessario per le
+      catene RSA-4096 reali. Moduli: `transport` (trait `Transport` +
+      adapter `embedded_io` blocking), `drbg` (ChaCha20 `rand_chacha`
+      seminato da RDRAND con gate CPUID leaf 1 ECX bit 30 — senza il gate
+      l'istruzione fa `#UD`, il flag CF non basta — fallback `rdtsc`, reseed
+      ogni MiB), `trust` (`CertVerifier` con `TlsClock`, `CERT_SIZE` 4096
+      fail-loud, buffer record 16640/16384), `session` (`connect`/`Session`,
+      `write_all` che flushta, `close` che restituisce il trasporto).
+      **La prova**: `testland/tlsprobe` (stack grande) apre un endpoint TCP
+      verso il gateway di passt (`NET_ADDR_ROUTER`, stessa strada del
+      responder DNS N6.0), fa l'handshake con **catena e hostname
+      verificati** (CA di test in `sys:ca.der`, non `NoVerify`), invia
+      `GET / HTTP/1.0` e valida una risposta `HTTP/`. Il server TLS sta
+      sull'host: la sandbox non ha il binario `openssl`, quindi i
+      certificati (CA + leaf RSA-2048, SAN `DNS:tls.test`, EKU serverAuth)
+      li genera il tool host `tools/tls-test-certs` (puro Rust:
+      `x509-cert`+`rsa`) e il server è Python `ssl` (OpenSSL 3.x, TLS 1.3,
+      ALPN `dot`). `run-tls-tests.sh` seeda `sys:tls.conf`/`sys:ca.der`
+      solo con `TLS_TEST_CA` (il gate resta identico) e richiede
+      `[tlsprobe] risultato: PASS`, `handshake: PASS`, `appdata: PASS` **e**
+      `alpn='dot'` nel log del server: un probe saltato non conta.
+      **Tre bug veri, tutti trovati dalla prova reale**:
+      (1) `Provider` era allocato in `Box` con align 16 (per `ChaCha20Rng`)
+      ma l'heap di civis rifiuta align > 8 → `memory allocation of 4960
+      bytes failed` senza una riga che dicesse perché: il DRBG ora avvolge
+      il generatore in un wrapper a align 8 (`ChaCha8`, sicuro: ChaCha
+      lavora su `u32`).
+      (2) il `Provider` è ~4.9 KiB: sta sullo stack (16 KiB) per la durata
+      dell'handshake, non serve sull'heap dopo `open()`.
+      (3) **il bug interessante, nel TCP**: `Conn::next_tx` spediva i dati
+      bufferizzati anche in `SynSent`, quando l'ACK del peer non è ancora
+      noto — un segmento dati con ACK=0. Sul loopback era invisibile
+      (il SYN+ACK è processato in modo sincrono dentro la stessa
+      `tcp_send`, quindi il secondo `next_tx` vedeva già `Established`);
+      verso passt il segmento arrivava prima del SYN+ACK e passt resettava
+      (il guest vedeva `EV_RST`, il server `ConnectionResetError`). Diagnosi
+      senza indovinare: un proxy TCP Python che logga i byte fra passt e il
+      server ha mostrato che il ClientHello **non** arrivava, e un hexdump
+      temporaneo dei frame TCP nel servizio `net` ha mostrato il segmento
+      dati con `ack=0x00000000` emesso *prima* del SYN+ACK in ingresso. Fix:
+      dati solo in `Established`/`CloseWait`, e il FIN solo a buffer di
+      invio vuoto (altrimenti il FIN scavalcava i byte ancora in coda).
+      Regressione coperta da `no_data_before_handshake_completes`
+      (unit test host). **Lezione**: il loopback sincrono nasconde le
+      corse del handshake; una prova su link reale vale più di dieci test
+      di loopback, e un log dei frame al confine giusto (servizio, non
+      driver) costa meno di un debugger.
+      **Validazione**: `[tls-tests] PASS` (handshake + HTTP + `alpn='dot'`
+      lato server); unit test host 109/109 (12 nuovi in `libs/tls`, 1 di
+      regressione TCP); net tests N1–N6.0 PASS (il fix TCP non regredisce);
+      gate 6/6, zero FAIL/PANIC/FAULT.

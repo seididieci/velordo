@@ -111,6 +111,15 @@ zero FAIL/PANIC/FAULT. La suite FAT32 e' **fuori dal gate** (ADR-0059:
   tempo). `[console] stats:` misura ogni 64 flush (T0). Fix trovato in
   validazione: `TRANSFER_TO_HOST_2D.offset` deve essere `y*stride + x*4`,
   non 0
+- **TLS 1.3 — adattatore `libs/tls`** (N6.2, ADR-0072): crate puro sopra
+  `embedded-tls` 0.19 (`rustpki`+`rsa`+`alloc`), trasporto e orologio
+  iniettati, DRBG ChaCha20 (RDRAND con gate CPUID), verifica catena +
+  hostname, `CERT_SIZE` 4 KiB fail-loud. Prova **reale** in QEMU
+  (`testland/tlsprobe` + `scripts/run-tls-tests.sh`) contro un server TLS
+  sull'host, ALPN `dot`: handshake + record applicativo PASS. Sul percorso
+  è emerso un **bug TCP**: `next_tx` spediva dati in `SynSent` (ACK=0 →
+  passt resetta); invisibile sul loopback perché il SYN+ACK è sincrono.
+  Corretto in `libs/net/src/tcp/conn.rs`, con unit test di regressione
 
 ## Pianificate
 
@@ -789,15 +798,27 @@ Voci con scope e vittoria dichiarati (non date).
       512 KiB sotto TCG). Vittoria: `./run-tests.sh` 6/6, zero
       FAIL/PANIC/FAULT, net tests e shell base/native verdi col nuovo target;
       nessun bloat (cardo 313872 B contro 317968 B del target vecchio).
-- [ ] **Rete N6.2 — `libs/tls` (adattatore TLS 1.3)** (pianificata,
-      ADR-0072): dentro `embedded-tls` 0.19 (versione pinnata), fuori un'API
-      piccola: trait `Transport` + impl `embedded_io::Read/Write`, provider
-      (`CryptoProvider` con DRBG ChaCha20 seminato da RDRAND, fallback
-      dichiarato debole sotto TCG), `TlsClock` iniettato (`usertime`),
-      `pki::CertVerifier` con `set_hostname_verification`, ALPN `dot`,
-      suite `Aes128GcmSha256`. Trust anchor: ISRG Root X1 compilata +
-      `ca = <path>` in `sys:dns.conf`. Vittoria: test host (DRBG, config,
-      catena, framing) verdi; handshake provato in QEMU.
+- [x] **Rete N6.2 — `libs/tls` (adattatore TLS 1.3)** (completata,
+      ADR-0072): crate **puro** (trasporto e orologio iniettati) sopra
+      `embedded-tls =0.19.0` (`default-features = false`, features
+      `rustpki`+`rsa`+`alloc`: `webpki` è std-only, `rsa` serve alle catene
+      RSA), `transport` (trait + adapter `embedded_io`), `drbg` (ChaCha20
+      seminato da RDRAND con gate CPUID, fallback `rdtsc`, reseed 1 MiB),
+      `trust` (`CertVerifier` con `TlsClock`, `CERT_SIZE` 4 KiB fail-loud,
+      buffer record 16640/16384), `session` (`connect`/`Session` con
+      `write_all` + `flush`). Feature `civis-clock` = `SystemClock` su
+      `civis::time::wall_secs()`: i test host girano senza (12 test).
+      `testland/tlsprobe` (stack grande) + `scripts/run-tls-tests.sh`:
+      handshake TLS 1.3 **reale** in QEMU contro un server sull'host
+      (certificati generati da `tools/tls-test-certs`, server Python `ssl`,
+      ALPN `dot`), catena **e** hostname verificati, record applicativo
+      (HTTP) validato. Tre bug veri trovati/chiusi: (a) `Provider` a
+      align 16 non allocabile sull'heap civis (align ≤ 8) → wrapper
+      `ChaCha8`; (b) `Provider` sullo stack invece del `Box` (4.9 KiB);
+      (c) **TCP**: `next_tx` spediva dati in `SynSent` con ACK=0 → passt
+      resettava (invisibile sul loopback). Vittoria: `[tlsprobe] risultato:
+      PASS` + `alpn='dot'` lato server; unit test 109/109; net tests PASS;
+      gate 6/6, zero FAIL/PANIC/FAULT.
 - [ ] **Rete N6.3 — DoT dentro `dns`** (pianificata, ADR-0072):
       `forward_dot()` con framing a prefisso di 2 byte (RFC 7858) sopra
       l'endpoint TCP, stessa forma di `forward_plain` (single-flight,

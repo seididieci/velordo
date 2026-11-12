@@ -137,6 +137,8 @@ seed_bin testland/build/net3.bin test/net3.bin tst test/net3.bin
 seed_bin testland/build/net4.bin test/net4.bin tst test/net4.bin
 seed_bin testland/build/nettcp.bin test/nettcp.bin tst test/nettcp.bin
 seed_bin testland/build/dnsprobe.bin test/dnsprobe.bin tst test/dnsprobe.bin
+# Probe TLS 1.3 (N6.2, ADR-0072): fuori gate, eseguito solo con `tls=1`.
+seed_bin testland/build/tlsprobe.bin test/tlsprobe.bin tst test/tlsprobe.bin
 seed_bin testland/build/userforeign.bin test/foreign.bin
 seed_bin flavours/posix/tests/build/userposixtests.bin test/posixtst.bin tst test/posixtst.bin
 # Hello std nativo (S1.3): solo se compilato via scripts/build-pal.sh (fuori
@@ -304,6 +306,21 @@ if [ -n "${NET_DNS_UPSTREAM_PORT:-}" ]; then
         "$NET_DNS_UPSTREAM_PORT" > "$ROOT/build-meta/dns.conf"
     SEED_NS+=( "sys:dns.conf=$ROOT/build-meta/dns.conf" )
     echo "[arca] + sys:dns.conf (upstream auto:$NET_DNS_UPSTREAM_PORT)"
+fi
+
+# TLS (N6.2, ADR-0072): `sys:tls.conf` (sni + porta del server TLS sull'host)
+# e `sys:ca.der` (trust anchor X.509 DER). Seedati solo se il chiamante
+# dichiara la CA: senza, `tlsprobe` si salta e il gate resta identico.
+if [ -n "${TLS_TEST_CA:-}" ]; then
+    if [ ! -f "$TLS_TEST_CA" ]; then
+        echo "[arca] errore: TLS_TEST_CA=$TLS_TEST_CA mancante" >&2
+        exit 1
+    fi
+    printf 'sni = %s\nport = %s\n' "${TLS_TEST_SNI:-tls.test}" "${TLS_TEST_PORT:-8443}" \
+        > "$ROOT/build-meta/tls.conf"
+    SEED_NS+=( "sys:tls.conf=$ROOT/build-meta/tls.conf" )
+    SEED_NS+=( "sys:ca.der=$TLS_TEST_CA" )
+    echo "[arca] + sys:tls.conf (sni ${TLS_TEST_SNI:-tls.test}, porta ${TLS_TEST_PORT:-8443}) + sys:ca.der"
 fi
 
 # Seed bucket Identis (ADR-0055): utente root con hash BLAKE2s-256 di "root".

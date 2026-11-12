@@ -330,8 +330,11 @@ Un driver che blocca cardo si deadlocka. Per questo il display va in **diretta**
 
 Zero FAIL/PANIC/#.* FAULT. Suite FAT32 fuori dal gate (`scripts/run-fat-tests.sh`).
 
-Unit test host (FUORI gate, millisecondi): `./scripts/run-unit-tests.sh` — 22 test
-(term rasterizer/cursore/surface, valloc, blake2s).
+Unit test host (FUORI gate, millisecondi): `./scripts/run-unit-tests.sh` — 109 test
+(`libs/term` rasterizer/cursore/surface, `libs/net` IPv6/NDP/TCP/SIIT/DNS,
+`libs/valloc`, `blake2s`, `libs/tls` trasporto/DRBG/config fail-closed).
+Run dedicati fuori gate: `scripts/run-net-tests.sh` (passt, N1–N6.0) e
+`scripts/run-tls-tests.sh` (handshake TLS 1.3 reale, N6.2, ADR-0072).
 
 ---
 
@@ -377,6 +380,13 @@ Unit test host (FUORI gate, millisecondi): `./scripts/run-unit-tests.sh` — 22 
 ### Per video/terminale:
 `userland/gpu/src/` (driver virtio-gpu) → `libs/term/src/disp.rs` (protocollo) →
 `userland/console/src/` (console server) → `libs/term/src/raster.rs` (font).
+
+### Per rete e TLS:
+`userland/netdev/src/` (driver virtio-net) → `userland/net/src/main.rs`
+(endpoint/ring, servizio) → `libs/net/src/` (Ethernet/IPv6/TCP/SIIT/DNS, core
+puro) → `libs/tls/src/` (adattatore TLS 1.3 sopra `embedded-tls`: trasporto e
+orologio iniettati, DRBG, `CertVerifier`). Il test TLS reale è
+`testland/tlsprobe` + `scripts/run-tls-tests.sh` (fuori gate, come la rete).
 
 ### Per IPC client-side (userland):
 `libs/civis/src/ipc.rs` (send/recv) → `libs/civis/src/fs/ring.rs` (ring frame ops) →

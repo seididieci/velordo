@@ -54,6 +54,9 @@ build_one testland/net4 testland/net4/src/net4.ld net4.bin net4
 build_one testland/nettcp testland/nettcp/src/nettcp.ld nettcp.bin nettcp
 # Probe DNS (N5, ADR-0069): test fuori gate, eseguito solo con `net=1`.
 build_one testland/dns testland/dns/src/dns.ld dnsprobe.bin dnsprobe
+# Probe TLS 1.3 (N6.2, ADR-0072): test fuori gate, eseguito solo con
+# `net=1 tls=1` (server TLS sull'host, scripts/run-tls-tests.sh).
+build_one testland/tlsprobe testland/tlsprobe/src/tlsprobe.ld tlsprobe.bin tlsprobe
 # Bench: BENCH_REDUCED=1 compila il profilo ridotto (feature `reduced`), per
 # la validazione rapida su host lenti. Mai nel gate.
 BENCH_FEATURES=""

@@ -5,6 +5,10 @@
 # dir build/*): rigenerabile con gli script in scripts/ + cargo.
 target/
 
+# Indice CodeGraph (strumento di navigazione del codice, rigenerabile con
+# `codegraph init`): mai nel repo.
+.codegraph/
+
 # Output binari freestanding (.bin raw caricati a USER_CODE) e immagini disco.
 *.bin
 *.iso

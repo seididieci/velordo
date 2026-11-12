@@ -222,13 +222,13 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `VecDeque` (`hexdump /bg.bmp` 5,2 MB: ~38 min → 31 s).
   Prossimo: console server con mirror seriale e routing POSIX
   stdout→device (l'hook `persona`), poi il DE.
-- **Rete (N1–N6.1, ADR-0068/0069)**: stack nativo in userspace — `libs/net`
+- **Rete (N1–N6.2, ADR-0068/0069/0072)**: stack nativo in userspace — `libs/net`
   core `no_std` 100% safe (Ethernet/IPv6/ICMPv6/NDP, SLAAC, RA guard,
   neighbor cache **STALE + NS di verifica** (non si butta la entry a 30 s:
   il MAC resta usabile, si scarta dopo 3 NS senza risposta), IID
   randomizzato, no DAD; **TCP reale** (N6.1: `tcp/conn.rs`, macchina a stati
   pura con 10 stati, finestra 2–4 segmenti, go-back-N RTO 1/2/4 s, solo
-  in-order, FIN/RST/TIME_WAIT, listener + backlog 4); 48 unit test host
+  in-order, FIN/RST/TIME_WAIT, listener + backlog 4); 49 unit test host
   IPv6/NDP/TCP/SIIT/DNS/parse), `userland/netdev` driver virtio-net (1 RX + 1 TX,
   64 descrittori, 2048 B, no offload, MSI-X, ring condiviso via shm),
   `userland/net` servizio (attach, poll, SLAAC, ping6 + endpoint a
@@ -264,9 +264,29 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `93.184.216.34` e per `upstream.test` → `198.51.100.7` via responder
   Python sull'host su `[::]:5353`, seed di `sys:dns.conf` gated su
   `NET_DNS_UPSTREAM_PORT`).
-  Prossimo: N6.2 (`libs/tls` adattatore sopra `embedded-tls` 0.19,
-  ADR-0072; prerequisito N6.2.0 = SSE2 nello userland, **completato**,
-  ADR-0071), N6.3 DoT dentro `dns`, poi personalità POSIX di rete, VT-d.
+  **N6.2 (ADR-0072, completato)**: `libs/tls` è un adattatore **puro**
+  (niente `civis`: trasporto e orologio iniettati) sopra `embedded-tls`
+  `=0.19.0` (`default-features = false`, features `rustpki`+`rsa`+`alloc`:
+  `webpki` è std-only, `rsa` serve alle catene RSA-4096). Moduli:
+  `transport` (trait + adapter `embedded_io`), `drbg` (ChaCha20, RDRAND con
+  gate CPUID, fallback `rdtsc`, reseed 1 MiB), `trust` (`CertVerifier` con
+  `TlsClock`, `CERT_SIZE` 4 KiB fail-loud, record 16640/16384), `session`.
+  L'unico aggancio al sistema è la feature `civis-clock` (`SystemClock` su
+  `civis::time::wall_secs()`): i 12 test host girano senza. Prova reale in
+  QEMU: `testland/tlsprobe` (stack grande) + `scripts/run-tls-tests.sh`
+  contro un server TLS sull'host (certificati da `tools/tls-test-certs`,
+  server Python `ssl`, ALPN `dot`), catena **e** hostname verificati +
+  record applicativo HTTP. **Bug TCP trovato dalla prova**: `next_tx`
+  spediva dati in `SynSent` con ACK=0 (passt resetta; invisibile sul
+  loopback perché il SYN+ACK è sincrono) — corretto in
+  `libs/net/src/tcp/conn.rs` (dati solo in `Established`/`CloseWait`, FIN
+  solo a buffer vuoto), regressione in
+  `no_data_before_handshake_completes`. **Nota heap**: `ChaCha20Rng` ha
+  align 16 e l'heap di civis accetta solo align ≤ 8 → il DRBG lo avvolge in
+  un wrapper a align 8.
+  Prossimo: N6.3 DoT dentro `dns` (framing RFC 7858 sopra lo stesso
+  trasporto, SERVFAIL su TLS/certificato invalido, fail-closed senza `sni`),
+  poi personalità POSIX di rete, VT-d.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo

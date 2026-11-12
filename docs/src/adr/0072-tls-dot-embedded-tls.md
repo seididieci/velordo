@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed (2026-11). Diventa Accepted a chiusura di N6.3 (DoT dentro `dns`).
+Proposed (2026-11). **N6.2 completato** (crate `libs/tls` + prova handshake
+TLS 1.3 reale in QEMU, `scripts/run-tls-tests.sh`). Diventa Accepted a
+chiusura di N6.3 (DoT dentro `dns`).
 
 ## Context
 
@@ -40,23 +42,40 @@ sicurezza nostro, la parte dove un errore costa di più.
 ## Decision
 
 1. **`libs/tls` è un adattatore**, non un'implementazione: dentro c'è
-   `embedded-tls` 0.19 (versione pinnata in `Cargo.lock`), fuori un'API
-   piccola e testabile. `dns` non vede `embedded-tls`.
-2. **Trasporto iniettato**: trait `Transport { read; write }` +
-   impl `embedded_io::Read/Write`. In `dns` l'implementazione è l'endpoint
-   TCP di `net` (`NET_EP_OPEN` + `NET_EP_FLAG_CONNECT`, ring 16×2048,
-   `NET_EP_TX`, attesa RX con deadline via `futex_wait`, ADR-0067).
-3. **Suite**: `Aes128GcmSha256` (inclusa da `embedded-tls`); ALPN `dot`.
-   Un solo named group: `secp256r1` (è ciò che `embedded-tls` offre).
-4. **Fiducia**: `pki::CertVerifier` (rustpki) con `TlsClock` iniettato da
-   `dns` (→ `civis::time::now()`), `set_hostname_verification(sni)`, catena
-   bounded (`CERT_SIZE` 4 KiB, fail-loud oltre). Trust anchor: **ISRG Root
-   X1 compilata** come fallback + `ca = <path>` in `sys:dns.conf` (DER).
-   Niente WebPKI completo, niente OCSP/CRL: dichiarato.
-5. **Entropia**: DRBG ChaCha20 seminato da RDRAND; fallback
-   `rdtsc ^ ticks ^ pid` (stesso schema di `identis::rand_token`).
-   **Sotto QEMU TCG RDRAND non funziona**: il fallback è dichiarato non
-   crypto-grade e va scritto nel threat model (ADR-0068).
+   `embedded-tls` 0.19 (versione pinnata `=0.19.0` in `Cargo.toml`), fuori
+   un'API piccola e testabile. `dns` non vede `embedded-tls`.
+   Feature abilitate: `default-features = false` + `["rustpki", "rsa",
+   "alloc"]` — `rustpki` è la strada `no_std` (`webpki` è std-only), `rsa`
+   implica `rustpki`+`alloc` ed è **necessario** per le catene firmate RSA
+   (ISRG Root X1 è RSA-4096).
+2. **Il crate è puro**: nessuna syscall, nessuna dipendenza da `civis`.
+   Trasporto **e** orologio sono iniettati: trait `Transport { read; write;
+   flush }` + adapter `embedded_io::Read/Write`, e `TlsClock` generico. Così
+   il crate si prova sull'host in millisecondi (`cargo test`, 12 test) senza
+   boot. L'unico aggancio al sistema è la feature `civis-clock` (dipendenza
+   opzionale) che fornisce `tls::SystemClock` (`civis::time::wall_secs()`):
+   i test host girano senza, il sistema reale la attiva.
+   In `dns`/`tlsprobe` il trasporto è l'endpoint TCP di `net`
+   (`NET_EP_OPEN` + `NET_EP_FLAG_CONNECT`, ring 16×2048, `NET_EP_TX`,
+   attesa RX con deadline via `futex_wait`, ADR-0067).
+3. **Suite**: `Aes128GcmSha256` (inclusa da `embedded-tls`); ALPN dal
+   chiamante (`dot` per DoT). Un solo named group: `secp256r1` (è ciò che
+   `embedded-tls` offre).
+4. **Fiducia**: `pki::CertVerifier` (rustpki) con `TlsClock` iniettato,
+   `set_hostname_verification(sni)` (lo fa `TlsConnection::open` col
+   `server_name` del `TlsConfig`), catena bounded (`CERT_SIZE` 4 KiB,
+   fail-loud oltre: `OutOfMemory`, mai handshake "riuscito" senza verifica).
+   Buffer record `RECORD_READ_BUF` 16640 / `RECORD_WRITE_BUF` 16384, nel
+   `Box` (heap civis), mai sullo stack. Trust anchor obbligatoria: vuota →
+   `Error::Config` (fail-closed). In N6.3 la CA arriverà da `sys:ca.der`.
+5. **Entropia**: DRBG ChaCha20 (`rand_chacha`, `rand_core` 0.6 — lo stesso
+   di `embedded-tls`) seminato da RDRAND (gate CPUID leaf 1 ECX bit 30:
+   senza supporto l'istruzione fa `#UD`); fallback `rdtsc ^ mix`. Reseed
+   ogni MiB. **Sotto QEMU TCG RDRAND non funziona**: il fallback è
+   dichiarato non crypto-grade e va scritto nel threat model (ADR-0068).
+   Nota di implementazione: `ChaCha20Rng` ha align 16, l'heap di civis
+   supporta solo align ≤ 8 → il DRBG lo avvolge in un wrapper a align 8
+   (`ChaCha8`), sicuro perché ChaCha lavora su `u32`.
 6. **Semantica DoT invariata rispetto a N6.0**: tabella statica vincente;
    nome fuori tabella + upstream configurato → inoltro; TLS rotto o
    certificato non valido → **SERVFAIL**, mai NXDOMAIN silenzioso;
@@ -71,10 +90,19 @@ sicurezza nostro, la parte dove un errore costa di più.
 
 - Handshake, key schedule, record layer e parsing dei certificati sono codice
   mantenuto da terzi, non nostro; `libs/tls` resta piccolo e verificabile.
-- Il trasporto iniettato rende il client testabile su host con un mock e in
-  QEMU con un `openssl s_server` locale.
+- Il trasporto e l'orologio iniettati rendono il client testabile su host con
+  un mock (12 unit test, senza boot) **e** in QEMU con un server TLS locale
+  (`scripts/run-tls-tests.sh`: `tools/tls-test-certs` genera CA+leaf RSA-2048,
+  Python `ssl` fa da server TLS 1.3 con ALPN `dot`). La prova QEMU copre
+  handshake, verifica catena+hostname e un record applicativo (HTTP).
 - Il clock reale c'è già (`usertime`), quindi la validità dei certificati è
   vera e non "ignorata".
+- **Bug TCP trovato dalla prova reale**: `Conn::next_tx` emetteva i dati
+  bufferizzati anche in `SynSent` (ACK non ancora noto → segmento con ACK=0,
+  che passt resetta). Sul loopback non si vedeva (SYN+ACK processato in modo
+  sincrono). Corretto: dati solo in `Established`/`CloseWait`, FIN solo a
+  buffer di invio vuoto. Regressione coperta da un unit test host
+  (`no_data_before_handshake_completes`).
 
 ### Negative / limiti dichiarati
 
@@ -87,10 +115,19 @@ sicurezza nostro, la parte dove un errore costa di più.
   `cargo update` distratto.
 - Sotto TCG l'entropia è debole (dichiarato); su hardware con RDRAND è ok.
 - `CERT_SIZE` bounded: catene più lunghe di 4 KiB vengono rifiutate.
+- Il server di prova è `ssl` di Python (non c'è il binario `openssl` nella
+  sandbox): va bene per la prova, ma i certificati di test li genera il tool
+  Rust `tools/tls-test-certs` per non dipendere da `openssl` in nessun passo.
+- La prova QEMU dipende da `passt` (come la suite di rete) e da un server TLS
+  sull'host: fuori dal gate, come N1–N6.
 
 ### Neutral
 
 - Il kernel resta neutro: nessuna syscall nuova, TLS è tutto userspace.
+- `tlsprobe` (testland) usa lo stack grande (`SPAWN_FLAG_BIGSTACK`): il
+  verifier contiene `OwnedCertificate<CERT_SIZE>` (~8 KiB). La lista è per
+  nome (`rector::wants_big_stack`), i manifest da disco non hanno un campo
+  dedicato.
 
 ## Alternatives Considered
 
@@ -112,4 +149,7 @@ sicurezza nostro, la parte dove un errore costa di più.
 - ADR-0068 (threat model), ADR-0069 (stack di rete), ADR-0070 (policy
   subtree), ADR-0071 (SSE2 nello userland).
 - RFC 7858 (DNS over TLS), RFC 8446 (TLS 1.3), RFC 5280 (X.509).
+- `libs/tls/` (N6.2: `transport`/`drbg`/`trust`/`session`),
+  `testland/tlsprobe/`, `tools/tls-test-certs/`,
+  `scripts/run-tls-tests.sh`.
 - `userland/dns/src/main.rs` (N6.0: `forward_plain`, config `sys:dns.conf`).
