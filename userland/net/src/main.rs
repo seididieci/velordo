@@ -234,12 +234,13 @@ impl NetService {
             .position(|e| e.state == EpState::Bound && e.local_port == port)
     }
 
-    /// Layout di uno slot ring (N2+N3):
-    /// `[len:u16][src_addr:16][src_port:2][dst_port:2][event:1][payload]`.
-    /// Per UDP `event` è sempre 0. Per TCP indica il tipo di segmento/controllo.
-    const SLOT_META: usize = 23; // 2+16+2+2+1
+    /// Layout di uno slot ring: lo definisce `net-ep` (N7.0, ADR-0074), una
+    /// volta per client e servizi. `net` parla IPv6 (23 byte di metadati).
+    const SLOT: net_ep::Layout = net_ep::Layout::IPV6;
 
     /// Scrive uno slot nel ring RX (service → client) dato un ring base.
+    ///
+    /// Il campo `port` e' la porta **sorgente**, `local` la destinazione.
     fn ep_rx_write_full(
         ring: *mut u8,
         src_addr: &Ipv6Addr,
@@ -248,34 +249,27 @@ impl NetService {
         event: u8,
         payload: &[u8],
     ) -> bool {
-        let total = Self::SLOT_META + payload.len();
+        let total = Self::SLOT.total(payload.len());
         if total > NET_EP_SLOT_SIZE {
             return false;
         }
         let head = unsafe { read_volatile(ring.add(NET_EP_RX_RING_OFF) as *const u32) };
         let tail = unsafe { read_volatile(ring.add(NET_EP_RX_RING_OFF + 4) as *const u32) };
-        if tail.wrapping_sub(head) >= NET_EP_RING_SLOTS as u32 {
+        let Some(index) = net_ep::push_index(head, tail, NET_EP_RING_SLOTS as u32) else {
             return false;
-        }
-        let slot = (tail % NET_EP_RING_SLOTS as u32) as usize;
+        };
+        let slot = index as usize % NET_EP_RING_SLOTS;
         let p = unsafe {
             ring.add(NET_EP_RX_RING_OFF + NET_EP_RING_HDR + slot * NET_EP_SLOT_SIZE)
         };
-        unsafe {
-            write_volatile(p as *mut u16, total as u16);
-            core::ptr::copy_nonoverlapping(src_addr.0.as_ptr(), p.add(2), 16);
-            write_volatile(p.add(18) as *mut u16, src_port);
-            write_volatile(p.add(20) as *mut u16, dst_port);
-            write_volatile(p.add(22) as *mut u8, event);
-            core::ptr::copy_nonoverlapping(payload.as_ptr(), p.add(23), payload.len());
+        let win = unsafe { core::slice::from_raw_parts_mut(p, total) };
+        if net_ep::write(win, Self::SLOT, &src_addr.0, src_port, dst_port, event, payload).is_none() {
+            return false;
         }
         fence(Ordering::Release);
         unsafe {
-            write_volatile(
-                ring.add(NET_EP_RX_RING_OFF + 4) as *mut u32,
-                tail.wrapping_add(1),
-            )
-        };
+            write_volatile(ring.add(NET_EP_RX_RING_OFF + 4) as *mut u32, net_ep::next(tail));
+        }
         true
     }
 
@@ -293,26 +287,25 @@ impl NetService {
             ring.add(NET_EP_TX_RING_OFF + NET_EP_RING_HDR + slot_idx * NET_EP_SLOT_SIZE)
         };
         let total = unsafe { read_volatile(p as *const u16) } as usize;
-        if total < Self::SLOT_META || total > NET_EP_SLOT_SIZE {
-            return None;
-        }
-        let mut addr = [0u8; 16];
-        unsafe {
-            core::ptr::copy_nonoverlapping(p.add(2), addr.as_mut_ptr(), 16);
-        }
-        let dst_port = unsafe { read_volatile(p.add(18) as *const u16) };
-        let event = unsafe { read_volatile(p.add(22) as *const u8) };
-        let payload_len = total - Self::SLOT_META;
+        let payload_len = net_ep::check(Self::SLOT, total, NET_EP_SLOT_SIZE)?;
         if payload_len > buf.len() {
             return None;
         }
-        unsafe {
-            core::ptr::copy_nonoverlapping(p.add(23), buf.as_mut_ptr(), payload_len);
-        }
-        Some((payload_len, Ipv6Addr(addr), dst_port, event))
+        let win = unsafe { core::slice::from_raw_parts(p, total) };
+        let s = net_ep::read(win, Self::SLOT, total)?;
+        buf[..payload_len].copy_from_slice(s.payload);
+        let mut addr = [0u8; 16];
+        addr.copy_from_slice(s.addr);
+        Some((payload_len, Ipv6Addr(addr), s.port, s.event))
     }
 
     /// Avanza la tail del TX ring (slot consumato) dato un ring base.
+    ///
+    /// I due contatori del ring TX sono **consultivi**: il client indica
+    /// l'indice dello slot in `NET_EP_TX` e il servizio legge quello, quindi
+    /// questi aggiornamenti non sono il meccanismo di sincronizzazione (il
+    /// client non li legge per decidere se c'e' posto: usa il proprio
+    /// cursore, vedi `civis::net`).
     fn ep_tx_consume_raw(ring: *mut u8) {
         let head = unsafe { read_volatile(ring.add(NET_EP_TX_RING_OFF) as *const u32) };
         unsafe {

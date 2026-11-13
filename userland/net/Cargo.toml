@@ -9,6 +9,7 @@ edition = "2024"
 [dependencies]
 civis = { path = "../../libs/civis" }
 net = { path = "../../libs/net" }
+net-ep = { path = "../../libs/net-ep" }
 
 [profile.dev]
 panic = "abort"
