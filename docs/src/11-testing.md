@@ -341,6 +341,15 @@ log seriale.
   I servizi `netdev`/`net`/`netecho`/`siit`/`dns` partono solo con `net=1`
   in cmdline (il gate non lo setta).
 
+- **Client DNS nativo** (`dns-resolve`, ADR-0075): comando della shell, non
+  un test. Con `NET=1 ./run.sh` (o `RUN_DISPLAY=gtk` per vedere il
+  terminale) dal prompt: `dns-resolve example.com` stampa
+  `[dns-resolve] example.com: 93.184.216.34 (A)` ed esce 0;
+  `dns-resolve example.com aaaa` interroga il tipo AAAA. Senza `net=1` il
+  servizio `dns` non esiste e il comando risponde "servizio DNS non
+  disponibile" (uscita 1). **Fuori dal gate**: il gate resta 6 righe e non
+  setta `net=1`.
+
 - **TLS 1.3 + DoT reali** (`scripts/run-tls-tests.sh`, N6.2/N6.3,
   ADR-0072): boot con `tls=1` (+ `net=1`) e virtio-net/passt. I server TLS
   girano **sull'host**: la sandbox non ha il binario `openssl`, quindi i

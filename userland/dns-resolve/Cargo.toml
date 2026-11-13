@@ -1,0 +1,19 @@
+[package]
+name = "dns-resolve"
+version = "0.1.0"
+edition = "2024"
+
+# Crate fuori dal workspace del kernel: build freestanding separata.
+[workspace]
+
+[dependencies]
+net = { path = "../../libs/net" }
+net-ep = { path = "../../libs/net-ep" }
+civis = { path = "../../libs/civis" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"

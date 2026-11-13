@@ -7,15 +7,17 @@
 //!
 //! Comandi S3.2a:
 //!   `help`           mostra i comandi disponibili
-//!   `users`          elenca gli utenti registrati (via Identis)
 //!   `create-user [nome]`  crea un utente (token VELORDO_SESSION richiesto)
-//!   `logout` / `exit`   torna al prompt di login (init riavvia il login come getty)
+//!   `exit`           chiude la shell
 //!
 //! Comandi S3.2b — esecuzione esterna da bucket `binary`:
 //!   `<programma>`  lancia un programma da un bucket eseguibile.
 //!                  La shell scopre i bucket tramite BIN_LIST, cerca il nome
 //!                  piatto `<programma>` (niente sottocartelle, ADR-0064),
 //!                  verifica EXECUTE con cardo, e lo esegue con spawn_image.
+//!
+//! `users`, `logout` e `dns-resolve` sono programmi esterni (ADR-0075), non
+//! built-in: la shell non conosce ne' `identis:config` ne' `init_bounce`.
 //!
 //! Se l'output di un comando non viene catturato in una variabile, il valore
 //! (futuro, S3.2b+) viene stampato serializzato.
@@ -301,7 +303,6 @@ civis::entry!(real_main);
 
 const CONSOLE_PATH: &str = "/dev/console";
 const KEYBOARD_PATH: &str = "/dev/input/keyboard";
-const IDENTIS_BUCKET: &str = "identis:config";
 
 /// Variabile d'ambiente con il token di sessione (hex).
 const ENV_SESSION: &str = "VELORDO_SESSION";
@@ -320,6 +321,10 @@ static mut CONSOLE_FD: i64 = -1;
 
 /// Stack pointer iniziale (per leggere VELORDO_USER dall'env).
 static mut SHELL_SP: u64 = 0;
+
+/// Token di sessione in formato hex (letto all'avvio, usato per spawn figli).
+static mut SESSION_TOKEN_HEX: [u8; 17] = [0u8; 17];
+static mut SESSION_TOKEN_LEN: usize = 0;
 
 fn console_write(data: &[u8]) {
     unsafe {
@@ -354,6 +359,16 @@ fn real_main(_sp: u64) -> ! {
 
     // Token di sessione dall'ambiente (passato dal login).
     let mut session_token = read_session_token(_sp);
+
+    // Memorizza il token hex globalmente per i figli (spawn esterni).
+    if let Some(token) = session_token {
+        let hex = alloc::format!("{:016x}", token);
+        let n = hex.len().min(16);
+        unsafe {
+            SESSION_TOKEN_HEX[..n].copy_from_slice(hex.as_bytes());
+            SESSION_TOKEN_LEN = n;
+        }
+    }
 
     console_write_str("\n[shell] Velordo shell nativa (S3.2a)\n");
     match session_token {
@@ -414,6 +429,10 @@ fn real_main(_sp: u64) -> ! {
         // ADR-0065 Fase 1+2: interprete Rust-like prima del dispatcher.
         // Se la riga è syntax-valida, viene valutata dall'interprete.
         // Se l'eval fallisce → fallback al dispatcher esistente (help, users, ecc.).
+        // I diagnostici `[ast]` si stampano solo per le righe che sembrano
+        // espressioni: per un comando (`dns-resolve example.com`) il fallback
+        // al dispatcher e' il comportamento normale, non un errore da mostrare.
+        let expr_like = looks_like_expression(line);
         let mut interpreted = false;
         match parser::parse(&line) {
             Ok(stmts) => {
@@ -431,19 +450,22 @@ fn real_main(_sp: u64) -> ! {
                             interpreted = true;
                         }
                         Err(e) => {
-                            let err_msg = format!("{}", e);
-                            console_write_str("[ast] skip: ");
-                            console_write_str(&err_msg);
-                            console_write_str("\n");
+                            if expr_like {
+                                console_write_str("[ast] skip: ");
+                                console_write_str(&format!("{}", e));
+                                console_write_str("\n");
+                            }
                         }
                     }
                 }
             }
             Err(e) => {
                 // Parsing fallito: non è syntax Rust-like, fallback dispatcher.
-                console_write_str("[ast] skip: ");
-                console_write_str(&format!("{}", e));
-                console_write_str("\n");
+                if expr_like {
+                    console_write_str("[ast] skip: ");
+                    console_write_str(&format!("{}", e));
+                    console_write_str("\n");
+                }
             }
         }
 
@@ -471,6 +493,23 @@ fn real_main(_sp: u64) -> ! {
     }
 }
 
+/// True se la riga ha la forma di un'espressione/stato dell'interprete
+/// (ADR-0065) e non di un comando della shell. Serve solo a decidere se i
+/// diagnostici `[ast]` vanno mostrati: il fallback al dispatcher e' normale.
+fn looks_like_expression(line: &str) -> bool {
+    let t = line.trim_start();
+    if t.starts_with("let ")
+        || t.starts_with("if ")
+        || t.starts_with("while ")
+        || t.starts_with("dump ")
+        || t.starts_with("type ")
+    {
+        return true;
+    }
+    // Assegnamento o chiamata: `x = ...`, `f(...)`.
+    line.contains('=') || line.contains('(')
+}
+
 /// Risultato di un comando: successo o token scaduto (retryable).
 enum CmdResult {
     Ok,
@@ -482,12 +521,24 @@ enum CmdResult {
 fn execute_command(cmd: &str, args: &[&str], session_token: Option<u64>) -> CmdResult {
     match cmd {
         "help" => { cmd_help(); CmdResult::Ok }
-        "users" => cmd_users(session_token),
+        "exit" => {
+            console_write_str("logout\n");
+            civis::exit(0);
+        }
         "create-user" => {
             let name = args.first().copied();
             cmd_create_user(session_token, name)
         }
-        "logout" | "exit" => cmd_logout(),
+        "logout" => {
+            // Il programma esterno stampa il messaggio; il bounce lo fa la
+            // shell, che e' figlia di init (`INIT_BOUNCE` va sul canale di
+            // nascita: per un nipote sarebbe la shell, non init). Dopo il
+            // bounce la shell esce: altrimenti resterebbe un secondo lettore
+            // della tastiera accanto al login riavviato.
+            try_execute_external("logout", args);
+            let _ = civis::init_bounce(civis::Service::Login);
+            civis::exit(0);
+        }
         _ => {
             // Non e' un comando built-in: prova a eseguirlo come programma esterno.
             if !try_execute_external(cmd, args) {
@@ -504,90 +555,11 @@ fn execute_command(cmd: &str, args: &[&str], session_token: Option<u64>) -> CmdR
 fn cmd_help() {
     console_write_str("Comandi disponibili:\n");
     console_write_str("  help              - mostra questa guida\n");
-    console_write_str("  users             - elenca gli utenti registrati\n");
     console_write_str("  create-user [nome]- crea un nuovo utente (richiede sessione root)\n");
-    console_write_str("  logout / exit     - torna al prompt di login\n");
+    console_write_str("  users             - elenca gli utenti registrati\n");
+    console_write_str("  exit              - chiudi la shell\n");
+    console_write_str("  logout            - torna al prompt di login\n");
     console_write_str("  <programma>       - esegue un programma da un bucket eseguibile\n");
-}
-
-/// Elenca gli utenti registrati.
-fn cmd_users(session_token: Option<u64>) -> CmdResult {
-    let token = match session_token {
-        Some(t) => t,
-        None => {
-            console_write_str("ERRORE: nessuna sessione attiva (login richiesto)\n");
-            return CmdResult::Ok;
-        }
-    };
-
-    let chan = match resolve_identis() {
-        Ok(c) => c,
-        Err(_) => {
-            console_write_str("ERRORE: servizio Identis non disponibile\n");
-            return CmdResult::Ok;
-        }
-    };
-
-    // LIST: w0 = 0 (nessun payload), w1 = token. Reply: w0 = codice, w1 = conteggio.
-    match civis::ipc::send(chan, civis::IDENTIS_LIST, 0, token) {
-        Ok(r) if r.w0 == proto::R_OK => {
-            let n = r.w1 as usize;
-            console_write_str("Utenti registrati (");
-            console_write_str(&format!("{}", n));
-            console_write_str("):\n");
-            // Legge i nomi direttamente dal bucket (Identis espone solo il conteggio).
-            print_users_from_bucket();
-        }
-        Ok(r) if r.w0 == proto::R_TOKEN_INVALID => return CmdResult::TokenExpired,
-        Ok(r) => {
-            console_write_str("ERRORE LIST: ");
-            match r.w0 {
-                proto::R_BUSY => console_write_str("servizio occupato\n"),
-                _ => console_write_str("errore di protocollo\n"),
-            }
-        }
-        Err(_) => console_write_str("ERRORE IPC\n"),
-    }
-    CmdResult::Ok
-}
-
-/// Legge i nomi degli utenti dal bucket `identis:config` e li stampa.
-fn print_users_from_bucket() {
-    let fd = match civis::open(IDENTIS_BUCKET, 0) {
-        Ok(f) => f,
-        Err(_) => {
-            console_write_str("ERRORE: impossibile leggere il bucket utenti\n");
-            return;
-        }
-    };
-
-    let mut buf = [0u8; 4096];
-    let mut out = String::new();
-    loop {
-        let cap = buf.len();
-        let n = match civis::read_fs(fd, &mut buf, cap) {
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        if n == 0 {
-            break;
-        }
-        out.push_str(core::str::from_utf8(&buf[..n]).unwrap_or(""));
-    }
-    let _ = civis::close(fd);
-
-    for line in out.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let mut parts = line.splitn(2, ':');
-        if let Some(name) = parts.next() {
-            console_write_str("  ");
-            console_write_str(name);
-            console_write_str("\n");
-        }
-    }
 }
 
 /// Crea un nuovo utente.
@@ -667,15 +639,6 @@ fn cmd_create_user(session_token: Option<u64>, name_arg: Option<&str>) -> CmdRes
     CmdResult::Ok
 }
 
-/// Torna al prompt di login: chiede a init di riavviare il login (getty),
-/// poi esce. La shell e' figlia di init (detached dal login al boot), quindi
-/// `init_bounce` e' lecito.
-fn cmd_logout() -> ! {
-    console_write_str("logout: riavvio del login...\n");
-    let _ = civis::init_bounce(civis::Service::Login);
-    civis::exit(0);
-}
-
 /// S3.2b — Tenta di eseguire un programma esterno da un bucket `binary`.
 /// La shell scopre i bucket tramite BIN_LIST, cerca il nome PIATTO
 /// `<programma>` (i bucket binary non hanno sottocartelle, ADR-0064),
@@ -739,15 +702,26 @@ fn try_execute_external(program: &str, args: &[&str]) -> bool {
             }
         }
 
-        // 5. Esegui l'immagine con spawn_image, passando argv (argv[0] =
-        // nome del programma + argomenti digitati). Il blocco packed deve
-        // restare vivo fino a dopo la syscall (il kernel lo copia).
+        // 5. Esegui l'immagine con spawn_image, passando argv + env.
+        // Il blocco packed deve restare vivo fino a dopo la syscall
+        // (il kernel lo copia). Env: VELORDO_SESSION=<hex> per i programmi
+        // che lo richiedono (es. `users`).
         let mut argv: Vec<&[u8]> = Vec::with_capacity(args.len() + 1);
         argv.push(key_bytes);
         for a in args {
             argv.push(a.as_bytes());
         }
-        let packed = civis::pack_args(&argv, &[]);
+        let mut env: Vec<&[u8]> = Vec::new();
+        // `pack_args` separa le voci con NUL: la variabile deve essere UNA
+        // stringa `VELORDO_SESSION=<hex>`, non due voci.
+        let mut session_env: Vec<u8> = Vec::new();
+        let hex_data = unsafe { &SESSION_TOKEN_HEX[..SESSION_TOKEN_LEN] };
+        if !hex_data.is_empty() {
+            session_env.extend_from_slice(b"VELORDO_SESSION=");
+            session_env.extend_from_slice(hex_data);
+            env.push(&session_env);
+        }
+        let packed = civis::pack_args(&argv, &env);
         let mut meta = match civis::SpawnMeta::new(program, 16, &[]) {
             Some(m) => m,
             None => {
@@ -763,11 +737,15 @@ fn try_execute_external(program: &str, args: &[&str]) -> bool {
                 console_write_str("[run] Processo avviato (canale ");
                 console_write_str(&alloc::format!("{}", chan));
                 console_write_str(")\n");
-                // Attendi la terminazione del figlio leggendo dal canale di nascita.
+                // Attendi la terminazione del figlio: esci solo su
+                // EXIT_NOTIFY (un messaggio dati del figlio non e' una
+                // terminazione).
                 loop {
                     match civis::recv() {
                         Ok(msg) => {
-                            if msg.channel as i64 == chan {
+                            if msg.channel as i64 == chan
+                                && msg.tag == civis::EXIT_NOTIFY
+                            {
                                 console_write_str("[run] Processo terminato\n");
                                 return true;
                             }

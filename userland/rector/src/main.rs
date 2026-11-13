@@ -353,9 +353,19 @@ fn run_test(meta: &SvcMeta, supervised: &mut [Supervised]) {
 /// Ritorna il pid ucciso o `u64::MAX` se il servizio e' ignoto. Chiamato dai
 /// loop che ricevono (run_test + supervisore): il chiamante risponde con
 /// reply (i test guidano il caos tramite init invece di killare direttamente).
-fn handle_bounce(supervised: &[Supervised], svc_disc: u64) -> u64 {
-    match supervised.iter().find(|e| e.svc as u64 == svc_disc) {
+fn handle_bounce(supervised: &mut [Supervised], svc_disc: u64) -> u64 {
+    match supervised.iter_mut().find(|e| e.svc as u64 == svc_disc) {
         Some(e) => {
+            // Un servizio gia' morto (o il **login** che ha avuto successo:
+            // `LoginGate` lascia `pid = -1`) non ha un processo da uccidere,
+            // ma il bounce e' proprio la richiesta di riaprirlo. Lo si
+            // spawana qui: senza, `logout` chiuderebbe la shell lasciando il
+            // sistema senza prompt.
+            if e.pid <= 0 {
+                println!("[init] bounce: {} non vivo, riavvio", svc_disc);
+                restart_service(e);
+                return e.pid.max(0) as u64;
+            }
             println!("[init] bounce: uccido pid={} ({})", e.pid, e.svc as u64);
             let _ = civis::kill(e.pid, 0);
             e.pid as u64
@@ -800,6 +810,15 @@ fn real_main(_sp: u64) -> ! {
     let my_pid = civis::getpid();
     println!("[init] up, pid={}", my_pid);
 
+    // Init si registra per nome (`Service::Init`): e' il supervisore e deve
+    // essere raggiungibile da chi non ha piu' il canale di nascita verso di
+    // lui — la shell, ri-parentata dopo che il login e' uscito, gli manda
+    // `INIT_BOUNCE` per `logout` (ADR-0075).
+    if civis::service_register(civis::Service::Init).is_err() {
+        println!("[init] service_register(Init) FAILED");
+        civis::exit(1);
+    }
+
     // Spawna i servizi user. Fase 57: log+disk in PARALLELO (log non aspetta
     // nessuno — prova che il chicken-egg e' morto; disk fa detection). Poi
     // fs (serve Disk registrato), time (serve /fat), FLUSH a vestigia (dopo
@@ -1080,7 +1099,7 @@ fn real_main(_sp: u64) -> ! {
                 handle_child_death(&mut supervised, m.w1 as i64, m.w0 as i64);
             }
             Ok(m) if m.tag == civis::INIT_BOUNCE => {
-                let r = handle_bounce(&supervised, m.w0);
+                let r = handle_bounce(&mut supervised, m.w0);
                 let _ = civis::reply(0, r, 0);
             }
             Ok(_) => {}

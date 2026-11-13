@@ -111,6 +111,11 @@ seed_bin flavours/posix/build/userrunhello.bin usr/bin/runhello.bin usr runhello
 # come quando la spawava init.
 seed_bin flavours/posix/build/usershell.bin usr/bin/usershell.bin usr usershell
 seed_bin userland/build/userarca.bin usr/bin/arca.bin usr arca
+# users/logout (ADR-0075): programmi esterni estratti dalla shell nativa.
+seed_bin userland/build/users.bin usr/bin/users.bin usr users
+seed_bin userland/build/logout.bin usr/bin/logout.bin usr logout
+# dns-resolve (ADR-0075): client DNS nativo (richiede `net=1` per il servizio).
+seed_bin userland/build/dns-resolve.bin usr/bin/dns-resolve.bin usr dns-resolve
 # create-user (ADR-0055): programma utente (l'interprete nativo lo invoca come
 # comando, Fase 3.2).
 seed_bin userland/build/create-user.bin usr/bin/cuuser.bin usr cuuser

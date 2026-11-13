@@ -232,7 +232,15 @@ pub fn peer_info(chan: u64) -> Result<u64, Error> {
 /// init rifiuta). La morte+restart si osservano poi via `service_pid`.
 #[inline]
 pub fn init_bounce(service: Service) -> Result<i64, Error> {
-    match send(CHANNEL_PARENT, INIT_BOUNCE, service as u64, 0) {
+    // Init e' raggiungibile per nome (`Service::Init`, registrato da init
+    // stesso): il canale di nascita non basta — un processo ri-parentato
+    // (la shell, dopo che il login e' uscito) ce l'ha morto. Fallback sul
+    // canale di nascita per i figli diretti di init.
+    let chan = match service_lookup(Service::Init) {
+        Ok(c) => c as u64,
+        Err(_) => CHANNEL_PARENT,
+    };
+    match send(chan, INIT_BOUNCE, service as u64, 0) {
         Ok(r) if r.w0 != u64::MAX => Ok(r.w0 as i64),
         Ok(_) => Err(Error::Failed),
         Err(e) => Err(e),

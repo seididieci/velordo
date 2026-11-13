@@ -127,6 +127,20 @@ zero FAIL/PANIC/FAULT. La suite FAT32 e' **fuori dal gate** (ADR-0059:
   è emerso un **bug TCP**: `next_tx` spediva dati in `SynSent` (ACK=0 →
   passt resetta); invisibile sul loopback perché il SYN+ACK è sincrono.
   Corretto in `libs/net/src/tcp/conn.rs`, con unit test di regressione
+- **Comandi esterni + client DNS nativo** (`userland/{users,logout,dns-resolve}`,
+  ADR-0075): `users`/`logout` escono dalla shell come programmi nel bucket
+  `usr` (la shell non conosce piu' `identis:config`); il token passa ai figli
+  via `VELORDO_SESSION` con `civis::pack_args`. `dns-resolve <nome> [aaaa]`
+  e' il primo client DNS lanciabile dall'utente: slot via
+  `net_ep::Layout::IPV4`, query/parse da `libs/net::dns`, rcode distinti,
+  attesa futex. Il loop di attesa del figlio ora esce solo su `EXIT_NOTIFY`
+  (prima usciva su qualunque messaggio). Validando e' emerso che `logout`
+  **non funzionava** nemmeno come built-in: init non era raggiungibile da un
+  processo ri-parentato e `handle_bounce` non rispawnava il login
+  (`pid = -1` dopo `LoginGate`); ora init si registra come `Service::Init`,
+  `init_bounce` lo risolve per nome e il bounce rispawna. Corretto anche
+  `Display` di `net::Ipv6Addr` (`:::1`). I dati strutturati (`VELORDO_DATA`)
+  sono rinviati: il WIP non trasportava payload
 
 ## Pianificate
 
@@ -323,6 +337,19 @@ Voci con scope e vittoria dichiarati (non date).
             `Socket`, `Device`), non solo byte. Se l'output non e' catturato
             in una variabile (`let f = ...`), il valore viene stampato
             serializzato. La shell tiene una tabella di handle in memoria.
+      - **Trasporto dei dati strutturati** (ADR-0075 lo dichiara non-obiettivo
+            finche' non c'e' il consumatore): il figlio restituisce record al
+            parent sul canale di nascita, la shell li raccoglie e li lega a
+            una variabile. Serve un formato che **trasporti davvero** il
+            payload (nome + tipo + valore), un CRC di integrita', e un loop
+            di attesa che distingua i tag da `EXIT_NOTIFY` (gia' fatto in
+            `try_execute_external`). Il WIP di `feature/net_tool` aveva un
+            abbozzo (`Value`, FNV-1a, `TAG_DATA`/`TAG_DONE`/`TAG_ERROR`,
+            blob `[HEADER][RECORDS][DATA][CRC]`, record da 11 byte) mai
+            collegato: `send_record` inviava solo la lunghezza. Vittoria
+            dichiarata: `let A = exec("dns-resolve", "example.com")` produce
+            un valore interrogabile nell'interprete, e la modalita' testuale
+            resta identica quando la variabile non c'e'.
       - **S3.2c — Pipeline di valori**: operatori `|>`, `filter`, `map`,
             `each` che compongono valori (non byte attraverso parser).
             Esempio: `fs.list("/src") |> filter(.extension == "rs") |>

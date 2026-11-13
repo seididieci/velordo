@@ -3575,3 +3575,69 @@
       (`dot` ×2 + `dotfail`), gate 6/6 e zero FAIL/PANIC/FAULT.
       Prossimo passo di rete: N7.1, personalità POSIX `socket` sopra
       `civis::net`.
+
+- [x] **Comandi esterni + client DNS nativo** (2026-11, ADR-0075): la shell
+      nativa aveva due built-in che erano programmi — `cmd_users` (leggeva
+      `identis:config` e parlava col protocollo Identis *dentro* la shell) e
+      `cmd_logout` (`init_bounce(Service::Login)`) — e nessun comando di rete
+      digitabile: l'unico client DNS era `testland/dns`, un probe della suite.
+      **Estrazione**: `userland/users` e `userland/logout` sono crate
+      esterni seedati nel bucket `usr` (`scripts/arca-tool.sh`) e lanciati da
+      `try_execute_external`; la shell perde `cmd_users`, `cmd_logout`,
+      `print_users_from_bucket` e `IDENTIS_BUCKET`. `exit` resta built-in
+      (non è un programma, è "chiudi la shell"). Il token di sessione va ai
+      figli via `VELORDO_SESSION` nell'env di `civis::pack_args(argv, env)`:
+      il blocco packed costruito a mano sparisce.
+      **Client DNS**: `userland/dns-resolve <nome> [aaaa]` parla al servizio
+      `dns` con il protocollo a endpoint (ADR-0069) e il codec condiviso
+      `net_ep::Layout::IPV4` (ADR-0074) — slot via `write`/`read`/`check`,
+      mai offset a mano; query con l'header di `libs/net::dns`; risposta via
+      `net::parse_response` con rcode distinto (NXDOMAIN/SERVFAIL/nessun
+      record); attesa `futex_wait` a deadline di 1 tick (ADR-0067); uscita
+      `0` ok / `1` uso / `2` timeout / `3` parse.
+      **Tre bug trovati nel WIP del ramo** (e corretti, non ereditati):
+      (1) `try_execute_external` usciva su **qualunque** messaggio dal canale
+      di nascita del figlio — con i dati strutturati il primo record avrebbe
+      fatto credere alla shell che il processo fosse morto; ora esce solo su
+      `EXIT_NOTIFY`. (2) `format_ipv4`/`format_ipv6` usavano `static mut` con
+      cache `LEN == 0`: la seconda chiamata restituiva l'indirizzo
+      precedente. (3) `send_record` inviava `send(chan, TAG_DATA, 0, len)`
+      senza payload né nome: il trasporto dati strutturati non esisteva.
+      **Tre bug trovati validando** (uno pre-esistente su master, due
+      esposti dall'estrazione):
+      (a) `pack_args` separa le voci con NUL: `VELORDO_SESSION=` e l'hex
+      finivano in **due** variabili e `users` rispondeva "nessuna sessione
+      attiva" — ora è una sola stringa.
+      (b) `logout` **non ha mai funzionato**: `init_bounce` mandava
+      `INIT_BOUNCE` sul canale di nascita, ma la shell è ri-parentata a init
+      quando il login esce, quindi quel canale è morto; e `LoginGate` lascia
+      `pid = -1` dopo un login riuscito, quindi `handle_bounce` non aveva
+      nulla da uccidere. Correzioni: init si registra come `Service::Init`
+      (il gate di `service_register` ammette ora anche pid 1 — è il
+      supervisore), `init_bounce` risolve per nome con fallback sul canale di
+      nascita, `handle_bounce` rispawna un servizio non vivo. Il bounce lo fa
+      la shell (figlia di init) e poi esce: due lettori della tastiera
+      accanto al login riavviato sarebbero un bug.
+      (c) `Display` di `net::Ipv6Addr` stampava `:::1` per un indirizzo che
+      **inizia** con la compressione (il flag `first` veniva riusato dopo
+      `::`): aveva test solo sul `parse`, mai sul `Display`. Corretto e
+      coperto da `display_rfc5952` (+ round-trip); `dns-resolve` ora usa
+      quel `Display` invece di duplicare la compressione.
+      **Dati strutturati rinviati** (ADR-0075): `libs/civis/src/value.rs`
+      (`Value`, FNV-1a, `parse_structured_data`), i tag `TAG_DATA`/`TAG_DONE`/
+      `TAG_ERROR` e il documento di progetto `fase-phase0-data.md` sono
+      **rimossi** — codice nel meccanismo senza chiamanti né collaudo è
+      debito, non progresso. Il progetto (`let x = exec("prog", "arg")`, blob
+      `[HEADER][RECORDS][DATA][CRC]`) resta in `ROADMAP.md` fra le
+      Pianificate, con la vittoria dichiarata.
+      **Rumore tolto**: `[ast] skip: parse error ...` compariva prima
+      dell'output di ogni comando esterno (il fallback al dispatcher è il
+      comportamento progettato, ADR-0065); ora i diagnostici si stampano solo
+      per le righe che sembrano espressioni (`let`/`if`/`while`/`dump`/`type`,
+      `=`, `(`).
+      **Validazione**: `dns-resolve example.com` → `93.184.216.34 (A)` e
+      `dns-resolve ipv6.example.com aaaa` → `2001:db8::1 (AAAA)` (prove
+      automatiche con `NET=1` + passt, oltre alla prova manuale); `logout`
+      riporta al prompt di login; unit test host 118/118 (1 nuovo sul
+      `Display` IPv6); fase `native` di `test-shell-all.sh` 30/30; gate 6/6
+      (`[usertests] 61/61`) e zero FAIL/PANIC/FAULT.

@@ -210,24 +210,23 @@ impl fmt::Display for Ipv6Addr {
         if best_len < 2 {
             best_len = 0;
         }
-        let mut first = true;
+        // `need_sep` = va scritto ':' prima del prossimo gruppo. Dopo "::" no:
+        // il separatore e' gia' nella compressione (con `first` il caso
+        // `::1` diventava `:::1`).
+        let mut need_sep = false;
         let mut i = 0usize;
         while i < 8 {
             if best_len > 0 && i == best_start {
-                if first {
-                    write!(f, "::")?;
-                } else {
-                    write!(f, ":")?;
-                }
-                first = false;
+                write!(f, "::")?;
+                need_sep = false;
                 i += best_len;
                 continue;
             }
-            if !first {
+            if need_sep {
                 write!(f, ":")?;
             }
             write!(f, "{:x}", g[i])?;
-            first = false;
+            need_sep = true;
             i += 1;
         }
         Ok(())
@@ -326,6 +325,24 @@ mod tests {
         );
         // Maiuscole accettate.
         assert_eq!(p("FE80::ABCD"), p("fe80::abcd"));
+    }
+
+    #[test]
+    fn display_rfc5952() {
+        let d = |s: &str| Ipv6Addr::parse(s).unwrap().to_string();
+        // Compressione del run piu' lungo, `::` a inizio/fine indirizzo.
+        assert_eq!(d("::"), "::");
+        assert_eq!(d("::1"), "::1");
+        assert_eq!(d("2001:db8::1"), "2001:db8::1");
+        assert_eq!(d("2001:db8::"), "2001:db8::");
+        assert_eq!(d("1:0:0:2:0:0:0:3"), "1:0:0:2::3");
+        // Nessun run >= 2: nessuna compressione.
+        assert_eq!(d("1:2:3:4:5:6:7:8"), "1:2:3:4:5:6:7:8");
+        assert_eq!(d("1:0:2:3:4:5:6:7"), "1:0:2:3:4:5:6:7");
+        // Round-trip: cio' che si stampa si ri-parsa uguale.
+        for s in ["::", "::1", "2001:db8::1", "fe80::1:2:3", "1:2:3:4:5:6:7:8"] {
+            assert_eq!(Ipv6Addr::parse(&d(s)).unwrap(), Ipv6Addr::parse(s).unwrap());
+        }
     }
 
     #[test]

@@ -7,8 +7,10 @@ use super::entry::{current_id, PERCPU};
 /// Fase 35 (hardening): i servizi di sistema si registrano solo da figli di
 /// init (tutti i driver veri lo sono): impedisce lo squat a slot libero dopo
 /// un kill. `Test` resta aperto (slot sacrificale della suite); `Init` e'
-/// registrabile solo da un figlio di init (nessun processo reale lo registra,
-/// quindi non cambia nulla — la regola e' uniforme).
+/// registrabile **da init stesso** (pid 1: e' il supervisore, deve essere
+/// raggiungibile per `INIT_BOUNCE` da un processo ri-parentato, che ha il
+/// canale di nascita morto — es. `logout` dalla shell) e da un figlio di init
+/// (regola uniforme; nessun altro lo registra).
 pub(super) fn sys_service_register(service_disc: u64) -> i64 {
     let service = match service_from_disc(service_disc) {
         Some(s) => s,
@@ -16,7 +18,9 @@ pub(super) fn sys_service_register(service_disc: u64) -> i64 {
     };
     let me = current_id() as usize;
     if service != syscall_numbers::Service::Test {
-        let is_init_child = matches!(crate::ordo::sched::process_ps(me), Some(s) if s.parent == Some(1));
+        // pid 1 e' init: e' il supervisore, non un figlio di se stesso.
+        let is_init_child = me == 1
+            || matches!(crate::ordo::sched::process_ps(me), Some(s) if s.parent == Some(1));
         if !is_init_child {
             crate::serial_println!(
                 "[svc] register '{}' da pid={} rifiutato (non figlio di init)",

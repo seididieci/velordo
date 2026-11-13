@@ -64,9 +64,13 @@ build_one userland/uptime  userland/uptime/src/uptime.ld   useruptime.bin  useru
 build_one userland/identis  userland/identis/src/identis.ld identis.bin   identis
 build_one userland/identis-login userland/identis-login/src/login.ld identis-login.bin identis-login
 # create-user (ADR-0055): client che chiede a Identis di creare un utente
-# (token di sessione + nome + hash BLAKE2s-256). Non e' ancora lanciato da
-# nessuno: la shell nativa (Fase 3.2) lo invocera' come comando.
+# (token di sessione + nome + hash BLAKE2s-256). Lanciato dalla shell nativa.
 build_one userland/create-user userland/create-user/src/create-user.ld create-user.bin create-user
+# users/logout (ADR-0075): programmi esterni estratti dalla shell nativa.
+build_one userland/users userland/users/src/users.ld users.bin users
+build_one userland/logout userland/logout/src/logout.ld logout.bin logout
+# dns-resolve (ADR-0075): client DNS nativo, lanciabile dalla shell (NET=1).
+build_one userland/dns-resolve userland/dns-resolve/src/dns-resolve.ld dns-resolve.bin dns-resolve
 # Shell nativa (Fase 3.2, S3.2a): REPL minima post-login, comandi help/users/create-user/logout/exit.
 build_one userland/interpres userland/interpres/src/interpres.ld shell.bin interpres
 # Fornitore di data/ora (Fase 50, P1 orologio): prima di gen-service-hashes
