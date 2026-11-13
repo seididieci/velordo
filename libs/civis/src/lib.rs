@@ -269,6 +269,10 @@ pub mod persona;
 
 pub mod fs;
 pub mod ipc;
+/// Client degli endpoint del servizio `net` (N7.0, ADR-0074): apertura,
+/// invio/ricezione sugli slot (formato in `net-ep`) e stream TCP blocking.
+/// Meccanismo neutro: nessun verbo POSIX, nessun tipo di socket.
+pub mod net;
 pub mod print;
 pub mod spawn;
 pub mod sys;

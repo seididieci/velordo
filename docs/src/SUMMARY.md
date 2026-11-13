@@ -101,3 +101,4 @@
 - [ADR-0071: SSE2 nello userland (target separato) e crypto di sistema](./adr/0071-sse2-userland.md)
 - [ADR-0072: TLS per DoT — `embedded-tls` dietro `libs/tls`, fiducia e limiti](./adr/0072-tls-dot-embedded-tls.md)
 - [ADR-0073: Ownership e `destroy` della memoria condivisa](./adr/0073-shm-ownership-destroy.md)
+- [ADR-0074: Client di rete nel meccanismo](./adr/0074-client-rete-meccanismo.md)

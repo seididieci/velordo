@@ -107,7 +107,10 @@ velordo/
 │   └── linker.ld       # Include la nota PVH per il boot QEMU
 ├── libs/
 │   ├── civis/          # meccanismo di sistema condiviso (ex libr): sys/ipc/heap/
-│   │                   #   fs/spawn/print/args + hook `persona` (ADR-0041)
+│   │                   #   fs/spawn/print/args/net + hook `persona` (ADR-0041)
+│   ├── net/            # core rete puro (Ethernet/IPv6/NDP/TCP/SIIT/DNS)
+│   ├── net-ep/         # formato degli slot dei ring endpoint (N7.0, ADR-0074)
+│   ├── tls/ tls-net/   # TLS 1.3 puro + newtype `TcpStream` (N6.2/N6.3)
 │   └── vela/           # codice driver condiviso (hub/block/input/gpu)
 ├── flavours/
 │   └── posix/          # personalita' POSIX (ADR-0041)
@@ -299,7 +302,22 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   liberato (ring smappato per il client) e gli eventi stantii vanno scartati
   al reconnect. Prova in `scripts/run-tls-tests.sh` (un boot): `dot: PASS`
   ×2 (query + reconnect) + `dotfail: PASS` con certificato fuori trust.
-  Prossimo: personalità POSIX di rete, DoH (N6.4), VT-d.
+  **N7.0 (ADR-0074, completato)**: il lato **client** del protocollo a
+  endpoint era copiato in otto posti con tre politiche di backpressure e due
+  modelli di cursore. Ora il formato è in `libs/net-ep` (puro, zero
+  dipendenze, layout IPv6/IPv4, 6 unit test host) e il client nel meccanismo:
+  `civis::net::{Endpoint, Stream}`. Invarianti unici: cursore TX **locale**
+  (i contatori del ring TX del servizio sono consultivi), `w0 == 0` = preso
+  in carico / `!0` = `Full` senza drop silenzioso / errore IPC = `Dead`; testa
+  RX avanzata solo dopo la copia; `len` invalido consumato e saltato;
+  `attach` non azzera i contatori; `close` idempotente. `libs/tls-net` è ora
+  un newtype (orphan rule) su `civis::net::Stream`. Migrati `netecho`, `dns`,
+  `testland/{netudp,net3,nettcp}`; `siit`, il server `net` e il lato client
+  di `dns` usano il codec. Nessuna syscall/tag/ABI nuova. Il workspace root
+  ha `exclude = ["libs/net-ep"]` (path dep con workspace proprio per i test
+  host). Verifica: unit host 117/117, net tests PASS, TLS/DoT PASS, gate 6/6.
+  Prossimo: N7.1 personalità POSIX `socket` sopra `civis::net`, poi DoH
+  (N6.4), VT-d.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
@@ -508,7 +526,7 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
 
 ```bash
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term, net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), valloc, blake2s, tls: 111 test
+./scripts/run-unit-tests.sh   # term, net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, valloc, blake2s, tls: 117 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh

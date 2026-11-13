@@ -4,40 +4,39 @@
 //! indirizzo IPv4 (in formato SIIT 64:ff9b::/96) e valida che il
 //! traduttore lo abbia accettato. Segnala TEST_DONE ad init.
 //! Eseguito solo con `net=1`.
+//!
+//! Dal N7.0 il formato dello slot è quello unico di `net_ep` (ADR-0074);
+//! `siit` usa il layout IPv4 (11 byte di metadati), quindi qui si usa il
+//! codec direttamente e non `civis::net::Endpoint` (che parla con `net`).
 
 #![no_std]
 #![no_main]
 
 use civis::println;
-use core::ptr::{read_volatile, write_volatile};
+use core::ptr::write_volatile;
 use core::sync::atomic::{fence, Ordering};
 
 // ── Costanti endpoint SIIT (da civis) ─────────────────────────────────
 use civis::{
-    NET_EP_FLAG_EPHEMERAL, NET_EP_OPEN, NET_EP_RX_RING_OFF, NET_EP_RING_HDR,
-    NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE, NET_EP_TX, NET_EP_TX_RING_OFF,
-    NET_PROTO_IPV4, SIIT_EP_CLOSE, SIIT_EP_OPEN, SIIT_EP_TX,
+    NET_EP_FLAG_EPHEMERAL, NET_EP_RING_HDR, NET_EP_RX_RING_OFF, NET_EP_SLOT_SIZE,
+    NET_EP_TX_RING_OFF, NET_PROTO_IPV4, SIIT_EP_CLOSE, SIIT_EP_OPEN, SIIT_EP_TX,
 };
+
+/// Layout IPv4: `[len:2][dst_ipv4:4][dst_port:2][src_port:2][evento:1][payload]`.
+const SLOT: net_ep::Layout = net_ep::Layout::IPV4;
 
 // Eventi slot SIIT.
 const EV_DATA: u8 = 0;
-
-// Metadata slot SIIT: [len:2][dst_ipv4:4][dst_port:2][src_port:2][evento:1][payload].
-const SLOT_META: usize = 11; // 2+4+2+2+1
 
 /// Indirizzo IPv4 destinatario (10.0.0.1, mappato in IPv6 SIIT).
 const DST_IPV4: [u8; 4] = [10, 0, 0, 1];
 /// Porta destinataria.
 const DST_PORT: u16 = 53;
-/// Numero massimo di tentativi.
-const MAX_RETRIES: u32 = 100;
 
-/// Entry point.
+// Entry point.
 civis::entry!(real_main);
 
 fn real_main(_sp: u64) -> ! {
-    let mut all_ok = true;
-
     // Risolve il servizio siit.
     let mut siit_chan = 0u64;
     for _ in 0..200 {
@@ -62,7 +61,7 @@ fn real_main(_sp: u64) -> ! {
     let r = match civis::send(
         siit_chan,
         SIIT_EP_OPEN,
-        (NET_PROTO_IPV4 as u64) << 16, // porta 0 = ephemeral
+        u64::from(NET_PROTO_IPV4) << 16, // porta 0 = ephemeral
         NET_EP_FLAG_EPHEMERAL as u64,
     ) {
         Ok(r) => r,
@@ -101,23 +100,17 @@ fn real_main(_sp: u64) -> ! {
     }
 
     // Scrive nello slot TX 0: payload + destinatario IPv4.
-    // Formato: [len:2][dst_ipv4:4][dst_port:2][src_port:2][evento:1][payload].
     let payload: &[u8] = b"net4-siiit-probe";
-    let total = SLOT_META + payload.len();
+    let total = SLOT.total(payload.len());
     if total > NET_EP_SLOT_SIZE {
         println!("[net4] FAIL: payload troppo grande per lo slot");
         finish(false);
     }
-    let p = unsafe {
-        ring_base.add(NET_EP_TX_RING_OFF + NET_EP_RING_HDR)
-    };
-    unsafe {
-        write_volatile(p as *mut u16, total as u16);
-        core::ptr::copy_nonoverlapping(DST_IPV4.as_ptr(), p.add(2), 4);
-        write_volatile(p.add(6) as *mut u16, DST_PORT);
-        write_volatile(p.add(8) as *mut u16, local_port);
-        write_volatile(p.add(10) as *mut u8, EV_DATA);
-        core::ptr::copy_nonoverlapping(payload.as_ptr(), p.add(11), payload.len());
+    let p = unsafe { ring_base.add(NET_EP_TX_RING_OFF + NET_EP_RING_HDR) };
+    let win = unsafe { core::slice::from_raw_parts_mut(p, total) };
+    if net_ep::write(win, SLOT, &DST_IPV4, DST_PORT, local_port, EV_DATA, payload).is_none() {
+        println!("[net4] FAIL: slot TX non scrivibile");
+        finish(false);
     }
     fence(Ordering::Release);
     unsafe {
@@ -128,27 +121,23 @@ fn real_main(_sp: u64) -> ! {
     };
 
     // Notifica siit di tradurre e inviare (slot 0).
-    let reply = civis::send(siit_chan, SIIT_EP_TX, ep_id as u64, 0);
-    match reply {
+    let all_ok = match civis::send(siit_chan, SIIT_EP_TX, ep_id as u64, 0) {
         Ok(r) if r.w0 == 0 => {
             println!(
                 "[net4] payload IPv4 accettato da siit: PASS (dst={}.{}.{}.{}:{})",
                 DST_IPV4[0], DST_IPV4[1], DST_IPV4[2], DST_IPV4[3], DST_PORT
             );
-            all_ok = true;
+            true
         }
         Ok(r) => {
-            println!(
-                "[net4] FAIL: siit ha rifiutato il payload (w0={})",
-                r.w0
-            );
-            all_ok = false;
+            println!("[net4] FAIL: siit ha rifiutato il payload (w0={})", r.w0);
+            false
         }
         Err(_) => {
             println!("[net4] FAIL: invio a siit fallito (IPC)");
-            all_ok = false;
+            false
         }
-    }
+    };
 
     // Chiude l'endpoint.
     let _ = civis::send(siit_chan, SIIT_EP_CLOSE, ep_id as u64, 0);
@@ -163,7 +152,12 @@ fn finish(ok: bool) -> ! {
     } else {
         println!("[net4] risultato: FAIL");
     }
-    let _ = civis::send(civis::CHANNEL_PARENT, civis::TEST_DONE, if ok { 1 } else { 0 }, 0);
+    let _ = civis::send(
+        civis::CHANNEL_PARENT,
+        civis::TEST_DONE,
+        if ok { 1 } else { 0 },
+        0,
+    );
     civis::exit(if ok { 0 } else { 1 })
 }
 

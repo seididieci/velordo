@@ -11,6 +11,10 @@
 # TLS sull'host e i certificati di test, quindi vive in
 # `scripts/run-tls-tests.sh` (un solo boot con TLS 1.3 e DoT).
 #
+# N7.0 (ADR-0074): i client di questi probe (netudp/net3/net4/dns) usano
+# `civis::net` / `net-ep` (apertura, slot, cursori, backpressure): la suite
+# prova che il client del meccanismo parla lo stesso protocollo del servizio.
+#
 # Uso: ./scripts/run-net-tests.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."

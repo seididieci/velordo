@@ -301,7 +301,7 @@ vedi [IPC](./07-ipc.md) e [ADR-0039](./adr/0039-logging-l1.md). Nota: il
 kernel embedda anche `vestigia` (boot-TCB con init/block/cardo: deve partire
 prima che il FS esista).
 
-### Rete — servizi e tag IPC (nessuna syscall nuova, N1–N6.1)
+### Rete — servizi e tag IPC (nessuna syscall nuova, N1–N7.0)
 
 Lo stack di rete (ADR-0068/0069) non aggiunge numeri di syscall: driver e
 servizi sono processi userspace che usano `service_register`/`service_lookup`/
@@ -343,6 +343,15 @@ evento `EV_FIN` chiede la chiusura ordinata. Eventi consegnati nel ring RX:
 senza conoscerne l'indirizzo (es. `upstream = auto` in `sys:dns.conf`): due
 parole IPC bastano per 16 byte, nessuna nuova syscall. Senza indirizzo la
 reply è `::` (`w0 = w1 = 0`).
+
+**N7.0 (ADR-0074)**: il lato client del protocollo (apertura, slot, cursori,
+backpressure, stream TCP) vive nel meccanismo (`libs/net-ep` per il formato,
+`civis::net` per endpoint e `Stream`). La migrazione non cambia **nessun**
+tag, syscall o formato su filo: i servizi restano quelli qui sopra e il
+kernel resta fuori dal percorso dati. Chi scrive un client usa
+`civis::net::{Endpoint, Stream}` invece di parlare i ring a mano; `siit` e
+il lato client di `dns` usano il codec (`net_ep::Layout::IPV4`) ma tengono i
+propri tag.
 
 Servizi: `Service::Net = 14`, `NetDev = 15`, `Siit = 16`, `Dns = 17`
 (`SERVICE_COUNT = 18`). Partono solo con `net=1` in cmdline. Dettagli e

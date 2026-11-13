@@ -14,7 +14,7 @@ nulla da solo.
 ## Stato (completate 1-57)
 
 Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
-`[identistest] PASS 11/11` + `[usertests] PASS 59/59` + `[threadtest] PASS 12/12`,
+`[identistest] PASS 11/11` + `[usertests] PASS 61/61` + `[threadtest] PASS 12/12`,
 zero FAIL/PANIC/FAULT. La suite FAT32 e' **fuori dal gate** (ADR-0059:
 `scripts/run-fat-tests.sh`).
 
@@ -844,8 +844,27 @@ Voci con scope e vittoria dichiarati (non date).
       Bug veri: dati TCP in `SynSent` (ACK=0), endpoint liberato su RST,
       eventi stantii al reconnect. Unit test 111/111; net tests PASS; gate
       6/6, zero FAIL/PANIC/FAULT. ADR-0072 → Accepted.
+- [x] **Rete N7.0 — client di rete nel meccanismo** (completata, ADR-0074):
+      il lato client del protocollo a endpoint era copiato in otto posti con
+      tre politiche di backpressure diverse (drop silenzioso, errore, retry)
+      e due modelli di cursore. Nuovo crate `libs/net-ep`: formato degli slot
+      in **una** definizione (layout parametrico IPv6/IPv4, `check` sul `len`,
+      cursore di ring), puro, zero dipendenze, `#![forbid(unsafe_code)]`,
+      6 test host. `civis::net`: `Endpoint` (open/attach/send/recv/drain/
+      stats/close) e `Stream` TCP blocking (il trasporto di `libs/tls-net`,
+      che resta un newtype per la orphan rule), con invarianti unici — TX a
+      cursore locale e `Full` esplicito (mai drop silenzioso), RX avanzata
+      solo dopo la copia, slot corrotti consumati e saltati, nessun buffer
+      grande sullo stack. Migrati `netecho`, `dns` (upstream), `libs/tls-net`,
+      `testland/{netudp,net3,nettcp}`; `siit`, il server `net` e il lato
+      client di `dns` usano il codec. Bug latente corretto per costruzione:
+      `netudp` usava un metadata di 31 byte (funzionava per caso). Nessuna
+      syscall/tag/ABI nuova, kernel invariato. Verifica: unit host 117/117,
+      net tests PASS (echo, netudp, net3, net4, dns, upstream), TLS/DoT PASS,
+      gate 6/6 e zero FAIL/PANIC/FAULT.
 - [ ] **Rete N6.4–N8** (pianificata, ADR-0068/0069/0070): DoH sulla stessa
-      API di trasporto; personalità POSIX socket; VT-d/IOMMU.
+      API di trasporto; personalità POSIX socket (N7.1, sopra `civis::net`);
+      VT-d/IOMMU.
       Config `sys:net` con policy di subtree in cardo (`sys:identis` rinomina
       `identis:config`, chiude il debito ADR-0058).
 

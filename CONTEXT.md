@@ -106,6 +106,8 @@ velordo/
 │   │       └── utf8.rs      # UTF-8 encoding/decoding
 │   ├── net/                 # Core rete (N1, ADR-0068/0069): Ethernet/IPv6/
 │   │                        #   ICMPv6/NDP, SLAAC, RA guard; no_std, safe
+│   ├── net-ep/             # Formato degli slot dei ring endpoint (N7.0,
+│   │                        #   ADR-0074): layout IPv6/IPv4, cursore; puro
 │   ├── valloc/              # Segregated-fit allocator (S2.1)│   │   └── src/
 │   │       ├── lib.rs       # Public API
 │   │       └── core.rs      # Core allocator implementation
@@ -324,17 +326,17 @@ Un driver che blocca cardo si deadlocka. Per questo il display va in **diretta**
 [testsarca] PASS 64/64
 [posixtests] PASS 4/4
 [identistest] PASS 11/11
-[usertests] PASS 59/59
+[usertests] PASS 61/61
 [threadtest] PASS 12/12
 ```
 
 Zero FAIL/PANIC/#.* FAULT. Suite FAT32 fuori dal gate (`scripts/run-fat-tests.sh`).
 
-Unit test host (FUORI gate, millisecondi): `./scripts/run-unit-tests.sh` — 111 test
+Unit test host (FUORI gate, millisecondi): `./scripts/run-unit-tests.sh` — 117 test
 (`libs/term` rasterizer/cursore/surface, `libs/net` IPv6/NDP/TCP/SIIT/DNS +
-framing RFC 7858, `libs/valloc`, `blake2s`, `libs/tls` trasporto/DRBG/config
-fail-closed).
-Run dedicati fuori gate: `scripts/run-net-tests.sh` (passt, N1–N6.0) e
+framing RFC 7858, `libs/net-ep` formato slot e cursore di ring,
+`libs/valloc`, `blake2s`, `libs/tls` trasporto/DRBG/config fail-closed).
+Run dedicati fuori gate: `scripts/run-net-tests.sh` (passt, N1–N6.3) e
 `scripts/run-tls-tests.sh` (handshake TLS 1.3 reale + DoT del resolver,
 N6.2/N6.3, ADR-0072).
 
@@ -386,12 +388,14 @@ N6.2/N6.3, ADR-0072).
 ### Per rete e TLS:
 `userland/netdev/src/` (driver virtio-net) → `userland/net/src/main.rs`
 (endpoint/ring, servizio) → `libs/net/src/` (Ethernet/IPv6/TCP/SIIT/DNS, core
-puro) → `libs/tls/src/` (adattatore TLS 1.3 sopra `embedded-tls`: trasporto e
-orologio iniettati, DRBG, `CertVerifier`) → `libs/tls-net/src/` (glue reale:
-`TcpStream` sull'endpoint `net` + `SystemClock`). Consumatori: `userland/dns`
-(`forward_dot`, una connessione per query, CA da `sys:ca.der`) e
-`testland/tlsprobe`. Prove: `scripts/run-tls-tests.sh` (fuori gate, come la
-rete) e `scripts/run-net-tests.sh`.
+puro) → `libs/net-ep/src/` (formato degli slot, N7.0) → `libs/civis/src/net/`
+(client `Endpoint`/`Stream` nel meccanismo) → `libs/tls/src/` (adattatore TLS
+1.3 sopra `embedded-tls`: trasporto e orologio iniettati, DRBG,
+`CertVerifier`) → `libs/tls-net/src/` (newtype `TcpStream` =
+`civis::net::Stream` visto come `tls::Transport` + `SystemClock`).
+Consumatori: `userland/dns` (`forward_dot`, una connessione per query, CA da
+`sys:ca.der`) e `testland/tlsprobe`. Prove: `scripts/run-tls-tests.sh` (fuori
+gate, come la rete) e `scripts/run-net-tests.sh`.
 
 ### Per IPC client-side (userland):
 `libs/civis/src/ipc.rs` (send/recv) → `libs/civis/src/fs/ring.rs` (ring frame ops) →

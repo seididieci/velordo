@@ -283,10 +283,12 @@ log seriale.
   l'alpha dell'immagine e i colori sono `0xRRGGBBAA`; **T2/T3**: fill a
   parole, `copy_from`/`shift_rows_up` con clipping, `draw_ink` che non tocca
   il background), `libs/net` (IPv6/NDP/TCP/SIIT/DNS, `Ipv6Addr::parse` e
-  cache dei vicini STALE con NS di verifica), `libs/valloc`, `blake2s` e
+  cache dei vicini STALE con NS di verifica), `libs/net-ep` (formato degli
+  slot dei ring: roundtrip IPv6/IPv4, limiti del `len`, cursore di ring
+  pieno/vuoto/wrap; N7.0), `libs/valloc`, `blake2s` e
   `libs/tls` (trasporto/adapter, DRBG ChaCha20, fail-closed della
   configurazione: SNI/CA mancanti e buffer record troppo piccoli danno
-  `Error::Config`) (**111 test** in tutto; `libs/net` ne ha 51, 21 dei quali
+  `Error::Config`) (**117 test** in tutto; `libs/net` ne ha 51, 21 dei quali
   sulla macchina a stati TCP e sul wiring, 2 sul framing RFC 7858). Girano da una
   **directory neutra**: il `.cargo/config.toml` del repo impone
   `build.target = x86_64-unknown-none` + `build-std` in base alla directory

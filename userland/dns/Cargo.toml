@@ -12,6 +12,7 @@ net = { path = "../../libs/net" }
 # `net` (condiviso con il probe tlsprobe).
 tls = { path = "../../libs/tls" }
 tls-net = { path = "../../libs/tls-net" }
+net-ep = { path = "../../libs/net-ep" }
 
 [profile.dev]
 panic = "abort"

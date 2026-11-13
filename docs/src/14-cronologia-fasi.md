@@ -3532,3 +3532,46 @@
       reconnect + fail-closed); unit test host 111/111 (2 nuovi sul framing
       RFC 7858); net tests N1–N6.0 PASS (il cambio in `userland/net` non
       regredisce il plain); gate 6/6, zero FAIL/PANIC/FAULT.
+
+- [x] **N7.0 — Client di rete nel meccanismo** (2026-11, ADR-0074): il
+      protocollo a endpoint (ADR-0069) aveva una sola implementazione lato
+      **server** (`userland/net`) e otto copie lato **client** — `netecho`,
+      `dns` (upstream), `libs/tls-net`, `testland/{net3,netudp,net4,nettcp}`
+      — con tre politiche di backpressure (drop silenzioso, `None`, retry
+      fino a deadline) e due modelli di cursore. Un bug vero era già
+      sepolto lì: `netudp` scriveva un metadata di 31 byte e funzionava solo
+      perché `net` legge i primi 23 e ignora il resto.
+      **Formato** (`libs/net-ep`): crate puro, zero dipendenze,
+      `#![forbid(unsafe_code)]`, `Layout` parametrico sulla lunghezza
+      dell'indirizzo (`IPV6` 23 byte per `net`, `IPV4` 11 per `siit` e il
+      lato client di `dns`), `write`/`read`/`check` di uno slot e cursore di
+      ring (`push_index`, `next`). Volatile e `fence` restano nei wrapper
+      unsafe; 6 test host (roundtrip, limiti del `len`, pieno/wrap).
+      **Client** (`civis::net`): `Endpoint` (open/attach/send/recv/drain/
+      stats/close) e `Stream` TCP blocking — il trasporto che stava in
+      `libs/tls-net`, spostato nel meccanismo. Invarianti unici: il cursore
+      TX è **locale** (il servizio legge l'indice in `NET_EP_TX`; i
+      contatori del ring TX sono consultivi), `w0 == 0` = preso in carico e
+      il cursore avanza, `w0 == !0` = `Full` (si riscrive lo stesso slot,
+      mai drop silenzioso), errore IPC = `Dead`; la testa RX avanza solo
+      dopo la copia del payload; `len` fuori range = slot consumato e
+      saltato, mai panic; `attach` non azzera i contatori (il servizio può
+      aver già scritto byte nel ring del figlio prima che il listener legga
+      `EV_ACCEPT`); `close` idempotente. `libs/tls-net` resta un newtype per
+      la orphan rule (`impl tls::Transport for civis::net::Stream` non è
+      possibile fuori dai due crate).
+      **Migrazione**: `userland/net` (tre funzioni server sul codec),
+      `netecho`, `dns` (`up: Option<Endpoint>`, `up_take_reply` con
+      `Endpoint::recv`), `libs/tls-net`, `testland/{netudp,net3,nettcp}`;
+      `siit` e il lato client di `dns` sul codec IPv4. `nettcp` usa
+      `Stream::write/read` (le deadline sostituiscono il loop a tick).
+      **Nessuna** syscall, tag o ABI nuova; kernel invariato; `libs/net`
+      resta puro. Il workspace root guadagna `exclude = ["libs/net-ep"]`:
+      è un path dep di `civis` (quindi raggiungibile da un membro) ma ha un
+      workspace proprio per i test host, e senza exclude Cargo vede due
+      root annidate.
+      **Validazione**: unit test host 117/117 (6 nuovi), net tests PASS
+      (echo reply, netudp, net3, net4, dns, upstream), TLS/DoT PASS
+      (`dot` ×2 + `dotfail`), gate 6/6 e zero FAIL/PANIC/FAULT.
+      Prossimo passo di rete: N7.1, personalità POSIX `socket` sopra
+      `civis::net`.

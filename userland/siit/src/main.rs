@@ -37,10 +37,11 @@ const EV_SYNACK: u8 = 2;
 const EV_FIN: u8 = 3;
 const EV_RST: u8 = 4;
 
-// Metadata slot SIIT:
-//   RX (siit → cliente): [len:2][src_ipv4:4][src_port:2][dst_port:2][evento:1][payload]
-//   TX (cliente → siit): [len:2][dst_ipv4:4][dst_port:2][src_port:2][evento:1][payload]
-const SLOT_META: usize = 11; // 2+4+2+2+1
+// Metadata slot SIIT: layout unico in `net_ep` (N7.0, ADR-0074), IPv4
+// (11 byte). RX e TX hanno la stessa forma: la porta 6 e' la remota
+// (sorgente in RX, destinazione in TX), la 8 e' la locale.
+const SLOT: net_ep::Layout = net_ep::Layout::IPV4;
+const SLOT_META: usize = net_ep::Layout::IPV4.meta();
 
 /// Stati TCP semplificati.
 const TCP_CLOSED: u8 = 0;
@@ -247,32 +248,28 @@ fn ep_rx_write_full(
     evento: u8,
     payload: &[u8],
 ) -> bool {
-    let total = SLOT_META + payload.len();
+    let total = SLOT.total(payload.len());
     if total > NET_EP_SLOT_SIZE {
         return false;
     }
     let head = unsafe { read_volatile(ring.add(NET_EP_RX_RING_OFF) as *const u32) };
     let tail = unsafe { read_volatile(ring.add(NET_EP_RX_RING_OFF + 4) as *const u32) };
-    if tail.wrapping_sub(head) >= NET_EP_RING_SLOTS as u32 {
+    let Some(index) = net_ep::push_index(head, tail, NET_EP_RING_SLOTS as u32) else {
         return false;
-    }
-    let slot = (tail % NET_EP_RING_SLOTS as u32) as usize;
+    };
+    let slot = index as usize % NET_EP_RING_SLOTS;
     let p = unsafe {
         ring.add(NET_EP_RX_RING_OFF + NET_EP_RING_HDR + slot * NET_EP_SLOT_SIZE)
     };
-    unsafe {
-        write_volatile(p as *mut u16, total as u16);
-        p.add(2).copy_from_nonoverlapping(src_ipv4.as_ptr(), 4);
-        write_volatile(p.add(6) as *mut u16, src_port);
-        write_volatile(p.add(8) as *mut u16, dst_port);
-        write_volatile(p.add(10) as *mut u8, evento);
-        core::ptr::copy_nonoverlapping(payload.as_ptr(), p.add(11), payload.len());
+    let win = unsafe { core::slice::from_raw_parts_mut(p, total) };
+    if net_ep::write(win, SLOT, src_ipv4, src_port, dst_port, evento, payload).is_none() {
+        return false;
     }
     fence(Ordering::Release);
     unsafe {
         write_volatile(
             ring.add(NET_EP_RX_RING_OFF + 4) as *mut u32,
-            tail.wrapping_add(1),
+            net_ep::next(tail),
         )
     };
     true
@@ -291,24 +288,16 @@ fn ep_tx_read_full(
         ring.add(NET_EP_TX_RING_OFF + NET_EP_RING_HDR + slot_idx * NET_EP_SLOT_SIZE)
     };
     let total = unsafe { read_volatile(p as *const u16) } as usize;
-    if total < SLOT_META || total > NET_EP_SLOT_SIZE {
-        return None;
-    }
-    let mut dst_ipv4 = [0u8; 4];
-    unsafe {
-        core::ptr::copy_nonoverlapping(p.add(2), dst_ipv4.as_mut_ptr(), 4);
-    }
-    let dst_port = unsafe { read_volatile(p.add(6) as *const u16) };
-    let src_port = unsafe { read_volatile(p.add(8) as *const u16) };
-    let evento = unsafe { read_volatile(p.add(10) as *const u8) };
-    let payload_len = total - SLOT_META;
+    let payload_len = net_ep::check(SLOT, total, NET_EP_SLOT_SIZE)?;
     if payload_len > buf.len() {
         return None;
     }
-    unsafe {
-        core::ptr::copy_nonoverlapping(p.add(11), buf.as_mut_ptr(), payload_len);
-    }
-    Some((payload_len, dst_ipv4, dst_port, src_port, evento))
+    let win = unsafe { core::slice::from_raw_parts(p, total) };
+    let s = net_ep::read(win, SLOT, total)?;
+    buf[..payload_len].copy_from_slice(s.payload);
+    let mut dst_ipv4 = [0u8; 4];
+    dst_ipv4.copy_from_slice(s.addr);
+    Some((payload_len, dst_ipv4, s.port, s.local, s.event))
 }
 
 /// Avanza la tail del TX ring (slot consumato).

@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["kernel", "userland/interpres"]
+# `net-ep` (N7.0) e' un path dep di `civis`, quindi raggiungibile da un membro,
+# ma ha un workspace proprio (host test con `cargo test`, come `libs/net`):
+# senza l'exclude Cargo vede due root annidate.
+exclude = ["libs/net-ep"]
 
 [profile.release]
 panic = "abort"

@@ -22,23 +22,23 @@ use alloc::vec::Vec;
 use tls_net::TcpStream;
 
 use civis;
+use civis::net::{Endpoint, Event, Flow, Proto, SendError, PAYLOAD_MAX};
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, Ordering};
 
 use net::{dns, Ipv6Addr};
 
 use civis::{
-    DNS_CLOSE, DNS_OPEN, DNS_PORT, DNS_STATS, DNS_TX, NET_ADDR_ROUTER, NET_EP_FLAG_EPHEMERAL,
-    NET_EP_RX_RING_OFF, NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE, NET_EP_TX,
-    NET_EP_TX_RING_OFF, NET_PROTO_UDP,
+    DNS_CLOSE, DNS_OPEN, DNS_PORT, DNS_STATS, DNS_TX, NET_ADDR_ROUTER, NET_EP_RX_RING_OFF,
+    NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE, NET_EP_TX_RING_OFF, NET_PROTO_UDP,
 };
 
 use net::{CLASS_IN, DNS_HEADER_LEN, FLAG_QR, FLAG_RD, TYPE_A, TYPE_AAAA};
 
-// Metadata slot endpoint del servizio `net`: [len:2][addr:16][sport:2][dport:2][evento:1].
-const NET_SLOT_META: usize = 23;
-// Metadata slot endpoint dei clienti DNS: [len:2][ipv4:4][port:2][port:2][evento:1].
-const SLOT_META: usize = 11;
+// Metadata slot endpoint dei clienti DNS: layout unico in `net_ep` (N7.0,
+// ADR-0074), IPv4 (11 byte).
+const SLOT: net_ep::Layout = net_ep::Layout::IPV4;
+const SLOT_META: usize = net_ep::Layout::IPV4.meta();
 // Evento dati nello slot.
 const EV_DATA: u8 = 0;
 // Numero massimo di endpoint clienti concorrenti.
@@ -156,9 +156,9 @@ impl Config {
 
 struct DnsService {
     net_chan: u64,
-    /// Endpoint effimero presso `net` usato come client verso l'upstream.
-    up_ep_id: u16,
-    up_ring: *mut u8,
+    /// Endpoint effimero presso `net` usato come client verso l'upstream
+    /// plain (N6.0). `None` = tabella statica.
+    up: Option<Endpoint>,
     cfg: Config,
     /// DoT (N6.3): endpoint TCP **persistente** (il ring si mappa una volta;
     /// la connessione si riapre per query con `TcpStream::abort`), trust
@@ -178,8 +178,7 @@ impl DnsService {
     fn new() -> Self {
         Self {
             net_chan: 0,
-            up_ep_id: 0,
-            up_ring: core::ptr::null_mut(),
+            up: None,
             cfg: Config::off(),
             dot: None,
             ca: Vec::new(),
@@ -250,31 +249,27 @@ fn ep_rx_write_full(
     evento: u8,
     payload: &[u8],
 ) -> bool {
-    let total = SLOT_META + payload.len();
+    let total = SLOT.total(payload.len());
     if total > NET_EP_SLOT_SIZE {
         return false;
     }
     let head = unsafe { read_volatile(ring.add(NET_EP_RX_RING_OFF) as *const u32) };
     let tail = unsafe { read_volatile(ring.add(NET_EP_RX_RING_OFF + 4) as *const u32) };
-    if tail.wrapping_sub(head) >= NET_EP_RING_SLOTS as u32 {
+    let Some(index) = net_ep::push_index(head, tail, NET_EP_RING_SLOTS as u32) else {
         return false;
-    }
-    let slot = (tail % NET_EP_RING_SLOTS as u32) as usize;
+    };
+    let slot = index as usize % NET_EP_RING_SLOTS;
     let p =
         unsafe { ring.add(NET_EP_RX_RING_OFF + NET_EP_RING_HDR + slot * NET_EP_SLOT_SIZE) };
-    unsafe {
-        write_volatile(p as *mut u16, total as u16);
-        p.add(2).copy_from_nonoverlapping(src_ipv4.as_ptr(), 4);
-        write_volatile(p.add(6) as *mut u16, src_port);
-        write_volatile(p.add(8) as *mut u16, dst_port);
-        write_volatile(p.add(10) as *mut u8, evento);
-        core::ptr::copy_nonoverlapping(payload.as_ptr(), p.add(11), payload.len());
+    let win = unsafe { core::slice::from_raw_parts_mut(p, total) };
+    if net_ep::write(win, SLOT, src_ipv4, src_port, dst_port, evento, payload).is_none() {
+        return false;
     }
     fence(Ordering::Release);
     unsafe {
         write_volatile(
             ring.add(NET_EP_RX_RING_OFF + 4) as *mut u32,
-            tail.wrapping_add(1),
+            net_ep::next(tail),
         )
     };
     true
@@ -292,24 +287,16 @@ fn ep_tx_read_full(
     let p =
         unsafe { ring.add(NET_EP_TX_RING_OFF + NET_EP_RING_HDR + slot_idx * NET_EP_SLOT_SIZE) };
     let total = unsafe { read_volatile(p as *const u16) } as usize;
-    if total < SLOT_META || total > NET_EP_SLOT_SIZE {
-        return None;
-    }
-    let mut dst_ipv4 = [0u8; 4];
-    unsafe {
-        core::ptr::copy_nonoverlapping(p.add(2), dst_ipv4.as_mut_ptr(), 4);
-    }
-    let dst_port = unsafe { read_volatile(p.add(6) as *const u16) };
-    let src_port = unsafe { read_volatile(p.add(8) as *const u16) };
-    let evento = unsafe { read_volatile(p.add(10) as *const u8) };
-    let payload_len = total - SLOT_META;
+    let payload_len = net_ep::check(SLOT, total, NET_EP_SLOT_SIZE)?;
     if payload_len > buf.len() {
         return None;
     }
-    unsafe {
-        core::ptr::copy_nonoverlapping(p.add(11), buf.as_mut_ptr(), payload_len);
-    }
-    Some((payload_len, dst_ipv4, dst_port, src_port, evento))
+    let win = unsafe { core::slice::from_raw_parts(p, total) };
+    let s = net_ep::read(win, SLOT, total)?;
+    buf[..payload_len].copy_from_slice(s.payload);
+    let mut dst_ipv4 = [0u8; 4];
+    dst_ipv4.copy_from_slice(s.addr);
+    Some((payload_len, dst_ipv4, s.port, s.local, s.event))
 }
 
 /// Avanza la tail del TX ring (slot consumato).
@@ -500,103 +487,45 @@ fn load_config(net_chan: u64) -> Config {
     cfg
 }
 
-/// Apre l'endpoint UDP effimero presso `net` e ne mappa il ring.
-fn open_upstream(net_chan: u64) -> Option<(u16, *mut u8)> {
-    let r = civis::send(
-        net_chan,
-        civis::NET_EP_OPEN,
-        (NET_PROTO_UDP as u64) << 16,
-        NET_EP_FLAG_EPHEMERAL as u64,
-    )
-    .ok()?;
-    if r.w0 == !0u64 {
-        return None;
-    }
-    let ring_id = (r.w1 & 0xffff_ffff) as u32;
-    let ring = civis::shm_map(ring_id, 0, civis::PROT_READ | civis::PROT_WRITE).ok()? as *mut u8;
-    unsafe {
-        write_volatile(ring.add(NET_EP_RX_RING_OFF) as *mut u32, 0);
-        write_volatile(ring.add(NET_EP_RX_RING_OFF + 4) as *mut u32, 0);
-        write_volatile(ring.add(NET_EP_TX_RING_OFF) as *mut u32, 0);
-        write_volatile(ring.add(NET_EP_TX_RING_OFF + 4) as *mut u32, 0);
-    }
-    Some((r.w0 as u16, ring))
-}
-
-/// Scrive uno slot nel ring TX dell'endpoint upstream (formato `net`):
-/// `[len:2][addr:16][dport:2][sport:2][evento:1][payload]`.
-/// Ritorna l'indice di slot, o `None` se il ring è pieno.
-fn up_tx_write(ring: *mut u8, dst: &Ipv6Addr, dst_port: u16, payload: &[u8]) -> Option<usize> {
-    let total = NET_SLOT_META + payload.len();
-    if total > NET_EP_SLOT_SIZE {
-        return None;
-    }
-    let head = unsafe { read_volatile(ring.add(NET_EP_TX_RING_OFF) as *const u32) };
-    let tail = unsafe { read_volatile(ring.add(NET_EP_TX_RING_OFF + 4) as *const u32) };
-    if tail.wrapping_sub(head) >= NET_EP_RING_SLOTS as u32 {
-        return None;
-    }
-    let slot = (tail % NET_EP_RING_SLOTS as u32) as usize;
-    let p = unsafe { ring.add(NET_EP_TX_RING_OFF + NET_EP_RING_HDR + slot * NET_EP_SLOT_SIZE) };
-    unsafe {
-        write_volatile(p as *mut u16, total as u16);
-        core::ptr::copy_nonoverlapping(dst.0.as_ptr(), p.add(2), 16);
-        write_volatile(p.add(18) as *mut u16, dst_port);
-        write_volatile(p.add(20) as *mut u16, 0); // sorgente: la sceglie `net`
-        write_volatile(p.add(22) as *mut u8, EV_DATA);
-        core::ptr::copy_nonoverlapping(payload.as_ptr(), p.add(NET_SLOT_META), payload.len());
-    }
-    fence(Ordering::Release);
-    unsafe {
-        write_volatile(
-            ring.add(NET_EP_TX_RING_OFF + 4) as *mut u32,
-            tail.wrapping_add(1),
-        )
-    };
-    Some(slot)
+/// Apre l'endpoint UDP effimero presso `net` (lato client dell'inoltro).
+///
+/// Dal N7.0 apertura, ring e slot sono di `civis::net` (ADR-0074).
+fn open_upstream(net_chan: u64) -> Option<Endpoint> {
+    Endpoint::open(net_chan, Proto::Udp, Flow::Ephemeral).ok()
 }
 
 /// Drena il ring RX dell'upstream e cerca la risposta alla query `txid`:
 /// verifica sorgente (indirizzo e porta configurati), `QR` e id. Copia il
 /// payload in `out` ripristinando il transaction id del cliente.
-fn up_take_reply(svc: &DnsService, txid: u16, client_id: u16, out: &mut [u8]) -> Option<usize> {
-    let ring = svc.up_ring;
-    if ring.is_null() {
-        return None;
-    }
-    let mut head = unsafe { read_volatile(ring.add(NET_EP_RX_RING_OFF) as *const u32) };
-    let tail = unsafe { read_volatile(ring.add(NET_EP_RX_RING_OFF + 4) as *const u32) };
-    let mut found = None;
-    while head != tail {
-        let slot = (head % NET_EP_RING_SLOTS as u32) as usize;
-        let p = unsafe { ring.add(NET_EP_RX_RING_OFF + NET_EP_RING_HDR + slot * NET_EP_SLOT_SIZE) };
-        let total = unsafe { read_volatile(p as *const u16) } as usize;
-        if total >= NET_SLOT_META {
-            let mut src = [0u8; 16];
-            unsafe { core::ptr::copy_nonoverlapping(p.add(2), src.as_mut_ptr(), 16) };
-            let src_port = unsafe { read_volatile(p.add(18) as *const u16) };
-            let payload_len = total - NET_SLOT_META;
-            if src == svc.cfg.upstream.0
-                && src_port == svc.cfg.port
-                && payload_len >= DNS_HEADER_LEN
-                && payload_len <= out.len()
-                && found.is_none()
-            {
-                let payload =
-                    unsafe { core::slice::from_raw_parts(p.add(NET_SLOT_META), payload_len) };
-                if let Some(hdr) = dns::parse_header(payload) {
-                    if hdr.id == txid && hdr.flags & FLAG_QR != 0 {
-                        out[..payload_len].copy_from_slice(payload);
-                        out[0..2].copy_from_slice(&client_id.to_be_bytes());
-                        found = Some(payload_len);
-                    }
-                }
-            }
+fn up_take_reply(
+    up: &mut Endpoint,
+    upstream: Ipv6Addr,
+    up_port: u16,
+    txid: u16,
+    client_id: u16,
+    out: &mut [u8],
+    buf: &mut [u8],
+) -> Option<usize> {
+    while let Some(r) = up.recv(buf) {
+        if r.truncated
+            || r.addr != upstream.0
+            || r.port != up_port
+            || r.len < DNS_HEADER_LEN
+            || r.len > out.len()
+        {
+            continue;
         }
-        head = head.wrapping_add(1);
-        unsafe { write_volatile(ring.add(NET_EP_RX_RING_OFF) as *mut u32, head) };
+        let payload = &buf[..r.len];
+        let Some(hdr) = dns::parse_header(payload) else {
+            continue;
+        };
+        if hdr.id == txid && hdr.flags & FLAG_QR != 0 {
+            out[..r.len].copy_from_slice(payload);
+            out[0..2].copy_from_slice(&client_id.to_be_bytes());
+            return Some(r.len);
+        }
     }
-    found
+    None
 }
 
 /// Inoltra `query` all'upstream (plain UDP) e attende la risposta entro il
@@ -617,18 +546,14 @@ fn forward_plain(
     wire[..query.len()].copy_from_slice(query);
     wire[0..2].copy_from_slice(&txid.to_be_bytes());
 
-    let slot = match up_tx_write(svc.up_ring, &svc.cfg.upstream, svc.cfg.port, &wire[..query.len()])
-    {
-        Some(s) => s,
-        None => {
-            let _ = civis::print_string(b"[dns] upstream: ring TX pieno\n");
-            return None;
-        }
+    let (upstream, up_port) = (svc.cfg.upstream, svc.cfg.port);
+    let Some(up) = svc.up.as_mut() else {
+        return None;
     };
-    match civis::send(svc.net_chan, NET_EP_TX, svc.up_ep_id as u64, slot as u64) {
-        Ok(r) if r.w0 == 0 => {}
-        Ok(r) => {
-            civis::println!("[dns] upstream: TX rifiutato w0={}", r.w0);
+    match up.send(upstream.0, up_port, Event::Data, &wire[..query.len()]) {
+        Ok(()) => {}
+        Err(SendError::Full) => {
+            let _ = civis::print_string(b"[dns] upstream: ring TX pieno\n");
             return None;
         }
         Err(_) => {
@@ -638,8 +563,9 @@ fn forward_plain(
     }
 
     let deadline = civis::get_ticks() as u64 + svc.cfg.timeout_ticks;
+    let mut buf = [0u8; PAYLOAD_MAX];
     loop {
-        if let Some(len) = up_take_reply(svc, txid, client_id, out) {
+        if let Some(len) = up_take_reply(up, upstream, up_port, txid, client_id, out, &mut buf) {
             return Some(len);
         }
         let now = civis::get_ticks() as u64;
@@ -807,9 +733,8 @@ fn real_main(_sp: u64) -> ! {
         }
     } else if svc.cfg.active() {
         match open_upstream(net_chan) {
-            Some((ep_id, ring)) => {
-                svc.up_ep_id = ep_id;
-                svc.up_ring = ring;
+            Some(up) => {
+                svc.up = Some(up);
                 civis::println!(
                     "[dns] upstream plain {}:{} timeout={} tick",
                     svc.cfg.upstream,
