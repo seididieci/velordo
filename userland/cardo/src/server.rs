@@ -366,6 +366,9 @@ fn real_main(_sp: u64) -> ! {
     // UNA volta all'handshake (peer_info), purgato all'EXIT_NOTIFY come
     // rings/rights. Effettivo = drop_mask & ceiling (mai widen).
     let mut policy: BTreeMap<u64, u32> = BTreeMap::new();
+    // Guard bucket di fiducia (ADR-0077): chi e' il peer, classificato una
+    // volta all'handshake come il tetto (pid 1 / owner di servizio / altro).
+    let mut trust: BTreeMap<u64, policy::Trust> = BTreeMap::new();
 
     // Grant single-use per handoff fd (Fase 40, modello B): nonce → snapshot.
     let mut grants = dup::GrantTable::new();
@@ -432,6 +435,7 @@ fn real_main(_sp: u64) -> ! {
             // nega op, mai la registrazione (civis ritenta comunque).
             let ceil = policy::ceiling_for(chan);
             policy.insert(chan, ceil);
+            trust.insert(chan, policy::classify(chan));
             println!("[cardo] client chan {} registered rings req={:#x} resp={:#x} ceiling={:#x}", chan, msg.w0, msg.w1, ceil);
             let _ = civis::reply(0, 0, 0);
             continue;
@@ -562,6 +566,7 @@ fn real_main(_sp: u64) -> ! {
             // Tetto policy (Fase 45): stessa vita — al re-handshake il peer
             // viene riclassificato (hash rimisurato allo spawn, mai stale).
             policy.remove(&chan);
+            trust.remove(&chan);
             // Grant orfani del morto (Fase 40): un pid riusato non deve poter
             // riscuotere grant altrui (la doppia attestazione al claim chiude
             // comunque la race, ma senza residui non c'e' race).
@@ -784,6 +789,16 @@ fn real_main(_sp: u64) -> ! {
         if !subtree_ok {
             rings::resp_ring_write(ERR, 0, &[]);
             let _ = civis::reply(0, ERR, 0);
+            continue;
+        }
+
+        // Bucket di fiducia protetti (ADR-0077, fase 0): il tetto dice QUALI
+        // op, questo dice SU COSA. Senza, un hash ignoto (che ha WRITE nel
+        // default) riscriverebbe `sys:ca.der`, i binari e il namespace.
+        let peer_trust = trust.get(&chan).copied().unwrap_or(policy::Trust::Other);
+        if !policy::write_allowed(op_tag as u32, w0, w1, payload, ceiling, peer_trust, &ftable, chan) {
+            rings::resp_ring_write(civis::ERR_DENIED, 0, &[]);
+            let _ = civis::reply(0, civis::ERR_DENIED, 0);
             continue;
         }
 

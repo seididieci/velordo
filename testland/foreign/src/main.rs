@@ -10,8 +10,11 @@
 //!   bit2 (4)  dup_grant NEGATO
 //!   bit3 (8)  pipe NEGATA
 //!   bit4 (16) open+read LECITI dopo i rifiuti (anti-wedge)
+//!   bit5 (32) `obj_put` nel bucket di sistema `sys` NEGATO (ADR-0077)
+//!   bit6 (64) `open` con TRUNC di un binario in `bin/` NEGATO (ADR-0077)
+//!   bit7 (128) `open` in scrittura di `identis:config` NEGATO (ADR-0077)
 //!
-//! `T_DONE(1, 31)` atteso da `t_policy`.
+//! `T_DONE(1, 255)` atteso da `t_policy`.
 
 #![no_std]
 #![no_main]
@@ -57,6 +60,21 @@ fn real_main(_sp: u64) -> ! {
     // bit3: pipe negata.
     if civis::pipe().is_err() {
         esiti |= 8;
+    }
+
+    // ── ADR-0077 (fase 0): bucket di fiducia protetti ──
+    // bit5: scrivere nel bucket di sistema deve essere negato (prima della
+    // fix `DEFAULT_UNKNOWN_OPS` includeva WRITE e questo put RIUSCIVA).
+    if civis::obj_put(b"sys", b"tamper", b"x").is_err() {
+        esiti |= 32;
+    }
+    // bit6: troncare un binario di sistema via path deve essere negato.
+    if civis::open("/bin/vestigia.bin", civis::OPEN_TRUNC).is_err() {
+        esiti |= 64;
+    }
+    // bit7: il bucket delle credenziali ha un owner (Identis), non noi.
+    if civis::open("identis:config", civis::OPEN_CREATE).is_err() {
+        esiti |= 128;
     }
 
     let _ = civis::send(civis::CHANNEL_PARENT, T_DONE, 1, esiti);

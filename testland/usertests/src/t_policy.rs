@@ -81,10 +81,12 @@ pub fn t_policy() -> bool {
             return false;
         }
     };
+    // 255 = bit0..bit7: i 5 della policy + i 3 dei bucket protetti
+    // (ADR-0077: sys, bin/ con TRUNC, identis:config).
     match recv_done_w1(f_chan) {
-        Some(31) => {}
+        Some(255) => {}
         Some(e) => {
-            println!("[usertests] t57: foreign esiti {:#b} (attesi 0b11111)", e);
+            println!("[usertests] t57: foreign esiti {:#b} (attesi 0b11111111)", e);
             let _ = helpers::wait_exit(f_chan);
             return false;
         }

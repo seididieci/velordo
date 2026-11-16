@@ -92,6 +92,10 @@ pub fn fs_gate<S: Sys>(st: &'static State<S>) -> Result<(), Error> {
 pub fn fs_reply_check(w0: u64) -> Result<u64, Error> {
     match w0 {
         ring::ERR => Err(Error::Failed),
+        // Diniego esplicito (es. guard dei bucket di fiducia, ADR-0077):
+        // senza questo braccio il sentinella veniva letto come una lunghezza
+        // (v => Ok(v)) e il diniego era invisibile al chiamante.
+        ERR_DENIED => Err(Error::Denied),
         ERR_NOTFOUND => Err(Error::NotFound),
         ERR_ISDIR => Err(Error::IsDir),
         ERR_NOTDIR => Err(Error::NotDir),

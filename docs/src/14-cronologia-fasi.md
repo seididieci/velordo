@@ -3708,3 +3708,34 @@
       manuale (`posixsock udp ::1 7 ciao`). Verifica: net tests PASS (echo,
       netudp, net3, net4, dns, upstream, **posixsock**), gate 6/6
       (`[usertests] 61/61`) e zero FAIL/PANIC/FAULT.
+
+- [x] **Sicurezza — bucket di fiducia protetti** (2026-11, ADR-0077, fase 0
+      della catena identità/privilegi): il choke point di cardo applicava solo
+      il **tetto** di policy, e il default per hash ignoto
+      (`DEFAULT_UNKNOWN_OPS = 0x19F`) include `WRITE`; `disk_put` non
+      controllava il bucket. Qualunque processo poteva quindi riscrivere
+      `sys:ca.der` (l'anchor DoT!), i binari in `usr`/`tst`, il namespace `ns`
+      e — via path — `bin/vestigia.bin` e `identis:config`.
+      **Fix**: `policy::write_allowed` dopo il tetto e il subtree, con tre
+      regole: operazioni amministrative (snapshot/rollback/clone/delete) solo
+      con `ceiling == RIGHTS_ALL`; target protetti (bucket `sys`/`usr`/`tst`/
+      `ns`, prefissi `bin/`, `usr/bin/`, `test/`) solo con `RIGHTS_ALL` o init;
+      carve-out per owner di servizio (`identis:` → Identis, bucket `log` →
+      Vestigia) con classificazione fatta una volta all'handshake
+      (`policy::classify`, `peer_pid` vs `service_pid`) e purgata su
+      `EXIT_NOTIFY`. Riusare `RIGHTS_ALL` come "TCB" tiene verdi i test che
+      usano snapshot (`testsarca` t56) e i bucket di prova (`test`, `d56`).
+      **Bug trovato (vero)**: il diniego era invisibile. `fs_reply_check` non
+      mappava `ERR_DENIED`, che cadeva in `v => Ok(v)` e veniva interpretato
+      come **lunghezza** della risposta: il primo giro del test vedeva il put
+      "riuscito" (esiti `0b11111` invece di `0b11111111`). Ora
+      `ERR_DENIED => Err(Error::Denied)` (e `rights_execute` continua a
+      riportare `Ok(false)` per non cambiare semantica alla shell). Lezione:
+      un sentinella d'errore non mappato è peggio di nessun sentinella — il
+      client crede di aver avuto successo.
+      **Validazione**: t57 esteso con l'attore ignoto `foreign` — `obj_put`
+      su `sys`, `open(TRUNC)` su `bin/vestigia.bin`, `open(CREATE)` su
+      `identis:config` tutti negati (esiti `0b11111111`); letture e scritture
+      lecite invariate; `identistest` 11/11 (identis scrive il suo bucket),
+      vestigia logga (carve-out `log`), gate 6/6 e net tests PASS, zero
+      FAIL/PANIC/FAULT.

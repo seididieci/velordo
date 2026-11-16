@@ -410,7 +410,18 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   FNV-1a nel PCB misurato allo spawn, manifest generato a build-time verificato
   da init pre-spawn; il kernel resta neutro (ADR-0025: POSIX e' personalità, non
   struttura). Il manifest esclude i binari che lo incorporano (rector/cardo:
-  hash di sé = ciclo instabile, mai fixpoint).
+  hash di sé = ciclo instabile, mai fixpoint). (5) **Bucket di fiducia
+  protetti (ADR-0077, fase 0)**: `policy::write_allowed` in cardo, dopo il
+  tetto e il subtree — admin ops (snapshot) solo con `ceiling == RIGHTS_ALL`;
+  bucket `sys`/`usr`/`tst`/`ns` e path `bin/`, `usr/bin/`, `test/` solo con
+  `RIGHTS_ALL` o init; carve-out per owner di servizio (`identis:` → Identis,
+  bucket `log` → Vestigia), classificato all'handshake e purgato su
+  `EXIT_NOTIFY`. Senza, il default `0x19F` (che include WRITE) lasciava a
+  chiunque la riscrittura di `sys:ca.der` e dei binari. Catena
+  identità/privilegi pianificata: ADR-0078 (digest BLAKE2s + manifest come
+  dato + firma Ed25519, verifica in cardo), ADR-0079 (classi
+  System/ThirdParty/Untrusted + `SYS_TRUST_IMAGE`), ADR-0080 (`Custos`,
+  ruoli, broker di rete).
 - **IPC reply implicita**: la reply del server va al peer del canale del
   messaggio correntemente elaborato (fissato da `recv` in `reply_chan`), non
   all'ultimo `send`. Piu' client concorrenti su un server sono quindi

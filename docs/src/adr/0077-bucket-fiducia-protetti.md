@@ -2,10 +2,18 @@
 
 ## Status
 
-**Accepted** (2026-11). Implementazione: fase 0 della catena
-identità/privilegi (commit successivo). Prerequisito di ADR-0078 (firma dei
+**Accepted** (2026-11). Fase 0 **implementata**: `policy::write_allowed` nel
+choke point di cardo, classificazione del peer all'handshake
+(`policy::classify`), test t57 esteso con l'attore ignoto `foreign` (esiti
+`0b11111111`), gate 6/6 e net tests PASS. Prerequisito di ADR-0078 (firma dei
 binari): senza questa protezione il materiale di fiducia sarebbe scrivibile da
 chiunque.
+
+**Bug trovato implementando**: `fs_reply_check` (client FS) non mappava
+`ERR_DENIED`, che quindi cadeva nel ramo `v => Ok(v)` e veniva letto come una
+**lunghezza**. Il diniego era invisibile ai client (il put "riusciva"). Ora
+`ERR_DENIED => Err(Error::Denied)`; `rights_execute` continua a riportare
+`Ok(false)` per i chiamanti.
 
 ## Context
 

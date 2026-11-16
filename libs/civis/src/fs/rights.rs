@@ -39,9 +39,10 @@ pub fn rights_execute(bucket: &[u8], key: &[u8]) -> Result<bool, Error> {
             resp_ring_consume(16);
             // w0 = 0 OK / ERR_DENIED (!0u64 - 12).
             match fs_reply_check(size) {
-                Ok(v) if v == 0 => Ok(true),   // Permesso
-                Ok(_) => Ok(false),             // Negato (ERR_DENIED)
-                Err(e) => Err(e),               // Errore di dominio
+                Ok(v) if v == 0 => Ok(true),      // Permesso
+                Ok(_) => Ok(false),                // Negato (sentinella ignota)
+                Err(Error::Denied) => Ok(false),   // Negato (ERR_DENIED)
+                Err(e) => Err(e),                  // Errore di dominio
             }
         }
         None => Err(Error::NotReady),
