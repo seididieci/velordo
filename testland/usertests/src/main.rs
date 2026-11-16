@@ -23,7 +23,7 @@ use civis::println;
 // build-time da scripts/gen-service-hashes.sh, incluso via
 // `VELORDO_SERVICE_HASHES` (esportata da build-tests.sh; usertests e'
 // compilato li'). t51 confronta `peer_info` col manifest.
-include!(env!("VELORDO_SERVICE_HASHES"));
+
 
 
 mod helpers;

@@ -116,12 +116,14 @@ pub(super) fn sys_peer_info(chan: usize) -> i64 {
         Some(p) => p,
         None => return -1,
     };
-    match crate::ordo::sched::process_image_hash(peer) {
-        Some(h) => {
+    match crate::ordo::sched::process_image_id(peer) {
+        Some(id) => {
+            let (lo, hi) = id.regs();
             unsafe {
                 let p = addr_of_mut!(PERCPU);
                 (*p).ipc_override = 1;
-                (*p).ret_rdi = h;
+                (*p).ret_rdi = lo;
+                (*p).ret_rsi = hi;
             }
             0
         }

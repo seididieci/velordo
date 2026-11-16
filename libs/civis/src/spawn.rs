@@ -213,14 +213,28 @@ pub fn peer_pid(chan: u64) -> Result<i64, Error> {
 }
 
 /// Fase 36 (identita' misurata, Strato 2 di ADR-0026) — `peer_info(chan)`:
-/// hash dell'immagine del peer del canale `chan` (0 = canale di nascita);
-/// `ServerDied` se il canale non esiste o il peer e' morto (Fase 39). I server
-/// lo usano per la policy su identita' (es. cardo accetta il replace di un
-/// prefix solo dallo stesso binario; init verifica il manifest pre-spawn).
+/// **identita'** dell'immagine del peer del canale `chan` (0 = canale di
+/// nascita); `ServerDied` se il canale non esiste o il peer e' morto
+/// (Fase 39). Dal ADR-0078 l'identita' e' `ImageId` (BLAKE2s-128, in
+/// `rdi`+`rsi`), non piu' FNV-1a. I server la usano per la policy su identita'
+/// (cardo accetta il replace di un prefix solo dallo stesso binario; init
+/// verifica il manifest pre-spawn).
 #[inline]
-pub fn peer_info(chan: u64) -> Result<u64, Error> {
-    let (rax, rdi, _, _, _) = unsafe { syscall4_out(SYS_PEER_INFO, chan, 0, 0, 0) };
-    if rax != 0 { Err(Error::ServerDied) } else { Ok(rdi) }
+pub fn peer_info(chan: u64) -> Result<ImageId, Error> {
+    let (rax, rdi, rsi, _, _) = unsafe { syscall4_out(SYS_PEER_INFO, chan, 0, 0, 0) };
+    if rax != 0 {
+        Err(Error::ServerDied)
+    } else {
+        Ok(ImageId::new(rdi, rsi))
+    }
+}
+
+/// Identita' crittografica dei byte di un'immagine (ADR-0078): BLAKE2s-256
+/// troncato a 128 bit. La stessa che il kernel misura allo spawn/exec, quindi
+/// un client puo' confrontare i byte che ha in mano con `peer_info`.
+#[inline]
+pub fn image_id(bytes: &[u8]) -> ImageId {
+    ImageId::from_digest(&blake2s::blake2s(bytes))
 }
 
 /// Fase 35 (hardening) — `init_bounce(service)`: chiede a init (canale di

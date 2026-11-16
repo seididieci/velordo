@@ -6,7 +6,7 @@
 //! l'address space e ne viene caricato uno nuovo leggendo DIRETTAMENTE dai
 //! byte user del chiamante (S2.5c, exec streaming: niente staging in heap,
 //! come `spawn_image` — lo spazio vecchio resta mappato finche' serve).
-//! Stack nuovo con argv stile Linux (37.1; argc=0 senza args); `image_hash`
+//! Stack nuovo con argv stile Linux (37.1; argc=0 senza args); `image_id`
 //! rimisurato (Strato 2: senza, `peer_info` mentirebbe e la regola same-image
 //! 36.5 sarebbe bypassabile); porte I/O azzerate (least privilege, come il
 //! figlio-copia). Il nome display resta quello vecchio in 37.0 (37.1 lo deriva da
@@ -37,7 +37,7 @@ pub fn exec_current(bytes: &[u8], args_block: Option<&[u8]>) -> Result<(), ()> {
     // 1. Validazione PRIMA di toccare qualunque stato (ELF malformato o args
     // malformati = -1, processo intatto, come `create_user` prima di allocare).
     let layout = crate::elf::validate(bytes).ok_or(())?;
-    let hash = syscall_numbers::image_hash(bytes);
+    let image_id = syscall_numbers::ImageId::from_digest(&blake2s::blake2s(bytes));
     let parsed = match args_block {
         Some(b) => Some(parse_args(b).ok_or(())?),
         None => None,
@@ -99,7 +99,7 @@ pub fn exec_current(bytes: &[u8], args_block: Option<&[u8]>) -> Result<(), ()> {
     // tranne il codice). `setup_user_stack` mappa e basta (le 3 parole
     // argc=0 che scrive per lo spawn vengono sovrascritte qui sotto: il
     // layout parte da USER_STACK_TOP).
-    let new_text = unsafe { crate::elf::load(new_cr3, bytes, &layout) };
+    let new_text = unsafe { crate::elf::load(new_cr3, bytes, &layout, image_id) };
     // Lo stack nuovo ha la stessa profondita' del vecchio (flag bigstack
     // preservato: un rustc che exec'un altro rustc resta largo).
     let _ = unsafe { crate::arc::vmm_user::setup_user_stack(new_cr3, frames as usize, None) };
@@ -141,7 +141,7 @@ pub fn exec_current(bytes: &[u8], args_block: Option<&[u8]>) -> Result<(), ()> {
         }
         let p = &mut sched.processes[me];
         p.text_id = new_text;
-        p.image_hash = hash;
+        p.image_id = image_id;
         // S2.5b: contenuto resettato (l'indirizzo pool resta: stesso pid).
         unsafe { crate::ordo::context::fpu_init(p.saved.fpu as *mut [u128; 32]) };
     }
@@ -159,8 +159,8 @@ pub fn exec_current(bytes: &[u8], args_block: Option<&[u8]>) -> Result<(), ()> {
         core::ptr::write((top - crate::syscall::SAVED_USER_RSP) as *mut u64, new_rsp);
     }
     crate::serial_println!(
-        "[exec] pid={} nuova immagine entry={:#x} hash={:#x}",
-        me, entry, hash
+        "[exec] pid={} nuova immagine entry={:#x} id={:016x}{:016x}",
+        me, entry, image_id.hi, image_id.lo
     );
     Ok(())
 }

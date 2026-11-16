@@ -929,12 +929,19 @@ Voci con scope e vittoria dichiarati (non date).
       Vittoria: un processo ignoto (`foreign`) riceve `ERR_DENIED` su
       `obj_put(b"sys", …)` e su `open(bin/vestigia.bin, TRUNC)`; letture e
       scritture lecite restano verdi; gate 6/6.
-- [ ] **Identità — digest crittografico e manifest come dato** (ADR-0078,
-      fase 1): `image_id` = BLAKE2s-256 troncato a 128 bit (crate `blake2s`
-      già nel repo), `peer_info` a 128 bit (`rdi`+`rsi`), manifest e policy
-      letti da `sys:manifest`/`sys:policy` invece che compilati (fail-closed
-      se mancano). Vittoria: cambiare il codice di un servizio **non
-      ricompila più il kernel**; gate 6/6; t51 aggiornato.
+- [x] **Identità — digest crittografico e manifest come dato** (completata,
+      ADR-0078, fase 1): `ImageId` = BLAKE2s-256 troncato a 128 bit
+      (`syscall-numbers::ImageId`, una sola misura in `elf::load`, riusata da
+      text table e PCB), `peer_info` a 128 bit (`rdi`+`rsi`), `FNV-1a` resta
+      solo come checksum ArcaFS. Manifest e policy sono **dati**:
+      `sys:manifest` (`nome <blake2s hex>`), `sys:policy` e `sys:test-policy`
+      (`hi lo mask nome`), seedati da `arca-tool.sh` e letti a runtime da init
+      (fail-closed: senza manifest nessun servizio da disco), cardo (dal
+      proprio motore, prima del READY) e usertests (t51/t58). Vittoria
+      misurata: `touch` su un servizio + build → **il kernel non si
+      ricompila** (servivano due fix di build: `.bin` identici non riscritti,
+      `kernel/build.rs` non osserva più la dir `userland/build` che contiene
+      `target/`). Gate 6/6, net tests PASS, zero FAIL/PANIC/FAULT.
 - [ ] **Identità — firma Ed25519 dei binari** (ADR-0078, fase 2):
       `libs/sig` (`ed25519-compact`, `no_std`, `default-features = false`),
       `tools/sign` host, sidecar `[VSIG][key_id][sig]`, verifica in cardo a

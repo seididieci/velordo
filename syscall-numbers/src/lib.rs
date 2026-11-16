@@ -126,10 +126,12 @@ pub const SYS_SPAWN_COPY: u64 = 45;
 /// processo — es. la policy `FS_REGISTER` di cardo distingue i figli di
 /// init). Non rivela nulla che `ps_info` non mostri gia'.
 pub const SYS_PEER_PID: u64 = 46;
-/// `peer_info(chan)`: hash dell'immagine (`image_hash`, FNV-1a sull'ELF) del
+/// `peer_info(chan)`: **identita'** dell'immagine (`ImageId`, BLAKE2s-128) del
 /// peer del canale `chan` (0 = canale di nascita), o -1 se il canale non
-/// esiste/il peer e' morto (Fase 36, identita' misurata, Strato 2 di ADR-0026).
-/// Multi-registro (pattern `PS_INFO`): rax = 0 + rdi = hash; -1 = errore.
+/// esiste/il peer e' morto (Fase 36, identita' misurata, Strato 2 di ADR-0026;
+/// digest crittografico da ADR-0078).
+/// Multi-registro (pattern `PS_INFO`): rax = 0, `rdi` = `lo`, `rsi` = `hi`;
+/// -1 = errore.
 /// I server lo usano per la policy su identita' (manifest init, `FS_REGISTER`
 /// in cardo). Non rivela nulla oltre l'identita' del binario (nomi e pid sono
 /// gia' visibili via `ps_info`/`peer_pid`).
@@ -1002,12 +1004,10 @@ pub const MAP_TEST_PHYS: u64 = 0x4_000000;
 /// `map_physical`; con 1 frame il secondo scratch veniva rifiutato.
 pub const MAP_TEST_FRAMES: u64 = 2;
 
-/// Identita' misurata di un'immagine ELF (Fase 36, Strato 2 di ADR-0026):
-/// FNV-1a a 64 bit sui byte dell'ELF. Single source kernel+user: il kernel la
-/// misura allo spawn (`image_hash` nel PCB) e la espone via `SYS_PEER_INFO`;
-/// init/cardo la ricalcolano sui byte caricati per la policy (manifest,
-/// `FS_REGISTER`). Stesso algoritmo dello sharing text (Fase 32, che ora usa
-/// questa funzione): sui `.bin` di build i due valori coincidono bit-per-bit.
+/// FNV-1a a 64 bit. **Non** e' piu' l'identita' di un'immagine: resta il
+/// checksum on-disk di ArcaFS (superblock/nodi, `arcafs::format`) e la
+/// convenzione di test di t52 (FNV dell'argv unito con NUL). Per l'identita'
+/// vedi [`ImageId`].
 pub fn image_hash(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
@@ -1015,6 +1015,49 @@ pub fn image_hash(bytes: &[u8]) -> u64 {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
+}
+
+/// Identita' crittografica di un'immagine (ADR-0078, fase 1): i primi 128 bit
+/// di BLAKE2s-256, come due parole. 128 bit danno resistenza alle collisioni
+/// 2^64 (FNV-1a a 64 bit ne dava 2^32: una collisione scelta su byte craftati
+/// via `spawn_image` era fattibile).
+///
+/// Single source kernel+user: il kernel la misura allo spawn/exec e la mette
+/// nel PCB; `SYS_PEER_INFO` la espone in `rdi` (lo) e `rsi` (hi). init/cardo
+/// la confrontano con il manifest. Il digest **completo** (256 bit) resta
+/// `blake2s::blake2s` per il `sys.content_hash` di ArcaFS.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ImageId {
+    /// Prima meta' del digest (little-endian sui byte 0..8).
+    pub lo: u64,
+    /// Seconda meta' (byte 8..16).
+    pub hi: u64,
+}
+
+impl core::fmt::LowerHex for ImageId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Forma compatta e stabile per i log: `hi` poi `lo`.
+        write!(f, "{:016x}{:016x}", self.hi, self.lo)
+    }
+}
+
+impl ImageId {
+    pub const fn new(lo: u64, hi: u64) -> Self {
+        Self { lo, hi }
+    }
+
+    /// `ImageId` dai primi 16 byte di un digest BLAKE2s-256.
+    pub const fn from_digest(d: &[u8; 32]) -> Self {
+        Self {
+            lo: u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]]),
+            hi: u64::from_le_bytes([d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15]]),
+        }
+    }
+
+    /// `lo`/`hi` in ordine di registro (`SYS_PEER_INFO`).
+    pub const fn regs(self) -> (u64, u64) {
+        (self.lo, self.hi)
+    }
 }
 
 /// Servizi di sistema raggiungibili per nome (ADR-0008, IPC per nome).

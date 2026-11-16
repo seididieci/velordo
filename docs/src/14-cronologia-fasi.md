@@ -3739,3 +3739,39 @@
       lecite invariate; `identistest` 11/11 (identis scrive il suo bucket),
       vestigia logga (carve-out `log`), gate 6/6 e net tests PASS, zero
       FAIL/PANIC/FAULT.
+
+- [x] **Identità — digest crittografico e manifest come dato** (2026-11,
+      ADR-0078, fase 1): l'identità era `FNV-1a 64` sui byte dell'ELF,
+      confrontata con un manifest **compilato** (`include!` in init/cardo/
+      usertests). Due problemi: FNV non è crittografico (`spawn_image` accetta
+      byte arbitrari: una collisione scelta era questione di lavoro, non di
+      fortuna) e ogni rebuild di un servizio cambiava il manifest, quindi
+      ricompilava init/cardo e — poiché il kernel li embedda — **il kernel**.
+      **Fix**: `ImageId` = BLAKE2s-256 troncato a 128 bit (resistenza alle
+      collisioni 2⁶⁴), calcolato **una volta** in `elf::load` e riusato da text
+      table e PCB; `peer_info` restituisce lo/hi in `rdi`/`rsi`; `FNV-1a`
+      resta solo come checksum on-disk di ArcaFS (`image_hash`, che NON è
+      l'identità). Manifest e policy diventano **dati**: `sys:manifest`
+      (`nome <blake2s hex>`), `sys:policy` e `sys:test-policy`
+      (`hi lo mask nome`), seedati da `arca-tool.sh`, letti a runtime da init
+      (dopo il READY di cardo; fail-closed: senza manifest nessun servizio da
+      disco), da cardo (dal proprio motore, prima del READY) e da usertests
+      (t51/t58). Il rebuild mirato di cardo in coda a `build-tests.sh`
+      sparisce: cardo non incorpora più la tabella test.
+      **Vittoria misurata** (`touch` su `netecho` + build → kernel intatto)
+      trovata **dopo due fix di build**, che erano il vero ostacolo:
+      (1) `build_one` riscriveva sempre i `.bin` (e `build-userland.sh` li
+      cancellava prima: il confronto non poteva mai scattare) → ora scrive un
+      temp **fuori** dalla dir di output e sostituisce solo se i byte
+      differiscono; (2) `kernel/build.rs` registrava `rerun-if-changed` sulla
+      *directory* `userland/build`, che contiene `target/` (riscritto a ogni
+      build) → il kernel era sempre "dirty". Ora si elencano i singoli `.bin`
+      (gli embed sono `include_bytes!` statici).
+      **Bug trovato**: il parser della policy esigeva 16 cifre hex anche per
+      la mask (4) → 0 righe lette, ogni test ricadeva nel default restrittivo
+      (29 FAIL al primo giro). Lezione: un bound copiato da un campo all'altro
+      fallisce in silenzio, e un dato vuoto sembra "assente" invece di
+      "illeggibile" — il log ora dice quante righe ha letto.
+      **Validazione**: gate 6/6 (`[usertests] 61/61`, t51/t52 con la nuova
+      identità), net tests PASS (incluso `[posixsock]`), zero
+      FAIL/PANIC/FAULT.

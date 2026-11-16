@@ -32,7 +32,7 @@ if ls pal/build/*.bin >/dev/null 2>&1; then
     echo "[gen-test-policy] + pal/build (veicoli PAL)"
 fi
 OUT_DIR="build-meta"
-OUT="$OUT_DIR/test_policy.rs"
+OUT="$OUT_DIR/test_policy.txt"
 
 for d in "${BUILD_DIRS[@]}"; do
     if [ ! -d "$d" ]; then
@@ -45,7 +45,7 @@ mkdir -p "$OUT_DIR"
 tmp="$OUT.tmp"
 
 python3 - "${BUILD_DIRS[@]}" "$tmp" <<'EOF'
-import glob, os, sys
+import glob, hashlib, os, sys
 
 def fnv1a(data: bytes) -> int:
     h = 0xCBF29CE484222325
@@ -63,25 +63,25 @@ if not bins:
 # cardo.bin (rebuild artefatto, vedi sopra) mai in tabella.
 bins = [p for p in bins if os.path.basename(p) not in ("userforeign.bin", "cardo.bin")]
 
-lines = [
-    "// Generato da scripts/gen-test-policy.sh — MAI modificare a mano.",
-    "// Sandbox build (Fase 45): hash dei binari testland -> mask ALL (la",
-    "// suite esercita ogni op; i negativi stanno in t57 sul default ignoto).",
-    "// Consumato via `include!(env!(\"VELORDO_TEST_POLICY\"))` SOLO da cardo",
-    "// (dopo service_hashes+service_policy). Rigenerato a ogni build test.",
-    "pub const TEST_POLICY: &[(u64, u32)] = &[",
-]
+# ADR-0078 (fase 1): la policy dei test e' **dato**, seedato in
+# `sys:test-policy` da arca-tool.sh. cardo la legge a runtime: aggiungere o
+# ricompilare un binario di test non ricompila piu' cardo (ne' il kernel).
+policy = []
 for p in bins:
     with open(p, "rb") as f:
         data = f.read()
     if not data:
         sys.exit("binario vuoto: %s" % p)
-    lines.append("    (0x%016X, 0x1FFF), // %s" % (fnv1a(data), os.path.basename(p)))
-lines.append("];")
+    stem = os.path.splitext(os.path.basename(p))[0]
+    digest = hashlib.blake2s(data).digest()
+    id_lo = int.from_bytes(digest[0:8], "little")
+    id_hi = int.from_bytes(digest[8:16], "little")
+    policy.append("%016x %016x 1fff %s" % (id_hi, id_lo, stem))
 
 with open(tmp, "w") as f:
-    f.write("\n".join(lines) + "\n")
-print("[gen-test-policy] %d binari -> %s" % (len(bins), tmp))
+    f.write("# Generato da scripts/gen-test-policy.sh — non modificare a mano.\n")
+    f.write("\n".join(policy) + "\n")
+print("[gen-test-policy] %d binari -> %s" % (len(policy), tmp))
 EOF
 
 mv "$tmp" "$OUT"

@@ -215,7 +215,7 @@ pub fn process_cr3(pid: usize) -> Option<u64> {
 /// Identita' misurata dell'immagine del processo `pid` (Fase 36, Strato 2 di
 /// ADR-0026): `None` se lo slot e' vuoto o il processo e' terminato (come
 /// `process_ps`). I processi kernel (idle) hanno hash 0 = nessuna immagine.
-pub fn process_image_hash(pid: usize) -> Option<u64> {
+pub fn process_image_id(pid: usize) -> Option<syscall_numbers::ImageId> {
     let guard = SCHED.lock();
     let sched = guard.as_ref()?;
     if pid >= sched.processes.len() {
@@ -225,5 +225,5 @@ pub fn process_image_hash(pid: usize) -> Option<u64> {
     if p.state == State::Terminated {
         return None;
     }
-    Some(p.image_hash)
+    Some(p.image_id)
 }

@@ -72,7 +72,7 @@ struct Endpoint {
     ring_id: u32,
     ring_base: *mut u8,
     peer_chan: u64,
-    peer_hash: u64,
+    peer_id: civis::ImageId,
     rx_pkts: u64,
     tx_pkts: u64,
     /// Connessione TCP nel core (`Net`), `NO_CONN` se non ancora aperta.
@@ -94,7 +94,7 @@ impl Endpoint {
             ring_id: 0,
             ring_base: core::ptr::null_mut(),
             peer_chan: 0,
-            peer_hash: 0,
+            peer_id: civis::ImageId { lo: 0, hi: 0 },
             rx_pkts: 0,
             tx_pkts: 0,
             conn_id: NO_CONN,
@@ -167,7 +167,7 @@ impl NetService {
     }
 
     /// Alloca un nuovo endpoint.
-    pub fn alloc_endpoint(&mut self, peer_chan: u64, peer_hash: u64) -> Option<usize> {
+    pub fn alloc_endpoint(&mut self, peer_chan: u64, peer_id: civis::ImageId) -> Option<usize> {
         for i in 0..MAX_ENDPOINTS {
             if self.endpoints[i].state == EpState::Free {
                 let ep_id = self.next_ep_id;
@@ -184,7 +184,7 @@ impl NetService {
                     ring_id: 0,
                     ring_base: core::ptr::null_mut(),
                     peer_chan,
-                    peer_hash,
+                    peer_id,
                     rx_pkts: 0,
                     tx_pkts: 0,
                     conn_id: NO_CONN,
@@ -338,7 +338,7 @@ impl NetService {
     }
 
     /// Verifica se un peer può bindare `port`.
-    pub fn can_bind(&self, _peer_hash: u64, port: u16) -> bool {
+    pub fn can_bind(&self, _peer_id: civis::ImageId, port: u16) -> bool {
         if port >= 49152 {
             return true;
         }
@@ -497,7 +497,7 @@ fn apply_accepted(svc: &mut NetService, conn: u8, port: u16) {
         return;
     };
     let listener = svc.endpoints[listener_idx];
-    let Some(child_idx) = svc.alloc_endpoint(listener.peer_chan, listener.peer_hash) else {
+    let Some(child_idx) = svc.alloc_endpoint(listener.peer_chan, listener.peer_id) else {
         svc.net.tcp_abort(conn);
         return;
     };
@@ -785,7 +785,7 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
             let proto = (m.w0 >> 16) as u16;
             let local_port = (m.w0 & 0xffff) as u16;
             let flags = m.w1;
-            let peer_hash = match civis::peer_info(m.channel) {
+            let peer_id = match civis::peer_info(m.channel) {
                 Ok(h) => h,
                 Err(_) => {
                     let _ = civis::reply(NET_EP_OPEN, !0u64, 0);
@@ -806,11 +806,11 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
             } else {
                 local_port
             };
-            if !svc.can_bind(peer_hash, port) {
+            if !svc.can_bind(peer_id, port) {
                 let _ = civis::reply(NET_EP_OPEN, !0u64, 0);
                 return;
             }
-            let Some(idx) = svc.alloc_endpoint(m.channel, peer_hash) else {
+            let Some(idx) = svc.alloc_endpoint(m.channel, peer_id) else {
                 let _ = civis::reply(NET_EP_OPEN, !0u64, 0);
                 return;
             };

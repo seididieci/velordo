@@ -7,23 +7,16 @@ const BIN_LIST_TAG: u32 = BIN_LIST as u32;
 
 // ── Main ───────────────────────────────────────────────────────────
 
-/// Nome del driver dietro il canale `chan` dal suo `image_hash` (Fase 36,
-/// identita' misurata): confronto col manifest generato a build-time; `"?"`
-/// se il canale e' morto o l'hash e' ignoto (test/helper, cardo stesso:
-/// `HASH_CARDO` non esiste — cardo incorpora il manifest e il suo hash
-/// sarebbe un ciclo). Solo diagnostica nei log, mai decisioni (la policy
-/// confronta gli hash, non i nomi).
+/// Nome del driver dietro il canale `chan` dalla sua identita' (Fase 36,
+/// `ImageId` da ADR-0078): confronto col manifest generato a build-time; `"?"`
+/// se il canale e' morto o l'identita' e' ignota (test/helper, cardo stesso:
+/// `ID_CARDO` non esiste — cardo incorpora il manifest e il suo id sarebbe un
+/// ciclo). Solo diagnostica nei log, mai decisioni (la policy confronta gli
+/// id, non i nomi).
 fn driver_name_of(chan: u64) -> &'static str {
     match civis::peer_info(chan) {
-        Ok(h) if h == HASH_GPU => "gpu",
-        Ok(h) if h == HASH_VELA => "vela",
-        Ok(h) if h == HASH_BLOCK => "block",
-        Ok(h) if h == HASH_KBD => "kbd",
-        Ok(h) if h == HASH_VESTIGIA => "vestigia",
-        Ok(h) if h == HASH_USERSHELL => "usershell",
-        Ok(h) if h == HASH_PORTA => "porta",
-        Ok(h) if h == HASH_USERUPTIME => "useruptime",
-        _ => "?",
+        Ok(id) => policy::name_of(id),
+        Err(_) => "?",
     }
 }
 
@@ -334,6 +327,9 @@ fn real_main(_sp: u64) -> ! {
     if let Some(d) = disk.as_mut() {
         seed_sys_disk(d, &mut fat_mounts, &mut fat_gen);
     }
+    // Policy e test-policy (ADR-0078): dati dal volume, letti PRIMA del READY
+    // (nessun client e' ancora classificato). Assenti = default restrittivo.
+    policy::load_tables(&disk);
     // Mount root: il volume ArcaFS su `""` (radice, catch-all). Ramfs resta
     // solo su `/tmp` (sopra); `/fat` resta montato per dati (niente fallback).
     let root_id = next_mount_id;
@@ -466,7 +462,7 @@ fn real_main(_sp: u64) -> ! {
                 // policy sui mount registrati dinamicamente.
                 // (a) solo sotto `/dev/` (niente hijack di `/` o voci rogue a
                 // root); (b) il replace di un prefix esistente solo dallo
-                // STESSO binario (stesso `image_hash` del driver vivo: il
+                // STESSO binario (stessa `ImageId` del driver vivo: il
                 // restart da disco rilegge gli stessi byte, quindi riesce
                 // senza init) o da un figlio di init (bootstrap): impedisce a
                 // un processo qualsiasi di squattare `/dev/null` dopo un kill.
@@ -496,7 +492,7 @@ fn real_main(_sp: u64) -> ! {
                     // replace di un prefix di un driver VIVO richiede un figlio
                     // di init; un driver morto (canale invalidato) puo' sempre
                     // essere rimpiazzato (riconnessione legittima). Fase 36: il
-                    // replace riesce anche dallo STESSO binario (hash uguale a
+                    // replace riesce anche dallo STESSO binario (id uguale a
                     // quello del driver vivo — restart da disco senza init).
                     let existing = mounts.iter().find(|m| m.prefix.as_str() == prefix).map(|m| m.driver_chan);
                     let stale = match existing {

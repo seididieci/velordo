@@ -84,7 +84,23 @@ build_one() {
     # Il kernel lo carica per-segmento (`kernel/src/elf.rs`, W^X). `--strip-all`
     # rimuove symtab/debug ma CONSERVA i program header (PT_LOAD). Il nome
     # output resta `.bin` (il loader sniffa il magic ELF).
-    "$OBJCOPY" --strip-all "$ELF" "$OUT"
+    #
+    # ADR-0078 (fase 1): se il `.bin` e' **identico** a quello gia' presente,
+    # non lo si sostituisce. Cosi' ricompilare un servizio NON cambia i byte di
+    # cardo/rector (che il kernel embedda via `include_bytes!`) e il kernel non
+    # viene ricompilato: la vittoria "aggiungere un servizio non tocca il
+    # kernel" dipende da questo, non solo dal manifest come dato.
+    # Il temp sta FUORI dalla dir di output: crearlo/rimuoverlo li' cambierebbe
+    # il mtime della *directory*, che cargo usa come input di `include_bytes!`
+    # (e ricompilerebbe il kernel anche a contenuto identico).
+    local TMP="${TMPDIR:-/tmp}/velordo-objcopy-$$-$out_name"
+    "$OBJCOPY" --strip-all "$ELF" "$TMP"
+    if [ -f "$OUT" ] && cmp -s "$TMP" "$OUT"; then
+        rm -f "$TMP"
+        echo "[build] $OUT (invariato)"
+        return 0
+    fi
+    mv -f "$TMP" "$OUT"
 
     local SIZE=$(stat -c %s "$OUT")
     echo "[build] $OUT ($SIZE bytes)"

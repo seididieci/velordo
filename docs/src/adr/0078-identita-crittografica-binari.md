@@ -2,8 +2,22 @@
 
 ## Status
 
-**Accepted** (2026-11). Fasi 1–2: digest BLAKE2s + manifest/policy come dati,
-poi `libs/sig` + `tools/sign` + verifica in cardo. Dipende da ADR-0077.
+**Accepted** (2026-11). **Fase 1 implementata**: `ImageId` = BLAKE2s-128
+(`syscall-numbers::ImageId`, calcolato una volta in `elf::load` e riusato da
+text table e PCB), `peer_info` a 128 bit (`rdi`+`rsi`), manifest e policy come
+**dati** (`sys:manifest` / `sys:policy` / `sys:test-policy`, letti a runtime da
+init, cardo e usertests). Fase 2 (`libs/sig` + `tools/sign` + verifica in
+cardo) da fare. Dipende da ADR-0077.
+
+Vittoria misurata: `touch userland/netecho/src/main.rs` + build → il kernel
+**non** viene ricompilato. Per ottenerla sono serviti due fix di build che
+mascherano il risultato: `build_one` non riscrive i `.bin` identici (mtime
+stabile, temp fuori dalla dir) e `kernel/build.rs` non osserva piu' la
+*directory* `userland/build` (contiene `target/`, riscritto a ogni build).
+
+**Bug trovato implementando**: il parser della policy richiedeva 16 cifre hex
+anche per la mask (4 cifre) → 0 righe lette e ogni test ricadeva nel default
+restrittivo. Un `if s.len() < 16` copiato da `hi`/`lo`.
 
 ## Context
 

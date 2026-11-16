@@ -121,6 +121,19 @@ seed_bin userland/build/dns-resolve.bin usr/bin/dns-resolve.bin usr dns-resolve
 seed_bin userland/build/create-user.bin usr/bin/cuuser.bin usr cuuser
 # Interprete nativa (Fase 3.2, S3.2a): REPL minima, spawnata dal login (identis-login).
 seed_bin userland/build/shell.bin bin/interpres.bin sys bin/interpres.bin
+# Manifest e policy come DATI (ADR-0078, fase 1): init e cardo li leggono a
+# runtime, quindi aggiungere/aggiornare un servizio non ricompila il kernel.
+# Bucket `sys`, chiavi piatte; niente path `ns` (non sono file da browsare).
+for pair in "manifest:manifest.txt" "policy:policy.txt" "test-policy:test_policy.txt"; do
+    key="${pair%%:*}"; file="${pair##*:}"
+    if [ -f "build-meta/$file" ]; then
+        SEED_NS+=( "sys:$key=$(pwd)/build-meta/$file" )
+        echo "[arca] + sys:$key (build-meta/$file)"
+    elif [ "$key" != "test-policy" ]; then
+        echo "[arca] errore: build-meta/$file mancante (build-userland.sh prima)" >&2
+        exit 1
+    fi
+done
 # Test suite /test (stessi dest 8.3 di inject-bins.sh). D2: le 6 suite che
 # init carica per object_id hanno anche l'oggetto in `tst`; gli helper
 # (testcli, testspin, …) vivono solo come path (dogfood VFS, D2.4).

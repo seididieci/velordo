@@ -689,7 +689,7 @@ pub fn t_exec_core() -> bool {
             return false;
         }
     };
-    let h_ref = civis::peer_info(r_chan).unwrap_or(0);
+    let h_ref = civis::peer_info(r_chan).unwrap_or_default();
     let (ok_h, _) = helpers::recv_done(&[h_chan]);
     let (ok_r, _) = helpers::recv_done(&[r_chan]);
     // Reap senza EXIT_NOTIFY (consumate dai recv_done sopra): poll throttled

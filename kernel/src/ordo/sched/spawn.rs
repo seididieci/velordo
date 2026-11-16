@@ -106,7 +106,7 @@ pub fn spawn_thread(entry: u64, stack: u64, fs: u64) -> Option<usize> {
     }
     let (name, name_owned, name_len, priority, cr3, tss_slot, cbs, text_id, img) = {
         let l = &sched.processes[group];
-        (l.name, l.name_owned, l.name_len, l.priority, l.cr3, l.tss_slot, l.cbs_server, l.text_id, l.image_hash)
+        (l.name, l.name_owned, l.name_len, l.priority, l.cr3, l.tss_slot, l.cbs_server, l.text_id, l.image_id)
     };
     let id = sched.alloc_pid()?;
     let thread = match unsafe {

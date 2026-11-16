@@ -410,7 +410,16 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   FNV-1a nel PCB misurato allo spawn, manifest generato a build-time verificato
   da init pre-spawn; il kernel resta neutro (ADR-0025: POSIX e' personalità, non
   struttura). Il manifest esclude i binari che lo incorporano (rector/cardo:
-  hash di sé = ciclo instabile, mai fixpoint). (5) **Bucket di fiducia
+  hash di sé = ciclo instabile, mai fixpoint). (6) **Identità crittografica e
+  manifest come dato (ADR-0078, fase 1)**: `ImageId` = BLAKE2s-128
+  (`syscall-numbers::ImageId`, una misura in `elf::load`, riusata da text
+  table e PCB), `peer_info` a 128 bit (`rdi`+`rsi`); `FNV-1a` resta solo
+  checksum ArcaFS. `sys:manifest` / `sys:policy` / `sys:test-policy` sono
+  **dati** seedati da `arca-tool.sh` e letti a runtime (init fail-closed senza
+  manifest, cardo dal proprio motore prima del READY). Corollario di build:
+  `build_one` non riscrive `.bin` identici (temp fuori dalla dir) e
+  `kernel/build.rs` elenca i singoli `.bin`, mai la dir `userland/build`
+  (contiene `target/`) — senza, il kernel si ricompila comunque. (5) **Bucket di fiducia
   protetti (ADR-0077, fase 0)**: `policy::write_allowed` in cardo, dopo il
   tetto e il subtree — admin ops (snapshot) solo con `ceiling == RIGHTS_ALL`;
   bucket `sys`/`usr`/`tst`/`ns` e path `bin/`, `usr/bin/`, `test/` solo con

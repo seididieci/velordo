@@ -110,19 +110,19 @@ fn handle_reg(st: &mut State, chan: u64, req_phys: u64, resp_phys: u64) -> u64 {
         return civis::ERR;
     }
     let pid = civis::peer_pid(chan).unwrap_or(-1);
-    let hash = civis::peer_info(chan).unwrap_or(0);
+    let id = civis::peer_info(chan).unwrap_or_default();
     if let Some(r) = st.regs.iter_mut().find(|r| r.chan == chan) {
         r.req_phys = req_phys;
         r.resp_phys = resp_phys;
         r.pid = pid;
-        r.hash = hash;
-        return hash;
+        r.hash = id.lo;
+        return id.lo;
     }
     if st.regs.len() >= 64 {
         return civis::ERR;
     }
-    st.regs.push(Reg { chan, req_phys, resp_phys, pid, hash });
-    hash
+    st.regs.push(Reg { chan, req_phys, resp_phys, pid, hash: id.lo });
+    id.lo
 }
 
 /// Persistenza opportunistica di UN record (chiave+bytes): PUT dato + PUT

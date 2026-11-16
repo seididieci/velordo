@@ -2,9 +2,10 @@
 //! condivise tra le istanze dello stesso binario, con refcount. Il loader ELF
 //! (`crate::elf`) carica `[base, rw_off)` da qui e `[rw_off, end)` privatamente.
 //!
-//! Identita': hash FNV-1a dell'ELF + **verifica byte-per-byte** del contenuto
-//! immutabile su hit (input da disco non fidato: una collisione di hash
-//! mapperebbe codice sbagliato, quindi non ci si fida del solo hash). Tabella
+//! Identita': `ImageId` (BLAKE2s-128, ADR-0078) dell'ELF + **verifica
+//! byte-per-byte** del contenuto immutabile su hit (input da disco non fidato:
+//! una collisione mapperebbe codice sbagliato, quindi non ci si fida del solo
+//! digest). Tabella
 //! statica (mai heap), stile `SHM_TABLE`; accesso serializzato dallo SCHED lock
 //! (spawn e reclaim). Slot pieni → fallback al load privato (mai spawn fallito).
 //! Scope: refcount-only (condivide tra istanze concorrenti, libera a 0).
@@ -21,9 +22,9 @@ use crate::elf::{Layout, PAGE};
 /// un errore di spawn) il contatore `full` e il log una-tantum lo dicono.
 const TEXT_MAX: usize = crate::ordo::sched::MAX_PIDS;
 
-/// `(phys, pages, hash, base, rw_off, refs)`; `phys == 0` = slot libero.
-static mut TEXT_TABLE: [(u64, u64, u64, u64, u64, u32); TEXT_MAX] =
-    [(0, 0, 0, 0, 0, 0); TEXT_MAX];
+/// `(phys, pages, id_lo, id_hi, base, rw_off, refs)`; `phys == 0` = libero.
+static mut TEXT_TABLE: [(u64, u64, u64, u64, u64, u64, u32); TEXT_MAX] =
+    [(0, 0, 0, 0, 0, 0, 0); TEXT_MAX];
 
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
@@ -36,12 +37,6 @@ static FULL: AtomicU64 = AtomicU64::new(0);
 /// la saturazione era invisibile (nessun log, `misses` non la conta) e il solo
 /// sintomo era un `t47: no sharing` inspiegabile.
 static WARNED: AtomicBool = AtomicBool::new(false);
-
-/// FNV-1a 64-bit sull'ELF (identita' del binario): single source in
-/// `syscall-numbers` (Fase 36, riusata per l'identita' misurata nel PCB).
-fn hash(bytes: &[u8]) -> u64 {
-    syscall_numbers::image_hash(bytes)
-}
 
 /// Confronta il contenuto immutabile del nuovo ELF con l'immagine in cache
 /// (`phys`): copre esattamente il range condiviso `[base, rw_off)`. Sicuro
@@ -82,22 +77,22 @@ unsafe fn fill_shared(bytes: &[u8], l: &Layout, phys: u64) {
 ///
 /// # Safety
 /// Chiamato dal loader con lo SCHED lock trattenuto (spawn/reclaim).
-pub unsafe fn acquire(bytes: &[u8], l: &Layout) -> Option<u32> {
+pub unsafe fn acquire(bytes: &[u8], l: &Layout, id: syscall_numbers::ImageId) -> Option<u32> {
     let pages = ((l.rw_off - l.base) / PAGE) as usize;
     if pages == 0 {
         return None;
     }
-    let h = hash(bytes);
     for i in 0..TEXT_MAX {
         let e = unsafe { *core::ptr::addr_of!(TEXT_TABLE[i]) };
         if e.0 != 0
-            && e.2 == h
+            && e.2 == id.lo
+            && e.3 == id.hi
             && e.1 == pages as u64
-            && e.3 == l.base
-            && e.4 == l.rw_off
+            && e.4 == l.base
+            && e.5 == l.rw_off
             && unsafe { verify(bytes, l, e.0) }
         {
-            unsafe { *core::ptr::addr_of_mut!(TEXT_TABLE[i].5) += 1; }
+            unsafe { *core::ptr::addr_of_mut!(TEXT_TABLE[i].6) += 1; }
             HITS.fetch_add(1, Ordering::Relaxed);
             LIVE.fetch_add(1, Ordering::Relaxed);
             return Some(i as u32 + 1);
@@ -131,7 +126,8 @@ pub unsafe fn acquire(bytes: &[u8], l: &Layout) -> Option<u32> {
     unsafe {
         core::ptr::write_bytes(crate::addr::phys_to_virt(phys) as *mut u8, 0, pages * PAGE as usize);
         fill_shared(bytes, l, phys);
-        *core::ptr::addr_of_mut!(TEXT_TABLE[i]) = (phys, pages as u64, h, l.base, l.rw_off, 1);
+        *core::ptr::addr_of_mut!(TEXT_TABLE[i]) =
+            (phys, pages as u64, id.lo, id.hi, l.base, l.rw_off, 1);
     }
     MISSES.fetch_add(1, Ordering::Relaxed);
     LIVE.fetch_add(1, Ordering::Relaxed);
@@ -172,15 +168,15 @@ pub fn release(id: u32) {
         return;
     }
     LIVE.fetch_sub(1, Ordering::Relaxed);
-    let refs = e.5.saturating_sub(1);
+    let refs = e.6.saturating_sub(1);
     if refs == 0 {
         crate::arc::phys_mem::free_contiguous(e.0, e.1 as usize);
-        unsafe { *core::ptr::addr_of_mut!(TEXT_TABLE[idx]) = (0, 0, 0, 0, 0, 0); }
+        unsafe { *core::ptr::addr_of_mut!(TEXT_TABLE[idx]) = (0, 0, 0, 0, 0, 0, 0); }
         // Slot di nuovo libero: un'eventuale saturazione successiva merita
         // un altro log (un avviso per episodio, non uno per boot).
         WARNED.store(false, Ordering::Relaxed);
     } else {
-        unsafe { *core::ptr::addr_of_mut!(TEXT_TABLE[idx].5) = refs; }
+        unsafe { *core::ptr::addr_of_mut!(TEXT_TABLE[idx].6) = refs; }
     }
 }
 
@@ -197,7 +193,7 @@ pub fn add_ref(id: u32) {
     if e.0 == 0 {
         return;
     }
-    unsafe { *core::ptr::addr_of_mut!(TEXT_TABLE[idx].5) += 1; }
+    unsafe { *core::ptr::addr_of_mut!(TEXT_TABLE[idx].6) += 1; }
     LIVE.fetch_add(1, Ordering::Relaxed);
 }
 

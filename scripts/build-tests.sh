@@ -23,11 +23,10 @@ rm -f "$BUILD"/*.bin flavours/posix/tests/build/*.bin
 # Manifest hash dei servizi (Fase 36): generato da build-userland.sh (che gira
 # sempre prima, vedi run.sh). Riesportato qui per i crate test che lo
 # includono (usertests t51: peer_info atteso); se manca, fail loud subito.
-if [ ! -f "build-meta/service_hashes.rs" ]; then
-    echo "[build-tests] ERROR: build-meta/service_hashes.rs mancante (build-userland.sh prima)" >&2
+if [ ! -f "build-meta/manifest.txt" ]; then
+    echo "[build-tests] ERROR: build-meta/manifest.txt mancante (build-userland.sh prima)" >&2
     exit 1
 fi
-export VELORDO_SERVICE_HASHES="$(pwd)/build-meta/service_hashes.rs"
 
 build_one testland/demo    testland/demo/src/demo.ld         userdemo.bin      userdemo
 build_one testland/testfs  testland/testfs/src/testfs.ld     usertestfs.bin    usertestfs
@@ -89,11 +88,6 @@ BUILD="flavours/posix/tests/build" build_one flavours/posix/tests flavours/posix
 # /fat per i restart da disco). Fixpoint in un passaggio (cardo e' fuori da
 # entrambe le tabelle, i test non dipendono da questa).
 bash scripts/gen-test-policy.sh
-export VELORDO_SERVICE_POLICY="$(pwd)/build-meta/service_policy.rs"
-export VELORDO_TEST_POLICY="$(pwd)/build-meta/test_policy.rs"
-# Rebuild mirato in userland/build (BUILD override: build_one scrive in
-# $BUILD/$out e qui $BUILD e' testland/build — il kernel embedda e inject
-# copiano userland/build). Rimuove anche l'eventuale cardo.bin stale in
-# testland/build (artefatto di run precedenti: NON deve finire in tabella).
-rm -f testland/build/cardo.bin
-BUILD="userland/build" build_one userland/cardo userland/cardo/src/cardo.ld cardo.bin cardo
+# ADR-0078 (fase 1): cardo NON incorpora piu' la tabella test (legge
+# `sys:test-policy` a runtime), quindi il rebuild mirato di cardo in coda a
+# questo script non serve piu': cardo.bin resta quello di build-userland.sh.

@@ -22,67 +22,128 @@ use civis::{VGA_CRTC_INDEX, VGA_CRTC_DATA, KBD_DATA, KBD_CMD, RTC_INDEX, RTC_DAT
 
 // Manifest degli hash dei servizi (Fase 36, identita' misurata, Strato 2 di
 // ADR-0026): generato a build-time da scripts/gen-service-hashes.sh sui
-// `.bin` finali, incluso qui via `VELORDO_SERVICE_HASHES` (esportata da
-// build-userland.sh; senza, questa compilazione fallisce loud).
-include!(env!("VELORDO_SERVICE_HASHES"));
+// ADR-0078 (fase 1): il manifest e' un **dato** (`sys:manifest`), letto a
+// runtime dopo che cardo e' pronto. Nessun `include!`: cambiare un servizio
+// non ricompila piu' init (ne' il kernel che lo embedda).
+const MANIFEST_MAX: usize = 40;
 
-/// Hash atteso del servizio `bin` (nome display, es. `b"gpu"`), o
+#[derive(Clone, Copy)]
+struct Pin {
+    name: [u8; 24],
+    name_len: u8,
+    id: civis::ImageId,
+    blake: [u8; 32],
+}
+
+static mut PINS: [Pin; MANIFEST_MAX] = [Pin {
+    name: [0; 24],
+    name_len: 0,
+    id: civis::ImageId { lo: 0, hi: 0 },
+    blake: [0; 32],
+}; MANIFEST_MAX];
+static mut NPINS: usize = 0;
+/// `false` = manifest assente/illeggibile: i servizi da disco NON partono
+/// (fail-closed), gli embedded (kernel) si'.
+static mut MANIFEST_OK: bool = false;
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Carica `sys:manifest` (`nome <blake2s-256 hex>` per riga). Idempotente.
+fn manifest_load() {
+    let data = match civis::obj_get(b"sys", b"manifest") {
+        Ok(d) => d,
+        Err(_) => {
+            println!("[init] manifest assente (sys:manifest): servizi da disco NON avviati");
+            return;
+        }
+    };
+    let mut n = 0usize;
+    for line in data.split(|&b| b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() || line[0] == b'#' {
+            continue;
+        }
+        let Some(sp) = line.iter().position(|&b| b == b' ') else { continue };
+        let (name, rest) = (&line[..sp], &line[sp + 1..]);
+        if name.is_empty() || name.len() > 24 || rest.len() < 64 || n >= MANIFEST_MAX {
+            continue;
+        }
+        let mut blake = [0u8; 32];
+        let mut ok = true;
+        for i in 0..32 {
+            match (hex_nibble(rest[i * 2]), hex_nibble(rest[i * 2 + 1])) {
+                (Some(hi), Some(lo)) => blake[i] = (hi << 4) | lo,
+                _ => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        let mut pin = Pin {
+            name: [0; 24],
+            name_len: name.len() as u8,
+            id: civis::ImageId::from_digest(&blake),
+            blake,
+        };
+        pin.name[..name.len()].copy_from_slice(name);
+        unsafe {
+            *core::ptr::addr_of_mut!(PINS[n]) = pin;
+            n += 1;
+            *core::ptr::addr_of_mut!(NPINS) = n;
+            *core::ptr::addr_of_mut!(MANIFEST_OK) = true;
+        }
+    }
+    println!("[init] manifest: {} servizi pinnati da sys:manifest", n);
+}
+
+/// Pin del servizio `bin` (nome display), se presente nel manifest.
+fn pin_of(bin: &[u8]) -> Option<Pin> {
+    unsafe {
+        let n = *core::ptr::addr_of!(NPINS);
+        for i in 0..n {
+            let p = *core::ptr::addr_of!(PINS[i]);
+            if p.name[..p.name_len as usize] == *bin {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Identita' attesa del servizio `bin` (nome display, es. `b"gpu"`), o
 /// `None` se non e' nel manifest: embedded disk/fs (TCB del kernel — init non
 /// ha i byte in mano per verificarli, li spawna per nome) e binari di test
 /// (solo suite, mai servizi). Solo i servizi da disco sono pinnati.
-fn expected_hash(bin: &[u8]) -> Option<u64> {
-    match bin {
-        b"gpu" => Some(HASH_GPU),
-        b"console" => Some(HASH_CONSOLE),
-        b"useruptime" => Some(HASH_USERUPTIME),
-        b"vela" => Some(HASH_VELA),
-        b"kbd" => Some(HASH_KBD),
-        b"porta" => Some(HASH_PORTA),
-        b"userposix" => Some(HASH_USERPOSIX),
-        b"usershell" => Some(HASH_USERSHELL),
-        b"usertime" => Some(HASH_USERTIME),
-        b"vestigia" => Some(HASH_VESTIGIA),
-        b"identis" => Some(HASH_IDENTIS),
-        b"identis-login" => Some(HASH_IDENTIS_LOGIN),
-        b"netecho" => Some(HASH_NETECHO),
-        b"siit" => Some(HASH_SIIT),
-        b"dns" => Some(HASH_DNS),
-        _ => None,
-    }
+/// L'identita' e' `ImageId` (BLAKE2s-128, ADR-0078): la stessa che il kernel
+/// misura e che `peer_info` espone.
+fn expected_id(bin: &[u8]) -> Option<civis::ImageId> {
+    pin_of(bin).map(|p| p.id)
 }
 
-/// Content-hash BLAKE2s-256 atteso (Fase 55, N0: `sys.content_hash`,
-/// arcafs.md §8): generato a build-time dagli stessi byte (gen-service-
-/// hashes.sh via hashlib; la crate `blake2s` e' l'implementazione guest,
-/// tenute d'accordo da testsarca). Stesse esclusioni di `expected_hash`.
+/// Content-hash BLAKE2s-256 atteso (Fase 55, N0: `sys.content_hash`): stesso
+/// digest da cui deriva `ImageId`, dal manifest (ADR-0078: dato, non codice).
 fn expected_blake(bin: &[u8]) -> Option<[u8; 32]> {
-    match bin {
-        b"gpu" => Some(BLAKE_GPU),
-        b"console" => Some(BLAKE_CONSOLE),
-        b"useruptime" => Some(BLAKE_USERUPTIME),
-        b"vela" => Some(BLAKE_VELA),
-        b"kbd" => Some(BLAKE_KBD),
-        b"porta" => Some(BLAKE_PORTA),
-        b"userposix" => Some(BLAKE_USERPOSIX),
-        b"usershell" => Some(BLAKE_USERSHELL),
-        b"usertime" => Some(BLAKE_USERTIME),
-        b"vestigia" => Some(BLAKE_VESTIGIA),
-        b"identis" => Some(BLAKE_IDENTIS),
-        b"identis-login" => Some(BLAKE_IDENTIS_LOGIN),
-        b"netecho" => Some(BLAKE_NETECHO),
-        b"siit" => Some(BLAKE_SIIT),
-        b"dns" => Some(BLAKE_DNS),
-        _ => None,
-    }
+    pin_of(bin).map(|p| p.blake)
 }
 
-/// Doppio pinning (Fase 55, N0): FNV-1a (manifest storico, veloce) +
-/// BLAKE2s-256 (tamper-evidence, TCB). Ritorna true se OGNI pin esistente
+/// Doppio pinning (Fase 55, N0 + ADR-0078): identita' BLAKE2s-128 (`ID_*`,
+/// quella che il kernel misura) + content-hash BLAKE2s-256 (`BLAKE_*`,
+/// tamper-evidence sul digest completo). Ritorna true se OGNI pin esistente
 /// passa; un binario senza pin (embedded/test) passa sempre (niente da
 /// confrontare). Stesso predicato usato da t58 per provare il rifiuto.
 fn verify_image(bin: &[u8], img: &[u8]) -> bool {
-    if let Some(expected) = expected_hash(bin) {
-        if civis::image_hash(img) != expected {
+    if let Some(expected) = expected_id(bin) {
+        if civis::image_id(img) != expected {
             return false;
         }
     }
@@ -213,7 +274,7 @@ fn spawn_image_from_vec(img: &[u8], meta: &SvcMeta) -> Option<i64> {
     // panic come prima; in restart e' retry-con-hold con log loud). Il log
     // dice `hash-ok` solo se c'era un pinning dal manifest (mai claim senza
     // verifica).
-    let pinned = expected_hash(meta.bin).is_some() || expected_blake(meta.bin).is_some();
+    let pinned = expected_id(meta.bin).is_some() || expected_blake(meta.bin).is_some();
     if !verify_image(meta.bin, img) {
         println!(" -> FAILED (hash mismatch)");
         return None;
@@ -249,6 +310,12 @@ fn spawn_image_from_vec(img: &[u8], meta: &SvcMeta) -> Option<i64> {
 /// una sorgente** (ADR-0059): il boot carica tutto da ArcaFS.
 fn spawn_entry(meta: &SvcMeta) -> Option<i64> {
     if let Some((bucket, key)) = meta.obj {
+        // Fail-closed (ADR-0078): senza manifest non si spawana nulla da
+        // disco — meglio nessun servizio che servizi non verificati.
+        if !unsafe { *core::ptr::addr_of!(MANIFEST_OK) } {
+            println!(" -> FAILED (manifest assente: fail-closed)");
+            return None;
+        }
         print_str!("[init] load obj ");
         civis::write_raw(key.as_ptr(), key.len());
         let img = match spawn_object(bucket, key) {
@@ -852,6 +919,9 @@ fn real_main(_sp: u64) -> ! {
     };
     wait_msg(fs_chan, SVC_READY);
     let _ = civis::vestigia::log(b"init", b"fs ready");
+    // Manifest dei servizi (ADR-0078): dato in `sys:manifest`, letto ora che
+    // il FS serve. Da qui in poi ogni spawn da disco e' verificato.
+    manifest_load();
     // Time da disco (Fase 50, P1 orologio): registra Time + ack; chi serve
     // data/ora (cardo per mtime, vestigia per i timbri) lo risolve per nome.
     if boot_svc(&SVC_TIME, true).is_none() {

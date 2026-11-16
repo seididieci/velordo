@@ -56,7 +56,7 @@ pub fn spawn_copy_current() -> Option<(usize, usize)> {
             p.priority,
             p.req_next,
             p.text_id,
-            p.image_hash,
+            p.image_id,
             p.name,
             p.name_owned,
             p.name_len,

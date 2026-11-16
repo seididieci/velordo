@@ -114,7 +114,7 @@ La numerazione e' definita nel dispatch di `syscall_handler` in `kernel/src/sysc
 | 44 | `text_stats()` | contatori shared text (Fase 32, debug/test): `hits` in rax, `misses` in rdi, `live` in rsi; dalla Fase 33 `rdx` = fault COW gestiti (`cow_count`); fix N6.3 `r10` = fallback privati per **tabella piena** (`text_full()`, 0 in condizioni normali: `TEXT_MAX` = processi concorrenti massimi) |
 | 45 | `spawn_copy()` | figlio-copia in COW (Fase 34, nessun argomento): padre `(pid_figlio, canale)` (rax + rdi multi-registro), figlio `(0, canale)`; -1 su PID/canali/OOM esauriti |
 | 46 | `peer_pid(chan)` | pid del peer del canale `chan` (0 = nascita), o -1 (Fase 35, hardening: i server attribuiscono le richieste; abilita la policy `FS_REGISTER`) |
-| 47 | `peer_info(chan)` | hash dell'immagine del peer del canale `chan` (0 = nascita): 0 + hash in rdi, o -1 (Fase 36, identita' misurata: policy su identita' in init/cardo) |
+| 47 | `peer_info(chan)` | **identita'** del peer del canale `chan` (0 = nascita): 0 + `rdi` = `lo`, `rsi` = `hi` di un `ImageId` BLAKE2s-128, o -1 (Fase 36, identita' misurata; digest crittografico da ADR-0078: policy su identita' in init/cardo) |
 | 48 | `exec_image(img, len, args, argslen)` | sostituisce l'immagine del chiamante (Fase 37, exec in-place): stesso PID/canali, nuovo address space + stack argv+env stile Linux (`args` = blocco `[argc:8][envc:8][argv][magic?][env]` entro `ARGS_MAX`, 0/0 = argc=0; env = byte opachi, kernel neutro — ADR-0033), hash rimisurato; mai ritorno (salta all'entry), -1 a validazione fallita (processo intatto) |
 | 49 | `dma_alloc(pages, slot)` | alloca `pages` frame contigui azzerati per DMA Bus-Master (Fase 38.1): mappa RW/NX nella finestra dello slot, ritorna `rax` = fisico base (il device vuole phys per PRD/BMIBA), `rdi` = pagine, `rsi` = VA dello slot. **Slot 0** = staging (≤ `DMA_PAGES_MAX` = 4, VA `USER_DMA_VA`, come prima); **slot ≥ 1** = device buffer (≤ `DMA_DEVICE_PAGES_MAX` = 1024 = 4 MiB, grant riservato all'owner di `Service::Console`, D3/ADR-0060); `DMA_SLOT_ANY` = primo libero. Free a teardown/exec, mai ereditata dal figlio-copia |
 | 50 | `suspend(pid)` | congela un processo user (Fase 44a, job control, ADR-0035): fuori dalle ready queue finche' resume (i wake lo saltano, i messaggi restano in coda); meccanismo neutro. 0 se sospeso (idempotente), -1 se non sospendibile (init/kernel/se'/non-figlio/terminato) |
@@ -244,7 +244,7 @@ extern "C" fn syscall_handler() -> i64 {
 | `shm_destroy` | 63 | Chiude una regione condivisa (Fase 30.1, owner-only) → `Ok`/`Err` |
 | `spawn_copy` | 45 | Figlio-copia in COW (Fase 34) → padre `(pid, chan)`, figlio `(0, chan)` |
 | `peer_pid` | 46 | Pid del peer di un canale (Fase 35) → pid o `Err` |
-| `peer_info` | 47 | Hash immagine del peer di un canale (Fase 36) → hash o `Err` |
+| `peer_info` | 47 | Identita' del peer di un canale (Fase 36, ADR-0078) → `ImageId` (lo/hi) o `Err` |
 | `exec_image` | 48 | Exec in-place senza argv (Fase 37.0) → mai ritorno, `Err` a validazione fallita |
 | `exec_image_args` | 48 | Come sopra con blocco argv+env grezzo (37.1, env in 43a) |
 | `serialize_argv_redir_env` | — | Blocco `[argc][envc][argv][magic?][env NAME=val]` (43a; wrapper `serialize_argv[_redir]` a env vuoto) |
@@ -254,6 +254,7 @@ extern "C" fn syscall_handler() -> i64 {
 | `dma_alloc_slot` | 49 | Come sopra ma con lo slot (0 = staging, ANY = primo libero, ≥ 1 = device buffer con grant) → (fisico, VA) |
 | `map_mmio` | 61 | Mappa BAR device UC, non-owned, nella finestra MMIO; solo owner di `Service::Gpu` (L0b, ADR-0057) |
 | `text_stats` | 44 | Contatori shared text (Fase 32): hits/misses/live (+ Fase 33: fault COW in rdx; fix N6.3: fallback per tabella piena in r10) |
+| `peer_info` | 47 | Identita' BLAKE2s-128 del peer: 0 + `rdi`/`rsi` = lo/hi (ADR-0078) |
 
 `spawn(name_ptr, name_len)` (Fase 8.1 + 13) crea un nuovo processo a partire dal
 binario user embedded il cui nome combacia con `name` (tabella `NAMED_BINARIES`

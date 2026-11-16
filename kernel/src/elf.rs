@@ -240,10 +240,15 @@ unsafe fn map_private(cr3: u64, bytes: &[u8], l: &Layout, from: u64, to: u64) {
 /// `cr3` deve essere un address space VUOTO appena creato da
 /// `new_address_space` (spawn ed exec, che poi passano a quello nuovo);
 /// `layout` deve venire da `validate` sullo stesso `bytes`.
-pub unsafe fn load(cr3: u64, bytes: &[u8], layout: &Layout) -> u32 {
+pub unsafe fn load(
+    cr3: u64,
+    bytes: &[u8],
+    layout: &Layout,
+    id: syscall_numbers::ImageId,
+) -> u32 {
     let mut text_id = 0u32;
     if layout.rw_off > layout.base {
-        match unsafe { crate::text::acquire(bytes, layout) } {
+        match unsafe { crate::text::acquire(bytes, layout, id) } {
             Some(id) => {
                 unsafe { crate::text::map_shared(cr3, layout, id) };
                 text_id = id;

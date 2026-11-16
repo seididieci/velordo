@@ -36,6 +36,7 @@ name = "civis"
 version = "0.1.0"
 dependencies = [
  "arcafs",
+ "blake2s",
  "net-ep",
  "syscall-numbers",
  "vfscli",
@@ -152,6 +153,7 @@ dependencies = [
 name = "velord"
 version = "0.1.0"
 dependencies = [
+ "blake2s",
  "linked_list_allocator",
  "pic8259",
  "spin",

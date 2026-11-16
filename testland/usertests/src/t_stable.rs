@@ -356,13 +356,43 @@ pub fn t_hardening() -> bool {
     true
 }
 
+/// Digest BLAKE2s-256 atteso per `name` dal manifest (`sys:manifest`, dato:
+/// ADR-0078). `None` se il nome non c'e' o il manifest e' assente.
+fn manifest_blake(name: &[u8]) -> Option<[u8; 32]> {
+    let data = civis::obj_get(b"sys", b"manifest").ok()?;
+    let nib = |b: u8| -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    };
+    for line in data.split(|&b| b == b'\n') {
+        let sp = line.iter().position(|&b| b == b' ')?;
+        if &line[..sp] != name {
+            continue;
+        }
+        let hex = &line[sp + 1..];
+        if hex.len() < 64 {
+            return None;
+        }
+        let mut out = [0u8; 32];
+        for i in 0..32 {
+            out[i] = (nib(hex[i * 2])? << 4) | nib(hex[i * 2 + 1])?;
+        }
+        return Some(out);
+    }
+    None
+}
+
 /// t51 — identita' misurata (Fase 36, Strato 2 di ADR-0026).
-/// (A) `peer_info` sui servizi caricati da disco (Console, Devfs) == manifest
+/// (A) `peer_info` sui servizi caricati da disco (Gpu, Vela) == manifest
 /// generato: il kernel misura gli stessi byte che init ha verificato al boot.
-/// (Su cardo embedded non c'e' pinning da manifest: `HASH_CARDO` non esiste
-/// per costruzione — cardo incorpora il manifest e il suo hash sarebbe un
+/// (Su cardo embedded non c'e' pinning da manifest: `ID_CARDO` non esiste
+/// per costruzione — cardo incorpora il manifest e il suo id sarebbe un
 /// ciclo instabile, vedi gen-service-hashes.sh.)
-/// (B) stabilita': due istanze dello stesso helper hanno lo stesso hash.
+/// (B) stabilita': due istanze dello stesso helper hanno la stessa identita'.
 /// (C) same-image positivo: due istanze NON-figlie-di-init dello stesso
 /// binario si passano un prefix (X2 rimpiazza X1 vivo) — con le sole regole
 /// Fase 35 sarebbe rifiutato. Osservabile: kill X1 → il mount sopravvive
@@ -373,11 +403,54 @@ pub fn t_hardening() -> bool {
 /// (E) `peer_info` a canale morto → Err.
 pub fn t_identity() -> bool {
     helpers::drain_stray();
-    // (A) hash dal kernel == manifest di build, per due servizi da disco.
+    // (A) identita' dal kernel == manifest (`sys:manifest`, dato), per due
+    // servizi da disco.
+    let manifest = match civis::obj_get(b"sys", b"manifest") {
+        Ok(d) => d,
+        Err(_) => {
+            println!("[usertests] t51: sys:manifest assente");
+            return false;
+        }
+    };
+    let expected_of = |name: &[u8]| -> Option<civis::ImageId> {
+        for line in manifest.split(|&b| b == b'\n') {
+            let Some(sp) = line.iter().position(|&b| b == b' ') else { continue };
+            if &line[..sp] != name {
+                continue;
+            }
+            let hex = &line[sp + 1..];
+            if hex.len() < 32 {
+                return None;
+            }
+            let nib = |b: u8| -> Option<u8> {
+                match b {
+                    b'0'..=b'9' => Some(b - b'0'),
+                    b'a'..=b'f' => Some(b - b'a' + 10),
+                    b'A'..=b'F' => Some(b - b'A' + 10),
+                    _ => None,
+                }
+            };
+            let mut digest = [0u8; 32];
+            for i in 0..16 {
+                let (h, l) = (nib(hex[i * 2])?, nib(hex[i * 2 + 1])?);
+                digest[i] = (h << 4) | l;
+            }
+            // Solo i primi 16 byte servono all'ImageId.
+            return Some(civis::ImageId::from_digest(&digest));
+        }
+        None
+    };
     for (svc, expected, name) in [
-        (civis::Service::Gpu, crate::HASH_GPU, "Gpu"),
-        (civis::Service::Vela, crate::HASH_VELA, "Vela"),
+        (civis::Service::Gpu, expected_of(b"gpu"), "Gpu"),
+        (civis::Service::Vela, expected_of(b"vela"), "Vela"),
     ] {
+        let expected = match expected {
+            Some(e) => e,
+            None => {
+                println!("[usertests] t51: {} assente dal manifest", name);
+                return false;
+            }
+        };
         let chan = match civis::service_lookup(svc) {
             Ok(c) => c as u64,
             Err(_) => {
@@ -573,7 +646,12 @@ pub fn t_sys_native() -> bool {
         println!("[usertests] t58: vela != path ns ({} vs {} B)", obj.len(), ns_file.len());
         return false;
     }
-    if blake2s::blake2s(&obj) != crate::BLAKE_GPU {
+    // Il digest atteso viene da `sys:manifest` (ADR-0078: dato, non codice).
+    let Some(expected_blake) = manifest_blake(b"gpu") else {
+        println!("[usertests] t58: gpu assente dal manifest");
+        return false;
+    };
+    if blake2s::blake2s(&obj) != expected_blake {
         println!("[usertests] t58: blake vela != manifest");
         return false;
     }
@@ -584,7 +662,7 @@ pub fn t_sys_native() -> bool {
     }
     let mut bad = obj.clone();
     bad[0] ^= 0xFF;
-    if blake2s::blake2s(&bad) == crate::BLAKE_GPU {
+    if blake2s::blake2s(&bad) == expected_blake {
         println!("[usertests] t58: digest invariato dopo flip?!");
         return false;
     }

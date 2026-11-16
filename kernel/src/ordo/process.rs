@@ -226,11 +226,11 @@ pub struct Process {
     /// `reclaim_one` dopo il teardown (i frame condivisi non sono owned).
     pub text_id: u32,
     /// Identita' misurata dell'immagine ELF (Fase 36, Strato 2 di ADR-0026):
-    /// FNV-1a (`syscall_numbers::image_hash`) sui byte caricati allo spawn.
+    /// `ImageId` (BLAKE2s-128, ADR-0078) sui byte caricati allo spawn.
     /// 0 = nessuna immagine (processi kernel). Ereditato alla copia (stessi
     /// byte). Meccanismo neutro: il kernel misura ed espone (36.2), la policy
     /// vive fuori (init manifest, `FS_REGISTER` in cardo).
-    pub image_hash: u64,
+    pub image_id: syscall_numbers::ImageId,
     /// Gruppo thread (S-T, ADR-0046): `Some(leader)` se questo PCB e' un
     /// thread 1:1 (condivide cr3/canali/fd/heap/VMA del leader, `None`
     /// per processi e leader. Il teardown mm/canali/notifiche avviene solo
@@ -336,7 +336,7 @@ impl Process {
             pending_wake: false,
             cbs_server: None,
             text_id: 0,
-            image_hash: 0,
+            image_id: syscall_numbers::ImageId::default(),
             thread_group: None,
             fs_base: 0,
             futex_woken: None,
@@ -383,7 +383,7 @@ impl Process {
         // Identita' misurata (Fase 36): sui byte validati, gli stessi che il
         // loader mappa qui sotto — misura cio' che gira, mai cio' che il
         // chiamante dichiara (nome owned, SpawnMeta).
-        let image_hash = syscall_numbers::image_hash(elf);
+        let image_id = syscall_numbers::ImageId::from_digest(&blake2s::blake2s(elf));
 
         // Kernel stack: RSP0 (per rientrare a ring 0 su interrupt) + frame.
         // Come sopra: base PHYS (teardown), top VIRT (RSP0 + frame iniziale).
@@ -402,7 +402,7 @@ impl Process {
 
         // Carica i segmenti ELF + stack user. La pagina FS per-processo viene
         // allocata/mappata lazy al primo uso (syscall 26).
-        let text_id = unsafe { crate::elf::load(cr3, elf, &layout) };
+        let text_id = unsafe { crate::elf::load(cr3, elf, &layout, image_id) };
         let user_stack_top =
             unsafe { crate::arc::vmm_user::setup_user_stack(cr3, stack_frames as usize, args) };
 
@@ -457,7 +457,7 @@ impl Process {
             pending_wake: false,
             cbs_server: None,
             text_id,
-            image_hash,
+            image_id,
             thread_group: None,
             fs_base: 0,
             futex_woken: None,
@@ -479,7 +479,7 @@ impl Process {
     /// figlio non eredita la bitmap I/O del padre, least privilege) e `text_id`
     /// sono del chiamante; IPC/ring/canali NON si ereditano (solo il canale di
     /// nascita, impostato dopo come in `finish_spawn`). Nome, priorita',
-    /// `image_hash` (stessi byte del padre, Fase 36) e `req_next` (i req_id
+    /// `image_id` (stessi byte del padre, Fase 36) e `req_next` (i req_id
     /// divergono dopo la copia) copiati dal padre.
     ///
     /// # Safety
@@ -498,7 +498,7 @@ impl Process {
         tss_slot: usize,
         tss_sel: SegmentSelector,
         text_id: u32,
-        image_hash: u64,
+        image_id: syscall_numbers::ImageId,
         stack_frames: u32,
     ) -> Process {
         Process {
@@ -527,7 +527,7 @@ impl Process {
             pending_wake: false,
             cbs_server: None,
             text_id,
-            image_hash,
+            image_id,
             thread_group: None,
             fs_base: 0,
             futex_woken: None,
@@ -564,7 +564,7 @@ impl Process {
         leader_tss_slot: usize,
         cbs_server: Option<usize>,
         text_id: u32,
-        image_hash: u64,
+        image_id: syscall_numbers::ImageId,
         entry: u64,
         user_stack: u64,
         fs_base: u64,
@@ -615,7 +615,7 @@ impl Process {
             pending_wake: false,
             cbs_server,
             text_id,
-            image_hash,
+            image_id,
             thread_group: Some(leader),
             fs_base,
             futex_woken: None,

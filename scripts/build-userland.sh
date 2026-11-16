@@ -19,7 +19,11 @@ export CARGO_TARGET_DIR="$TARGET_DIR"
 # Fase 58.4: i .bin sono per-dir (nativi qui, POSIX in flavours/posix/build).
 # Pulisco i .bin stantii (es. binari POSIX prima dello spostamento) cosi' il
 # manifest degli hash non li vede due volte (E0428 duplicate const).
-rm -f "$BUILD"/*.bin
+# ADR-0078 (fase 1): NIENTE `rm -f *.bin` — `build_one` confronta l'output con
+# il `.bin` esistente e lo lascia intatto se identico (mtime stabile). Cosi'
+# ricompilare un servizio non tocca i binari embedded nel kernel e il kernel
+# non si ricompila. Un `.bin` orfano (crate rimosso) resta: innocuo (manifest e
+# seed sono per nome), si toglie a mano se serve.
 
 # Suite di test: di default init la SALTA (feature `skip_tests`, boot di
 # produzione dritto alla shell). Con RUN_TESTS=1 (run-tests.sh) init
@@ -102,24 +106,12 @@ build_one userland/tools/arca userland/tools/arca/src/arca.ld userarca.bin usera
 # HASH_USERSHELL, HASH_USERRUNHELLO).
 bash scripts/build-posix.sh
 
-# Manifest degli hash dei servizi (Fase 36, Strato 2): FNV-1a sui `.bin`
-# appena prodotti. fs e init vengono DOPO perche' lo includono a compile time
-# (cardo: policy FS_REGISTER su identita'; rector: manifest pre-spawn) via
-# `include!(env!("VELORDO_SERVICE_HASHES"))` — senza la variabile la loro
-# compilazione fallisce loud (mai manifest stale silenzioso).
+# Manifest degli hash dei servizi (Fase 36, Strato 2; ADR-0078): BLAKE2s sui
+# `.bin` appena prodotti, emesso come **dato** (`build-meta/manifest.txt`).
 bash scripts/gen-service-hashes.sh
-export VELORDO_SERVICE_HASHES="$(pwd)/build-meta/service_hashes.rs"
-# Tabella policy servizi (Fase 45, sandbox build): emessa dallo stesso script.
-# TEST_POLICY ancora assente qui (i .bin test non esistono): placeholder
-# vuoto per la prima build di cardo, SOSTITUITO dal rebuild in coda a
-# build-tests.sh (unico cardo.bin che conta: kernel+inject vengono dopo).
-# Placeholder MAI usato a runtime: ogni binario in tabella servizi o ignoto
-# ha comunque un tetto (il lookup cade sul default a tabella vuota).
-if [ ! -f "build-meta/test_policy.rs" ]; then
-    printf '// Placeholder pre-test (Fase 45): sostituito dal rebuild in build-tests.sh.\n// A tabella vuota ogni hash test cade nel default restrittivo.\npub const TEST_POLICY: &[(u64, u32)] = &[];\n' > build-meta/test_policy.rs
-fi
-export VELORDO_SERVICE_POLICY="$(pwd)/build-meta/service_policy.rs"
-export VELORDO_TEST_POLICY="$(pwd)/build-meta/test_policy.rs"
+# ADR-0078 (fase 1): manifest e policy sono dati (`build-meta/*.txt`), seedati
+# in `sys:` da arca-tool.sh e letti a runtime da init/cardo. Nessun `include!`,
+# nessun export: cambiare un servizio non ricompila il kernel.
 
 build_one userland/cardo   userland/cardo/src/cardo.ld     cardo.bin       cardo
 build_one userland/rector  userland/rector/src/rector.ld   rector.bin      rector $RECTOR_FEATURES

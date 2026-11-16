@@ -10,6 +10,7 @@ edition = "2024"
 syscall-numbers = { path = "../../syscall-numbers" }
 arcafs = { path = "../../arcafs" }
 vfscli = { path = "../vfscli" }
+blake2s = { path = "../../blake2s" }
 net-ep = { path = "../net-ep" }
 
 [profile.dev]

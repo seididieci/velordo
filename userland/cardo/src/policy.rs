@@ -2,30 +2,146 @@ use super::*;
 
 // ── Policy su identita' (Fase 45, sandbox build) ───────────────────
 // La self-restriction (Fase 17) non vincola chi non droppa: qui cardo
-// applica un TETTO server-side per hash misurato. Al primo handshake
-// (FS_BUF_REG) il canale viene classificato UNA volta (peer_info = hash
-// FNV-1a misurato dal kernel allo spawn, ADR-0027) e il tetto resta in cache
-// fino all'EXIT_NOTIFY (stessa vita di rings/rights: niente TOCTOU oltre la
-// purga esistente, niente syscall per-op nel choke point).
+// applica un TETTO server-side per identita' misurata. Al primo handshake
+// (FS_BUF_REG) il canale viene classificato UNA volta (`peer_info` = `ImageId`
+// BLAKE2s-128 misurata dal kernel allo spawn, ADR-0078) e il tetto resta in
+// cache fino all'EXIT_NOTIFY (stessa vita di rings/rights: niente TOCTOU oltre
+// la purga esistente, niente syscall per-op nel choke point).
 //
 // Effettivo nel choke point: `drop_mask & ceiling` (la policy non allarga
 // mai: un DROP resta irrevocabile, t34 invariato).
 //
 // Classificazione (ordine):
-// 1. pid 1 (init): ALL. init e' escluso dal manifest (ciclo hash-di-se',
-//    Fase 36) ma e' TCB spawnato dal kernel (mai riusato: la sua morte e'
-//    panic). Senza, init non caricherebbe i binari da /fat.
-// 2. hash noto al manifest servizi (`SERVICE_POLICY`, generato a build):
-//    mask della riga (TCB = ALL, programmi di terzi = restrittiva).
-// 3. hash noto ai test (`TEST_POLICY`, solo build test): ALL (la suite
-//    esercita ogni op; i negativi stanno in t57 sul default).
+// 1. pid 1 (init): ALL. init e' TCB spawnato dal kernel (mai riusato: la sua
+//    morte e' panic).
+// 2. identita' nota al manifest servizi (`sys:policy`, **dato** seedato a
+//    build-time e letto dal volume all'avvio): mask della riga (TCB = ALL,
+//    programmi di terzi = restrittiva).
+// 3. identita' nota ai test (`sys:test-policy`, solo build test): ALL (la
+//    suite esercita ogni op; i negativi stanno in t57 sul default).
 // 4. ignoto: DEFAULT_UNKNOWN_OPS (niente MOUNT/UMOUNT/GRANT/PIPE — le op
 //    che creano stato globale o capability per altri; file e dir restano
 //    usabili). Fail-closed: a peer_info fallito, stesso default.
 //
-// La tabella test e' un file SEPARATO incluso SOLO da cardo: i binari test
-// incorporano service_hashes (t51) ma NON test_policy, quindi niente ciclo
-// (stesso motivo dell'esclusione rector/cardo in Fase 36).
+// ADR-0078 (fase 1): le tabelle non sono piu' compilate. Aggiungere un
+// servizio o ricompilare un test non tocca cardo ne' il kernel.
+
+/// Voci massime per tabella (servizi + test): il manifest reale ne ha ~25.
+const POLICY_MAX: usize = 48;
+
+/// `(identita', mask)` caricata da `sys:policy` / `sys:test-policy`.
+static mut SERVICE_POLICY: [(civis::ImageId, u32); POLICY_MAX] =
+    [(civis::ImageId { lo: 0, hi: 0 }, 0); POLICY_MAX];
+static mut SERVICE_N: usize = 0;
+static mut TEST_POLICY: [(civis::ImageId, u32); POLICY_MAX] =
+    [(civis::ImageId { lo: 0, hi: 0 }, 0); POLICY_MAX];
+static mut TEST_N: usize = 0;
+
+/// Nomi (diagnostica) allineati alle due tabelle: `load_one` li riempie con la
+/// quarta colonna della riga (`hi lo mask nome`).
+static mut SERVICE_NAMES: [[u8; 24]; POLICY_MAX] = [[0; 24]; POLICY_MAX];
+static mut TEST_NAMES: [[u8; 24]; POLICY_MAX] = [[0; 24]; POLICY_MAX];
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Hex di 1..=16 cifre (`hi`/`lo` sono 16, la mask 3-4).
+fn hex_u64(s: &[u8]) -> Option<u64> {
+    if s.is_empty() || s.len() > 16 {
+        return None;
+    }
+    let mut v = 0u64;
+    for &b in s {
+        v = (v << 4) | hex_nibble(b)? as u64;
+    }
+    Some(v)
+}
+
+/// Riempie una tabella da un oggetto `sys:<key>` (`hi lo mask [nome]`).
+fn load_one(
+    disk: &btree_drv::DiskEngine,
+    key: &[u8],
+    out: *mut (civis::ImageId, u32),
+    names: *mut [u8; 24],
+    n_out: *mut usize,
+    tag: &str,
+) {
+    let Some(data) = disk.get(b"sys", key) else {
+        println!("[cardo] {} assente (sys:{})", tag, core::str::from_utf8(key).unwrap_or("?"));
+        return;
+    };
+    let mut n = 0usize;
+    for line in data.split(|&b| b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() || line[0] == b'#' {
+            continue;
+        }
+        let mut it = line.split(|&b| b == b' ');
+        let (Some(hi_s), Some(lo_s), Some(mask_s)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        let (Some(hi), Some(lo), Some(mask)) = (hex_u64(hi_s), hex_u64(lo_s), hex_u64(mask_s))
+        else {
+            continue;
+        };
+        if n >= POLICY_MAX {
+            break;
+        }
+        unsafe {
+            core::ptr::write(out.add(n), (civis::ImageId { lo, hi }, mask as u32));
+            let mut name = [0u8; 24];
+            if let Some(raw) = it.next() {
+                let k = raw.len().min(24);
+                name[..k].copy_from_slice(&raw[..k]);
+            }
+            core::ptr::write(names.add(n), name);
+        }
+        n += 1;
+    }
+    unsafe { *n_out = n };
+    println!(
+        "[cardo] {}: {} righe da sys:{} ({} B)",
+        tag,
+        n,
+        core::str::from_utf8(key).unwrap_or("?"),
+        data.len()
+    );
+}
+
+/// Carica `sys:policy` e `sys:test-policy` (ADR-0078). Chiamata all'avvio,
+/// dopo il bind del motore e prima del READY: nessun client e' ancora
+/// classificato, quindi le tabelle sono complete prima del primo handshake.
+/// cardo e' il server FS: legge dal proprio motore, non via IPC.
+pub fn load_tables(disk: &Option<btree_drv::DiskEngine>) {
+    let Some(engine) = disk.as_ref() else {
+        println!("[cardo] policy: nessun volume, tabelle vuote (default restrittivo)");
+        return;
+    };
+    unsafe {
+        load_one(
+            engine,
+            b"policy",
+            core::ptr::addr_of_mut!(SERVICE_POLICY).cast(),
+            core::ptr::addr_of_mut!(SERVICE_NAMES).cast(),
+            core::ptr::addr_of_mut!(SERVICE_N),
+            "policy",
+        );
+        load_one(
+            engine,
+            b"test-policy",
+            core::ptr::addr_of_mut!(TEST_POLICY).cast(),
+            core::ptr::addr_of_mut!(TEST_NAMES).cast(),
+            core::ptr::addr_of_mut!(TEST_N),
+            "test-policy",
+        );
+    }
+}
 
 /// Default fail-closed per hash ignoto (Fase 45, SYNC escluso in Fase 52):
 /// ALL senza MOUNT (0x20), UMOUNT (0x40), GRANT (0x200), PIPE (0x400),
@@ -34,21 +150,44 @@ use super::*;
 /// concede fd e non pilota FLUSH (anti sync-storm).
 pub const DEFAULT_UNKNOWN_OPS: u32 = 0x19F;
 
+/// Nome diagnostico dell'identita' `id` (dal manifest), `"?"` se ignota.
+pub fn name_of(id: civis::ImageId) -> &'static str {
+    unsafe {
+        let n = *core::ptr::addr_of!(SERVICE_N);
+        for i in 0..n {
+            let (pid, _) = *core::ptr::addr_of!(SERVICE_POLICY[i]);
+            if pid == id {
+                // `&'static` sul buffer statico (mai un temporaneo).
+                let name: &'static [u8; 24] = &*core::ptr::addr_of!(SERVICE_NAMES[i]);
+                let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+                return core::str::from_utf8(&name[..len]).unwrap_or("?");
+            }
+        }
+    }
+    "?"
+}
+
 /// Tetto ops per il canale `chan` (chiamato una volta all'handshake).
 pub fn ceiling_for(chan: u64) -> u32 {    // (1) init: TCB pid 1, fuori manifest per costruzione.
     if civis::peer_pid(chan).unwrap_or(-1) == 1 {
         return civis::RIGHTS_ALL;
     }
-    // (2+3) hash noto: cerca prima nei servizi, poi nei test.
-    if let Ok(h) = civis::peer_info(chan) {
-        for &(ph, mask) in SERVICE_POLICY {
-            if ph == h {
-                return mask;
+    // (2+3) identita' nota: cerca prima nei servizi, poi nei test.
+    if let Ok(id) = civis::peer_info(chan) {
+        unsafe {
+            let n = *core::ptr::addr_of!(SERVICE_N);
+            for i in 0..n {
+                let (pid, mask) = *core::ptr::addr_of!(SERVICE_POLICY[i]);
+                if pid == id {
+                    return mask;
+                }
             }
-        }
-        for &(ph, mask) in TEST_POLICY {
-            if ph == h {
-                return mask;
+            let n = *core::ptr::addr_of!(TEST_N);
+            for i in 0..n {
+                let (pid, mask) = *core::ptr::addr_of!(TEST_POLICY[i]);
+                if pid == id {
+                    return mask;
+                }
             }
         }
     }

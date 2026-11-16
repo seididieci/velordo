@@ -18,7 +18,8 @@ TARGET_DIR="$BUILD/target"
 export CARGO_TARGET_DIR="$TARGET_DIR"
 
 # Pulisco i .bin stantii (il manifest hash li vedrebbe doppi).
-rm -f "$BUILD"/*.bin
+# ADR-0078 (fase 1): niente `rm -f *.bin` (vedi build-userland.sh): il
+# confronto in `build_one` tiene stabile il mtime degli output invariati.
 
 # posix-server (Fase 40.3): supervisionato da init, registra `Service::Posix`.
 build_one flavours/posix/server flavours/posix/server/src/posix.ld userposix.bin userposix

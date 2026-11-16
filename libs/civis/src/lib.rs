@@ -81,6 +81,8 @@ pub use syscall_numbers::{
 pub use syscall_numbers::{
     DNS_CLOSE, DNS_OPEN, DNS_STATS, DNS_TX, DNS_PORT,
 };
+/// Identita' crittografica di un'immagine (ADR-0078).
+pub use syscall_numbers::ImageId;
 /// Servizi di sistema raggiungibili per nome (ADR-0008).
 pub use syscall_numbers::Service;
 /// Tag della notifica kernel→parent della morte di un figlio (Fase 14).

@@ -15,12 +15,15 @@ fn main() {
 
     // I binari user embeddati (user_binary.rs) vengono rigenerati da
     // scripts/build-userland.sh e scripts/build-tests.sh: se cambiano il
-    // kernel va ricompilato. Le dir (add/remove di un .bin) + ogni .bin
-    // presente (cambio contenuto): senza i per-file, modificare un binario
-    // esistente non invaliderebbe la build (stale silenzioso, osservato).
+    // kernel va ricompilato. Si elencano i **singoli .bin** (cambio
+    // contenuto): la directory NON va osservata — contiene anche `target/`
+    // (CARGO_TARGET_DIR dello userland), che ogni build riscrive e che
+    // renderebbe il kernel sempre "dirty" (ADR-0078: senza questa
+    // distinzione, aggiungere un servizio ricompilava comunque il kernel).
+    // Un `.bin` nuovo non e' un problema: gli embed sono `include_bytes!`
+    // statici, quindi un binario non referenziato non entra nell'immagine.
     for dir in ["../userland/build", "../testland/build"] {
         let d = manifest_dir.join(dir);
-        println!("cargo:rerun-if-changed={}", d.display());
         if let Ok(rd) = std::fs::read_dir(&d) {
             for e in rd.flatten() {
                 let p = e.path();
