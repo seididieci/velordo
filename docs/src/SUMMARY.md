@@ -103,3 +103,4 @@
 - [ADR-0073: Ownership e `destroy` della memoria condivisa](./adr/0073-shm-ownership-destroy.md)
 - [ADR-0074: Client di rete nel meccanismo](./adr/0074-client-rete-meccanismo.md)
 - [ADR-0075: Comandi esterni e client DNS nativo](./adr/0075-comandi-esterni-client-dns.md)
+- [ADR-0076: Socket POSIX sopra `civis::net` (N7.1)](./adr/0076-posix-socket-civis-net.md)

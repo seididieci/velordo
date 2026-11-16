@@ -132,7 +132,7 @@ velordo/
 │           └── error.rs     # Error types
 │
 ├── flavours/posix/          # PERSONALITÀ POSIX (ADR-0041) — separata dal meccanismo
-│   ├── libr/                # crate `libr`: errno, stdio, fork, exec + entry! macro
+│   ├── libr/                # crate `libr`: errno, stdio, fork, exec, sock + entry! macro
 │   ├── server/              # posix-server (userposix.bin) — Service::Posix = 12
 │   ├── shell/               # Shell POSIX interattiva (usershell.bin)
 │   ├── cli/                 # Programmi POSIX lanciabili (runhello)
@@ -396,6 +396,10 @@ puro) → `libs/net-ep/src/` (formato degli slot, N7.0) → `libs/civis/src/net/
 Consumatori: `userland/dns` (`forward_dot`, una connessione per query, CA da
 `sys:ca.der`) e `testland/tlsprobe`. Prove: `scripts/run-tls-tests.sh` (fuori
 gate, come la rete) e `scripts/run-net-tests.sh`.
+Personalità POSIX: `flavours/posix/libr/src/sock.rs` (N7.1, ADR-0076) traduce
+`socket/connect/send/sendto/recv/recvfrom/close` sopra `civis::net`, con i fd
+`64..72` riservati (i fd < 64 restano ai file). Il probe `testland/posixsock`
+prova il percorso personalità → meccanismo → servizio → core.
 
 ### Per IPC client-side (userland):
 `libs/civis/src/ipc.rs` (send/recv) → `libs/civis/src/fs/ring.rs` (ring frame ops) →

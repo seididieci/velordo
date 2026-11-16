@@ -352,6 +352,21 @@ log seriale.
   disponibile" (uscita 1). **Fuori dal gate**: il gate resta 6 righe e non
   setta `net=1`.
 
+- **Socket POSIX** (`posixsock`, N7.1, ADR-0076): probe automatico, spawnato
+  da init **solo con `net=1`** dopo `dnsprobe`. Apre le socket con le sole API
+  POSIX della personalità (`libr::socket/connect/sendto/recvfrom/send/recv/
+  close`) e fa echo UDP verso `netecho:7` e TCP verso `netecho:8`. Contratto:
+  `[posixsock] udp PASS` + `[posixsock] tcp PASS` +
+  `[posixsock] risultato: PASS`, richiesto da `scripts/run-net-tests.sh`.
+  Prova il percorso personalità → `libr::sock` (fd 64..72) → `civis::net`
+  (N7.0) → servizio `net` → core TCP/UDP: nessuna syscall nuova, kernel
+  intatto. Il binario è seedato anche in `usr/bin/posixsock.bin`, quindi dalla
+  shell nativa `posixsock udp ::1 7 ciao` (o `tcp`) fa la stessa prova a mano.
+  Il primo giro ha trovato un bug **vero** di traduzione: su TCP il ring
+  consegna `SynAck` (len 0) prima dell'echo, e un `recv` che lo trattava come
+  dato faceva leggere 0 byte (= EOF per POSIX) — ora `libr::sock` scarta gli
+  eventi di controllo e mappa `Fin`→0, `Rst`→`-ECONNRESET`.
+
 - **TLS 1.3 + DoT reali** (`scripts/run-tls-tests.sh`, N6.2/N6.3,
   ADR-0072): boot con `tls=1` (+ `net=1`) e virtio-net/passt. I server TLS
   girano **sull'host**: la sandbox non ha il binario `openssl`, quindi i

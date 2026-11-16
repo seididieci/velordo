@@ -896,9 +896,28 @@ Voci con scope e vittoria dichiarati (non date).
       syscall/tag/ABI nuova, kernel invariato. Verifica: unit host 117/117,
       net tests PASS (echo, netudp, net3, net4, dns, upstream), TLS/DoT PASS,
       gate 6/6 e zero FAIL/PANIC/FAULT.
+- [x] **N7.1 — Socket POSIX sopra `civis::net`** (completata, ADR-0076):
+      la personalità POSIX espone `socket/connect/send/sendto/recv/recvfrom/
+      close` sopra il client di rete del meccanismo (N7.0). **Nessuna syscall,
+      nessun tag, kernel intatto**: `libr::sock` è solo un consumatore di
+      `civis::net`. Opzione (b) dichiarata: i fd `64..72` sono riservati alle
+      socket (tabella statica in `libr`), i fd < 64 restano ai file; la
+      tabella fd unificata è il follow-up. Solo `AF_INET6` (`AF_INET` →
+      `EAFNOSUPPORT`: il percorso IPv4 via `siit` è un follow-up). Errori come
+      `-errno` (nessun `errno` globale nel meccanismo). Dettagli che sono
+      invarianti: backpressure `Full` → `-EAGAIN` (mai drop silenzioso);
+      su TCP gli eventi di controllo (`SynAck`/`Accept`) non sono dati — il
+      primo giro del probe ha trovato che un `recv` li trattava come 0 byte
+      (= EOF), ora si scartano e `Fin`→0, `Rst`→`-ECONNRESET`; attese idle con
+      `futex_wait` a 1 tick (ADR-0067). Vittoria conseguita: il probe
+      `testland/posixsock` (spawnato da init solo con `net=1`, dopo
+      `dnsprobe`) fa echo UDP (`netecho:7`) e TCP (`netecho:8`) con le sole
+      API POSIX → `[posixsock] udp PASS`, `[posixsock] tcp PASS`,
+      `[posixsock] risultato: PASS` in `scripts/run-net-tests.sh`; seedato
+      anche in `usr/bin/posixsock.bin` per l'uso manuale dalla shell. Gate
+      invariato (6/6, zero FAIL/PANIC/FAULT).
 - [ ] **Rete N6.4–N8** (pianificata, ADR-0068/0069/0070): DoH sulla stessa
-      API di trasporto; personalità POSIX socket (N7.1, sopra `civis::net`);
-      VT-d/IOMMU.
+      API di trasporto; VT-d/IOMMU.
       Config `sys:net` con policy di subtree in cardo (`sys:identis` rinomina
       `identis:config`, chiude il debito ADR-0058).
 

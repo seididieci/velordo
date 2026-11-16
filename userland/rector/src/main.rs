@@ -770,6 +770,10 @@ const TEST_NET4: SvcMeta = SvcMeta { bin: b"net4", obj: Some((b"tst", b"test/net
 const TEST_NETTCP: SvcMeta = SvcMeta { bin: b"nettcp", obj: Some((b"tst", b"test/nettcp.bin")), prio: 16, io: &[] };
 // Resolver DNS (N5, ADR-0069): eseguito solo con `net=1`, dopo net4.
 const TEST_DNS: SvcMeta = SvcMeta { bin: b"dnsprobe", obj: Some((b"tst", b"test/dnsprobe.bin")), prio: 16, io: &[] };
+// Socket POSIX (N7.1, ADR-0076): personalità `libr` sopra `civis::net`,
+// solo con `net=1`, dopo il resolver (usa `netecho` UDP 7 e TCP 8).
+#[cfg(not(feature = "skip_tests"))]
+const TEST_POSIXSOCK: SvcMeta = SvcMeta { bin: b"posixsock", obj: Some((b"tst", b"test/posixsock.bin")), prio: 16, io: &[] };
 // Probe TLS 1.3 (N6.2, ADR-0072): solo con `net=1` **e** `tls=1`; si salta da
 // solo se manca `sys:tls.conf` (server TLS sull'host, script dedicato).
 #[cfg(not(feature = "skip_tests"))]
@@ -1021,6 +1025,8 @@ fn real_main(_sp: u64) -> ! {
             run_test(&TEST_NET4, &mut supervised);
             run_test(&TEST_NETTCP, &mut supervised);
             run_test(&TEST_DNS, &mut supervised);
+            // Socket POSIX (N7.1): personalità `libr` sopra `civis::net`.
+            run_test(&TEST_POSIXSOCK, &mut supervised);
             // TLS 1.3 reale (N6.2): solo con `tls=1` in cmdline, dopo il
             // probe DNS. Il server TLS sta sull'host (script dedicato).
             if cmdline_has_tls() {

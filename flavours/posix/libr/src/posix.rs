@@ -37,6 +37,14 @@ pub const EAGAIN: i64 = 35;
 pub const EPIPE: i64 = 32;
 pub const ENOSPC: i64 = 28;
 
+// ── Numeri errno specifici socket (N7.1) ──
+pub const EBADF: i64 = 9;
+pub const ENOTCONN: i64 = 57;
+pub const EAFNOSUPPORT: i64 = 97;
+pub const EOPNOTSUPP: i64 = 95;
+pub const ETIMEDOUT: i64 = 110;
+pub const ECONNRESET: i64 = 104;
+
 /// UNICA traduzione nativo→errno (Fase 39). Totale sul dominio (il compilatore
 /// impone un braccio per variante: nessuna nuova variante senza errno). Il caso
 /// peggiore di un bug qui e' un numero sbagliato in un messaggio, mai un

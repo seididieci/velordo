@@ -142,6 +142,10 @@ seed_bin testland/build/net3.bin test/net3.bin tst test/net3.bin
 seed_bin testland/build/net4.bin test/net4.bin tst test/net4.bin
 seed_bin testland/build/nettcp.bin test/nettcp.bin tst test/nettcp.bin
 seed_bin testland/build/dnsprobe.bin test/dnsprobe.bin tst test/dnsprobe.bin
+# Probe socket POSIX (N7.1, ADR-0076): oggetto in `tst` per init (net=1) e
+# path in `usr/bin` per l'uso manuale dalla shell nativa.
+seed_bin testland/build/posixsock.bin test/posixsock.bin tst test/posixsock.bin
+seed_bin testland/build/posixsock.bin usr/bin/posixsock.bin usr posixsock
 # Probe TLS 1.3 (N6.2, ADR-0072): fuori gate, eseguito solo con `tls=1`.
 seed_bin testland/build/tlsprobe.bin test/tlsprobe.bin tst test/tlsprobe.bin
 seed_bin testland/build/userforeign.bin test/foreign.bin

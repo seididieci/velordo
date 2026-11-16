@@ -1,0 +1,18 @@
+[package]
+name = "posixsock"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+civis = { path = "../../libs/civis" }
+libr = { path = "../../flavours/posix/libr" }
+net = { path = "../../libs/net" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"

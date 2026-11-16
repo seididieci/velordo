@@ -114,7 +114,7 @@ velordo/
 │   └── vela/           # codice driver condiviso (hub/block/input/gpu)
 ├── flavours/
 │   └── posix/          # personalita' POSIX (ADR-0041)
-│       ├── libr/       # crate `libr`: errno/stdio/fork/exec + `entry!` (hook)
+│       ├── libr/       # crate `libr`: errno/stdio/fork/exec/sock + `entry!` (hook)
 │       ├── server/     # posix-server (userposix.bin)
 │       ├── shell/      # shell POSIX (usershell.bin)
 │       ├── cli/        # programmi lanciabili POSIX (runhello)
@@ -318,8 +318,22 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   di `dns` usano il codec. Nessuna syscall/tag/ABI nuova. Il workspace root
   ha `exclude = ["libs/net-ep"]` (path dep con workspace proprio per i test
   host). Verifica: unit host 117/117, net tests PASS, TLS/DoT PASS, gate 6/6.
-  Prossimo: N7.1 personalità POSIX `socket` sopra `civis::net`, poi DoH
-  (N6.4), VT-d.
+  **N7.1 (ADR-0076, completato)**: la personalità espone le socket sopra il
+  client del meccanismo — `libr::sock` con
+  `socket/connect/send/sendto/recv/recvfrom/close`, **zero syscall e kernel
+  intatto**. Scelta dichiarata (b): fd `64..72` riservati alle socket, i fd
+  < 64 restano ai file (fd table unificata = follow-up); solo `AF_INET6`
+  (`AF_INET` → `EAFNOSUPPORT`, IPv4 via `siit` è un follow-up); errori come
+  `-errno`. Invarianti: `Full` → `-EAGAIN` (mai drop silenzioso), attese con
+  `futex_wait` a 1 tick (ADR-0067), e **su TCP gli eventi di controllo non
+  sono dati** (`SynAck` scartato; `Fin`→0 = EOF, `Rst`→`-ECONNRESET` — il
+  primo giro del probe leggeva 0 byte e lo chiamava EOF). Vittoria: probe
+  `testland/posixsock` (init lo spawana con `net=1` dopo `dnsprobe`) fa echo
+  UDP `netecho:7` + TCP `netecho:8` con le sole API POSIX →
+  `[posixsock] risultato: PASS` in `scripts/run-net-tests.sh`; lo stesso
+  binario è in `usr/bin/posixsock.bin` per l'uso manuale dalla shell. Gate
+  invariato (6/6, zero FAIL/PANIC/FAULT).
+  Prossimo: DoH (N6.4), poi VT-d.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo

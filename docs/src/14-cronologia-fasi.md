@@ -3674,3 +3674,37 @@
       riporta al prompt di login; unit test host 118/118 (1 nuovo sul
       `Display` IPv6); fase `native` di `test-shell-all.sh` 30/30; gate 6/6
       (`[usertests] 61/61`) e zero FAIL/PANIC/FAULT.
+
+- [x] **N7.1 — Socket POSIX sopra `civis::net`** (2026-11, ADR-0076): dopo
+      N7.0 il meccanismo aveva un client di rete unico, ma la personalità non
+      esponeva nulla: un programma POSIX doveva linkare `civis::net`, cioè
+      parlare il vocabolario del meccanismo. N7.1 aggiunge `libr::sock`:
+      `socket/connect/send/sendto/recv/recvfrom/close` sopra
+      `civis::net::{Endpoint, Stream}`, **zero syscall e kernel intatto**
+      (ADR-0048: nessuna syscall nasce per POSIX).
+      **Scelta (b), dichiarata**: i fd `64..72` sono riservati alle socket
+      (tabella statica in `libr`), i fd < 64 restano ai file; una fd table
+      unificata con `read`/`write` per range era un refactor di shell+CLI
+      dentro la stessa fase, quindi è il follow-up. Solo `AF_INET6`
+      (`AF_INET` → `EAFNOSUPPORT`: IPv4 passa da `siit` e da un altro layout
+      di slot). Errori come `-errno` (il meccanismo non ha un `errno` globale
+      e inventarne uno qui sarebbe vocabolario POSIX fuori dal bordo).
+      **Invarianti che vengono da N7.0**: backpressure `Full` → `-EAGAIN`
+      (mai drop silenzioso); attese idle con `futex_wait` a 1 tick (ADR-0067),
+      deadline 500 tick → `-ETIMEDOUT`.
+      **Bug trovato dal probe (vero)**: su TCP il ring RX consegna `SynAck`
+      (len 0) prima dell'echo; il primo `recv` lo trattava come dato e
+      ritornava 0 byte — che per POSIX è **EOF**, quindi il programma
+      concludeva "connessione chiusa". Ora `libr::sock` scarta gli eventi di
+      controllo (`SynAck`/`Accept`/`Other`) e mappa `Fin`→0,
+      `Rst`→`-ECONNRESET`. Lezione: un evento di trasporto non è un byte, e
+      il bordo POSIX deve filtrare prima di contare.
+      **Vittoria**: `testland/posixsock` (spawnato da init solo con `net=1`,
+      dopo `dnsprobe`) fa echo UDP su `netecho:7` (`sendto`+`recvfrom`) e TCP
+      su `netecho:8` (`connect`+`send`+`recv`) → `[posixsock] udp PASS`,
+      `[posixsock] tcp PASS`, `[posixsock] risultato: PASS`; il probe è
+      richiesto da `scripts/run-net-tests.sh` (fuori gate, come gli altri di
+      rete) e lo stesso binario è in `usr/bin/posixsock.bin` per l'uso
+      manuale (`posixsock udp ::1 7 ciao`). Verifica: net tests PASS (echo,
+      netudp, net3, net4, dns, upstream, **posixsock**), gate 6/6
+      (`[usertests] 61/61`) e zero FAIL/PANIC/FAULT.

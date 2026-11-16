@@ -17,6 +17,9 @@ extern crate alloc;
 pub mod posix;
 pub mod stdio;
 
+/// Socket POSIX sopra `civis::net` (N7.1, ADR-0076).
+pub mod sock;
+
 /// Serializzazione argv/env + `exec` per path (personalità POSIX).
 pub mod exec;
 /// `fork` COW (personalità POSIX; il meccanismo COW è in `civis`).
@@ -28,6 +31,10 @@ pub use stdio::{
 };
 pub use exec::{exec, exec_env, serialize_argv, serialize_argv_redir, serialize_argv_redir_env};
 pub use fork::{fork, ForkResult};
+pub use posix::{
+    EBADF, EAFNOSUPPORT, EINVAL, EIO, ENOMEM, ENOTCONN, EOPNOTSUPP, ETIMEDOUT, EPERM,
+};
+pub use sock::{close, connect, recv, recvfrom, send, sendto, socket};
 
 /// Preparazione d'ingresso della personalità (chiamata da [`entry!`] prima di
 /// saltare a `main`): installa il routing stdout nel meccanismo e ripristina il

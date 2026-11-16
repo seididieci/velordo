@@ -112,13 +112,14 @@ rg -q '\[net3\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: TCP loopba
 rg -q '\[net4\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: SIIT (N4)"; fail=1; }
 rg -q '\[dns\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: DNS (N5)"; fail=1; }
 rg -q '\[dns\] upstream: PASS' "$LOG" || { echo "[net-tests] manca: upstream DNS (N6.0)"; fail=1; }
+rg -q '\[posixsock\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: socket POSIX (N7.1)"; fail=1; }
 if [ -n "${NET_TCP_PEER:-}" ]; then
     rg -q '\[nettcp\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: TCP rete reale (N6.1d)"; fail=1; }
 fi
 
-LOGRE='\[net\]|\[netdev\]|\[netecho\]|\[netudp\]|\[net3\]|\[net4\]|\[nettcp\]|\[siit\]|\[dns\]|\[dns-host\]'
+LOGRE='\[net\]|\[netdev\]|\[netecho\]|\[netudp\]|\[net3\]|\[net4\]|\[nettcp\]|\[siit\]|\[dns\]|\[dns-host\]|\[posixsock\]'
 if [ "$fail" = "0" ]; then
-    echo "[net-tests] PASS: echo reply + UDP echo + TCP (handshake e echo reali) + IPv4 SIIT + DNS probe + upstream DNS${NET_TCP_PEER:+ + TCP rete reale}"
+    echo "[net-tests] PASS: echo reply + UDP echo + TCP (handshake e echo reali) + IPv4 SIIT + DNS probe + upstream DNS + socket POSIX${NET_TCP_PEER:+ + TCP rete reale}"
     rg "$LOGRE" "$LOG" | tail -45
     exit 0
 fi
