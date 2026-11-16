@@ -208,8 +208,24 @@ con zero-fill lazy (stesso contratto di `sbrk`: VA subito, frame al fault).
 - Il riferimento sta nel PCB (`text_id`) e si rilascia in `reclaim_one` dopo il
   teardown (il walk libera solo le foglie `owned`). Scope refcount-only:
   condivide tra istanze **concorrenti**; una cache persistente e' un follow-up.
+- La tabella ha `TEXT_MAX = MAX_PIDS` (128) slot: e' un bound **provabile**,
+  non una speranza — al massimo un'immagine per processo vivo (`spawn`/`exec`
+  ne acquisiscono una, `fork` e i thread condividono l'id del gruppo con
+  `add_ref`, `exec` rilascia la vecchia *prima* di caricare la nuova). Il
+  vecchio limite di 16 era sotto il numero di binari distinti vivi con
+  `net=1` (~20): la tabella si saturava e il fallback privato era silenzioso
+  (nessun log, `misses` non lo contava; l'unico sintomo era `t47` senza
+  sharing).
+- `acquire` cerca **prima** lo slot libero e solo poi alloca: a tabella piena
+  esce subito invece di costruire e buttare via un'immagine (`alloc_contiguous`
+  + copia + free) per ogni spawn. Il fallback privato resta corretto, solo non
+  condivide.
 - `text_stats` (syscall 44) espone `hits/misses/live` (debug/test); dalla Fase
-  33 `rdx` = fault COW gestiti (`cow_count`).
+  33 `rdx` = fault COW gestiti (`cow_count`); dal fix N6.3 `r10` = `full`, i
+  fallback privati per tabella piena (0 in condizioni normali, quindi un valore
+  non-zero segnala slot trattenuti). Alla prima saturazione il kernel stampa
+  un log `[text] tabella piena`, uno per episodio (riarmato quando uno slot si
+  libera via `release`).
 
 ## Copy-on-write a livello di frame (Fase 33, ADR-0023)
 

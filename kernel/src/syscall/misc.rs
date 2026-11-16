@@ -163,13 +163,14 @@ pub(super) fn sys_cbs_get_info(server_id: u64) -> i64 {
 /// `cbs_get_info`: rax = hits, rdi = misses, rsi = live, rdx = cow.
 /// (Il nome resta storico: e' il contatore debug/test della memoria user.)
 pub(super) fn sys_text_stats() -> i64 {
-    let (hits, misses, live) = crate::text::stats();
+    let (hits, misses, live, full) = crate::text::stats();
     unsafe {
         let p = addr_of_mut!(PERCPU);
         (*p).ipc_override = 1;
         (*p).ret_rdi = misses;
         (*p).ret_rsi = live;
         (*p).ret_rdx = crate::arc::phys_mem::cow_count();
+        (*p).ret_r10 = full;
     }
     hits as i64
 }

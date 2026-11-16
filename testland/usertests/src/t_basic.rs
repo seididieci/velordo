@@ -450,6 +450,7 @@ pub fn t_shm() -> bool {
 pub fn t_text() -> bool {
     helpers::drain_stray();
     let (h0, _m0, _l0) = civis::text_stats();
+    let f0 = civis::text_full();
     // 3 helper parcheggiati (vivi) dallo stesso binario `testcli`.
     let mut chans = [0u64; 3];
     let mut pids = [0i64; 3];
@@ -466,9 +467,21 @@ pub fn t_text() -> bool {
         }
     }
     let (h1, _m1, live1) = civis::text_stats();
+    let f1 = civis::text_full();
     // Almeno 1 hit: la 2a/3a istanza condivide il testo della 1a.
     if h1 <= h0 {
-        println!("[usertests] t47: no sharing (hits {}->{})", h0, h1);
+        // Diagnosi: se la tabella si e' riempita, il fallback privato e'
+        // corretto ma il test non puo' osservare la condivisione.
+        if f1 > f0 {
+            println!(
+                "[usertests] t47: no sharing (hits {}->{}, tabella shared text PIENA: {} fallback privati)",
+                h0,
+                h1,
+                f1 - f0
+            );
+        } else {
+            println!("[usertests] t47: no sharing (hits {}->{})", h0, h1);
+        }
         return false;
     }
     // Cleanup: uccidi e attendi l'exit (reclaim rilascia il ref).

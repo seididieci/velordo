@@ -111,7 +111,7 @@ La numerazione e' definita nel dispatch di `syscall_handler` in `kernel/src/sysc
 | 42 | `shm_create(len)` | crea una regione di memoria condivisa (Fase 30, max 256 KiB, frame contigui azzerati) → id (>= 1) o -1 |
 | 43 | `shm_map(id, hint, prot, flags)` | mappa la regione condivisa `id` come VMA (prot R/RW, PTE non-owned pre-materializzate): le pagine sono le stesse per tutti i mappatori (scritture visibili); refcount, a 0 i frame sono liberati; con `MAP_COW` (Fase 33, solo `PROT_READ`) le pagine sono `RO`+`COW` (stessi frame finche' nessuno scrive, copia privata al primo write) con refcount per-frame; ritorna la base o -1 |
 | 63 | `shm_destroy(id)` | chiude una regione condivisa (Fase 30.1, owner-only): marca `destroyed` (i `shm_map` successivi falliscono) e rilascia il riferimento dell'owner; i frame vanno via subito se non ci sono mappature, altrimenti all'ultimo `munmap`/teardown; il teardown del processo rilascia comunque i riferimenti owner delle regioni che possiede; 0 o -1 |
-| 44 | `text_stats()` | contatori shared text (Fase 32, debug/test): `hits` in rax, `misses` in rdi, `live` in rsi; dalla Fase 33 `rdx` = fault COW gestiti (`cow_count`) |
+| 44 | `text_stats()` | contatori shared text (Fase 32, debug/test): `hits` in rax, `misses` in rdi, `live` in rsi; dalla Fase 33 `rdx` = fault COW gestiti (`cow_count`); fix N6.3 `r10` = fallback privati per **tabella piena** (`text_full()`, 0 in condizioni normali: `TEXT_MAX` = processi concorrenti massimi) |
 | 45 | `spawn_copy()` | figlio-copia in COW (Fase 34, nessun argomento): padre `(pid_figlio, canale)` (rax + rdi multi-registro), figlio `(0, canale)`; -1 su PID/canali/OOM esauriti |
 | 46 | `peer_pid(chan)` | pid del peer del canale `chan` (0 = nascita), o -1 (Fase 35, hardening: i server attribuiscono le richieste; abilita la policy `FS_REGISTER`) |
 | 47 | `peer_info(chan)` | hash dell'immagine del peer del canale `chan` (0 = nascita): 0 + hash in rdi, o -1 (Fase 36, identita' misurata: policy su identita' in init/cardo) |
@@ -253,7 +253,7 @@ extern "C" fn syscall_handler() -> i64 {
 | `dma_alloc` | 49 | Alloca frame contigui per DMA (Fase 38.1, slot 0) → fisico base |
 | `dma_alloc_slot` | 49 | Come sopra ma con lo slot (0 = staging, ANY = primo libero, ≥ 1 = device buffer con grant) → (fisico, VA) |
 | `map_mmio` | 61 | Mappa BAR device UC, non-owned, nella finestra MMIO; solo owner di `Service::Gpu` (L0b, ADR-0057) |
-| `text_stats` | 44 | Contatori shared text (Fase 32): hits/misses/live (+ Fase 33: fault COW in rdx) |
+| `text_stats` | 44 | Contatori shared text (Fase 32): hits/misses/live (+ Fase 33: fault COW in rdx; fix N6.3: fallback per tabella piena in r10) |
 
 `spawn(name_ptr, name_len)` (Fase 8.1 + 13) crea un nuovo processo a partire dal
 binario user embedded il cui nome combacia con `name` (tabella `NAMED_BINARIES`

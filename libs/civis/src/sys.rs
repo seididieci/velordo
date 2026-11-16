@@ -423,6 +423,18 @@ pub fn text_stats() -> (u64, u64, u64) {
     (rax as u64, rdi, rsi)
 }
 
+/// Fase 32 (fix N6.3) — `text_full()`: quanti spawn non hanno potuto
+/// condividere il testo perche' la tabella era **piena** (stessa syscall di
+/// `text_stats`, registro `r10`). 0 in condizioni normali: `TEXT_MAX` copre
+/// tutti i processi concorrenti, quindi un valore non-zero segnala slot
+/// trattenuti (es. ref perso su un errore di spawn). Sensore, non decisione:
+/// il fallback privato e' sempre corretto, solo non condivide.
+#[inline]
+pub fn text_full() -> u64 {
+    let (_, _, _, _, r10) = unsafe { syscall4_out(SYS_TEXT_STATS, 0, 0, 0, 0) };
+    r10
+}
+
 /// Fase 33 — `cow_count()`: fault COW gestiti finora (stessa syscall di
 /// `text_stats`, registro `rdx`). Debug/test: t48 verifica `cow > 0` dopo
 /// write su mappatura COW.

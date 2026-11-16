@@ -117,7 +117,11 @@ zero FAIL/PANIC/FAULT. La suite FAT32 e' **fuori dal gate** (ADR-0059:
   nel core, una connessione per query con endpoint persistente, CA da
   `sys:ca.der` e fail-closed (SERVFAIL) su TLS/certificato invalido. Prova in
   QEMU: due query DoT (query + reconnect) e una con certificato fuori trust →
-  SERVFAIL, tutto in un boot solo
+  SERVFAIL, tutto in un boot solo. In coda, un limite trovato solo con
+  `net=1`: shared text a 16 slot sotto i ~20 binari vivi → sharing mai
+  attivo e fallback privato silenzioso; ora `TEXT_MAX = MAX_PIDS` (128,
+  bound provabile), slot libero cercato prima di allocare, `full` in `r10`
+  di `text_stats` e log `[text] tabella piena` una-tantum per episodio
 - **TLS 1.3 — adattatore `libs/tls`** (N6.2, ADR-0072): crate puro sopra
   `embedded-tls` 0.19 (`rustpki`+`rsa`+`alloc`), trasporto e orologio
   iniettati, DRBG ChaCha20 (RDRAND con gate CPUID), verifica catena +

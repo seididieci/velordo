@@ -3532,6 +3532,20 @@
       reconnect + fail-closed); unit test host 111/111 (2 nuovi sul framing
       RFC 7858); net tests N1–N6.0 PASS (il cambio in `userland/net` non
       regredisce il plain); gate 6/6, zero FAIL/PANIC/FAULT.
+      **Limite scoperto in coda: shared text a 16 slot** — nelle prove con
+      `net=1` `t47` falliva (`no sharing`) mentre nel gate passava. Causa:
+      `TEXT_MAX` era 16, sotto il numero di binari distinti vivi con la rete
+      (~20: netdev, net, netecho, siit, dns, ...); `hits 0->0` su tutto il
+      boot dimostrava che la condivisione non era mai partita, e il fallback
+      privato era **silenzioso** (`misses` non lo contava, nessun log). Il
+      limite ora è `MAX_PIDS` (128), che è un bound provabile (una immagine
+      per processo vivo; `fork`/thread fanno `add_ref`, `exec` rilascia prima
+      di caricare). `acquire` cerca lo slot libero **prima** di allocare (a
+      tabella piena non costruisce più un'immagine da buttare), `text_stats`
+      espone `full` in `r10` e la prima saturazione stampa
+      `[text] tabella piena` (uno per episodio, riarmato al `release`);
+      `t47` dice se il fallimento è tabella piena. Riprovato con `net=1`:
+      t47 PASS, net tests PASS, `[text]` mai stampato.
 
 - [x] **N7.0 — Client di rete nel meccanismo** (2026-11, ADR-0074): il
       protocollo a endpoint (ADR-0069) aveva una sola implementazione lato

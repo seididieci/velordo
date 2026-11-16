@@ -109,8 +109,10 @@ pub const SYS_SHM_MAP: u64 = 43;
 /// altrimenti all'ultimo `munmap`/teardown. Il teardown del processo rilascia
 /// comunque i riferimenti owner delle regioni che possiede.
 pub const SYS_SHM_DESTROY: u64 = 63;
-/// Contatori shared text (Fase 32, debug/test): ritorna `hits` in rax,
-/// `misses` in rdi, `live` in rsi (nessun argomento).
+/// Contatori shared text (Fase 32, debug/test): `hits` in rax, `misses` in
+/// rdi, `live` in rsi; `rdx` = fault COW (Fase 33), `r10` = fallback privati
+/// per tabella piena (0 in condizioni normali: `TEXT_MAX` = processi
+/// concorrenti massimi). Nessun argomento.
 pub const SYS_TEXT_STATS: u64 = 44;
 /// Crea un figlio-copia che condivide l'address space del chiamante in COW
 /// (Fase 34): nessun argomento. Ritorna al padre `(pid_figlio,

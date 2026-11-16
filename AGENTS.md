@@ -420,7 +420,8 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `on_tick`): stack kernel, slot TSS, address space user (foglie PTE `owned`,
   vedi sotto) → poi notifica `EXIT_NOTIFY` a TUTTI i peer e PID nel free-set.
   Notifica DOPO il teardown: nei loop spawn/exit il pool non si esaurisce. Riuso: PID
-  (cap 32 concorrenti), slot TSS, canali (`None`) e server CBS (`None`).
+  (`MAX_PIDS` = 128 concorrenti, processi + thread 1:1 nello stesso pool),
+  slot TSS, canali (`None`) e server CBS (`None`).
   `kill(pid, code)` (35): killabile qualunque processo user tranne init/kernel/
   self. Morte di init → panic documentato. `usertestcli` ha i modi CHURN/KILLME/
    SRVDIE/SYNCWAIT/MNTDIE/OPENDIE/MAPHAMMER/FLOOD; suite 21/21 → 31/31 (t22 churn riuso+leak, t23

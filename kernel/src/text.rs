@@ -9,11 +9,17 @@
 //! (spawn e reclaim). Slot pieni → fallback al load privato (mai spawn fallito).
 //! Scope: refcount-only (condivide tra istanze concorrenti, libera a 0).
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::elf::{Layout, PAGE};
 
-/// Immagini condivise massime (slot statici).
-const TEXT_MAX: usize = 16;
+/// Immagini condivise massime (slot statici): **al massimo una per processo
+/// vivo** — `spawn`/`exec` ne acquisiscono una, `fork` e i thread condividono
+/// l'id del gruppo (`add_ref`, nessun nuovo slot) e `exec` rilascia la vecchia
+/// *prima* di caricare la nuova — quindi il bound e' il numero di entita'
+/// schedulabili concorrenti (`MAX_PIDS`). A questo limite il fallback privato
+/// e' irraggiungibile per costruzione; se succede comunque (es. ref perso su
+/// un errore di spawn) il contatore `full` e il log una-tantum lo dicono.
+const TEXT_MAX: usize = crate::ordo::sched::MAX_PIDS;
 
 /// `(phys, pages, hash, base, rw_off, refs)`; `phys == 0` = slot libero.
 static mut TEXT_TABLE: [(u64, u64, u64, u64, u64, u32); TEXT_MAX] =
@@ -23,6 +29,13 @@ static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
 /// Somma dei refcount vivi (immagini * riferimenti).
 static LIVE: AtomicU64 = AtomicU64::new(0);
+/// Fallback privati per **tabella piena** (mai per OOM): sensore, non una
+/// decisione — il fallback e' sempre corretto, solo non condivide.
+static FULL: AtomicU64 = AtomicU64::new(0);
+/// Un log per *episodio* di saturazione (riarmato quando uno slot si libera):
+/// la saturazione era invisibile (nessun log, `misses` non la conta) e il solo
+/// sintomo era un `t47: no sharing` inspiegabile.
+static WARNED: AtomicBool = AtomicBool::new(false);
 
 /// FNV-1a 64-bit sull'ELF (identita' del binario): single source in
 /// `syscall-numbers` (Fase 36, riusata per l'identita' misurata nel PCB).
@@ -90,25 +103,39 @@ pub unsafe fn acquire(bytes: &[u8], l: &Layout) -> Option<u32> {
             return Some(i as u32 + 1);
         }
     }
-    // Miss: costruisci l'immagine.
+    // Miss: **prima** lo slot libero, poi l'allocazione. A tabella piena il
+    // fallback privato non paga un `alloc_contiguous` + copia + free per ogni
+    // spawn: si esce subito (era il caso di `net=1`, dove i servizi di rete
+    // saturavano i 16 slot della vecchia tabella e ogni spawn buttava via
+    // un'immagine appena costruita).
+    let mut free = None;
+    for i in 0..TEXT_MAX {
+        if unsafe { (*core::ptr::addr_of!(TEXT_TABLE[i])).0 } == 0 {
+            free = Some(i);
+            break;
+        }
+    }
+    let Some(i) = free else {
+        FULL.fetch_add(1, Ordering::Relaxed);
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            crate::serial_println!(
+                "[text] tabella piena ({} immagini condivise): fallback privato, sharing disattivato",
+                TEXT_MAX
+            );
+        }
+        return None;
+    };
+
+    // Miss: costruisci l'immagine nello slot gia' scelto.
     let phys = crate::arc::phys_mem::alloc_contiguous(pages)?;
     unsafe {
         core::ptr::write_bytes(crate::addr::phys_to_virt(phys) as *mut u8, 0, pages * PAGE as usize);
         fill_shared(bytes, l, phys);
+        *core::ptr::addr_of_mut!(TEXT_TABLE[i]) = (phys, pages as u64, h, l.base, l.rw_off, 1);
     }
-    for i in 0..TEXT_MAX {
-        let e = unsafe { *core::ptr::addr_of!(TEXT_TABLE[i]) };
-        if e.0 == 0 {
-            unsafe {
-                *core::ptr::addr_of_mut!(TEXT_TABLE[i]) = (phys, pages as u64, h, l.base, l.rw_off, 1);
-            }
-            MISSES.fetch_add(1, Ordering::Relaxed);
-            LIVE.fetch_add(1, Ordering::Relaxed);
-            return Some(i as u32 + 1);
-        }
-    }
-    crate::arc::phys_mem::free_contiguous(phys, pages);
-    None
+    MISSES.fetch_add(1, Ordering::Relaxed);
+    LIVE.fetch_add(1, Ordering::Relaxed);
+    Some(i as u32 + 1)
 }
 
 /// Mappa il range immutabile `[base, rw_off)` di `id` in `cr3` come pagine
@@ -149,6 +176,9 @@ pub fn release(id: u32) {
     if refs == 0 {
         crate::arc::phys_mem::free_contiguous(e.0, e.1 as usize);
         unsafe { *core::ptr::addr_of_mut!(TEXT_TABLE[idx]) = (0, 0, 0, 0, 0, 0); }
+        // Slot di nuovo libero: un'eventuale saturazione successiva merita
+        // un altro log (un avviso per episodio, non uno per boot).
+        WARNED.store(false, Ordering::Relaxed);
     } else {
         unsafe { *core::ptr::addr_of_mut!(TEXT_TABLE[idx].5) = refs; }
     }
@@ -171,11 +201,16 @@ pub fn add_ref(id: u32) {
     LIVE.fetch_add(1, Ordering::Relaxed);
 }
 
-/// `(hits, misses, live)`: contatori per la syscall `text_stats` (debug/test).
-pub fn stats() -> (u64, u64, u64) {
+/// `(hits, misses, live, full)`: contatori per la syscall `text_stats`
+/// (debug/test). `full` conta i fallback privati per **tabella piena**: 0 in
+/// condizioni normali (il bound `TEXT_MAX` copre tutti i processi
+/// concorrenti), quindi un valore non-zero e' il segnale che qualcosa tiene
+/// slot senza rilasciarli.
+pub fn stats() -> (u64, u64, u64, u64) {
     (
         HITS.load(Ordering::Relaxed),
         MISSES.load(Ordering::Relaxed),
         LIVE.load(Ordering::Relaxed),
+        FULL.load(Ordering::Relaxed),
     )
 }
