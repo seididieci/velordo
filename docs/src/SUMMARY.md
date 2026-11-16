@@ -104,3 +104,7 @@
 - [ADR-0074: Client di rete nel meccanismo](./adr/0074-client-rete-meccanismo.md)
 - [ADR-0075: Comandi esterni e client DNS nativo](./adr/0075-comandi-esterni-client-dns.md)
 - [ADR-0076: Socket POSIX sopra `civis::net` (N7.1)](./adr/0076-posix-socket-civis-net.md)
+- [ADR-0077: Bucket di fiducia protetti in cardo](./adr/0077-bucket-fiducia-protetti.md)
+- [ADR-0078: Identità crittografica dei binari (digest, manifest, firma)](./adr/0078-identita-crittografica-binari.md)
+- [ADR-0079: Classi di privilegio e spawn attestato](./adr/0079-classi-privilegio-spawn-attestato.md)
+- [ADR-0080: Policy per identità, ruoli e broker di rete](./adr/0080-policy-identita-ruoli-broker.md)

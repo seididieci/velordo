@@ -916,6 +916,56 @@ Voci con scope e vittoria dichiarati (non date).
       `[posixsock] risultato: PASS` in `scripts/run-net-tests.sh`; seedato
       anche in `usr/bin/posixsock.bin` per l'uso manuale dalla shell. Gate
       invariato (6/6, zero FAIL/PANIC/FAULT).
+- [ ] **Sicurezza — bucket di fiducia protetti** (ADR-0077, fase 0): oggi
+      `DEFAULT_UNKNOWN_OPS` (0x19F) include `WRITE` e `disk_put` non controlla
+      il bucket: **qualunque** processo può riscrivere `sys:ca.der`,
+      `usr/*`, `tst/*`, il namespace `ns` e i path `bin/`, `usr/bin/`,
+      `identis:config`. Il guard nel choke point di cardo applica tre regole:
+      operazioni amministrative (snapshot/rollback) solo con `ceiling == ALL`;
+      target protetti (bucket `sys`/`usr`/`tst`/`ns`, prefissi `bin/`,
+      `usr/bin/`, `test/`) solo con `ceiling == ALL` o init (pid 1);
+      carve-out per owner di servizio (`identis:` → Identis, bucket `log` →
+      Vestigia, classificati all'handshake via `peer_pid`/`service_pid`).
+      Vittoria: un processo ignoto (`foreign`) riceve `ERR_DENIED` su
+      `obj_put(b"sys", …)` e su `open(bin/vestigia.bin, TRUNC)`; letture e
+      scritture lecite restano verdi; gate 6/6.
+- [ ] **Identità — digest crittografico e manifest come dato** (ADR-0078,
+      fase 1): `image_id` = BLAKE2s-256 troncato a 128 bit (crate `blake2s`
+      già nel repo), `peer_info` a 128 bit (`rdi`+`rsi`), manifest e policy
+      letti da `sys:manifest`/`sys:policy` invece che compilati (fail-closed
+      se mancano). Vittoria: cambiare il codice di un servizio **non
+      ricompila più il kernel**; gate 6/6; t51 aggiornato.
+- [ ] **Identità — firma Ed25519 dei binari** (ADR-0078, fase 2):
+      `libs/sig` (`ed25519-compact`, `no_std`, `default-features = false`),
+      `tools/sign` host, sidecar `[VSIG][key_id][sig]`, verifica in cardo a
+      `R_RIGHTS_EXECUTE`, anchor in `sys:anchor`, vettori RFC 8032 nei test
+      host. Vittoria: binario senza firma → esecuzione negata; firma valida →
+      esegue; chiave ignota o bit flippato → negato (test nel gate).
+- [ ] **Privilegi — classi e spawn attestato** (ADR-0079, fase 3): `Class`
+      nel PCB (`System`/`ThirdParty`/`Untrusted`), trust table nel kernel
+      (32 voci) registrabile **solo** da cardo via `SYS_TRUST_IMAGE = 64`,
+      gate su `service_register`, `dma_alloc` device, `map_mmio`,
+      `io_ranges`. Vittoria: un probe figlio di init ma non firmato **non**
+      registra `Service::Net` (t66 nel gate); un probe `System` sì.
+- [ ] **Privilegi — `io_ranges` e bisogni dal manifest** (ADR-0079, fase 4):
+      le porte I/O dei driver escono da `NAMED_BINARIES` e arrivano dalla
+      trust entry (manifest firmato); `SpawnMeta.io_ranges` ignorato per
+      `class != System`. Vittoria: un driver nuovo si aggiunge con manifest +
+      seed, zero rebuild del kernel; `block` continua a fare PIO ATA.
+- [ ] **Policy — identità, ruoli e `Custos`** (ADR-0080, fase 5): nuovo
+      servizio `Custos` (`Service::Custos = 18`) che possiede `sys:policy` e
+      `usr:<nome>:consent`; ruoli multipli in Identis (`root`, `net-admin`,
+      `hw-admin`, `user`); policy per identità in cardo e in `net` (sparisce
+      lo stub `policy_allow_wk`: oggi chiunque può bindare 7/8/53/853 appena
+      esiste `sys:net.conf`). Vittoria: `netecho` binda 7 e 8, un altro
+      binario firmato no; un utente `user` non concede `net-admin`.
+- [ ] **Policy — broker di rete e grant runtime** (ADR-0080, fase 6):
+      `userland/netbroker` (`Service::NetBroker = 19`) con
+      `BROKER_RESOLVE`/`BROKER_CONNECT` a proxy, allowlist di porte, rate
+      limit per identità e audit in Vestigia; il codice `Untrusted` non
+      ottiene mai `Service::Net`; consenso statico per ruolo (prompt = fase 7).
+      Vittoria: un programma non firmato naviga solo via broker, il tentativo
+      diretto è negato, rate limit e audit attivi.
 - [ ] **Rete N6.4–N8** (pianificata, ADR-0068/0069/0070): DoH sulla stessa
       API di trasporto; VT-d/IOMMU.
       Config `sys:net` con policy di subtree in cardo (`sys:identis` rinomina
@@ -925,6 +975,12 @@ Voci con scope e vittoria dichiarati (non date).
 
 Idee senza trigger (non date, solo su pressione reale).
 
+- [ ] **Consenso con prompt utente** (ADR-0080, fase 7): dialogo al primo
+      avvio di un processo che chiede risorse (rete, hardware), legato alla
+      sessione e al ruolo. Prerequisiti dichiarati: **DE** (voce pendente,
+      oggi c'è il terminale a celle) e **S3.3(c)** token → capability
+      per-canale (senza, il consenso sarebbe rubabile col bearer). Fino ad
+      allora la decisione resta statica per ruolo (fase 6).
 - [ ] audio AC97+CBS (primo client servizio PCI, chiude ADR-0007 davvero)
 - [ ] server-run async block (quando l'overlap DMA lo richiede)
 - [ ] Strato 3 credenziali
