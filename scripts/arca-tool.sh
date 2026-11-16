@@ -307,19 +307,24 @@ if [ -n "${NET_TCP_ECHO_PORT:-}" ]; then
 fi
 
 # DoT (N6.3, ADR-0072) vince sul plain: il resolver usa una connessione TLS
-# per query verso il server sull'host. `timeout_ms` copre handshake + query
-# (la verifica RSA sotto TCG e' la voce lenta).
+# per query. `upstream = auto` punta al default router: utile per un server
+# sull'host raggiunto via passt, ma per un resolver **pubblico** (Quad9 &
+# co.) serve l'indirizzo esplicito — `NET_DNS_UPSTREAM=<ipv6>`.
+# `timeout_ms` copre handshake + query (la verifica della catena sotto TCG e'
+# la voce lenta).
 if [ -n "${NET_DNS_DOT_PORT:-}" ]; then
-    printf 'upstream = auto\nport = %s\nmode = dot\nsni = %s\ntimeout_ms = %s\n' \
-        "$NET_DNS_DOT_PORT" "${NET_DNS_DOT_SNI:-dns.test}" "${NET_DNS_DOT_TIMEOUT_MS:-5000}" \
-        > "$ROOT/build-meta/dns.conf"
+    DOT_UPSTREAM="${NET_DNS_UPSTREAM:-auto}"
+    printf 'upstream = %s\nport = %s\nmode = dot\nsni = %s\ntimeout_ms = %s\n' \
+        "$DOT_UPSTREAM" "$NET_DNS_DOT_PORT" "${NET_DNS_DOT_SNI:-dns.test}" \
+        "${NET_DNS_DOT_TIMEOUT_MS:-5000}" > "$ROOT/build-meta/dns.conf"
     SEED_NS+=( "sys:dns.conf=$ROOT/build-meta/dns.conf" )
-    echo "[arca] + sys:dns.conf (dot auto:$NET_DNS_DOT_PORT sni=${NET_DNS_DOT_SNI:-dns.test})"
+    echo "[arca] + sys:dns.conf (dot $DOT_UPSTREAM:$NET_DNS_DOT_PORT sni=${NET_DNS_DOT_SNI:-dns.test})"
 elif [ -n "${NET_DNS_UPSTREAM_PORT:-}" ]; then
-    printf 'upstream = auto\nport = %s\nmode = plain\ntimeout_ms = 2000\n' \
-        "$NET_DNS_UPSTREAM_PORT" > "$ROOT/build-meta/dns.conf"
+    PLAIN_UPSTREAM="${NET_DNS_UPSTREAM:-auto}"
+    printf 'upstream = %s\nport = %s\nmode = plain\ntimeout_ms = 2000\n' \
+        "$PLAIN_UPSTREAM" "$NET_DNS_UPSTREAM_PORT" > "$ROOT/build-meta/dns.conf"
     SEED_NS+=( "sys:dns.conf=$ROOT/build-meta/dns.conf" )
-    echo "[arca] + sys:dns.conf (upstream auto:$NET_DNS_UPSTREAM_PORT)"
+    echo "[arca] + sys:dns.conf (upstream $PLAIN_UPSTREAM:$NET_DNS_UPSTREAM_PORT)"
 fi
 
 # TLS (N6.2, ADR-0072): `sys:tls.conf` (sni + porta del server TLS sull'host)

@@ -89,9 +89,10 @@ export NET_DNS_UPSTREAM_PORT="$UPSTREAM_PORT"
 
 # ── Peer TCP di rete reale (N6.1d, opzionale) ───────────────────────────
 # Il TCP verso l'esterno dipende dall'ambientazione: passt **non** inoltra il
-# TCP al loopback dell'host (l'UDP del DNS sì) e in questa sandbox anche un
-# peer pubblico IPv6 risponde RST. Perciò il probe si esegue solo se chi
-# chiama dichiara un peer raggiungibile, e solo allora diventa obbligatorio:
+# TCP al loopback dell'host (l'UDP del DNS sì). Un **peer pubblico** invece è
+# raggiungibile: misurato con `NET_TCP_PEER=2620:fe::fe NET_TCP_ECHO_PORT=53`
+# (`[nettcp] ... risposta 61 byte (rcode=0)`). Resta opt-in perché dipende
+# dalla rete di chi lancia; se dichiarato, il probe diventa obbligatorio:
 #   NET_TCP_PEER=<ipv6> [NET_TCP_ECHO_PORT=53] ./scripts/run-net-tests.sh
 if [ -n "${NET_TCP_PEER:-}" ]; then
     export NET_TCP_ECHO_ADDR="$NET_TCP_PEER"

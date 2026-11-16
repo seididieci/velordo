@@ -270,8 +270,10 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `NET_DNS_UPSTREAM_PORT`).
   **N6.2 (ADR-0072, completato)**: `libs/tls` è un adattatore **puro**
   (niente `civis`: trasporto e orologio iniettati) sopra `embedded-tls`
-  `=0.19.0` (`default-features = false`, features `rustpki`+`rsa`+`alloc`:
-  `webpki` è std-only, `rsa` serve alle catene RSA-4096). Moduli:
+  `=0.19.0` (`default-features = false`, features
+  `rustpki`+`rsa`+`p384`+`alloc`: `webpki` è std-only, `rsa` serve alle
+  catene RSA-4096, `p384` alle firme ECDSA-SHA384 — senza, le arm gated di
+  `pki` rifiutano la catena DigiCert G3 di Quad9). Moduli:
   `transport` (trait + adapter `embedded_io`), `drbg` (ChaCha20, RDRAND con
   gate CPUID, fallback `rdtsc`, reseed 1 MiB), `trust` (`CertVerifier` con
   `TlsClock`, `CERT_SIZE` 4 KiB fail-loud, record 16640/16384), `session`.
@@ -527,7 +529,7 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
 
 ```bash
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term, net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, valloc, blake2s, tls: 117 test
+./scripts/run-unit-tests.sh   # term, net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, valloc, blake2s, tls: 118 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh

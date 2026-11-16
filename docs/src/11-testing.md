@@ -288,7 +288,7 @@ log seriale.
   pieno/vuoto/wrap; N7.0), `libs/valloc`, `blake2s` e
   `libs/tls` (trasporto/adapter, DRBG ChaCha20, fail-closed della
   configurazione: SNI/CA mancanti e buffer record troppo piccoli danno
-  `Error::Config`) (**117 test** in tutto; `libs/net` ne ha 51, 21 dei quali
+  `Error::Config`) (**118 test** in tutto; `libs/net` ne ha 52, 21 dei quali
   sulla macchina a stati TCP e sul wiring, 2 sul framing RFC 7858). Girano da una
   **directory neutra**: il `.cargo/config.toml` del repo impone
   `build.target = x86_64-unknown-none` + `build-std` in base alla directory
@@ -327,10 +327,12 @@ log seriale.
   l'eco end-to-end — handshake, ACK, dati e chiusura passano tutti dalla
   macchina a stati. Il probe `nettcp` (query DNS over TCP verso un peer
   esterno, stesso trasporto di DoT) è **opzionale**: passt non inoltra il TCP
-  al loopback dell'host e in questa ambientazione anche un peer pubblico
-  risponde RST, quindi si esegue solo dichiarando
+  al loopback dell'host, quindi si esegue solo dichiarando
   `NET_TCP_PEER=<ipv6> NET_TCP_ECHO_PORT=53 ./scripts/run-net-tests.sh`
-  (che rende `[nettcp] risultato: PASS` obbligatorio).
+  (che rende `[nettcp] risultato: PASS` obbligatorio). Un **peer pubblico**
+  è raggiungibile: misurato con `NET_TCP_PEER=2620:fe::fe` (Quad9:53) →
+  `[nettcp] DNS over TCP su rete reale: risposta 61 byte (rcode=0)`; il
+  limite di passt riguarda il loopback dell'host, non l'uscita.
   Risultato N6.0: `dnsprobe` invia anche una query A per `upstream.test`,
   nome fuori tabella; `dns` la inoltra via UDP plain all'upstream
   configurato e restituisce l'indirizzo `198.51.100.7`. L'upstream è un
@@ -383,6 +385,14 @@ log seriale.
   smappato (ora un endpoint CONNECT sopravvive alla connessione); (c) gli
   eventi stantii della connessione precedente chiudevano il primo read della
   successiva (ora `EV_ABORT` libera lo slot TCP e scarta il ring RX).
+  Variante contro un resolver **pubblico** (facoltativa, dipende dalla rete):
+  `NET_DNS_UPSTREAM=2620:fe::fe NET_DNS_DOT_PORT=853` +
+  `NET_DNS_DOT_SNI=dns.quad9.net`, con `TLS_TEST_CA` che punta alla root in
+  `third_party/ca/DigiCertGlobalRootG3.der`. La catena di Quad9 è
+  **ECDSA-SHA384**, quindi copre la feature `p384` che i certificati RSA di
+  `tls-test-certs` non toccano; anchor = root (non l'intermediate inviata dal
+  server). Successo: `[dns] risposta dot: ... rcode=3` e nessun
+  `handshake fallito`.
 
 - **hello std** (S1.3…S2.4): `scripts/build-pal.sh` (PAL + sysroot in
   `$PAL_WORK`) produce `pal/build/hello-std.bin`, seedato come

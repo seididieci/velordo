@@ -20,6 +20,15 @@
 # self-signed "cattivo") e i server usano Python `ssl` (OpenSSL 3.x, TLS 1.3,
 # ALPN `dot`).
 #
+# Prova contro un resolver **pubblico** (facoltativa, dipende dalla rete di
+# chi lancia): catena ECDSA-SHA384 reale — quindi copre la feature `p384` di
+# `libs/tls`, che i certificati RSA di questo script non toccano:
+#   NET=1 RUN_DISPLAY=none NET_DNS_UPSTREAM=2620:fe::fe NET_DNS_DOT_PORT=853 \
+#   NET_DNS_DOT_SNI=dns.quad9.net NET_DNS_DOT_TIMEOUT_MS=8000 \
+#   TLS_TEST_CA=third_party/ca/DigiCertGlobalRootG3.der ./run.sh
+# Successo = `[dns] risposta dot: ... rcode=3` (NXDOMAIN via TLS) e **nessun**
+# `[dns] dot: handshake fallito`.
+#
 # Uso: ./scripts/run-tls-tests.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."

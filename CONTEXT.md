@@ -332,7 +332,7 @@ Un driver che blocca cardo si deadlocka. Per questo il display va in **diretta**
 
 Zero FAIL/PANIC/#.* FAULT. Suite FAT32 fuori dal gate (`scripts/run-fat-tests.sh`).
 
-Unit test host (FUORI gate, millisecondi): `./scripts/run-unit-tests.sh` — 117 test
+Unit test host (FUORI gate, millisecondi): `./scripts/run-unit-tests.sh` — 118 test
 (`libs/term` rasterizer/cursore/surface, `libs/net` IPv6/NDP/TCP/SIIT/DNS +
 framing RFC 7858, `libs/net-ep` formato slot e cursore di ring,
 `libs/valloc`, `blake2s`, `libs/tls` trasporto/DRBG/config fail-closed).

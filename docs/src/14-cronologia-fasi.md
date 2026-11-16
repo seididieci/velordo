@@ -3532,20 +3532,39 @@
       reconnect + fail-closed); unit test host 111/111 (2 nuovi sul framing
       RFC 7858); net tests N1–N6.0 PASS (il cambio in `userland/net` non
       regredisce il plain); gate 6/6, zero FAIL/PANIC/FAULT.
-      **Limite scoperto in coda: shared text a 16 slot** — nelle prove con
-      `net=1` `t47` falliva (`no sharing`) mentre nel gate passava. Causa:
-      `TEXT_MAX` era 16, sotto il numero di binari distinti vivi con la rete
-      (~20: netdev, net, netecho, siit, dns, ...); `hits 0->0` su tutto il
-      boot dimostrava che la condivisione non era mai partita, e il fallback
-      privato era **silenzioso** (`misses` non lo contava, nessun log). Il
-      limite ora è `MAX_PIDS` (128), che è un bound provabile (una immagine
-      per processo vivo; `fork`/thread fanno `add_ref`, `exec` rilascia prima
-      di caricare). `acquire` cerca lo slot libero **prima** di allocare (a
-      tabella piena non costruisce più un'immagine da buttare), `text_stats`
-      espone `full` in `r10` e la prima saturazione stampa
-      `[text] tabella piena` (uno per episodio, riarmato al `release`);
-      `t47` dice se il fallimento è tabella piena. Riprovato con `net=1`:
-      t47 PASS, net tests PASS, `[text]` mai stampato.
+      **Seguito: DoT contro un resolver pubblico (Quad9)** — la prima prova
+      fuori dalla sandbox dava `Tls(Io(BrokenPipe))`. Tre cause, tutte
+      verificate e corrette: (1) `scripts/arca-tool.sh` scriveva
+      `upstream = auto`, cioè il **gateway di passt**, non Quad9: RST sulla
+      853. Aggiunto `NET_DNS_UPSTREAM` (default `auto`, i test non cambiano).
+      (2) mancava la feature `p384` di `embedded-tls`: le arm
+      `EcdsaSecp384r1Sha384`/`ECDSA_SHA384` di `pki` sono cfg-gated, e la
+      catena DigiCert G3 di Quad9 è firmata `ecdsa-with-SHA384` (la
+      `CertificateVerify` è P-256: il ClientHello annunciava già P-384).
+      (3) l'anchor era l'intermediate: `CertificateChain` verifica l'**ultimo**
+      certificato inviato dal server contro l'anchor, quindi serve la **root**
+      `DigiCert Global Root G3` (in repo, `third_party/ca/`). Con
+      `NET_DNS_UPSTREAM=2620:fe::fe`, `NET_DNS_DOT_SNI=dns.quad9.net` e la
+      root come CA: `[dns] risposta dot: len=85 rcode=3` via TLS e nessun
+      handshake fallito. L'egress TCP del guest, dato per rotto, è stato
+      misurato con `nettcp dnstcp` verso `2620:fe::fe:53`:
+      `risposta 61 byte (rcode=0)` — il limite di passt riguarda il loopback
+      dell'host, non i peer pubblici.
+      **Limite scoperto in coda: shared text a 16 slot** — nella stessa
+      sessione di prove con `net=1` `t47` falliva (`no sharing`) mentre nel
+      gate passava. Causa: `TEXT_MAX` era 16, sotto il numero di binari
+      distinti vivi con la rete (~20: netdev, net, netecho, siit, dns, ...);
+      `hits 0->0` su tutto il boot dimostrava che la condivisione non era
+      mai partita, e il fallback privato era **silenzioso** (`misses` non lo
+      contava, nessun log). Il limite ora è `MAX_PIDS` (128), che è un bound
+      provabile (una immagine per processo vivo; `fork`/thread fanno
+      `add_ref`, `exec` rilascia prima di caricare). `acquire` cerca lo slot
+      libero **prima** di allocare (a tabella piena non costruisce più
+      un'immagine da buttare), `text_stats` espone `full` in `r10` e la
+      prima saturazione stampa `[text] tabella piena` (uno per episodio,
+      riarmato al `release`); `t47` dice se il fallimento è tabella piena.
+      Riprovato con `net=1`: t47 PASS, net tests PASS, `[text]` mai
+      stampato.
 
 - [x] **N7.0 — Client di rete nel meccanismo** (2026-11, ADR-0074): il
       protocollo a endpoint (ADR-0069) aveva una sola implementazione lato

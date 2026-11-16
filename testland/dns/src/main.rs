@@ -177,8 +177,9 @@ fn real_main(_sp: u64) -> ! {
             if matches {
                 println!("[dns] upstream: PASS");
             } else if rcode == RCODE_NXDOMAIN {
-                // Nessun upstream configurato: comportamento N5, non un errore.
-                println!("[dns] upstream: SKIP (nessun upstream configurato)");
+                // NXDOMAIN: nessun upstream configurato (comportamento N5)
+                // oppure l'upstream ha risposto che il nome non esiste.
+                println!("[dns] upstream: SKIP (NXDOMAIN: nessun upstream o nome inesistente)");
             } else if rcode == RCODE_SERVFAIL {
                 println!("[dns] upstream: FAIL (SERVFAIL)");
                 all_ok = false;
@@ -252,8 +253,10 @@ fn real_main(_sp: u64) -> ! {
                 // DoT configurato ma non funzionante: fail-closed corretto.
                 println!("[dns] dotfail: PASS (SERVFAIL)");
             } else if rcode == RCODE_NXDOMAIN {
-                // Nessun upstream (N5): il resolver non mente, non c'è DoT.
-                println!("[dns] dot: SKIP (nessun upstream)");
+                // NXDOMAIN: nessun upstream (N5) o upstream che non conosce il
+                // nome (es. un resolver pubblico: la risposta è arrivata, il
+                // che prova che il trasporto — DoT incluso — ha funzionato).
+                println!("[dns] dot: SKIP (NXDOMAIN: nessun upstream o nome inesistente)");
             } else {
                 println!("[dns] dot: SKIP (upstream non DoT)");
             }

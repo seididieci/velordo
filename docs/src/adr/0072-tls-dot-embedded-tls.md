@@ -45,9 +45,14 @@ sicurezza nostro, la parte dove un errore costa di più.
    `embedded-tls` 0.19 (versione pinnata `=0.19.0` in `Cargo.toml`), fuori
    un'API piccola e testabile. `dns` non vede `embedded-tls`.
    Feature abilitate: `default-features = false` + `["rustpki", "rsa",
-   "alloc"]` — `rustpki` è la strada `no_std` (`webpki` è std-only), `rsa`
-   implica `rustpki`+`alloc` ed è **necessario** per le catene firmate RSA
-   (ISRG Root X1 è RSA-4096).
+   "p384", "alloc"]` — `rustpki` è la strada `no_std` (`webpki` è std-only),
+   `rsa` implica `rustpki`+`alloc` ed è **necessario** per le catene firmate
+   RSA (ISRG Root X1 è RSA-4096), `p384` per le firme ECDSA-SHA384. Le arm
+   `EcdsaSecp384r1Sha384` (CertificateVerify) e `ECDSA_SHA384` (firma della
+   catena) nel modulo `pki` sono dietro `#[cfg(feature = "p384")]`: senza,
+   una catena reale come quella DigiCert G3 (leaf `ecdsa-with-SHA384`, come
+   Quad9) fallisce con `InvalidSignatureScheme`. Il ClientHello annunciava
+   già P-384 (`config.rs` non è gated): mancava solo la **verifica**.
 2. **Il crate è puro**: nessuna syscall, nessuna dipendenza da `civis`.
    Trasporto **e** orologio sono iniettati: trait `Transport { read; write;
    flush }` + adapter `embedded_io::Read/Write`, e `TlsClock` generico. Così
@@ -76,6 +81,14 @@ sicurezza nostro, la parte dove un errore costa di più.
    fuori tabella (fail-closed), mai NXDOMAIN e mai plaintext. Nessun root
    store compilato: un solo root (es. ISRG X1) coprirebbe solo una parte
    delle catene reali e darebbe una falsa garanzia; la CA si dichiara.
+   **L'anchor deve essere la ROOT, non l'intermediate**: `CertificateChain`
+   di `pki` parte dall'**ultimo** certificato inviato dal server e lo
+   verifica contro l'anchor (poi scende la catena). Un server che invia
+   `[leaf, intermediate]` (Quad9) richiede quindi la root che ha firmato
+   l'intermediate — `DigiCert Global Root G3`, non la
+   `DigiCert Global G3 TLS ECC SHA384 2020 CA1`. In repo:
+   `third_party/ca/DigiCertGlobalRootG3.der` (provenienza e uso in
+   `third_party/README.md`).
 5. **Entropia**: DRBG ChaCha20 (`rand_chacha`, `rand_core` 0.6 — lo stesso
    di `embedded-tls`) seminato da RDRAND (gate CPUID leaf 1 ECX bit 30:
    senza supporto l'istruzione fa `#UD`); fallback `rdtsc ^ mix`. Reseed
@@ -123,6 +136,24 @@ sicurezza nostro, la parte dove un errore costa di più.
   sincrono). Corretto: dati solo in `Established`/`CloseWait`, FIN solo a
   buffer di invio vuoto. Regressione coperta da un unit test host
   (`no_data_before_handshake_completes`).
+- **DoT reale contro un resolver pubblico (Quad9, verificato)**: con
+  `NET_DNS_UPSTREAM=2620:fe::fe`, `NET_DNS_DOT_PORT=853`,
+  `NET_DNS_DOT_SNI=dns.quad9.net` e `TLS_TEST_CA` che punta alla root in
+  `third_party/ca/DigiCertGlobalRootG3.der`, il probe `dns` riceve NXDOMAIN
+  (rcode=3) via TLS per i nomi fuori tabella: handshake + catena + hostname +
+  query funzionano, e nessun `[dns] dot: handshake fallito` compare. Tre
+  lezioni entrate nel codice/negli script:
+  1. `NET_DNS_UPSTREAM` in `scripts/arca-tool.sh` (default `auto`): per un
+     resolver pubblico l'upstream è un indirizzo **esplicito**; `auto` è il
+     router di passt, non Quad9 (e senza listener sulla porta → RST, che il
+     trasporto riporta come `Tls(Io(BrokenPipe))`, non come errore di
+     certificato).
+  2. La feature `p384` (sopra): senza, la catena ECDSA-SHA384 fallisce.
+  3. L'anchor è la **root**, non l'intermediate (sopra).
+  L'egress TCP del guest è stato misurato a parte con `testland/nettcp` in
+  modalità `dnstcp` verso `2620:fe::fe:53`: risposta DNS valida (`rcode=0`),
+  quindi il limite "passt non inoltra TCP" vale per il loopback dell'host,
+  non per un peer pubblico.
 
 ### Negative / limiti dichiarati
 
@@ -143,8 +174,8 @@ sicurezza nostro, la parte dove un errore costa di più.
 - DoT senza keep-alive: ogni query paga un handshake completo (RSA/P-256 sulla
   verifica: misurato ~200 ms sotto TCG). Accettabile per un resolver, da
   rivedere se il traffico cresce.
-- `dns` cresce a ~318 KiB (embedded-tls + rsa + p256) e usa lo stack grande
-  come `tlsprobe`: il `Provider` (~4.9 KiB) sta sullo stack durante
+- `dns` cresce a ~371 KiB (embedded-tls + rsa + p256 + p384) e usa lo stack
+  grande come `tlsprobe`: il `Provider` (~4.9 KiB) sta sullo stack durante
   l'handshake.
 
 ### Neutral
@@ -170,6 +201,11 @@ sicurezza nostro, la parte dove un errore costa di più.
 - **Fiducia TOFU (pin al primo uso)**: scartata: un DoT che non verifica la
   catena non aggiunge garanzie rispetto al plain, e il clock reale rende la
   verifica vera praticabile.
+- **Solo `rsa` (senza la feature `p384`)**: scartata dopo la prova reale —
+  le catene ECDSA-SHA384 (DigiCert G3, il caso Quad9) richiedono le arm
+  `#[cfg(feature = "p384")]` di `pki`, sia sulla firma della catena sia sul
+  `CertificateVerify`; con il solo `rsa` il costo era un handshake che
+  falliva con `InvalidSignatureScheme`.
 
 ## References
 
@@ -179,7 +215,8 @@ sicurezza nostro, la parte dove un errore costa di più.
 - `libs/tls/` (N6.2: `transport`/`drbg`/`trust`/`session`),
   `libs/tls-net/` (N6.3: `TcpStream` + `SystemClock`),
   `testland/tlsprobe/`, `tools/tls-test-certs/`,
-  `scripts/run-tls-tests.sh`.
+  `scripts/run-tls-tests.sh`, `third_party/ca/DigiCertGlobalRootG3.der`
+  (root per la prova Quad9).
 - `userland/dns/src/main.rs` (N6.0 `forward_plain`, N6.3 `forward_dot`,
   config `sys:dns.conf` + `sys:ca.der`).
 - `libs/net/src/dns.rs` (framing RFC 7858: `frame_tcp`/`tcp_prefix_len`).
