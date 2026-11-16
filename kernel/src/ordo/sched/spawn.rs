@@ -148,7 +148,7 @@ pub unsafe fn create_user(
     let process = match unsafe {
         Process::create_user(
             name, priority, elf, parent, parent_chan, io_ranges, detached, stack_frames,
-            args,
+            args, id,
         )
     } {
         Some(p) => p,

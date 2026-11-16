@@ -300,7 +300,14 @@ impl Process {
         // frame di interrupt annidati.
         let saved = unsafe { crate::ordo::context::new_context(stack_top, entry as usize as u64) };
 
-        let tss_slot = Self::alloc_tss(stack_top, io_ranges)?;
+        let tss_slot = match Self::alloc_tss(stack_top, io_ranges) {
+            Some(slot) => slot,
+            None => {
+                // Rollback: senza il PCB nessun teardown liberera' lo stack.
+                crate::arc::phys_mem::free_contiguous(stack_base, STACK_FRAMES);
+                return None;
+            }
+        };
         let tss_sel = crate::gdt::selectors().tss_selector(tss_slot);
 
         Some(Process {
@@ -351,6 +358,10 @@ impl Process {
     /// per-segmento (Fase 31, `elf::load`: RX/RO/RW + NX, entry dall'ELF) e lo
     /// stack user, e prepara un frame CPU ring 3 (`new_context_user`).
     ///
+    /// `pid` e' lo slot gia' riservato dal chiamante: serve **solo** al
+    /// rollback (teardown dell'address space se un passo successivo fallisce),
+    /// non viene registrato qui — il PCB lo riceve da `place_process`.
+    ///
     /// # Safety
     /// `parent` e' il processo che richiede la creazione (`None` se dal kernel).
     /// `io_ranges` = porte I/O (inclusive) consentite a ring 3 (TSS ADR-0006).
@@ -364,6 +375,7 @@ impl Process {
         detached: bool,
         stack_frames: u32,
         args: Option<&crate::arc::vmm_user::ParsedArgs<'_>>,
+        pid: usize,
     ) -> Option<Process> {
         // Validazione PRIMA di allocare (ELF malformato = nessun leak).
         let layout = crate::elf::validate(elf)?;
@@ -379,7 +391,14 @@ impl Process {
         let stack_top = crate::addr::phys_to_virt(stack_base + (STACK_FRAMES as u64 * crate::arc::phys_mem::FRAME_SIZE));
 
         // Address space user dedicato (PML4 proprio, kernel condiviso U=0).
-        let cr3 = crate::arc::vmm_user::new_address_space()?;
+        // Fallimento = solo lo stack kernel da restituire.
+        let cr3 = match crate::arc::vmm_user::new_address_space() {
+            Some(c) => c,
+            None => {
+                crate::arc::phys_mem::free_contiguous(stack_base, STACK_FRAMES);
+                return None;
+            }
+        };
 
         // Carica i segmenti ELF + stack user. La pagina FS per-processo viene
         // allocata/mappata lazy al primo uso (syscall 26).
@@ -392,7 +411,24 @@ impl Process {
         let saved =
             unsafe { crate::ordo::context::new_context_user(stack_top, entry, user_stack_top) };
 
-        let tss_slot = Self::alloc_tss(stack_top, io_ranges)?;
+        let tss_slot = match Self::alloc_tss(stack_top, io_ranges) {
+            Some(slot) => slot,
+            None => {
+                // Rollback: il PCB non esiste ancora, quindi nulla liberera'
+                // lo spazio creato fin qui. L'ordine conta: prima l'address
+                // space (foglie `owned`: codice + stack user), poi il ref
+                // della shared text (pagine read-only `owned` = 0, il walk le
+                // salta) e infine lo stack kernel. `pid` e' riservato ma non
+                // collocato: i record per-pid sono vuoti (il reclaim li azzera
+                // prima di rimettere il PID nel free-set).
+                unsafe { crate::arc::vmm_user::teardown_user_space(cr3, pid) };
+                if text_id != 0 {
+                    crate::text::release(text_id);
+                }
+                crate::arc::phys_mem::free_contiguous(stack_base, STACK_FRAMES);
+                return None;
+            }
+        };
         let tss_sel = crate::gdt::selectors().tss_selector(tss_slot);
 
         Some(Process {
@@ -540,7 +576,13 @@ impl Process {
         let stack_top = crate::addr::phys_to_virt(stack_base + (STACK_FRAMES as u64 * crate::arc::phys_mem::FRAME_SIZE));
         let saved =
             unsafe { crate::ordo::context::new_context_user(stack_top, entry, user_stack) };
-        let tss_slot = Self::alloc_tss(stack_top, &[])?;
+        let tss_slot = match Self::alloc_tss(stack_top, &[]) {
+            Some(slot) => slot,
+            None => {
+                crate::arc::phys_mem::free_contiguous(stack_base, STACK_FRAMES);
+                return None;
+            }
+        };
         if crate::gdt::clone_tss_iomap(tss_slot, leader_tss_slot).is_none() {
             crate::gdt::free_tss_slot(tss_slot);
             crate::arc::phys_mem::free_contiguous(stack_base, STACK_FRAMES);

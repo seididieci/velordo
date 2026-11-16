@@ -123,10 +123,33 @@ pub fn new_address_space() -> Option<u64> {
         );
     }
 
-    // Regione user: alloco i 3 livelli sotto USER_BASE.
-    let pdp = crate::arc::phys_mem::alloc()?;
-    let pd = crate::arc::phys_mem::alloc()?;
-    let pt = crate::arc::phys_mem::alloc()?;
+    // Regione user: alloco i 3 livelli sotto USER_BASE. Un fallimento a meta'
+    // non deve lasciare i frame gia' presi (OOM qui = spawn fallito, non RAM
+    // persa): unwinding esplicito, `free` basta (ref 1 da `alloc`).
+    let pdp = match crate::arc::phys_mem::alloc() {
+        Some(f) => f,
+        None => {
+            crate::arc::phys_mem::free(pm);
+            return None;
+        }
+    };
+    let pd = match crate::arc::phys_mem::alloc() {
+        Some(f) => f,
+        None => {
+            crate::arc::phys_mem::free(pdp);
+            crate::arc::phys_mem::free(pm);
+            return None;
+        }
+    };
+    let pt = match crate::arc::phys_mem::alloc() {
+        Some(f) => f,
+        None => {
+            crate::arc::phys_mem::free(pd);
+            crate::arc::phys_mem::free(pdp);
+            crate::arc::phys_mem::free(pm);
+            return None;
+        }
+    };
     unsafe {
         zero_frame(pdp);
         zero_frame(pd);
