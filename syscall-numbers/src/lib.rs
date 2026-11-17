@@ -1060,6 +1060,42 @@ impl ImageId {
     }
 }
 
+/// Classe di privilegio di un'immagine (ADR-0079, fase 2): esito della
+/// verifica della firma, riferita al **contenuto** (il sidecar e' indicizzato
+/// dal digest), non al path da cui l'oggetto e' letto.
+///
+/// `R_RIGHTS_EXECUTE` la riporta in `w1` (ADR-0078 fase 2) e la fase 3 la
+/// scrive nel PCB allo spawn, cosi' il privilegio segue l'immagine che gira e
+/// non il bucklet da cui e' stata caricata.
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageClass {
+    /// Nessuna firma (o bucket non privilegiato): codice compilato in casa,
+    /// eseguibile con privilegi bassi.
+    Untrusted = 0,
+    /// Firmata da una chiave `thirdparty` dell'anchor.
+    ThirdParty = 1,
+    /// Firmata da una chiave `system` dell'anchor (TCB).
+    System = 2,
+}
+
+impl ImageClass {
+    /// Decodifica il valore di registro (`w1`); ignoto → `Untrusted` (mai
+    /// promozione per un valore non riconosciuto).
+    pub const fn from_u64(v: u64) -> Self {
+        match v {
+            2 => Self::System,
+            1 => Self::ThirdParty,
+            _ => Self::Untrusted,
+        }
+    }
+
+    /// Valore di registro (`w1`).
+    pub const fn as_u64(self) -> u64 {
+        self as u64
+    }
+}
+
 /// Servizi di sistema raggiungibili per nome (ADR-0008, IPC per nome).
 /// Il discriminant coincide con l'indice di slot nel registry del kernel
 /// (`channels.rs`): `#[repr(u64)]` + assegnazione esplicita per rendere

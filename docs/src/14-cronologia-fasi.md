@@ -3775,3 +3775,36 @@
       **Validazione**: gate 6/6 (`[usertests] 61/61`, t51/t52 con la nuova
       identità), net tests PASS (incluso `[posixsock]`), zero
       FAIL/PANIC/FAULT.
+
+- [x] **Identità — firma Ed25519 dei binari** (2026-11, ADR-0078, fase 2):
+      completata dopo la fase 1. `libs/sig` (`ed25519-compact` `=2.6.1`,
+      `no_std`, `default-features = false`) con dominio
+      `VELORDO-IMAGE-V1\0`, sidecar `[VSIG][key_id:8 LE][sig:64]` (76 B) e
+      verifica incrementale (`Verifier`); `tools/sign` host e
+      `scripts/sign-bins.sh` agganciato a `seed_bin` (l'unica mappa
+      file→bucket): `sys`/`vela` → chiave `system`, `usr` → `thirdparty`.
+      **La firma è sul contenuto**, non sul path: namespace `sig`
+      indicizzato dal digest BLAKE2s-256 (`sig:<64 hex>`), una voce per
+      immagine — le copie in `sys`/`vela`/`usr`/`ns` condividono la firma,
+      una copia manomessa non la eredita. ArcaFS **non cambia** (v4; il
+      sidecar nel record è la strada del v5, rinviata a un ADR suo).
+      Anchor come dato `sys:anchor` (`key_id` ricalcolata dalla pubkey; `key_id`
+      BE in anchor, LE nel sidecar — il parser usa `from_be_bytes` lato
+      anchor, bug già pagato al primo giro), 8 chiavi max. Verifica in
+      cardo (`userland/cardo/src/verify.rs`, cache su ImageId+key_id+sig,
+      `#[inline(never)]` firewall LTO) e `R_RIGHTS_EXECUTE` risponde `w0` =
+      verdetto, `w1` = `ImageClass` (`syscall-numbers::ImageClass`,
+      ri-esportato da `civis`).
+      Semantica: firma **obbligatoria** in `sys`/`vela`/`usr` (assente →
+      `ERR_DENIED`), altrove assente → `Untrusted`; sidecar malformato,
+      chiave ignota o firma non valida → **sempre** negato (mai downgrade a
+      "non firmato"). `sig` e `vela` entrano in `protected_bucket`
+      (ADR-0077). Chiavi di **test** in
+      `tools/sign/keys/*-test-only.key` (override
+      `VELORDO_SIGN_KEY_SYSTEM`/`_THIRDPARTY`).
+      **Vittoria**: t66 (7 casi: system/third-party/untrusted, non firmato in
+      `vela`, byte flippato con sidecar altrui, `key_id` azzerato, oggetto
+      assente) → `[usertests] PASS 62/62`, gate 6/6, zero FAIL/PANIC/FAULT.
+      **Limiti dichiarati**: `libr::exec` POSIX legge per path e non chiede il
+      verdetto (si chiude in fase 3 con la classe nel PCB), TOCTOU
+      verifica→spawn, rotazione/revoca manuali, chiavi di test nel repo.

@@ -52,6 +52,12 @@ if command -v fallocate >/dev/null 2>&1; then
 fi
 echo "[arca] tool in $TOOL_BIN, immagine $OUT"
 
+# Tool di firma (ADR-0078, fase 2): stessa modalita' del tool arca (host std,
+# build da directory neutra). Costruito UNA volta; `seed_bin` lo usa per
+# firmare i binari di `sys`/`vela`/`usr`.
+bash "$ROOT/scripts/sign-bins.sh" build
+bash "$ROOT/scripts/sign-bins.sh" anchor
+
 # Seed del volume con i file di boot (Fase 2 + D1): `/bin` + `/bin/posix` +
 # `/usr/bin` + `/test` + fixture. Il seed e' un build-time: il disco host legge
 # i binari gia' compilati e li scrive nel bucket `ns` (percorso, vista POSIX
@@ -63,6 +69,24 @@ echo "[arca] tool in $TOOL_BIN, immagine $OUT"
 # root = 0): le derivate MBR/GPT copiano blocchi dal volume originale.
 # Fail-loud: file mancante o seed fallito = exit 1, mai `|| true`.
 SEED_NS=()
+# Firma (ADR-0078, fase 2): i binari che finiscono nei bucket di software
+# spedito (`sys`, `vela`, `usr`) vengono firmati sul CONTENUTO e il sidecar va
+# nel namespace `sig`, indicizzato dal digest (`sig:<blake2s-256 hex>`). Una
+# sola firma copre tutte le copie degli stessi byte (sys/vela/usr/ns).
+SIG_SEEN=()
+seed_sig() {
+    local bucket="$1" file="$2" out digest sidecar
+    out="$(bash "$ROOT/scripts/sign-bins.sh" one "$bucket" "$ROOT/$file")"
+    digest="${out%% *}"
+    sidecar="${out#* }"
+    # Dedupe: lo stesso file seedato in piu' bucket (`ns` + `usr`) ha lo
+    # stesso digest, quindi una sola voce `sig:`.
+    case " ${SIG_SEEN[*]:-} " in
+        *" $digest "*) return 0 ;;
+    esac
+    SIG_SEEN+=("$digest")
+    SEED_NS+=( "sig:$digest=$sidecar" )
+}
 # seed_bin <host-rel> <ns-key> [obj-bucket obj-key]: ns sempre, obj per classi.
 seed_bin() {
     if [ ! -f "$ROOT/$1" ]; then
@@ -72,6 +96,11 @@ seed_bin() {
     SEED_NS+=( "ns:$2=$ROOT/$1" )
     if [ -n "${3:-}" ] && [ -n "${4:-}" ]; then
         SEED_NS+=( "$3:$4=$ROOT/$1" )
+        # Solo i bucket di software spedito pretendono la firma; test e dati
+        # restano non firmati (eseguono come `Untrusted`).
+        case "$3" in
+            sys|vela|usr) seed_sig "$3" "$1" ;;
+        esac
     fi
 }
 # Servizi /bin: driver in `vela`, resto in `sys` (D1).
@@ -124,7 +153,7 @@ seed_bin userland/build/shell.bin bin/interpres.bin sys bin/interpres.bin
 # Manifest e policy come DATI (ADR-0078, fase 1): init e cardo li leggono a
 # runtime, quindi aggiungere/aggiornare un servizio non ricompila il kernel.
 # Bucket `sys`, chiavi piatte; niente path `ns` (non sono file da browsare).
-for pair in "manifest:manifest.txt" "policy:policy.txt" "test-policy:test_policy.txt"; do
+for pair in "manifest:manifest.txt" "policy:policy.txt" "test-policy:test_policy.txt" "anchor:anchor.txt"; do
     key="${pair%%:*}"; file="${pair##*:}"
     if [ -f "build-meta/$file" ]; then
         SEED_NS+=( "sys:$key=$(pwd)/build-meta/$file" )
@@ -163,6 +192,46 @@ seed_bin testland/build/posixsock.bin usr/bin/posixsock.bin usr posixsock
 seed_bin testland/build/tlsprobe.bin test/tlsprobe.bin tst test/tlsprobe.bin
 seed_bin testland/build/userforeign.bin test/foreign.bin
 seed_bin flavours/posix/tests/build/userposixtests.bin test/posixtst.bin tst test/posixtst.bin
+
+# Artefatti del test firma (t66, ADR-0078 fase 2). Costruiti host-side: il
+# volume seedato con un sidecar sbagliato e' esattamente l'attacco che il
+# verifier deve rifiutare. Non entrano in nessun bucket enumerato da
+# BIN_LIST, quindi non diventano comandi.
+SIGART="$ROOT/build-meta/sig-test"
+mkdir -p "$SIGART"
+# (a) binario NON firmato in un bucket che pretende la firma (`vela`).
+cp "$ROOT/testland/build/userdemo.bin" "$SIGART/unsigned.bin"
+SEED_NS+=( "vela:bin/unsigned.bin=$SIGART/unsigned.bin" )
+# (b) copia manomessa (un byte flippato) con la firma valida di un ALTRO
+#     binario: il digest cambia, il sidecar resta quello di gpu.bin. La firma
+#     non verifica e NON deve degradare a "non firmato".
+flip_byte() {  # <src> <dst> <offset>
+    cp "$1" "$2"
+    local orig new
+    orig=$(od -An -tu1 -j"$3" -N1 "$1" | tr -d ' \n')
+    new=$(( (orig ^ 1) & 0xFF ))
+    printf "\\$(printf '%03o' "$new")" | dd of="$2" bs=1 seek="$3" conv=notrunc 2>/dev/null
+}
+GPU_BIN="$ROOT/userland/build/gpu.bin"
+if [ ! -f "$GPU_BIN" ]; then
+    echo "[arca] errore: gpu.bin mancante (artefatti firma t66)" >&2
+    exit 1
+fi
+flip_byte "$GPU_BIN" "$SIGART/sigbad.bin" 100
+flip_byte "$GPU_BIN" "$SIGART/sigunk.bin" 200
+GPU_DIGEST="$(bash "$ROOT/scripts/sign-bins.sh" digest "$GPU_BIN")"
+GPU_SIG="$ROOT/build-meta/sig/$GPU_DIGEST.sig"
+[ -f "$GPU_SIG" ] || { echo "[arca] errore: sidecar di gpu.bin assente" >&2; exit 1; }
+# sigbad: sidecar valido di gpu.bin sul digest della copia manomessa.
+D_BAD="$(bash "$ROOT/scripts/sign-bins.sh" digest "$SIGART/sigbad.bin")"
+cp "$GPU_SIG" "$SIGART/sigbad.sig"
+SEED_NS+=( "sig:$D_BAD=$SIGART/sigbad.sig" "tst:test/sigbad.bin=$SIGART/sigbad.bin" )
+# sigunk: stesso sidecar con `key_id` azzerato (chiave ignota all'anchor).
+D_UNK="$(bash "$ROOT/scripts/sign-bins.sh" digest "$SIGART/sigunk.bin")"
+cp "$GPU_SIG" "$SIGART/sigunk.sig"
+head -c 8 /dev/zero | dd of="$SIGART/sigunk.sig" bs=1 seek=4 conv=notrunc 2>/dev/null
+SEED_NS+=( "sig:$D_UNK=$SIGART/sigunk.sig" "tst:test/sigunk.bin=$SIGART/sigunk.bin" )
+echo "[arca] + artefatti firma t66 (unsigned in vela, sigbad, sigunk)"
 # Hello std nativo (S1.3): solo se compilato via scripts/build-pal.sh (fuori
 # dal gate default: rust-lang/rust + ~10 min di build). Niente fail-loud qui:
 # il gate non dipende dalla PAL.

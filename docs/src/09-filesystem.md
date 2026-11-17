@@ -240,6 +240,20 @@ usertests 17/17, shell 3/3.
   store; il seal per-versione arriva con ArcaFS in A1). `BLAKE2s` proprio
   (crate `blake2s`, RFC 7693: vettori generati da due implementazioni
   indipendenti) usato anche dal seal futuro e dal tool host.
+- **Firma delle immagini** (ADR-0078 fase 2): `R_RIGHTS_EXECUTE` (0x37,
+  payload `[bucket_len:1][bucket]\0[key_len:1][key]\0`, lo stesso prefisso di
+  `R_OBJ_GET/PUT`) risponde `w0` = verdetto (`0` /
+  `ERR_DENIED` / `ERR_NOTFOUND`) e **`w1` = `ImageClass`** (`0` `Untrusted`,
+  `1` `ThirdParty`, `2` `System`; tipo in `syscall-numbers`, ri-esportato da
+  `civis`). Il verdetto è **del contenuto**: il sidecar sta nel namespace
+  `sig` indicizzato dal digest (`sig:<blake2s-256 hex>` →
+  `[VSIG][key_id:8 LE][sig:64]`, 76 B), quindi le copie degli stessi byte in
+  `sys`/`vela`/`usr`/`ns` condividono la firma e una copia manomessa non la
+  eredita. Firma obbligatoria in `sys`/`vela`/`usr`; altrove l'assenza vale
+  `Untrusted`; un sidecar presente ma non valido nega **sempre**. Le chiavi
+  (autorevoli) stanno in `sys:anchor`; `sig` e `vela` sono bucket protetti
+  (ADR-0077). Client: `civis::fs::rights::rights_execute_verdict` /
+  `rights_execute`.
 
 ## Contratto di durabilita' (Fase 52, P3)
 

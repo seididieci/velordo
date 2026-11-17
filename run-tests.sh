@@ -11,9 +11,9 @@
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 61/61
+#   [usertests] PASS 62/62
 #   [threadtest] PASS 12/12
-# (Fase 30.1: t65 shm ownership + destroy; la suite e' cresciuta di una riga)
+# (Fase 30.1: t65 shm ownership + destroy; Fase 2 ADR-0078: t66 firma immagini e classi; la suite e' cresciuta di due righe)
 # N7.0 (ADR-0074): nessuna riga nuova — il client di rete vive in `civis::net`
 # e il formato degli slot in `libs/net-ep`; i percorsi di rete si provano nei
 # run dedicati (scripts/run-net-tests.sh, scripts/run-tls-tests.sh).

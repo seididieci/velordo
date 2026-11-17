@@ -942,18 +942,43 @@ Voci con scope e vittoria dichiarati (non date).
       ricompila** (servivano due fix di build: `.bin` identici non riscritti,
       `kernel/build.rs` non osserva più la dir `userland/build` che contiene
       `target/`). Gate 6/6, net tests PASS, zero FAIL/PANIC/FAULT.
-- [ ] **Identità — firma Ed25519 dei binari** (ADR-0078, fase 2):
-      `libs/sig` (`ed25519-compact`, `no_std`, `default-features = false`),
-      `tools/sign` host, sidecar `[VSIG][key_id][sig]`, verifica in cardo a
-      `R_RIGHTS_EXECUTE`, anchor in `sys:anchor`, vettori RFC 8032 nei test
-      host. Vittoria: binario senza firma → esecuzione negata; firma valida →
-      esegue; chiave ignota o bit flippato → negato (test nel gate).
+- [x] **Identità — firma Ed25519 dei binari** (completata, ADR-0078, fase 2):
+      `libs/sig` (`ed25519-compact` `=2.6.1`, `no_std`,
+      `default-features = false`) con dominio `VELORDO-IMAGE-V1\0`, sidecar
+      `[VSIG][key_id:8 LE][sig:64]` (76 B) e verifica incrementale;
+      `tools/sign` host (keygen/pubkey/digest/sign/verify) e
+      `scripts/sign-bins.sh` agganciato a `seed_bin` (l'unica mappa
+      file→bucket): `sys`/`vela` → chiave `system`, `usr` → `thirdparty`.
+      **La firma è sul contenuto**, non sul path: namespace `sig` indicizzato
+      dal digest BLAKE2s-256 (`sig:<64 hex>`), una voce per immagine — le
+      copie in `sys`/`vela`/`usr`/`ns` condividono la firma, una copia
+      manomessa non la eredita. ArcaFS **non cambia** (v4; il sidecar nel
+      record è la strada del v5, ADR a parte). Anchor come dato `sys:anchor`
+      (`key_id pubkey classe nome`, `key_id` ricalcolata dalla pubkey, 8
+      chiavi max). Verifica in cardo (`verify.rs`, cache su
+      ImageId+key_id+sig, `#[inline(never)]`) e risposta `R_RIGHTS_EXECUTE`
+      con `w0` = verdetto e `w1` = `ImageClass` (`syscall-numbers`).
+      Semantica: firma **obbligatoria** in `sys`/`vela`/`usr` (assente →
+      `ERR_DENIED`), altrove assente → `Untrusted`; sidecar malformato, chiave
+      ignota o firma non valida → **sempre** negato (mai downgrade a "non
+      firmato"). `sig`/`vela` entrano nei bucket protetti (ADR-0077).
+      Chiavi di **test** in `tools/sign/keys/*-test-only.key`, sostituibili
+      via `VELORDO_SIGN_KEY_SYSTEM`/`_THIRDPARTY`. Vittoria: t66 (7 casi:
+      system/third-party/untruested, non firmato in `vela`, byte flippato con
+      sidecar altrui, `key_id` azzerato, oggetto assente) — `usertests 62/62`.
+      Limiti dichiarati: `libr::exec` POSIX legge per path e non chiede il
+      verdetto (si chiude in fase 3), TOCTOU verifica→spawn (fase 3 con la
+      classe nel PCB), rotazione/revoca manuali, chiavi di test nel repo.
+      **Bug trovato**: l'anchor scrive `%016x` (BE) mentre il sidecar usa LE —
+      il primo giro scartava tutte le righe; parse corretto `from_be_bytes`.
 - [ ] **Privilegi — classi e spawn attestato** (ADR-0079, fase 3): `Class`
       nel PCB (`System`/`ThirdParty`/`Untrusted`), trust table nel kernel
       (32 voci) registrabile **solo** da cardo via `SYS_TRUST_IMAGE = 64`,
       gate su `service_register`, `dma_alloc` device, `map_mmio`,
-      `io_ranges`. Vittoria: un probe figlio di init ma non firmato **non**
-      registra `Service::Net` (t66 nel gate); un probe `System` sì.
+      `io_ranges`; la classe si legge in `w1` di `R_RIGHTS_EXECUTE` (fase 2)
+      e va scritta nel PCB, così vale anche per `libr::exec`. Vittoria: un
+      probe figlio di init ma non firmato **non** registra `Service::Net`
+      (t67 nel gate); un probe `System` sì.
 - [ ] **Privilegi — `io_ranges` e bisogni dal manifest** (ADR-0079, fase 4):
       le porte I/O dei driver escono da `NAMED_BINARIES` e arrivano dalla
       trust entry (manifest firmato); `SpawnMeta.io_ranges` ignorato per

@@ -110,6 +110,7 @@ velordo/
 │   │                   #   fs/spawn/print/args/net + hook `persona` (ADR-0041)
 │   ├── net/            # core rete puro (Ethernet/IPv6/NDP/TCP/SIIT/DNS)
 │   ├── net-ep/         # formato degli slot dei ring endpoint (N7.0, ADR-0074)
+│   ├── sig/            # firma Ed25519 delle immagini (ADR-0078 fase 2)
 │   ├── tls/ tls-net/   # TLS 1.3 puro + newtype `TcpStream` (N6.2/N6.3)
 │   └── vela/           # codice driver condiviso (hub/block/input/gpu)
 ├── flavours/
@@ -129,6 +130,8 @@ velordo/
 │   ├── build-userland.sh  # servizi nativi -> userland/build (+ build-posix)
 │   ├── build-posix.sh  # binari POSIX -> flavours/posix/build
 │   ├── build-tests.sh  # binari test suite -> testland/build
+│   ├── arca-tool.sh    # seed del volume (manifest/policy/anchor/sig + binari)
+│   ├── sign-bins.sh    # firma per bucket + anchor (ADR-0078 fase 2)
 │   └── putc16.inc
 ├── run.sh              # build userland + testland + kernel + QEMU (PVH)
 ├── userland/           # servizi NATIVI: init, block, cardo, gpu, kbd, vela,
@@ -142,6 +145,8 @@ velordo/
 ├── blake2s/            # BLAKE2s-256 proprio (RFC 7693, no_std) — P5
 ├── arcafs/             # casa ArcaFS (56.2a): tag/wire/formato condivisi guest/host — P5/A1/A2
 ├── tools/arca/         # tool host `arca create` (std, P5)
+├── tools/sign/         # tool host: chiavi e firme delle immagini (std, ADR-0078)
+│                       #   keys/*-test-only.key = chiavi di TEST (mai produzione)
 ├── testland/           # TEST SUITE + repro + demo (nessun binario "utente")
 │   │                   #   demo, testfs, testfat, testsarca, hogheap, devreader,
 │   │                   #   usertests (+ helper usertest-client/usertest-spin);
@@ -161,7 +166,7 @@ velordo/
 
 ## Stato corrente
 
-Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 61/61` + `[threadtest] PASS 12/12` + shell nativa (fase `native` di `test-shell-all.sh`; le fasi POSIX sono storiche dal login nativo, ADR-0062), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
+Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 62/62` + `[threadtest] PASS 12/12` + shell nativa (fase `native` di `test-shell-all.sh`; le fasi POSIX sono storiche dal login nativo, ADR-0062), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
 - **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
   BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
@@ -419,17 +424,39 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   manifest, cardo dal proprio motore prima del READY). Corollario di build:
   `build_one` non riscrive `.bin` identici (temp fuori dalla dir) e
   `kernel/build.rs` elenca i singoli `.bin`, mai la dir `userland/build`
-  (contiene `target/`) — senza, il kernel si ricompila comunque. (5) **Bucket di fiducia
+  (contiene `target/`) — senza, il kernel si ricompila comunque. (7) **Firma
+  Ed25519 delle immagini (ADR-0078, fase 2)**: `libs/sig` (formato sidecar
+  `[VSIG][key_id:8 LE][sig:64]`, dominio `VELORDO-IMAGE-V1\0`, verifica
+  incrementale; `ed25519-compact` `no_std`), `tools/sign` host e
+  `scripts/sign-bins.sh` agganciato a `seed_bin` (`sys`/`vela` → chiave
+  `system`, `usr` → `thirdparty`). La firma e' sul **contenuto**: namespace
+  `sig` indicizzato dal digest BLAKE2s-256 (`sig:<64 hex>`), una voce per
+  immagine — copie in `sys`/`vela`/`usr`/`ns` condividono la firma, una copia
+  manomessa no. ArcaFS resta v4 (il sidecar nel record e' la strada del v5).
+  Anchor come dato `sys:anchor` (`key_id` ricalcolata dalla pubkey); verifica
+  in cardo (`verify.rs`, cache su ImageId+key_id+sig) e `R_RIGHTS_EXECUTE`
+  risponde `w0` = verdetto, **`w1` = `ImageClass`**. Firma obbligatoria in
+  `sys`/`vela`/`usr`; altrove assente = `Untrusted`; sidecar malformato,
+  chiave ignota o firma invalida = **sempre** negato (mai downgrade). `sig` e
+  `vela` in `protected_bucket`. Chiavi di **test** in
+  `tools/sign/keys/*-test-only.key` (override
+  `VELORDO_SIGN_KEY_SYSTEM`/`_THIRDPARTY`); t66 nel gate (`usertests 62/62`).
+  Limiti dichiarati: `libr::exec` POSIX legge per path (si chiude in fase 3),
+  TOCTOU verifica→spawn, rotazione/revoca manuali. **Trappola**: la `key_id`
+  e' BE (`%016x`) in `sys:anchor` e LE nel sidecar — il parser usa
+  `from_be_bytes` lato anchor. (5) **Bucket di fiducia
   protetti (ADR-0077, fase 0)**: `policy::write_allowed` in cardo, dopo il
   tetto e il subtree — admin ops (snapshot) solo con `ceiling == RIGHTS_ALL`;
-  bucket `sys`/`usr`/`tst`/`ns` e path `bin/`, `usr/bin/`, `test/` solo con
+  bucket `sys`/`usr`/`tst`/`ns`/`sig`/`vela` e path `bin/`, `usr/bin/`,
+  `test/` solo con
   `RIGHTS_ALL` o init; carve-out per owner di servizio (`identis:` → Identis,
   bucket `log` → Vestigia), classificato all'handshake e purgato su
   `EXIT_NOTIFY`. Senza, il default `0x19F` (che include WRITE) lasciava a
   chiunque la riscrittura di `sys:ca.der` e dei binari. Catena
-  identità/privilegi pianificata: ADR-0078 (digest BLAKE2s + manifest come
-  dato + firma Ed25519, verifica in cardo), ADR-0079 (classi
-  System/ThirdParty/Untrusted + `SYS_TRUST_IMAGE`), ADR-0080 (`Custos`,
+  identità/privilegi: ADR-0078 (fasi 1–2 fatte: digest + manifest come dato +
+  firma Ed25519, verifica in cardo), ADR-0079 (classi
+  System/ThirdParty/Untrusted + `SYS_TRUST_IMAGE`, fase 3: la classe in `w1`
+  c'e' gia', va nel PCB; test t67), ADR-0080 (`Custos`,
   ruoli, broker di rete).
 - **IPC reply implicita**: la reply del server va al peer del canale del
   messaggio correntemente elaborato (fissato da `recv` in `reply_chan`), non
@@ -563,7 +590,7 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
 
 ```bash
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term, net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, valloc, blake2s, tls: 118 test
+./scripts/run-unit-tests.sh   # term, net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, valloc, blake2s, sig, tls: 125 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh
@@ -595,7 +622,7 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 61/61
+#   [usertests] PASS 62/62
 #   [threadtest] PASS 12/12
 # KVM=1 accelera (-enable-kvm -cpu host, opt-in; senza /dev/kvm resta TCG).
 # Il timeout chiude il boot al prompt del login: il contratto sono le PASS.

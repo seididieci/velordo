@@ -9,6 +9,12 @@ choke point di cardo, classificazione del peer all'handshake
 binari): senza questa protezione il materiale di fiducia sarebbe scrivibile da
 chiunque.
 
+**Fase 2 (ADR-0078)**: i bucket protetti si allargano a **`sig`** (i sidecar
+delle firme: solo init li scrive) e **`vela`** (i driver: protegge le immagini
+firmate dalla sostituzione). Oggi nessun client scrive `vela`: l'unico writer
+runtime è il seed interno di cardo (`seed_sys_disk`, che non passa dal choke
+point), e le immagini che ne uscirebbero sono comunque non firmate.
+
 **Bug trovato implementando**: `fs_reply_check` (client FS) non mappava
 `ERR_DENIED`, che quindi cadeva nel ramo `v => Ok(v)` e veniva letto come una
 **lunghezza**. Il diniego era invisibile ai client (il put "riusciva"). Ora
@@ -56,6 +62,10 @@ prima del dispatch. Tre regole, in ordine:
 2. **Target protetti**: scrittura/creazione/cancellazione/rename su
    - path con prefisso `bin/`, `usr/bin/`, `test/` (binari e suite);
    - bucket `sys`, `usr`, `tst`, `ns` (oggetti e namespace);
+   - **`sig` e `vela`** (aggiunti in ADR-0078 fase 2: i sidecar delle firme e
+     i driver. Un `vela` scrivibile da chiunque permetteva di sostituire un
+     driver **firmato** — la firma senza write-protection del bucket che la
+     contiene è teatro, esattamente come per `sys` in fase 0);
    richiede `ceiling == RIGHTS_ALL` **oppure** peer `pid == 1` (init).
 3. **Carve-out per owner di servizio**: `identis:` (path) → solo Identis;
    bucket `log` → solo Vestigia. L'owner è determinato **una volta

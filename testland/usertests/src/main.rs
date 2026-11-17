@@ -36,6 +36,7 @@ mod t_lifecycle;
 mod t_mapflap;
 mod t_policy;
 mod t_scroll;
+mod t_sig;
 mod t_stable;
 // ── main ─────────────────────────────────────────────────────────────
 
@@ -109,6 +110,7 @@ fn real_main(_sp: u64) -> ! {
     helpers::report(&mut total, &mut ok, "t63 modeset + re-adattamento (D4)", t_display::t_display_modeset());
     helpers::report(&mut total, &mut ok, "t64 scroll vs repaint (D7/T4)", t_scroll::t_scroll_equivalence());
     helpers::report(&mut total, &mut ok, "t65 shm ownership + destroy", t_basic::t_shm_destroy());
+    helpers::report(&mut total, &mut ok, "t66 firma immagini + classi", t_sig::t_signature());
     // t34 per ULTIMO: i drop sono irrevocabili sul canale di usertests.
     helpers::report(&mut total, &mut ok, "t34 diritti per-canale lato server", t_fs::t_rights());
 

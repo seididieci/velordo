@@ -5,6 +5,15 @@
 **Accepted** (2026-11). Fasi 3–4. Dipende da ADR-0077 (bucket protetti) e
 ADR-0078 (identità firmata).
 
+**Stato**: la classe è già calcolata e trasmessa, ma non ancora *nel PCB*.
+ADR-0078 fase 2 (implementata) fa rispondere a `R_RIGHTS_EXECUTE` `w0` =
+verdetto e `w1` = `ImageClass` (`syscall-numbers::ImageClass`, ri-esportato da
+`civis`), con il verdetto **riferito al contenuto** (il sidecar è indicizzato
+dal digest): due copie degli stessi byte hanno la stessa classe, una copia
+manomessa non ne ha nessuna. La fase 3 incomincia da lì: portare quel `w1` nel
+PCB via trust table, senza ri-verificare firme nel kernel. Il test nuovo della
+fase 3 sarà **t67** (t66 è occupato dalla firma).
+
 ## Context
 
 Oggi il privilegio è distribuito in punti diversi, ciascuno con la sua chiave:
