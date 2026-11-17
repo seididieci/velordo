@@ -251,20 +251,34 @@ pub fn image_id(bytes: &[u8]) -> ImageId {
     ImageId::from_digest(&blake2s::blake2s(bytes))
 }
 
-/// Registra `id -> classe` nella trust table del kernel (ADR-0079 fase 3).
+/// Registra `id -> (classe, porte I/O)` nella trust table del kernel
+/// (ADR-0079 fasi 3–4).
 ///
 /// Chiamabile solo da cardo (owner di `Service::Cardo`) o init: il kernel e'
 /// il punto di enforcement della classe, e il writer della tabella deve essere
 /// UNO (il servizio che verifica le firme). Il kernel calcola l'`ImageId` sui
 /// byte caricati allo spawn/exec e fa lookup qui: se l'immagine cambia tra la
 /// verifica e l'esecuzione, l'id e' diverso e la classe cade su `Untrusted`
-/// (chiude il TOCTOU verifica→spawn senza crypto nel kernel).
+/// (chiude il TOCTOU verifica→spawn senza crypto nel kernel). Le porte
+/// (`io`) finiscono nel TSS del processo, mai in `SpawnMeta`.
 ///
-/// `Denied` se il chiamante non e' autorizzato o la tabella e' piena.
+/// `Denied` se il chiamante non e' autorizzato, la tabella e' piena o i range
+/// sono invalidi.
 #[inline]
-pub fn trust_image(id: ImageId, class: ImageClass) -> Result<(), Error> {
+pub fn trust_image(id: ImageId, class: ImageClass, io: &[(u16, u16)]) -> Result<(), Error> {
+    if io.len() > TRUST_IO_MAX {
+        return Err(Error::Invalid);
+    }
+    let mut payload = TrustIo { count: io.len() as u64, ranges: [(0, 0); TRUST_IO_MAX] };
+    payload.ranges[..io.len()].copy_from_slice(io);
     let r = unsafe {
-        syscall4(SYS_TRUST_IMAGE, id.lo, id.hi, class.as_u64(), 0)
+        syscall4(
+            SYS_TRUST_IMAGE,
+            id.lo,
+            id.hi,
+            class.as_u64(),
+            &payload as *const TrustIo as u64,
+        )
     };
     if r < 0 { Err(Error::Denied) } else { Ok(()) }
 }

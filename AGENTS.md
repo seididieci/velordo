@@ -166,7 +166,7 @@ velordo/
 
 ## Stato corrente
 
-Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 63/63` + `[threadtest] PASS 12/12` + shell nativa (fase `native` di `test-shell-all.sh`; le fasi POSIX sono storiche dal login nativo, ADR-0062), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
+Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 64/64` + `[threadtest] PASS 12/12` + shell nativa (fase `native` di `test-shell-all.sh`; le fasi POSIX sono storiche dal login nativo, ADR-0062), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
 - **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
   BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
@@ -457,7 +457,23 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   byte cambiano tra verifica e load l'id non combacia → `Untrusted` (t67).
   **Trappola**: il gate `service_register` richiede **lineage e** classe —
   usertests (figlio di init ma `tst` non firmato) è `Untrusted`.
-  Limiti: fase 4 (`io_ranges` dal manifest) e file fuori dal namespace (FAT)
+  (9) **Porte I/O dal manifest (ADR-0079, fase 4)**: `sys:manifest` porta una
+  terza colonna `<io>` (`-` o `start-end[,...]` esadecimale; tabella `IO` in
+  `gen-service-hashes.sh`); cardo la parsa in `policy::manifest_io` e registra
+  classe **e** porte insieme (`TrustIo` in `SYS_TRUST_IMAGE`). `create_user`
+  prende i range dalla trust entry; **`SpawnMeta.io_ranges` è ignorato**
+  (nessun chiamante si allarga le porte). `exec` riapplica le porte del nuovo
+  contenuto. I binari **embedded** (`block`, ATA + PCI + BM: 6 range) tengono
+  i range compilati — partono prima di cardo e la loro slice non è troncata a
+  `TRUST_IO_MAX`. **`SYS_SPAWN` per nome è solo init** (prima chiunque poteva
+  spawnare `block` e prendersi le porte ATA). t68: `ioprobe` firmato `system`
+  con manifest `80-80` legge `0x80` (exit 0) e, dichiarando `0x2F8` in
+  `SpawnMeta`, fa `#GP` (la dichiarazione è ignorata). **Trappola**: un
+  binario di test fuori da `userland/build`/`flavours/posix/build` non entra
+  nel manifest generato — la riga va aggiunta da `arca-tool.sh`
+  (`manifest-io.txt`); init ignora la terza colonna, cardo la legge.
+  Limiti: porte embedded compilate, revoca a caldo assente, conf PCI senza
+  IOMMU (contenimento nullo, ADR-0026); file fuori dal namespace (FAT)
   restano `Untrusted`. **Trappola**: la `key_id`
   e' BE (`%016x`) in `sys:anchor` e LE nel sidecar — il parser usa
   `from_be_bytes` lato anchor. (5) **Bucket di fiducia
@@ -470,10 +486,10 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `EXIT_NOTIFY`. Senza, il default `0x19F` (che include WRITE) lasciava a
   chiunque la riscrittura di `sys:ca.der` e dei binari. Catena
   identità/privilegi: ADR-0078 (fasi 1–2 fatte: digest + manifest come dato +
-  firma Ed25519, verifica in cardo), ADR-0079 (fase 3 fatta: classi
-  System/ThirdParty/Untrusted nel PCB via `SYS_TRUST_IMAGE`, gate
-  strutturali, t67; fase 4 = `io_ranges` dal manifest), ADR-0080 (`Custos`,
-  ruoli, broker di rete).
+  firma Ed25519, verifica in cardo), ADR-0079 (fasi 3–4 fatte: classi
+  System/ThirdParty/Untrusted nel PCB via `SYS_TRUST_IMAGE`, porte I/O dal
+  manifest, gate strutturali, `SYS_SPAWN` solo init, t67/t68), ADR-0080
+  (`Custos`, ruoli, broker di rete).
 - **IPC reply implicita**: la reply del server va al peer del canale del
   messaggio correntemente elaborato (fissato da `recv` in `reply_chan`), non
   all'ultimo `send`. Piu' client concorrenti su un server sono quindi
@@ -638,12 +654,12 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 63/63
+#   [usertests] PASS 64/64
 #   [threadtest] PASS 12/12
 # KVM=1 accelera (-enable-kvm -cpu host, opt-in; senza /dev/kvm resta TCG).
 # Il timeout chiude il boot al prompt del login: il contratto sono le PASS.
 timeout 300 ./run-tests.sh > /tmp/boot.log
-rg '\[testfs\] PASS 5/5|\[testsarca\] PASS 64/64|\[posixtests\] PASS 4/4|\[identistest\] PASS 11/11|\[usertests\] PASS 61/61|\[threadtest\] PASS 12/12' /tmp/boot.log
+rg '\[testfs\] PASS 5/5|\[testsarca\] PASS 64/64|\[posixtests\] PASS 4/4|\[identistest\] PASS 11/11|\[usertests\] PASS 64/64|\[threadtest\] PASS 12/12' /tmp/boot.log
 test "$(rg -c 'FAIL|PANIC|#.* FAULT' /tmp/boot.log)" = "0"
 ```
 

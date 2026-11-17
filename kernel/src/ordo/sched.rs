@@ -40,14 +40,19 @@ const QUANTUM_TICKS: u64 = 2;
 /// il numero totale di processi creati dal boot.
 pub(crate) const MAX_PIDS: usize = 128;
 
-/// Trust table ADR-0079 fase 3: ImageId -> ImageClass, popolata da cardo via
-/// SYS_TRUST_IMAGE. Max 32 entry, mai sovrascritte da altri chiamanti.
-/// Il kernel fa lookup allo spawn/exec per assegnare ImageClass al PCB.
+/// Trust table ADR-0079 fasi 3–4: ImageId -> ImageClass + porte I/O, popolata
+/// da cardo via SYS_TRUST_IMAGE. Max 32 entry, mai sovrascritte da altri
+/// chiamanti. Il kernel fa lookup allo spawn/exec per assegnare la classe al
+/// PCB e le porte al TSS del processo.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TrustEntry {
     id: syscall_numbers::ImageId,
     class: syscall_numbers::ImageClass,
+    /// Voci valide di `io` (0..=4). Le porte vengono dal manifest firmato
+    /// (ADR-0079 fase 4), mai da una dichiarazione del chiamante.
+    io_count: u8,
+    io: [(u16, u16); syscall_numbers::TRUST_IO_MAX],
     used: bool,
 }
 
@@ -56,34 +61,49 @@ const TRUST_MAX: usize = 32;
 static mut TRUST_TABLE: [TrustEntry; TRUST_MAX] = [TrustEntry {
     id: syscall_numbers::ImageId::new(0, 0),
     class: syscall_numbers::ImageClass::Untrusted,
+    io_count: 0,
+    io: [(0, 0); syscall_numbers::TRUST_IO_MAX],
     used: false,
 }; TRUST_MAX];
 
-/// Lookup: classe per `image_id`, default `Untrusted` se assente.
-/// Chiamato sotto SCHED.lock da create_user/exec_current: nessun lock qui
-/// (accesso statico, come la cache di cardo).
+/// Lookup completo per `image_id`: `(classe, porte)`. `None` = nessuna entry
+/// (immagine non verificata: `Untrusted`, nessuna porta). Chiamato sotto
+/// SCHED.lock da create_user/exec_current: nessun lock qui (accesso statico).
 pub(crate) fn trust_lookup(
     id: syscall_numbers::ImageId,
-) -> syscall_numbers::ImageClass {
+) -> Option<(syscall_numbers::ImageClass, [(u16, u16); syscall_numbers::TRUST_IO_MAX], usize)> {
     unsafe {
         let table = core::ptr::addr_of!(TRUST_TABLE).cast::<TrustEntry>();
         for i in 0..TRUST_MAX {
             let e = &*table.add(i);
             if e.used && e.id == id {
-                return e.class;
+                return Some((e.class, e.io, e.io_count as usize));
             }
         }
     }
-    syscall_numbers::ImageClass::Untrusted
+    None
 }
 
-/// Registra `id -> classe`. Ritorna true se OK, false se tabella piena o
-/// chiamante non autorizzato. Chiamato da sys_trust_image (non sotto lock).
+/// Classe per `image_id` (default `Untrusted`). Comodita' per i gate
+/// strutturali, che non hanno bisogno delle porte.
+pub(crate) fn trust_class(id: syscall_numbers::ImageId) -> syscall_numbers::ImageClass {
+    trust_lookup(id)
+        .map(|(c, _, _)| c)
+        .unwrap_or(syscall_numbers::ImageClass::Untrusted)
+}
+
+/// Registra `id -> (classe, porte)`. Ritorna true se OK, false se tabella
+/// piena o chiamante non autorizzato. Chiamato da sys_trust_image (non sotto
+/// lock).
 pub(crate) fn trust_register(
     id: syscall_numbers::ImageId,
     class: syscall_numbers::ImageClass,
+    io: &[(u16, u16)],
     caller_pid: usize,
 ) -> bool {
+    if io.len() > syscall_numbers::TRUST_IO_MAX {
+        return false;
+    }
     // Solo cardo (owner di Service::Cardo) o init possono registrare: il
     // kernel e' il punto di enforcement, quindi il writer della trust table
     // deve essere UNO (il servizio che verifica le firme). Un figlio di init
@@ -94,6 +114,8 @@ pub(crate) fn trust_register(
     if !allowed {
         return false;
     }
+    let mut ranges = [(0u16, 0u16); syscall_numbers::TRUST_IO_MAX];
+    ranges[..io.len()].copy_from_slice(io);
     unsafe {
         let table = core::ptr::addr_of_mut!(TRUST_TABLE).cast::<TrustEntry>();
         // Aggiorna entry esistente con stesso id (idempotente).
@@ -102,6 +124,8 @@ pub(crate) fn trust_register(
             if e.used && e.id == id {
                 let e_mut = &mut *table.add(i);
                 e_mut.class = class;
+                e_mut.io = ranges;
+                e_mut.io_count = io.len() as u8;
                 return true;
             }
         }
@@ -112,6 +136,8 @@ pub(crate) fn trust_register(
                 let e_mut = &mut *table.add(i);
                 e_mut.id = id;
                 e_mut.class = class;
+                e_mut.io = ranges;
+                e_mut.io_count = io.len() as u8;
                 e_mut.used = true;
                 return true;
             }

@@ -156,7 +156,10 @@ con zero-fill lazy (stesso contratto di `sbrk`: VA subito, frame al fault).
   `USER_STACK_GUARD` (pagina sotto lo stack, mai mappata).
 - Stessa politica "errore del processo → muore il processo" per l'OOM del
   demand-zero (heap/mmap) e per #GP da user mode (es. `in`/`out` su porta non
-  concessa dalla I/O bitmap del TSS).
+  concessa dalla I/O bitmap del TSS). **ADR-0079 fase 4**: la bitmap viene
+  dalla **trust entry** dell'`ImageId` (porte del manifest `sys:manifest`,
+  registrate da cardo via `SYS_TRUST_IMAGE`), non da `SpawnMeta`; i binari
+  embedded (TCB) usano i range compilati in `NAMED_BINARIES`.
 - Estrazione del phys da una PTE SEMPRE con `PTE_ADDR_MASK` (bit 12..51): mai
   `& !0xFFF`, che con NX lascerebbe il bit 63 e corromperebbe il frame address.
 

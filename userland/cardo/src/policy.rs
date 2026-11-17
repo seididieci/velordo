@@ -63,6 +63,134 @@ fn hex_u64(s: &[u8]) -> Option<u64> {
     Some(v)
 }
 
+// ── Porte I/O dal manifest (ADR-0079, fase 4) ───────────────────────
+// `sys:manifest` = `nome <blake2s-256 hex> <io>`; `<io>` = `-` o intervalli
+// inclusivi esadecimali `start-end[,...]`. La tabella e' indicizzata
+// dall'`ImageId` (contenuto): le porte seguono i byte, come la classe. Cardo
+// la usa quando registra la trust entry (`SYS_TRUST_IMAGE`), cosi' il TSS del
+// processo prende le porte dal manifest firmato e non da `SpawnMeta`.
+
+static mut MANIFEST_IO: [(civis::ImageId, [(u16, u16); civis::TRUST_IO_MAX], u8); POLICY_MAX] =
+    [(civis::ImageId { lo: 0, hi: 0 }, [(0, 0); civis::TRUST_IO_MAX], 0); POLICY_MAX];
+static mut MANIFEST_IO_N: usize = 0;
+
+/// Porte I/O dichiarate per `id` (`&[]` = nessuna). Lookup lineare: la tabella
+/// e' piccola (una voce per servizio) e il chiamante e' gia' nel choke point.
+pub fn manifest_io(id: civis::ImageId) -> &'static [(u16, u16)] {
+    unsafe {
+        let n = *core::ptr::addr_of!(MANIFEST_IO_N);
+        let table = core::ptr::addr_of!(MANIFEST_IO)
+            .cast::<(civis::ImageId, [(u16, u16); civis::TRUST_IO_MAX], u8)>();
+        for i in 0..n {
+            let e = &*table.add(i);
+            if e.0 == id {
+                return &e.1[..e.2 as usize];
+            }
+        }
+    }
+    &[]
+}
+
+/// Un intervallo `start-end` in esadecimale (inclusivo).
+fn parse_io_range(s: &[u8]) -> Option<(u16, u16)> {
+    let dash = s.iter().position(|&b| b == b'-')?;
+    let start = hex_u64(&s[..dash])?;
+    let end = hex_u64(&s[dash + 1..])?;
+    if start > end || end > u16::MAX as u64 {
+        return None;
+    }
+    Some((start as u16, end as u16))
+}
+
+/// Carica le porte dal manifest (`sys:manifest`, **dato** seedato a
+/// build-time). Righe malformate vengono scartate loud (come per policy).
+pub fn load_manifest_io(disk: &Option<btree_drv::DiskEngine>) {
+    let Some(engine) = disk.as_ref() else {
+        return;
+    };
+    let Some(data) = engine.get(b"sys", b"manifest") else {
+        println!("[cardo] manifest assente: nessuna porta I/O dichiarata");
+        return;
+    };
+    let mut n = 0usize;
+    let mut bad = 0usize;
+    for line in data.split(|&b| b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() || line[0] == b'#' {
+            continue;
+        }
+        let mut it = line.split(|&b| b == b' ');
+        let (_name, Some(hex), Some(io_s)) = (it.next(), it.next(), it.next()) else {
+            bad += 1;
+            continue;
+        };
+        // Digest esadecimale: i primi 32 caratteri sono i 16 byte di `ImageId`.
+        if hex.len() < 32 {
+            bad += 1;
+            continue;
+        }
+        let mut bytes = [0u8; 16];
+        let mut ok = true;
+        for i in 0..16 {
+            let (Some(hi), Some(lo)) =
+                (hex_nibble(hex[i * 2]), hex_nibble(hex[i * 2 + 1]))
+            else {
+                ok = false;
+                break;
+            };
+            bytes[i] = (hi << 4) | lo;
+        }
+        if !ok {
+            bad += 1;
+            continue;
+        }
+        let id = civis::ImageId {
+            lo: u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+            hi: u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+        };
+        let mut ranges = [(0u16, 0u16); civis::TRUST_IO_MAX];
+        let mut count = 0usize;
+        if io_s != b"-" {
+            for part in io_s.split(|&b| b == b',') {
+                if count >= civis::TRUST_IO_MAX {
+                    println!("[cardo] manifest: oltre {} range per una voce, resto ignorato", civis::TRUST_IO_MAX);
+                    break;
+                }
+                match parse_io_range(part) {
+                    Some(r) => {
+                        ranges[count] = r;
+                        count += 1;
+                    }
+                    None => {
+                        println!("[cardo] manifest: range I/O invalido, voce scartata");
+                        bad += 1;
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        if n >= POLICY_MAX {
+            println!("[cardo] manifest: oltre {} voci I/O, resto ignorato", POLICY_MAX);
+            break;
+        }
+        unsafe {
+            core::ptr::write(
+                core::ptr::addr_of_mut!(MANIFEST_IO)
+                    .cast::<(civis::ImageId, [(u16, u16); civis::TRUST_IO_MAX], u8)>()
+                    .add(n),
+                (id, ranges, count as u8),
+            );
+        }
+        n += 1;
+    }
+    unsafe { *core::ptr::addr_of_mut!(MANIFEST_IO_N) = n };
+    println!("[cardo] manifest: {} voci I/O ({} righe scartate)", n, bad);
+}
+
 /// Riempie una tabella da un oggetto `sys:<key>` (`hi lo mask [nome]`).
 fn load_one(
     disk: &btree_drv::DiskEngine,
@@ -142,6 +270,7 @@ pub fn load_tables(disk: &Option<btree_drv::DiskEngine>) {
         );
     }
     load_anchor(disk);
+    load_manifest_io(disk);
 }
 
 // ── Anchor delle chiavi di firma (ADR-0078, fase 2) ─────────────────────

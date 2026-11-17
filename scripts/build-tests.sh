@@ -72,6 +72,9 @@ build_one testland/bench testland/bench/src/bench.ld userbench.bin userbench $BE
 # policy (gen-test-policy.sh lo salta per nome) per provare il default
 # restrittivo fail-closed sugli hash fuori manifest.
 build_one testland/foreign testland/foreign/src/foreign.ld userforeign.bin userforeign
+# Sonda delle porte I/O dal manifest (ADR-0079 fase 4, t68): firmata `system`
+# e con la riga `sys:manifest` che concede `80-80`. Mai nel boot.
+build_one testland/ioprobe testland/ioprobe/src/ioprobe.ld ioprobe.bin ioprobe
 # Fuse staticone (S2.5d): ricompone i chunk rustc e lo spawna bigstack.
 # Mai nel gate (run dedicato RUN_S25=1).
 build_one testland/s25fuse testland/s25fuse/src/s25fuse.ld users25fuse.bin users25fuse

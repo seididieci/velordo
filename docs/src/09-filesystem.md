@@ -260,6 +260,11 @@ usertests 17/17, shell 3/3.
   sui byte caricati e assegna `image_class` al PCB: se l'oggetto è cambiato
   dopo la verifica la classe cade su `Untrusted`. `peer_info` riporta la
   classe in `rdx`.
+- **Porte I/O dal manifest** (ADR-0079 fase 4): `sys:manifest` ha la terza
+  colonna `<io>` (intervalli inclusivi esadecimali, tabella `IO` in
+  `gen-service-hashes.sh`). Cardo la registra insieme alla classe
+  (`TrustIo`), il kernel la scrive nella I/O bitmap del TSS: `SpawnMeta`
+  non concede più porte.
 
 ## Contratto di durabilita' (Fase 52, P3)
 

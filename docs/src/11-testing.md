@@ -2,7 +2,7 @@
 
 > I conteggi di suite citati negli ADR e nelle sotto-fasi del libro sono
 > **snapshot all'epoca** di ciascuna fase (es. 17/17, 21/21, 32/32). Il gate
-> corrente e' quello qui sotto (5/5 + 64/64 + 4/4 + 11/11 + 63/63 + 12/12 +
+> corrente e' quello qui sotto (5/5 + 64/64 + 4/4 + 11/11 + 64/64 + 12/12 +
 > shell) e in `AGENTS.md`. La suite **FAT32** e' **fuori dal gate**
 > (ADR-0059: il FAT non e' piu' il filesystem di sistema): vive in
 > `scripts/run-fat-tests.sh`, un run dedicato con un disco FAT attaccato.
@@ -28,7 +28,7 @@ testland/   test suite meccanismo + repro + demo storiche
   testfs        usertestfs   — ramfs (read/write/mkdir/errori)   → PASS 5/5
   testfat       usertestfat  — FAT32 scrivibile (Fase 20) + /dev/null, /dev/zero → PASS 7/7
   testsarca     usertestsarca — ArcaFS P5+A1+56.1+56.2a+56.2b+56.2c (B+tree COW + commit, recovery/GC + sys-dal-volume) + logging L1 Fase 57 (gateway `Log` RAM-first, bucket per identita', seal, stats, bounce) + namespace POSIX 56.3 (dir emergenti + set RAM, ADR-0042) + quota per bucket A3 (budget, ERR_NOSPC, persistenza, ADR-0044) + rename/symlink S1.1 (file/dir, link+follow, ERR tipizzati) + range read 2 MiB S2.5f/F0 + prefix-overwrite W1 (merge esplicito `ns_write`) + extent dinamici S2.5w/W2 (ADR-0050: COW a blocchi, liveness, XSTATS) + append 512K bound (test59) + cache write-through S2.5w/W3 (ADR-0051: fasce R0/R1/R2, sizing meminfo, hit/reads in XSTATS) + epoche minime S2.5w/W4 (ADR-0052: fd-write a epoca, crash kill-mid recovery, test60) + packing sub-blocco stesso-bucket S2.5w/W5 (ADR-0053: tipo nodo PACKED, bump per bucket, refcount eager + rebuild al bind, test61) + blocchi 64 KiB e rimozione cap 16 MiB S2.5w/W6 (ADR-0054: ARCA_VERSION 3, nessun cap oggetto, walk streaming, test62) + identita' del volume v4 (ADR-0059: superblock 192 B, label + mountpoint dichiarato, test63-64) → PASS 64/64
-  usertests     usertests    — suite meccanismo (63 test, +t59 rename/+t60 symlink/+t61 chdir/+t62 chmod S1.1/+t63 modeset D4/+t64 scroll vs repaint T4/+t65 shm ownership + destroy/+t66 firma immagini ADR-0078 fase 2/+t67 classe nel PCB ADR-0079 fase 3) → PASS 63/63
+  usertests     usertests    — suite meccanismo (64 test, +t59 rename/+t60 symlink/+t61 chdir/+t62 chmod S1.1/+t63 modeset D4/+t64 scroll vs repaint T4/+t65 shm ownership + destroy/+t66 firma immagini ADR-0078 fase 2/+t67 classe nel PCB ADR-0079 fase 3/+t68 porte I/O dal manifest fase 4) → PASS 64/64
   identistest   identistest  — protocollo Identis (ADR-0058): sessione/token, verifica credenziali, creazione utente, duplicati, nomi non conformi, elenco utenti, formato del bucket `identis:config` → PASS 11/11
   threadtest    userthreadtest — thread 1:1 (S-T, ADR-0046: create/stack/TLS/futex/IPC/fd/stress-32/FPU-S2.5b) → PASS 12/12
   usertest-client usertestcli  — helper a modalita' (ECHO/ZEROREAD/NULLW/SRV/CHURN/KILLME/SRVDIE/SYNCWAIT/MNTDIE/OPENDIE/MAPHAMMER/FLOOD/NEST/FAULT_*/SHMDEMO/COWDEMO/FORKDEMO/ORPHAN/HARDEN/REG51/EXECDEMO/DUPCLAIM/DUPGRANT/DUPSIBCLAIM/SEEKDENY/SUSPENDENY/SIGCATCH/GRANTDENY/SHDESTROY)
@@ -92,7 +92,7 @@ Righe di gate:
 [testsarca] PASS 64/64
 [posixtests] PASS 4/4
 [identistest] PASS 11/11
-[usertests] PASS 63/63
+[usertests] PASS 64/64
 [threadtest] PASS 12/12
 ```
 
@@ -424,7 +424,7 @@ log seriale.
   slice da 4 KiB + 19 IPC DMA per blocco da 64 KiB (`DISK_MAX_SECTORS` = 7
   settori) → candidato W7 (finestra DMA multi-pagina + payload piu' grandi).
 
-## Cosa copre `usertests` (63 test meccanismo; t34 per ultimo: i drop dei
+## Cosa copre `usertests` (64 test meccanismo; t34 per ultimo: i drop dei
 diritti sono irrevocabili sul canale della suite)
 
 | Test | Cosa verifica |
@@ -479,6 +479,7 @@ diritti sono irrevocabili sul canale della suite)
 | t65 | ownership + destroy di shm (Fase 30.1): `shm_create` senza `shm_map` non lascia frame orfani (destroy + riuso slot); `shm_destroy` e' owner-only (secondo destroy rifiutato, helper non-owner rifiutato); la mappa esistente resta leggibile/scrivibile dopo il destroy, i nuovi `shm_map` falliscono (fail-closed); `munmap` libera i frame all'ultimo ref |
 | t66 | firma delle immagini e classi (ADR-0078 fase 2): `R_RIGHTS_EXECUTE` risponde `w0` = verdetto e `w1` = `ImageClass` — `vela:bin/gpu.bin` firmato `system` → eseguibile/`System`, `usr:runhello` firmato `thirdparty` → eseguibile/`ThirdParty`, `tst:test/tests.bin` non firmato → eseguibile/`Untrusted`; `vela:bin/unsigned.bin` (bucket obbligatorio) → negato; `tst:test/sigbad.bin` (byte flippato con il sidecar valido di un ALTRO binario) → negato; `tst:test/sigunk.bin` (sidecar con `key_id` azzerato) → negato; oggetto assente → `NotFound`. Gli artefatti li seeda `arca-tool.sh` host-side: e' l'attacco reale, non una simulazione nel client |
 | t67 | classe nel PCB dal kernel (ADR-0079 fase 3): `SYS_TRUST_IMAGE` popola la trust table (solo cardo), il kernel ricalcola l'`ImageId` sui byte caricati e assegna `ImageClass`; `peer_info_class` legge la classe autorevole. Casi: helper firmato `system` spedito in `tst` → `System` (la firma vince sul bucket); helper non firmato → `Untrusted`; **TOCTOU** (verificato il contenuto su disco, si spawna una copia con un bit diverso) → `Untrusted`; gate strutturale: usertests (figlio di init, `Untrusted`) non registra `Service::Net` |
+| t68 | porte I/O dal manifest (ADR-0079 fase 4): `ioprobe` (firmato `system`, riga di manifest `80-80`) legge la porta `0x80` → exit 0 (le porte vengono dal manifest, zero rebuild del kernel); la stessa sonda spawnata con `SpawnMeta.io_ranges = 0x2F8` legge `0x2F8` → `#GP` → `FAULT_EXIT_CODE` (la dichiarazione del chiamante è ignorata) |
 | t49 | fork COW (Fase 34): l'helper duplica se stesso; padre e figlio scrivono un globale COW e verificano l'isolamento; il figlio riporta valore+return sul canale di nascita (SYNC) ed esce 0; il padre verifica report + `EXIT_NOTIFY` con code 0 |
 | t50 | hardening (Fase 35, ADR-0026): un helper prova a killare un fratello (non suo figlio) e a registrare un servizio di sistema (`Init`) → entrambi rifiutati; usertests prova `map_physical` di RAM del kernel (0x100000) → rifiutato; prova a killare devfs (non suo figlio) → rifiutato (servizio vivo) |
 | t51 | identita' misurata (Fase 36, ADR-0027): `peer_info` su Console/Devfs == manifest generato; stabilita' hash tra istanze; same-image positivo (X2 rimpiazza X1 vivo non-init-child, il mount sopravvive al kill); squat con hash diverso rifiutato (mount purgato, open fallisce); `peer_info` a canale morto → Err (helper REG51 + ramo SQUAT di spin) |

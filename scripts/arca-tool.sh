@@ -153,7 +153,24 @@ seed_bin userland/build/shell.bin bin/interpres.bin sys bin/interpres.bin
 # Manifest e policy come DATI (ADR-0078, fase 1): init e cardo li leggono a
 # runtime, quindi aggiungere/aggiornare un servizio non ricompila il kernel.
 # Bucket `sys`, chiavi piatte; niente path `ns` (non sono file da browsare).
-for pair in "manifest:manifest.txt" "policy:policy.txt" "test-policy:test_policy.txt" "anchor:anchor.txt"; do
+#
+# ADR-0079 fase 4: la riga del manifest porta anche le porte I/O (`<io>`).
+# La sonda `ioprobe` (t68) e' un binario di test fuori dalle BUILD_DIRS del
+# generatore: la sua riga si aggiunge qui (init ignora la terza colonna,
+# cardo la legge come spec I/O). Il manifest seedato e' `manifest-io.txt`.
+IOP_BIN="$ROOT/testland/build/ioprobe.bin"
+IOP_DIGEST=""
+IOP_SIG=""
+cp "$ROOT/build-meta/manifest.txt" "$ROOT/build-meta/manifest-io.txt"
+if [ -f "$IOP_BIN" ]; then
+    IOP_OUT="$(bash "$ROOT/scripts/sign-bins.sh" one sys "$IOP_BIN")"
+    IOP_DIGEST="${IOP_OUT%% *}"
+    IOP_SIG="${IOP_OUT#* }"
+    printf 'ioprobe %s 80-80\n' "$IOP_DIGEST" >> "$ROOT/build-meta/manifest-io.txt"
+else
+    echo "[arca] avviso: ioprobe.bin assente (artefatto t68 non seedato)" >&2
+fi
+for pair in "manifest:manifest-io.txt" "policy:policy.txt" "test-policy:test_policy.txt" "anchor:anchor.txt"; do
     key="${pair%%:*}"; file="${pair##*:}"
     if [ -f "build-meta/$file" ]; then
         SEED_NS+=( "sys:$key=$(pwd)/build-meta/$file" )
@@ -249,6 +266,15 @@ S_SIGTEST="${SIGTEST_OUT#* }"
 SEED_NS+=( "sig:$D_SIGTEST=$S_SIGTEST" "tst:test/sigtest.bin=$SIGART/sigtest.bin" \
            "ns:test/sigtest.bin=$SIGART/sigtest.bin" )
 echo "[arca] + artefatto firma t67 (sigtest: system in tst)"
+
+# t68 (ADR-0079 fase 4): sonda delle porte I/O. Firmata `system` e con la
+# riga in `sys:manifest` (sopra) che concede `80-80`: le porte vengono dal
+# manifest, non da `SpawnMeta`.
+if [ -n "$IOP_DIGEST" ]; then
+    SEED_NS+=( "sig:$IOP_DIGEST=$IOP_SIG" "tst:test/ioprobe.bin=$IOP_BIN" \
+               "ns:test/ioprobe.bin=$IOP_BIN" )
+    echo "[arca] + artefatto t68 (ioprobe: system, porta 0x80 dal manifest)"
+fi
 # Hello std nativo (S1.3): solo se compilato via scripts/build-pal.sh (fuori
 # dal gate default: rust-lang/rust + ~10 min di build). Niente fail-loud qui:
 # il gate non dipende dalla PAL.

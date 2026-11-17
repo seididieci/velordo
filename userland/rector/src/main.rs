@@ -16,9 +16,6 @@ use civis::{println, print_str};
 // Tag di fine-test e servizio-pronto (DocsB): single source in
 // `syscall-numbers`, via `civis` (prima duplicati qui).
 use civis::{SVC_READY, TEST_DONE};
-// Range porte I/O (TSS per-processo): single source in `syscall-numbers` via
-// `civis` (prima duplicati tra kernel/user_binary, block/detect e rector).
-use civis::{VGA_CRTC_INDEX, VGA_CRTC_DATA, KBD_DATA, KBD_CMD, RTC_INDEX, RTC_DATA};
 
 // Manifest degli hash dei servizi (Fase 36, identita' misurata, Strato 2 di
 // ADR-0026): generato a build-time da scripts/gen-service-hashes.sh sui
@@ -228,18 +225,14 @@ fn spawn_child(name: &[u8]) -> Option<i64> {
 /// **Il FAT non e' piu' una sorgente** (ADR-0059): il boot non attacca piu'
 /// dischi FAT e i binari vivono tutti in ArcaFS (bucket di classe: `sys`
 /// per i servizi, `vela` per i driver, `tst` per la suite, `usr` per i
-/// programmi utente). `io`/`prio` valgono per il path da disco (l'embedded
-/// li prende dalla tabella kernel).
+/// programmi utente). Le porte I/O NON stanno qui (ADR-0079 fase 4): vengono
+/// dal manifest (`sys:manifest`) e le registra cardo nella trust table del
+/// kernel; `prio` resta una scelta dello spawner.
 struct SvcMeta {
     bin: &'static [u8],
     obj: Option<(&'static [u8], &'static [u8])>,
     prio: u8,
-    io: &'static [(u16, u16)],
 }
-
-/// Porte I/O per i manifest da disco: i valori sono in `syscall-numbers` via
-/// `civis` (single source con kernel e block); i manifest li costruiscono
-/// inline sotto.
 
 /// Spawna un servizio da ArcaFS via `obj_get()` (Fase 55, N0).
 fn spawn_object(bucket: &[u8], key: &[u8]) -> Option<alloc::vec::Vec<u8>> {
@@ -279,7 +272,7 @@ fn spawn_image_from_vec(img: &[u8], meta: &SvcMeta) -> Option<i64> {
         println!(" -> FAILED (hash mismatch)");
         return None;
     }
-    let sm = match civis::SpawnMeta::new(name, meta.prio, meta.io) {
+    let sm = match civis::SpawnMeta::new(name, meta.prio, &[]) {
         Some(m) => m,
         None => return None,
     };
@@ -716,44 +709,37 @@ const SVC_GPU: SvcMeta = SvcMeta {
     obj: Some((b"vela", b"bin/gpu.bin")),
     prio: 16,
     // spazio di configurazione PCI per enumerare/programmare virtio-gpu-pci
-    io: &[(civis::syscall_numbers::PCI_CONF_ADDR, civis::syscall_numbers::PCI_CONF_END)],
 };
 /// Console server (D3): modello a celle, font, surface; serve `/dev/console`.
 const SVC_CONSOLE: SvcMeta = SvcMeta {
     bin: b"console",
     obj: Some((b"sys", b"bin/console.bin")),
     prio: 16,
-    io: &[(VGA_CRTC_INDEX, VGA_CRTC_DATA)],
 };
 const SVC_UPTIME: SvcMeta = SvcMeta {
     bin: b"useruptime",
     obj: Some((b"sys", b"bin/uptime.bin")),
     prio: 1,
-    io: &[],
 };
 const SVC_VELA: SvcMeta = SvcMeta {
     bin: b"vela",
     obj: Some((b"sys", b"bin/vela.bin")),
     prio: 16,
-    io: &[],
 };
 const SVC_KBD: SvcMeta = SvcMeta {
     bin: b"kbd",
     obj: Some((b"vela", b"bin/kbd.bin")),
     prio: 16,
-    io: &[(KBD_DATA, KBD_CMD)],
 };
 const SVC_PORTA: SvcMeta = SvcMeta {
     bin: b"porta",
     obj: Some((b"sys", b"bin/porta.bin")),
     prio: 16,
-    io: &[],
 };
 const SVC_POSIX: SvcMeta = SvcMeta {
     bin: b"userposix",
     obj: Some((b"sys", b"bin/posix/posix.bin")),
     prio: 16,
-    io: &[],
 };
 // Servizio identita'/autenticazione utenti (ADR-0055): identis gestisce il
 // bucket `identis:config` (nome -> hash password). identis-login e' il primo
@@ -762,7 +748,6 @@ const SVC_IDENTIS: SvcMeta = SvcMeta {
     bin: b"identis",
     obj: Some((b"sys", b"bin/identis.bin")),
     prio: 16,
-    io: &[],
 };
 /// Driver virtio-net (ADR-0069): possiede il device, le virtqueue e il ring
 /// condiviso con `net`. Parte solo con `net=1` in cmdline (run dedicato).
@@ -770,47 +755,40 @@ const SVC_NETDEV: SvcMeta = SvcMeta {
     bin: b"netdev",
     obj: Some((b"vela", b"bin/netdev.bin")),
     prio: 16,
-    io: &[(civis::syscall_numbers::PCI_CONF_ADDR, civis::syscall_numbers::PCI_CONF_END)],
 };
 /// Servizio di rete (ADR-0069): IPv6/ICMPv6/NDP, endpoint a capability.
 const SVC_NET: SvcMeta = SvcMeta {
     bin: b"net",
     obj: Some((b"sys", b"bin/net.bin")),
     prio: 16,
-    io: &[],
 };
 /// Server di echo UDP (N2, ADR-0069): porta 7, spawnato solo con `net=1`.
 const SVC_NETECHO: SvcMeta = SvcMeta {
     bin: b"netecho",
     obj: Some((b"sys", b"bin/netecho.bin")),
     prio: 16,
-    io: &[],
 };
 /// Traduttore IPv4 SIIT/NAT64 (N4, ADR-0069): porta 30000, spawnato solo con `net=1`.
 const SVC_SIIT: SvcMeta = SvcMeta {
     bin: b"siit",
     obj: Some((b"sys", b"bin/siit.bin")),
     prio: 16,
-    io: &[],
 };
 /// Resolver DNS plain (N5, ADR-0069): porta 53, spawnato solo con `net=1`.
 const SVC_DNS: SvcMeta = SvcMeta {
     bin: b"dns",
     obj: Some((b"sys", b"bin/dns.bin")),
     prio: 16,
-    io: &[],
 };
 const SVC_LOGIN: SvcMeta = SvcMeta {
     bin: b"identis-login",
     obj: Some((b"sys", b"bin/identis-login.bin")),
     prio: 16,
-    io: &[],
 };
 const SVC_TIME: SvcMeta = SvcMeta {
     bin: b"usertime",
     obj: Some((b"vela", b"bin/time.bin")),
     prio: 16,
-    io: &[(RTC_INDEX, RTC_DATA)],
 };
 /// Gateway centrale di logging L1 (Fase 57, ADR-0039, R8):
 /// EMBEDDED come block/cardo (deve partire prima che il FS esista — spawn
@@ -819,59 +797,58 @@ const SVC_VESTIGIA: SvcMeta = SvcMeta {
     bin: b"vestigia",
     obj: None,
     prio: 16,
-    io: &[],
 };
 // Suite di test (D2): caricate per object_id dal bucket `tst` (hash-pinned
 // come i servizi); `path` resta come gemello FAT documentato (t39 lo prova).
 #[cfg(not(feature = "skip_tests"))]
-const TEST_FS: SvcMeta = SvcMeta { bin: b"usertestfs", obj: Some((b"tst", b"test/testfs.bin")), prio: 16, io: &[] };
+const TEST_FS: SvcMeta = SvcMeta { bin: b"usertestfs", obj: Some((b"tst", b"test/testfs.bin")), prio: 16 };
 #[cfg(all(not(feature = "skip_tests"), feature = "fat_tests"))]
-const TEST_FAT: SvcMeta = SvcMeta { bin: b"usertestfat", obj: Some((b"tst", b"test/testfat.bin")), prio: 16, io: &[] };
+const TEST_FAT: SvcMeta = SvcMeta { bin: b"usertestfat", obj: Some((b"tst", b"test/testfat.bin")), prio: 16 };
 #[cfg(not(feature = "skip_tests"))]
-const TEST_ARCA: SvcMeta = SvcMeta { bin: b"usertestsarca", obj: Some((b"tst", b"test/testarca.bin")), prio: 16, io: &[] };
+const TEST_ARCA: SvcMeta = SvcMeta { bin: b"usertestsarca", obj: Some((b"tst", b"test/testarca.bin")), prio: 16 };
 // Suite della personalita' POSIX (Fase 58.5, ADR-0041): gira PRIMA di
 // usertests (t54 deve precedere i drop di diritti di t34 in usertests).
 #[cfg(not(feature = "skip_tests"))]
-const TEST_POSIX: SvcMeta = SvcMeta { bin: b"userposixtests", obj: Some((b"tst", b"test/posixtst.bin")), prio: 16, io: &[] };
+const TEST_POSIX: SvcMeta = SvcMeta { bin: b"userposixtests", obj: Some((b"tst", b"test/posixtst.bin")), prio: 16 };
 // Protocollo di autenticazione/creazione utenti (ADR-0055, Fase 3.1):
 // sessione con token, add_user, duplicati, nomi non conformi, elenco.
 #[cfg(not(feature = "skip_tests"))]
-const TEST_IDENTIS: SvcMeta = SvcMeta { bin: b"identistest", obj: Some((b"tst", b"test/idtest.bin")), prio: 16, io: &[] };
+const TEST_IDENTIS: SvcMeta = SvcMeta { bin: b"identistest", obj: Some((b"tst", b"test/idtest.bin")), prio: 16 };
 // Probe UDP (N2, ADR-0069): eseguito solo con `net=1`, dopo identistest.
 #[cfg(not(feature = "skip_tests"))]
-const TEST_NETUDP: SvcMeta = SvcMeta { bin: b"netudp", obj: Some((b"tst", b"test/netudp.bin")), prio: 16, io: &[] };
+const TEST_NETUDP: SvcMeta = SvcMeta { bin: b"netudp", obj: Some((b"tst", b"test/netudp.bin")), prio: 16 };
 // Probe TCP (N3, ADR-0069): eseguito solo con `net=1`, dopo netudp.
 #[cfg(not(feature = "skip_tests"))]
-const TEST_NET3: SvcMeta = SvcMeta { bin: b"net3", obj: Some((b"tst", b"test/net3.bin")), prio: 16, io: &[] };
+const TEST_NET3: SvcMeta = SvcMeta { bin: b"net3", obj: Some((b"tst", b"test/net3.bin")), prio: 16 };
 // Probe IPv4/SIIT (N4, ADR-0069): eseguito solo con `net=1`, dopo net3.
 #[cfg(not(feature = "skip_tests"))]
-const TEST_NET4: SvcMeta = SvcMeta { bin: b"net4", obj: Some((b"tst", b"test/net4.bin")), prio: 16, io: &[] };
+const TEST_NET4: SvcMeta = SvcMeta { bin: b"net4", obj: Some((b"tst", b"test/net4.bin")), prio: 16 };
 // Probe TCP su rete reale (N6.1d): solo con `net=1`, dopo net4; si salta da
 // solo se manca `sys:nettcp.conf` (echo server sull'host).
 #[cfg(not(feature = "skip_tests"))]
-const TEST_NETTCP: SvcMeta = SvcMeta { bin: b"nettcp", obj: Some((b"tst", b"test/nettcp.bin")), prio: 16, io: &[] };
+const TEST_NETTCP: SvcMeta = SvcMeta { bin: b"nettcp", obj: Some((b"tst", b"test/nettcp.bin")), prio: 16 };
 // Resolver DNS (N5, ADR-0069): eseguito solo con `net=1`, dopo net4.
-const TEST_DNS: SvcMeta = SvcMeta { bin: b"dnsprobe", obj: Some((b"tst", b"test/dnsprobe.bin")), prio: 16, io: &[] };
+const TEST_DNS: SvcMeta = SvcMeta { bin: b"dnsprobe", obj: Some((b"tst", b"test/dnsprobe.bin")), prio: 16 };
 // Socket POSIX (N7.1, ADR-0076): personalità `libr` sopra `civis::net`,
 // solo con `net=1`, dopo il resolver (usa `netecho` UDP 7 e TCP 8).
 #[cfg(not(feature = "skip_tests"))]
-const TEST_POSIXSOCK: SvcMeta = SvcMeta { bin: b"posixsock", obj: Some((b"tst", b"test/posixsock.bin")), prio: 16, io: &[] };
+const TEST_POSIXSOCK: SvcMeta = SvcMeta { bin: b"posixsock", obj: Some((b"tst", b"test/posixsock.bin")), prio: 16 };
 // Probe TLS 1.3 (N6.2, ADR-0072): solo con `net=1` **e** `tls=1`; si salta da
 // solo se manca `sys:tls.conf` (server TLS sull'host, script dedicato).
 #[cfg(not(feature = "skip_tests"))]
-const TEST_TLSPROBE: SvcMeta = SvcMeta { bin: b"tlsprobe", obj: Some((b"tst", b"test/tlsprobe.bin")), prio: 16, io: &[] };
+const TEST_TLSPROBE: SvcMeta = SvcMeta { bin: b"tlsprobe", obj: Some((b"tst", b"test/tlsprobe.bin")), prio: 16 };
 #[cfg(not(feature = "skip_tests"))]
-const TESTS: SvcMeta = SvcMeta { bin: b"usertests", obj: Some((b"tst", b"test/tests.bin")), prio: 16, io: &[] };
+const TESTS: SvcMeta = SvcMeta { bin: b"usertests", obj: Some((b"tst", b"test/tests.bin")), prio: 16 };
 // Thread 1:1 (S-T, ADR-0046): dopo usertests (nessuna dipendenza dai diritti),
 // prima della shell interattiva.
 #[cfg(not(feature = "skip_tests"))]
-const TEST_THREADS: SvcMeta = SvcMeta { bin: b"userthreadtest", obj: Some((b"tst", b"test/thread.bin")), prio: 16, io: &[] };
+const TEST_THREADS: SvcMeta = SvcMeta { bin: b"userthreadtest", obj: Some((b"tst", b"test/thread.bin")), prio: 16 };
 // Fuse staticone (S2.5d): ricompone i chunk rustc e lo spawna bigstack.
 // Solo obj (niente FAT: i chunk vivono solo su arca grande), solo se la
 // cmdline contiene `s25=1` (run dedicato, mai nel gate).
-const TEST_S25: SvcMeta = SvcMeta { bin: b"s25fuse", obj: Some((b"tst", b"tool/s25fuse.bin")), prio: 16, io: &[] };
+const TEST_S25: SvcMeta = SvcMeta { bin: b"s25fuse", obj: Some((b"tst", b"tool/s25fuse.bin")), prio: 16 };
 #[cfg(feature = "bench")]
-const TEST_BENCH: SvcMeta = SvcMeta { bin: b"userbench", obj: Some((b"tst", b"test/bench.bin")), prio: 16, io: &[] };
+const TEST_BENCH: SvcMeta = SvcMeta { bin: b"userbench", obj: Some((b"tst", b"test/bench.bin")), prio: 16 };
 
 /// Spawna dal manifest SENZA attesa (spawn parallelo, Fase 57): il chiamante
 /// sincronizza con `wait_any`. Fallimento = None (fail loud al chiamante).
@@ -1038,8 +1015,8 @@ fn real_main(_sp: u64) -> ! {
     //
     // Disk/fs embedded: manifest inline (path=None) con gli stessi nomi: il
     // restart riusa `spawn_child` come a boot.
-    const META_DISK: SvcMeta = SvcMeta { bin: b"block", obj: None, prio: 16, io: &[] };
-    const META_FS: SvcMeta = SvcMeta { bin: b"cardo", obj: None, prio: 16, io: &[] };
+    const META_DISK: SvcMeta = SvcMeta { bin: b"block", obj: None, prio: 16 };
+    const META_FS: SvcMeta = SvcMeta { bin: b"cardo", obj: None, prio: 16 };
     let mut supervised = [
         Supervised::new(&SVC_GPU, civis::Service::Gpu),
         Supervised::new(&SVC_CONSOLE, civis::Service::Console),

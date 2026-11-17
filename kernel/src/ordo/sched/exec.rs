@@ -145,14 +145,20 @@ pub fn exec_current(bytes: &[u8], args_block: Option<&[u8]>) -> Result<(), ()> {
         // ADR-0079 fase 3: la classe si RICALCOLA dai byte caricati (mai
         // ereditata): se l'oggetto e' cambiato tra il check di cardo e l'exec,
         // l'ImageId qui e' diverso e il lookup cade su Untrusted.
-        p.image_class = super::trust_lookup(image_id);
+        p.image_class = super::trust_class(image_id);
         // S2.5b: contenuto resettato (l'indirizzo pool resta: stesso pid).
         unsafe { crate::ordo::context::fpu_init(p.saved.fpu as *mut [u128; 32]) };
     }
 
-    // 6. TSS: bitmap I/O azzerata (idempotente). Nessuno puo' chiedere porte
-    // via exec (solo init via spawn_image): least privilege di default.
-    crate::gdt::configure_tss(slot, x86_64::VirtAddr::new(top), &[]);
+    // 6. TSS: bitmap I/O dalle porte della trust entry (ADR-0079 fase 4).
+    // L'exec ricalcola l'identita' e riapplica le porte del **contenuto**
+    // nuovo: un'immagine senza entry non ottiene porte (least privilege), una
+    // firmata le prende dal manifest. Mai ereditate dalla vecchia immagine.
+    let io = match super::trust_lookup(image_id) {
+        Some((_, ranges, n)) => ranges[..n].to_vec(),
+        None => alloc::vec::Vec::new(),
+    };
+    crate::gdt::configure_tss(slot, x86_64::VirtAddr::new(top), &io);
 
     // 7. Riscrive il frame syscall salvato sullo stack kernel (`top` == rsp0,
     // vedi `set_current` in ctx.rs): RIP→entry nuova, RSP→stack nuovo (punta

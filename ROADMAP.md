@@ -991,11 +991,25 @@ Voci con scope e vittoria dichiarati (non date).
       `usertests 63/63`, gate 6/6, shell `run`/`native`/`source` PASS.
       Limiti dichiarati: fase 4 (`io_ranges` dal manifest) e file fuori dal
       namespace (FAT, `Untrusted`).
-- [ ] **Privilegi — `io_ranges` e bisogni dal manifest** (ADR-0079, fase 4):
-      le porte I/O dei driver escono da `NAMED_BINARIES` e arrivano dalla
-      trust entry (manifest firmato); `SpawnMeta.io_ranges` ignorato per
-      `class != System`. Vittoria: un driver nuovo si aggiunge con manifest +
-      seed, zero rebuild del kernel; `block` continua a fare PIO ATA.
+- [x] **Privilegi — `io_ranges` e bisogni dal manifest** (completata,
+      ADR-0079, fase 4): le porte I/O dei driver sono un **dato**:
+      `sys:manifest` ha una terza colonna `<io>` (`-` o `start-end[,...]`,
+      tabella `IO` in `gen-service-hashes.sh`), cardo la parsa
+      (`policy::manifest_io`) e registra classe **e** porte insieme
+      (`TrustIo` in `SYS_TRUST_IMAGE`, `count` + 4 range). `create_user`
+      prende i range dalla trust entry; **`SpawnMeta.io_ranges` è ignorato**
+      (nessun chiamante si allarga le porte) e `exec` riapplica le porte del
+      nuovo contenuto. I binari **embedded** (`block`: ATA + PCI + BM, 6
+      range) restano eccezione dichiarata (partono prima di cardo; la loro
+      slice non è troncata a `TRUST_IO_MAX`). Hardening incluso:
+      **`SYS_SPAWN` per nome è solo init** (prima chiunque poteva spawnare
+      `block` e ottenere le porte ATA). Vittoria: t68 (`ioprobe` firmato
+      `system` con manifest `80-80` legge `0x80` → exit 0; la stessa sonda con
+      `SpawnMeta.io_ranges = 0x2F8` fa `#GP`) → `usertests 64/64`, gate 6/6,
+      shell `run`/`native`/`source` PASS; `block` continua a fare PIO ATA e
+      gpu/console/kbd/usertime/netdev prendono le porte dal manifest, zero
+      rebuild del kernel. Limiti: porte embedded compilate, revoca a caldo
+      assente, conf PCI senza IOMMU (ADR-0026).
 - [ ] **Policy — identità, ruoli e `Custos`** (ADR-0080, fase 5): nuovo
       servizio `Custos` (`Service::Custos = 18`) che possiede `sys:policy` e
       `usr:<nome>:consent`; ruoli multipli in Identis (`root`, `net-admin`,

@@ -87,7 +87,7 @@ La numerazione e' definita nel dispatch di `syscall_handler` in `kernel/src/sysc
 | 16 | `send(channel, tag, w0, w1)` | IPC per canale (0 = parent), Fase 7+13 |
 | 17 | `recv()` | IPC per canale: ritorna (channel, tag, w0, w1), Fase 7+13 |
 | 18 | `reply(tag, w0, w1)` | risponde al messaggio corrente (reply implicita), Fase 7+13 |
-| 20 | `spawn(name)` | crea un processo e ritorna il **canale di nascita** verso il figlio (Fase 8.1+13) |
+| 20 | `spawn(name)` | crea un processo dal binario **embedded** e ritorna il **canale di nascita** verso il figlio (Fase 8.1+13); **ADR-0079 fase 4**: solo init (pid 1) — gli altri usano `spawn_image`/`exec` |
 | 21 | `map_physical(phys, virt, count)` | mappa pagine fisiche nello spazio user (Fase 8.2) |
 | 22 | `get_ticks()` | ritorna il contatore PIT corrente (Fase 8.3) |
 | 23-24 | (ritirate) | erano `mkdir`/`fs_register`; dal Fase 9.6 le operazioni FS sono IPC dirette a cardo |
@@ -104,7 +104,7 @@ La numerazione e' definita nel dispatch di `syscall_handler` in `kernel/src/sysc
 | 35 | `kill(pid, code)` | termina un processo user (exit/kill kernel-side) → 0 o -1 (Fase 14, ADR-0010) |
 | 36 | `service_pid(service)` | pid dell'owner del servizio o -1 (supervisione/diagnostica, Fase 14) |
 | 37 | `ps_info(pid)` | snapshot `ps`: 0 + nome in rdi+rsi, packed stato/prio/parent/ipc in rdx, tick in r10; -1 se slot vuoto (Fase 19.1; stato 2=Stopped dalla 44a) |
-| 38 | `spawn_image(img, len, meta, metalen)` | come `spawn` ma il binario e' in memoria del chiamante (servizi da disco, Fase 21); `meta` = `SpawnMeta` 56 B (nome/prio/porte, porte solo init; S2.5e: `args_ptr`/`args_len` = blocco packed `[argc:8][envc:8][stringhe NUL]`, stesso formato di exec, zero = argc=0, layout via direct map); ritorna il canale di nascita o -1 |
+| 38 | `spawn_image(img, len, meta, metalen)` | come `spawn` ma il binario e' in memoria del chiamante (servizi da disco, Fase 21); `meta` = `SpawnMeta` 56 B (nome/prio; **ADR-0079 fase 4**: `io_ranges` **ignorate**, le porte vengono dalla trust entry del contenuto; S2.5e: `args_ptr`/`args_len` = blocco packed `[argc:8][envc:8][stringhe NUL]`, stesso formato di exec, zero = argc=0, layout via direct map); ritorna il canale di nascita o -1 |
 | 39 | `mmap(hint, len, prot, flags)` | mappa anonima privata nel basso canonico (Fase 28/29): VA subito, frame zero al primo fault; `hint` 0 = scelta kernel, `MMAP_FIXED` = piazza o fallisci; `prot` = `PROT_NONE`/`PROT_READ`/`PROT_READ\|PROT_WRITE` (W solo ed EXEC rifiutati); ritorna la base o -1 |
 | 40 | `munmap(addr, len)` | smappa VMA intere (Fase 28, niente split: parziali = -1 senza stato) → 0 o -1 |
 | 41 | `mprotect(addr, len, prot)` | cambia le protezioni di VMA intere (Fase 29): RO↔RW flippa il bit W, `PROT_NONE` fa cadere le pagine (riuso a zeri); stesse regole di `munmap`; ritorna 0 o -1 |
@@ -119,7 +119,7 @@ La numerazione e' definita nel dispatch di `syscall_handler` in `kernel/src/sysc
 | 49 | `dma_alloc(pages, slot)` | alloca `pages` frame contigui azzerati per DMA Bus-Master (Fase 38.1): mappa RW/NX nella finestra dello slot, ritorna `rax` = fisico base (il device vuole phys per PRD/BMIBA), `rdi` = pagine, `rsi` = VA dello slot. **Slot 0** = staging (≤ `DMA_PAGES_MAX` = 4, VA `USER_DMA_VA`, come prima); **slot ≥ 1** = device buffer (≤ `DMA_DEVICE_PAGES_MAX` = 1024 = 4 MiB, grant riservato all'owner di `Service::Console`, D3/ADR-0060); `DMA_SLOT_ANY` = primo libero. Free a teardown/exec, mai ereditata dal figlio-copia. **ADR-0079 fase 3**: gli slot device (≥ 1) richiedono classe `System`; lo slot 0 (staging) resta aperto |
 | 50 | `suspend(pid)` | congela un processo user (Fase 44a, job control, ADR-0035): fuori dalle ready queue finche' resume (i wake lo saltano, i messaggi restano in coda); meccanismo neutro. 0 se sospeso (idempotente), -1 se non sospendibile (init/kernel/se'/non-figlio/terminato) |
 | 51 | `resume(pid)` | rimette in schedulazione un sospeso (Fase 44a): no-op ok se running; un bloccato con coda non vuota si sveglia subito. Stessi gate di `suspend` |
-| 64 | `trust_image(id_lo, id_hi, class)` | registra `ImageId → ImageClass` nella **trust table** del kernel (ADR-0079 fase 3): solo cardo (owner di `Service::Cardo`) o init; max 32 entry, mai sovrascritte da altri. Il kernel ricalcola l'`ImageId` sui byte caricati allo spawn/exec e fa lookup qui per assegnare la classe al PCB (default `Untrusted`). 0 o -1 (non autorizzato/tabella piena) |
+| 64 | `trust_image(id_lo, id_hi, class, ranges_ptr)` | registra `ImageId → (ImageClass, porte I/O)` nella **trust table** del kernel (ADR-0079 fasi 3–4): solo cardo (owner di `Service::Cardo`) o init; max 32 entry, mai sovrascritte da altri. `ranges_ptr` = `TrustIo` (`repr(C)`: `count` + `[(u16,u16);4]`, intervalli inclusivi; 0 = nessuna porta). Il kernel ricalcola l'`ImageId` sui byte caricati allo spawn/exec e fa lookup qui per assegnare classe (PCB) e porte (TSS). 0 o -1 (non autorizzato/tabella piena/payload malformato) |
 
 > **Fase 29 (protezioni)**: `PROT_NONE`/`PROT_READ`/`PROT_READ|PROT_WRITE` sono
 > enforced dal page-fault handler. Un fault di protezione da user mode (write

@@ -254,15 +254,43 @@ pub(super) fn sys_ps_info(pid: usize) -> i64 {
     0
 }
 
-/// Fase 3 (ADR-0079): registra `image_id -> classe` nella trust table del
-/// kernel. Chiamabile solo da init (pid 1) o figli di init (cardo).
-/// Argomenti: arg1 = image_id_lo, arg2 = image_id_hi, arg3 = class (u64).
-/// Ritorna 0 se registrata, -1 se tabella piena o chiamante non autorizzato.
-pub(super) fn sys_trust_image(id_lo: u64, id_hi: u64, class: u64) -> i64 {
+/// Fasi 3–4 (ADR-0079): registra `image_id -> (classe, porte I/O)` nella trust
+/// table del kernel. Chiamabile solo da cardo (owner di `Service::Cardo`) o
+/// init. Argomenti: arg1 = image_id_lo, arg2 = image_id_hi, arg3 = class,
+/// arg4 = puntatore a `TrustIo` in memoria del chiamante (0 = nessuna porta).
+/// Ritorna 0 se registrata, -1 se tabella piena / chiamante non autorizzato /
+/// `TrustIo` malformato.
+pub(super) fn sys_trust_image(id_lo: u64, id_hi: u64, class: u64, io_ptr: u64) -> i64 {
     let caller = super::entry::current_id() as usize;
     let id = syscall_numbers::ImageId::new(id_lo, id_hi);
     let class = syscall_numbers::ImageClass::from_u64(class);
-    if crate::ordo::sched::trust_register(id, class, caller) {
+
+    // Porte (ADR-0079 fase 4): copia stabile + validazione PRIMA di toccare la
+    // tabella (mai entry a meta'). `io_ptr == 0` = nessuna porta.
+    let mut ranges = [(0u16, 0u16); syscall_numbers::TRUST_IO_MAX];
+    let mut n = 0usize;
+    if io_ptr != 0 {
+        let size = core::mem::size_of::<syscall_numbers::TrustIo>();
+        if !crate::arc::vmm_user::is_user_range(io_ptr, size) {
+            crate::serial_println!("[syscall] trust_image: TrustIo fuori dallo spazio user");
+            return -1;
+        }
+        let io: syscall_numbers::TrustIo =
+            unsafe { core::ptr::read_unaligned(io_ptr as *const syscall_numbers::TrustIo) };
+        if io.count as usize > syscall_numbers::TRUST_IO_MAX {
+            return -1;
+        }
+        n = io.count as usize;
+        for i in 0..n {
+            let (s, e) = io.ranges[i];
+            if s > e {
+                return -1;
+            }
+            ranges[i] = (s, e);
+        }
+    }
+
+    if crate::ordo::sched::trust_register(id, class, &ranges[..n], caller) {
         0
     } else {
         -1

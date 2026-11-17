@@ -79,8 +79,15 @@ bins = [p for p in bins if os.path.basename(p) not in ("rector.bin", "cardo.bin"
 # Emettiamo due file seedati in `sys:` da arca-tool.sh; init e cardo li
 # leggono a runtime, quindi cambiare un servizio NON ricompila piu' il kernel.
 #
-#   manifest.txt  -> sys:manifest     `nome <blake2s-256 hex>` per riga
+#   manifest.txt  -> sys:manifest     `nome <blake2s-256 hex> <io>` per riga
 #   policy.txt    -> sys:policy       `<hi16> <lo16> <mask3> <nome>` per riga
+#
+# `<io>` (ADR-0079 fase 4) = `-` (nessuna porta) oppure intervalli inclusivi
+# esadecimali separati da virgola (`start-end[,...]`, es. `80-80`,
+# `cf8-cff,1f0-1f7`). Cardo li registra nella trust table del kernel insieme
+# alla classe: sono le porte che finiscono nel TSS del processo. Sono **dati**
+# firmati-indirettamente (il manifest e' in `sys`, protetto), non piu' una
+# tabella compilata nel kernel: aggiungere un driver non richiede un rebuild.
 #
 # L'identita' e' `ImageId` (BLAKE2s-128, primi 16 byte del digest): init la
 # ricava dal digest stesso, quindi una sola fonte copre identita' e
@@ -92,7 +99,31 @@ POLICY = {
     "net": 0x000,
     "netecho": 0x000,
 }
+# Porte I/O per servizio (ADR-0079 fase 4): stessa verita' dei valori in
+# `syscall-numbers` (single source), ma espressa come **dato** del manifest.
+# Solo i driver da disco hanno porte qui: `block` e' embedded (TCB, parte
+# prima di cardo) e tiene le sue in `NAMED_BINARIES`.
+IO = {
+    # virtio-gpu: spazio di configurazione PCI
+    "gpu": [(0xCF8, 0xCFF)],
+    # virtio-net: spazio di configurazione PCI
+    "netdev": [(0xCF8, 0xCFF)],
+    # console: registri CRTC della VGA
+    "console": [(0x3D4, 0x3D5)],
+    # kbd: controller PS/2
+    "kbd": [(0x60, 0x64)],
+    # usertime: CMOS/RTC
+    "usertime": [(0x70, 0x71)],
+}
 DEFAULT_MASK = 0x1FFF  # ALL (servizi TCB, incluso EXECUTE)
+
+
+def io_spec(stem):
+    rs = IO.get(stem)
+    if not rs:
+        return "-"
+    return ",".join("%x-%x" % (s, e) for (s, e) in rs)
+
 
 manifest = []
 policy = []
@@ -105,7 +136,7 @@ for p in bins:
     digest = hashlib.blake2s(data).digest()
     id_lo = int.from_bytes(digest[0:8], "little")
     id_hi = int.from_bytes(digest[8:16], "little")
-    manifest.append("%s %s" % (stem, digest.hex()))
+    manifest.append("%s %s %s" % (stem, digest.hex(), io_spec(stem)))
     mask = POLICY.get(stem, DEFAULT_MASK)
     policy.append("%016x %016x %03x %s" % (id_hi, id_lo, mask, stem))
 

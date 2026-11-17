@@ -87,7 +87,7 @@ pub(super) extern "C" fn syscall_handler() -> i64 {
             syscall_numbers::SYS_BOOT_CMDLINE => sys_boot_cmdline((*p).arg1, (*p).arg2 as usize),
             // Fase 3 (ADR-0079): registra image_id -> classe nella trust table.
             syscall_numbers::SYS_TRUST_IMAGE => {
-                sys_trust_image((*p).arg1, (*p).arg2, (*p).arg3)
+                sys_trust_image((*p).arg1, (*p).arg2, (*p).arg3, (*p).arg4)
             }
             // S-T (ADR-0046): thread 1:1 + TLS (futex in T3).
             syscall_numbers::SYS_THREAD_CREATE => {

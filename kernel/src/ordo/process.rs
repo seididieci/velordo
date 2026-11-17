@@ -392,6 +392,25 @@ impl Process {
         // chiamante dichiara (nome owned, SpawnMeta).
         let image_id = syscall_numbers::ImageId::from_digest(&blake2s::blake2s(elf));
 
+        // ADR-0079 fasi 3–4: classe e porte I/O vengono dalla trust table
+        // (manifest firmato, registrata da cardo). Se l'immagine non e'
+        // verificata (nessuna entry) la classe e' `Untrusted` e valgono le
+        // porte del chiamante — che esistono solo per i binari **embedded**
+        // (TCB dentro il kernel: `block` parte prima di cardo, non ha un
+        // manifest da cui leggere, e ha piu' di `TRUST_IO_MAX` range: la sua
+        // slice non viene troncata). Un'immagine da disco senza entry non
+        // ottiene porte.
+        let trust = crate::ordo::sched::trust_lookup(image_id);
+        let trust_ranges = match trust {
+            Some((_, ranges, _)) => ranges,
+            None => [(0u16, 0u16); syscall_numbers::TRUST_IO_MAX],
+        };
+        let (image_class, eff_io): (syscall_numbers::ImageClass, &[(u16, u16)]) =
+            match trust {
+                Some((c, _, n)) => (c, &trust_ranges[..n]),
+                None => (syscall_numbers::ImageClass::Untrusted, io_ranges),
+            };
+
         // Kernel stack: RSP0 (per rientrare a ring 0 su interrupt) + frame.
         // Come sopra: base PHYS (teardown), top VIRT (RSP0 + frame iniziale).
         let stack_base = crate::arc::phys_mem::alloc_contiguous(STACK_FRAMES)?;
@@ -418,7 +437,7 @@ impl Process {
         let saved =
             unsafe { crate::ordo::context::new_context_user(stack_top, entry, user_stack_top) };
 
-        let tss_slot = match Self::alloc_tss(stack_top, io_ranges) {
+        let tss_slot = match Self::alloc_tss(stack_top, eff_io) {
             Some(slot) => slot,
             None => {
                 // Rollback: il PCB non esiste ancora, quindi nulla liberera'
@@ -465,7 +484,7 @@ impl Process {
             cbs_server: None,
             text_id,
             image_id,
-            image_class: crate::ordo::sched::trust_lookup(image_id),
+            image_class,
             thread_group: None,
             fs_base: 0,
             futex_woken: None,
@@ -536,7 +555,7 @@ impl Process {
             cbs_server: None,
             text_id,
             image_id,
-            image_class: crate::ordo::sched::trust_lookup(image_id),
+            image_class: crate::ordo::sched::trust_class(image_id),
             thread_group: None,
             fs_base: 0,
             futex_woken: None,
@@ -625,7 +644,7 @@ impl Process {
             cbs_server,
             text_id,
             image_id,
-            image_class: crate::ordo::sched::trust_lookup(image_id),
+            image_class: crate::ordo::sched::trust_class(image_id),
             thread_group: Some(leader),
             fs_base,
             futex_woken: None,

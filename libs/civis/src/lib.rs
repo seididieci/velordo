@@ -84,6 +84,9 @@ pub use syscall_numbers::{
 /// Identita' crittografica di un'immagine (ADR-0078).
 pub use syscall_numbers::ImageId;
 pub use syscall_numbers::ImageClass;
+/// Porte I/O dichiarabili per immagine (ADR-0079 fase 4, payload di
+/// `SYS_TRUST_IMAGE`).
+pub use syscall_numbers::{TrustIo, TRUST_IO_MAX};
 /// Servizi di sistema raggiungibili per nome (ADR-0008).
 pub use syscall_numbers::Service;
 /// Tag della notifica kernel→parent della morte di un figlio (Fase 14).

@@ -112,6 +112,7 @@ fn real_main(_sp: u64) -> ! {
     helpers::report(&mut total, &mut ok, "t65 shm ownership + destroy", t_basic::t_shm_destroy());
     helpers::report(&mut total, &mut ok, "t66 firma immagini + classi", t_sig::t_signature());
     helpers::report(&mut total, &mut ok, "t67 classe nel PCB (kernel)", t_sig::t_image_class());
+    helpers::report(&mut total, &mut ok, "t68 porte I/O dal manifest", t_sig::t_io_ranges());
     // t34 per ULTIMO: i drop sono irrevocabili sul canale di usertests.
     helpers::report(&mut total, &mut ok, "t34 diritti per-canale lato server", t_fs::t_rights());
 

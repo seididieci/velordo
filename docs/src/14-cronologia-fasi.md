@@ -3850,3 +3850,36 @@
       Nota operativa: le fasi shell usano il kernel/`rector` **di produzione**
       — vanno ricompilati userland e kernel dopo un `run-tests.sh` (che lascia
       il `rector` con la suite e il boot supera il timeout del login).
+
+- [x] **Privilegi — porte I/O dal manifest** (2026-11, ADR-0079, fase 4):
+      le porte dei driver sono un **dato**, non una tabella compilata.
+      `sys:manifest` guadagna la terza colonna `<io>` (`-` oppure
+      `start-end[,...]` esadecimale; la tabella `IO` in
+      `gen-service-hashes.sh` è l'unica verità host-side: gpu/netdev → PCI,
+      console → CRTC, kbd → PS/2, usertime → CMOS). init ignora la colonna
+      (compatibile), **cardo** la parsa in `policy::manifest_io` e la usa
+      quando registra la trust entry: `SYS_TRUST_IMAGE` prende un quarto
+      argomento, `TrustIo` (`count` + `[(u16,u16);4]`), e registra **classe e
+      porte insieme** (niente finestra "System ma senza range").
+      `create_user` prende i range dalla trust entry; **`SpawnMeta.io_ranges`
+      è ignorato** — nessun chiamante si allarga le porte — e `exec`
+      riapplica le porte del nuovo contenuto (prima le azzerava sempre).
+      **Hardening incluso**: `SYS_SPAWN` per nome è ora **solo init**; prima
+      qualunque processo poteva `spawn("block")` e prendersi le porte ATA.
+      **Eccezione dichiarata**: i binari embedded (`block`) partono prima di
+      cardo e tengono i range compilati (`NAMED_BINARIES`); la loro slice non
+      è troncata a `TRUST_IO_MAX` — il primo giro la troncava a 4 e `block`
+      moriva con `#GP` sul conf PCI (6 range: ATA×4 + PCI + BM).
+      **Vittoria**: t68 — `ioprobe` (firmato `system`, riga di manifest
+      `80-80`) legge la porta `0x80` → exit 0, senza che il chiamante dichiari
+      nulla; la stessa sonda spawnata con `SpawnMeta.io_ranges = 0x2F8` legge
+      `0x2F8` → `#GP` → `FAULT_EXIT_CODE` (la dichiarazione è ignorata).
+      `[usertests] PASS 64/64`, gate 6/6, shell `run`/`native`/`source` PASS,
+      zero FAIL/PANIC/FAULT. `block` continua a fare PIO ATA; gpu/console/kbd/
+      usertime/netdev prendono le porte dal manifest — zero rebuild del
+      kernel.
+      **Trappola**: un binario di test fuori da `userland/build`/
+      `flavours/posix/build` non entra nel manifest generato; la riga va
+      aggiunta da `arca-tool.sh` (`manifest-io.txt`).
+      **Limiti**: porte embedded compilate, revoca a caldo assente, conf PCI
+      senza IOMMU (contenimento nullo, ADR-0026).

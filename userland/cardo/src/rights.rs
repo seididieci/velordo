@@ -208,16 +208,23 @@ pub fn handle_rights_execute(
     };
     match verify::verdict_for(bucket, key, verdict) {
         Ok((w0, class)) => {
-            // ADR-0079 fase 3: registra l'identita' verificata nella trust
-            // table del kernel. Il kernel, allo spawn/exec, ricalcola l'id
-            // sui byte caricati e lo confronta: se l'oggetto e' cambiato tra
-            // questa verifica e l'esecuzione, l'id non combacia e la classe
-            // cade su Untrusted (TOCTOU chiuso senza crypto nel kernel).
+            // ADR-0079 fasi 3–4: registra l'identita' verificata e le porte
+            // dichiarate nel manifest (`sys:manifest`, dato) nella trust table
+            // del kernel. Il kernel, allo spawn/exec, ricalcola l'id sui byte
+            // caricati e lo confronta: se l'oggetto e' cambiato tra questa
+            // verifica e l'esecuzione, l'id non combacia e la classe cade su
+            // Untrusted (TOCTOU chiuso senza crypto nel kernel). Le porte
+            // finiscono nel TSS del processo, mai in `SpawnMeta`.
             //
             // La registrazione e' best-effort per il verdetto (un fallimento
-            // = immagine eseguita Untrusted, mai promozione), ma loud nel log.
-            if let Err(e) = civis::trust_image(id, class) {
-                println!("[cardo] trust_image({:016x}{:016x}) fallita: {:?}", id.hi, id.lo, e);
+            // = immagine eseguita Untrusted senza porte, mai promozione), ma
+            // loud nel log.
+            let io = policy::manifest_io(id);
+            if let Err(e) = civis::trust_image(id, class, io) {
+                println!(
+                    "[cardo] trust_image({:016x}{:016x}) fallita: {:?}",
+                    id.hi, id.lo, e
+                );
             }
             Some((w0, class.as_u64()))
         }

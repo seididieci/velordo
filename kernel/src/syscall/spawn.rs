@@ -7,6 +7,18 @@ use super::service::finish_spawn;
 /// qui il channel id. Ritorna il channel id, o -1 se il nome non e' noto / la
 /// creazione fallisce.
 pub(super) fn sys_spawn(name_ptr: u64, name_len: usize) -> i64 {
+    // ADR-0079 fase 4 (hardening): lo spawn per NOME raggiunge i binari
+    // embedded (TCB dentro il kernel: `block` con le porte ATA, `cardo`,
+    // `vestigia`, `rector`). E' un privilegio di init: senza questo gate
+    // qualunque processo poteva spawnare `block` e ottenere le porte ATA.
+    // I programmi si lanciano con `spawn_image`/`exec` (byte in mano).
+    if current_id() != 1 {
+        crate::serial_println!(
+            "[syscall] spawn per nome: pid={} rifiutato (solo init)",
+            current_id()
+        );
+        return -1;
+    }
     if name_len == 0 || name_len > 64 {
         return -1;
     }
@@ -134,23 +146,17 @@ pub(super) fn sys_spawn_image(img_ptr: u64, img_len: usize, meta_ptr: u64, meta_
         },
         None => None,
     };
-    // Porte I/O (ADR-0079 fase 3): riservate a codice `System` (init e i
-    // driver embedded/firmati). Chi non lo e' e le chiede = -1 (fail loud:
-    // il campo non viene "ignorato in silenzio").
-    let caller_class = crate::ordo::sched::process_image_class(current_id() as usize)
-        .unwrap_or(syscall_numbers::ImageClass::Untrusted);
-    if caller_class != syscall_numbers::ImageClass::System && meta.io_count != 0 {
-        return -1;
-    }
+    // Porte I/O (ADR-0079 fase 4): il campo `SpawnMeta.io_ranges` e' IGNORATO.
+    // Le porte vengono dalla trust entry (manifest firmato, registrata da
+    // cardo) e le assegna `create_user`; l'unica eccezione sono i binari
+    // embedded, che passano da `spawn_named` (non da qui). Ignorare il campo
+    // invece di rifiutarlo tiene l'ABI di `SpawnMeta` invariata.
+    let _ = meta.io_count;
+    let _ = meta.io_ranges;
     let prio = match meta.prio {
         1..=31 => crate::ordo::sched::Priority(meta.prio),
         _ => return -1, // mai 0 (idle) ne' oltre 31
     };
-    for (s, e) in meta.io_ranges[..meta.io_count as usize].iter() {
-        if s > e {
-            return -1;
-        }
-    }
     // S-T (T5): parent = leader del gruppo (vedi sys_spawn).
     let parent = crate::ordo::sched::group_leader(current_id() as usize);
     let name_len = meta.name.iter().position(|&b| b == 0).unwrap_or(16);
@@ -161,7 +167,7 @@ pub(super) fn sys_spawn_image(img_ptr: u64, img_len: usize, meta_ptr: u64, meta_
         img_len,
         Some(parent),
         None,
-        &meta.io_ranges[..meta.io_count as usize],
+        &[],
         detached,
         stack_frames,
         parsed.as_ref(),

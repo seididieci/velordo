@@ -225,3 +225,96 @@ pub fn t_image_class() -> bool {
 
     pass
 }
+
+/// t68 — porte I/O dal manifest (ADR-0079 fase 4).
+///
+/// La sonda `ioprobe` e' firmata `system` e la sua riga in `sys:manifest`
+/// concede `80-80`. Dopo la verifica (cardo registra classe **e** porte nella
+/// trust table) il kernel scrive il range nel TSS del processo: la lettura di
+/// `0x80` riesce senza che il chiamante dichiari nulla.
+///
+/// Poi la stessa sonda, spawnata con `SpawnMeta.io_ranges` che dichiara
+/// `0x2F8`, legge quella porta: il kernel **ignora** la dichiarazione, il TSS
+/// non la consente → `#GP` → il processo muore con `FAULT_EXIT_CODE`.
+pub fn t_io_ranges() -> bool {
+    helpers::drain_stray();
+    let mut pass = true;
+
+    // Verifica: cardo registra classe+porte per il contenuto della sonda.
+    match verdict(b"tst", b"test/ioprobe.bin") {
+        Ok((true, c)) if c == civis::ImageClass::System => {}
+        other => {
+            println!("[usertests] t68: ioprobe verdetto {:?} (atteso System)", other);
+            pass = false;
+        }
+    }
+
+    // (1) Porta concessa dal manifest: la lettura riesce, exit 0.
+    match helpers::spawn_cfg("/test/ioprobe.bin", "ioprobe", 16, 0, 0) {
+        Some((chan, _ack)) => {
+            match helpers::wait_exit(chan) {
+                Some((0, _)) => {}
+                Some((code, _)) => {
+                    println!("[usertests] t68: porta concessa, exit {} (atteso 0)", code);
+                    pass = false;
+                }
+                None => {
+                    println!("[usertests] t68: nessuna EXIT_NOTIFY (porta concessa)");
+                    pass = false;
+                }
+            }
+        }
+        None => {
+            println!("[usertests] t68: spawn ioprobe (porta concessa) fallito");
+            pass = false;
+        }
+    }
+
+    // (2) Dichiarazione del chiamante ignorata: `SpawnMeta` chiede 0x2F8, il
+    // kernel assegna solo le porte del manifest (0x80) → #GP.
+    let img = match civis::load_file("/test/ioprobe.bin") {
+        Some(b) if !b.is_empty() => b,
+        _ => {
+            println!("[usertests] t68: ioprobe non caricabile");
+            return false;
+        }
+    };
+    match civis::SpawnMeta::new("ioprobe", 16, &[(0x2F8, 0x2F8)]) {
+        Some(meta) => match civis::spawn_image(&img, &meta) {
+            Ok(chan) => {
+                let chan = chan as u64;
+                // La sonda attende T_CFG prima di toccare la porta.
+                if civis::send(chan, 100 /* T_CFG */, 1, 0).is_ok() {
+                    match helpers::wait_exit(chan) {
+                        Some((c, _)) if c == civis::FAULT_EXIT_CODE => {}
+                        Some((c, _)) => {
+                            println!(
+                                "[usertests] t68: porta dichiarata dal chiamante, exit {} (atteso {})",
+                                c,
+                                civis::FAULT_EXIT_CODE
+                            );
+                            pass = false;
+                        }
+                        None => {
+                            println!("[usertests] t68: nessuna EXIT_NOTIFY (porta negata)");
+                            pass = false;
+                        }
+                    }
+                } else {
+                    println!("[usertests] t68: T_CFG non recapitato");
+                    pass = false;
+                }
+            }
+            Err(_) => {
+                println!("[usertests] t68: spawn ioprobe (porta negata) fallito");
+                pass = false;
+            }
+        },
+        None => {
+            println!("[usertests] t68: SpawnMeta con io rifiutata dal builder");
+            pass = false;
+        }
+    }
+
+    pass
+}

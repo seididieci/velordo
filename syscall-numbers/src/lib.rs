@@ -212,14 +212,35 @@ pub const SYS_GETCWD: u64 = 60;
 /// (PCD|PWT) e non-owned (il teardown non libera frame device). Ristretta
 /// all'owner di `Service::Gpu`. Ritorna 0 o -1.
 pub const SYS_MAP_MMIO: u64 = 61;
-/// Registra `image_id → classe` nella trust table del kernel (ADR-0079,
-/// fase 3). Registrabile solo da cardo (figlio di init): il kernel calcola
-/// l'`ImageId` sui byte caricati allo spawn/exec e fa lookup qui per
-/// assegnare `ImageClass` al PCB. Max 32 entry, mai sovrascritte da altri.
+/// Registra `image_id → classe` (+ porte I/O) nella trust table del kernel
+/// (ADR-0079, fasi 3–4). Registrabile solo da cardo (owner di
+/// `Service::Cardo`) o init: il kernel calcola l'`ImageId` sui byte caricati
+/// allo spawn/exec e fa lookup qui per assegnare `ImageClass` al PCB e le
+/// porte al TSS del processo. Max 32 entry, mai sovrascritte da altri.
 /// `class` = `ImageClass` (0=Untrusted, 1=ThirdParty, 2=System).
-/// Argomenti: `arg1 = image_id_lo`, `arg2 = image_id_hi`, `arg3 = class`.
-/// Ritorna 0 se registrata, -1 se tabella piena / chiamante non autorizzato.
+/// Argomenti: `arg1 = image_id_lo`, `arg2 = image_id_hi`, `arg3 = class`,
+/// `arg4 = puntatore a `TrustIo`` in memoria del chiamante (0 = nessuna
+/// porta). Classe e porte si registrano **insieme**: niente finestra in cui
+/// un'immagine e' `System` ma senza i suoi range.
+/// Ritorna 0 se registrata, -1 se tabella piena / chiamante non autorizzato /
+/// `TrustIo` malformato.
 pub const SYS_TRUST_IMAGE: u64 = 64;
+
+/// Porte I/O dichiarate per un'immagine (ADR-0079 fase 4): payload di
+/// `SYS_TRUST_IMAGE`, `repr(C)` identico kernel/userspace. `count` = voci
+/// valide di `ranges` (0..=4); ogni voce e' un intervallo **inclusivo**
+/// `start..=end`. Il kernel valida `count <= 4` e `start <= end` (fail-loud,
+/// mai troncamento silenzioso) e ignora il resto.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TrustIo {
+    pub count: u64,
+    pub ranges: [(u16, u16); 4],
+}
+
+/// Porte I/O massime dichiarabili per immagine (stesso bound del TSS
+/// per-processo, ADR-0006).
+pub const TRUST_IO_MAX: usize = 4;
 pub const CWD_MAX: usize = 256;
 
 /// Base fisica della finestra MMIO device (L0b, QEMU-scoped): buco PCI sopra

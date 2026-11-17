@@ -9,8 +9,10 @@ ADR-0078 (identità firmata).
 `SYS_TRUST_IMAGE = 64` registrabile solo da cardo, `ImageClass` nel PCB
 (`image_class`), classe calcolata dal kernel ricalcolando l'`ImageId` sui byte
 caricati, gate su `service_register`/`dma_alloc` device/`map_mmio`/`io_ranges`,
-`peer_info` riporta la classe in `rdx`, t67 nel gate. Fase 4 (`io_ranges` dal
-manifest) da fare. Vedi §Implementazione.
+`peer_info` riporta la classe in `rdx`, t67 nel gate. **Fase 4 implementata**
+(2026-11): le porte I/O arrivano dal manifest firmato alla trust entry
+(`TrustIo` in `SYS_TRUST_IMAGE`), `SpawnMeta.io_ranges` è ignorato, `SYS_SPAWN`
+per nome è riservato a init, t68 nel gate. Vedi §Implementazione.
 
 ## Context
 
@@ -154,6 +156,75 @@ disco, si spawna una copia con un bit diverso → `Untrusted`; (4) gate: usertes
 - **`libr::exec` su file fuori dal namespace** (FAT) non ha verifica di firma:
   esegue `Untrusted` (il gate `service_register`/device resta chiuso).
 
+## Implementazione (fase 4) — porte I/O dal manifest
+
+### 1. Le porte sono un dato, non una tabella compilata
+
+`sys:manifest` passa da `nome <blake2s-256 hex>` a
+`nome <blake2s-256 hex> <io>`, con `<io>` = `-` oppure intervalli inclusivi
+esadecimali `start-end[,...]` (es. `80-80`, `cf8-cff,1f0-1f7`).
+`scripts/gen-service-hashes.sh` ha la tabella `IO` (gpu/netdev → PCI,
+console → CRTC, kbd → PS/2, usertime → CMOS): **una** verità host-side, i
+valori coincidono con `syscall-numbers`.
+
+init legge il manifest come prima (ignora la terza colonna); **cardo** la
+parsa all'avvio in una tabella `ImageId → range` (accanto a policy e
+test-policy) e la usa quando registra la trust entry.
+
+### 2. `SYS_TRUST_IMAGE` prende anche le porte
+
+Argomenti: `id_lo`, `id_hi`, `class`, **`ranges_ptr`** → `TrustIo`
+(`repr(C)`: `count: u64` + `ranges: [(u16,u16); 4]`). Il kernel copia con
+`read_unaligned` (stabile, niente TOCTOU), valida `count <= 4` e
+`start <= end`, poi registra **classe e porte insieme**: non esiste una
+finestra in cui un'immagine è `System` ma senza i suoi range.
+
+### 3. `SpawnMeta.io_ranges` è ignorato
+
+`sys_spawn_image` non legge più il campo (resta nell'ABI, ignorato): nessun
+chiamante può allargarsi le porte. `create_user` prende i range dalla trust
+entry dell'`ImageId`; senza entry → `Untrusted` e **nessuna** porta.
+
+`exec` ricalcola l'identità e **riapplica** le porte del nuovo contenuto
+(prima le azzerava sempre): un'immagine firmata che fa exec di sé resta con i
+suoi range, un'immagine senza entry non ne ottiene.
+
+### 4. Eccezione dichiarata: i binari embedded
+
+`block` (ATA) parte **prima** di cardo — il volume non esiste ancora — quindi
+non può ricevere range dal manifest. I binari **embedded** (`block`, `cardo`,
+`vestigia`, `rector`) mantengono i range compilati in `NAMED_BINARIES`, e la
+loro slice non è troncata al bound del manifest (block ne ha sei). Questa è la
+deviazione motivata dal testo letterale di §4: "spariscono da
+`NAMED_BINARIES`" vale per i driver **da disco**.
+
+### 5. `SYS_SPAWN` per nome solo da init
+
+Lo spawn per nome raggiunge i binari embedded (TCB con le porte ATA). Prima
+qualunque processo poteva `spawn("block")`; ora solo init (pid 1). I
+programmi si lanciano con `spawn_image`/`exec` (byte in mano).
+
+### 6. Vittoria e test
+
+**t68** (`testland/ioprobe`, firmato `system`, riga di manifest `80-80`):
+
+1. dopo la verifica di cardo, la sonda legge la porta `0x80` → exit 0: le
+   porte vengono dal manifest, **zero rebuild del kernel**;
+2. la stessa sonda spawnata con `SpawnMeta.io_ranges = 0x2F8` legge `0x2F8`
+   → `#GP` → `FAULT_EXIT_CODE`: la dichiarazione del chiamante è ignorata.
+
+`block` continua a fare PIO ATA (embedded) e gpu/console/kbd/usertime/netdev
+prendono le porte dal manifest: boot, gate 6/6 (`usertests 64/64`) e fasi
+shell `run`/`native`/`source` verdi.
+
+### Limiti residui
+
+- `io_ranges` dei binari embedded restano compilati (motivo al §4).
+- Il conf PCI (`cf8-cff`) permette di riprogrammare qualunque device: senza
+  IOMMU il contenimento è nullo (già dichiarato in ADR-0026).
+- La revoca delle porte richiede di cambiare il manifest e riavviare cardo
+  (nessuna revoca a caldo).
+
 ## Consequences
 
 ### Positive- Il privilegio poggia su autenticità, non su lineage: "figlio di init" resta
@@ -161,6 +232,9 @@ disco, si spawna una copia con un bit diverso → `Untrusted`; (4) gate: usertes
 - Aggiungere un driver non tocca il kernel.
 - La classe è un dato del PCB: leggibile da `ps`/log per diagnosi.
 - I test di classe non richiedono rete: stanno nel gate.
+- (Fase 4) Le porte I/O sono un **dato** del manifest: aggiungere o spostare
+  un driver non ricompila il kernel, e nessun chiamante può allargarsele con
+  `SpawnMeta`.
 
 ### Negative
 
@@ -178,6 +252,8 @@ disco, si spawna una copia con un bit diverso → `Untrusted`; (4) gate: usertes
 - La classe non cambia l'ABI di spawn/exec: resta `spawn_image(bytes)`.
 - `peer_info` guadagna `rdx` (la classe): i client che ignorano il registro
   restano validi (`civis::peer_info` invariata, `peer_info_class` nuova).
+- (Fase 4) `SpawnMeta.io_ranges` resta nel layout ma è ignorato: l'ABI non
+  cambia, il significato sì (le porte sono un privilegio del contenuto).
 
 ## Alternatives Considered
 
@@ -204,3 +280,8 @@ disco, si spawna una copia con un bit diverso → `Untrusted`; (4) gate: usertes
   `libs/civis/src/spawn.rs` (`trust_image`, `peer_info_class`),
   `userland/cardo/src/{verify,rights}.rs`, `flavours/posix/libr/src/exec.rs`
   (`verify_exec`), `testland/usertests/src/t_sig.rs` (t67)
+- Fase 4: `syscall-numbers` (`TrustIo`), `kernel/src/ordo/process.rs`
+  (porte dalla trust entry), `kernel/src/syscall/spawn.rs` (`SYS_SPAWN` solo
+  init, `io_ranges` ignorate), `userland/cardo/src/policy.rs`
+  (`load_manifest_io`), `scripts/gen-service-hashes.sh` (tabella `IO`),
+  `testland/ioprobe`, `testland/usertests/src/t_sig.rs` (t68)
