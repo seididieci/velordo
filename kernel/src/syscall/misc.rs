@@ -253,3 +253,18 @@ pub(super) fn sys_ps_info(pid: usize) -> i64 {
     }
     0
 }
+
+/// Fase 3 (ADR-0079): registra `image_id -> classe` nella trust table del
+/// kernel. Chiamabile solo da init (pid 1) o figli di init (cardo).
+/// Argomenti: arg1 = image_id_lo, arg2 = image_id_hi, arg3 = class (u64).
+/// Ritorna 0 se registrata, -1 se tabella piena o chiamante non autorizzato.
+pub(super) fn sys_trust_image(id_lo: u64, id_hi: u64, class: u64) -> i64 {
+    let caller = super::entry::current_id() as usize;
+    let id = syscall_numbers::ImageId::new(id_lo, id_hi);
+    let class = syscall_numbers::ImageClass::from_u64(class);
+    if crate::ordo::sched::trust_register(id, class, caller) {
+        0
+    } else {
+        -1
+    }
+}

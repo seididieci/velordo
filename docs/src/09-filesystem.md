@@ -254,6 +254,12 @@ usertests 17/17, shell 3/3.
   (autorevoli) stanno in `sys:anchor`; `sig` e `vela` sono bucket protetti
   (ADR-0077). Client: `civis::fs::rights::rights_execute_verdict` /
   `rights_execute`.
+- **Classe nel kernel** (ADR-0079 fase 3): a ogni verifica riuscita cardo
+  registra `ImageId → ImageClass` con `SYS_TRUST_IMAGE` (trust table di 32
+  voci, solo cardo/init). Il kernel, allo spawn/exec, **ricalcola** l'`ImageId`
+  sui byte caricati e assegna `image_class` al PCB: se l'oggetto è cambiato
+  dopo la verifica la classe cade su `Untrusted`. `peer_info` riporta la
+  classe in `rdx`.
 
 ## Contratto di durabilita' (Fase 52, P3)
 

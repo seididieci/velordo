@@ -284,6 +284,17 @@ pub(super) fn sys_map_mmio(phys_addr: u64, virt_addr: u64, count: usize) -> i64 
             return -1;
         }
     };
+    // ADR-0079 fase 3: l'owner del device deve essere codice `System` (un
+    // driver firmato/embedded), non solo aver vinto lo slot del servizio.
+    let class = crate::ordo::sched::process_image_class(me)
+        .unwrap_or(syscall_numbers::ImageClass::Untrusted);
+    if class != syscall_numbers::ImageClass::System {
+        crate::serial_println!(
+            "[syscall] map_mmio: pid={} owner ma classe {:?} != System, rifiutato",
+            me, class
+        );
+        return -1;
+    }
     if phys_addr < win.phys
         || phys_addr.checked_add(dev_len).map_or(true, |e| e > win.phys + win.size)
     {
@@ -434,6 +445,20 @@ pub(super) fn sys_dma_alloc(pages: usize, slot: u64) -> i64 {
         return -1; // cr3 non impostata (prima di allocare: mai record orfani)
     }
     let pid = current_id() as usize;
+    // ADR-0079 fase 3: gli slot "device" (>= 1: framebuffer, ring device)
+    // sono riservati a codice `System`. Lo slot 0 (staging) resta aperto:
+    // non e' un grant verso un device, e' memoria di lavoro per l'I/O.
+    if slot >= syscall_numbers::DMA_SLOT_DEVICE {
+        let class = crate::ordo::sched::process_image_class(pid)
+            .unwrap_or(syscall_numbers::ImageClass::Untrusted);
+        if class != syscall_numbers::ImageClass::System {
+            crate::serial_println!(
+                "[syscall] dma_alloc: pid={} slot={} ma classe {:?} != System, rifiutato",
+                pid, slot, class
+            );
+            return -1;
+        }
+    }
     let (phys, n, idx) = match crate::arc::vmm_user::alloc_dma_pages(cur, pid, pages, slot) {
         Some(p) => p,
         None => {

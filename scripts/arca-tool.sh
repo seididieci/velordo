@@ -225,13 +225,30 @@ GPU_SIG="$ROOT/build-meta/sig/$GPU_DIGEST.sig"
 # sigbad: sidecar valido di gpu.bin sul digest della copia manomessa.
 D_BAD="$(bash "$ROOT/scripts/sign-bins.sh" digest "$SIGART/sigbad.bin")"
 cp "$GPU_SIG" "$SIGART/sigbad.sig"
-SEED_NS+=( "sig:$D_BAD=$SIGART/sigbad.sig" "tst:test/sigbad.bin=$SIGART/sigbad.bin" )
+SEED_NS+=( "sig:$D_BAD=$SIGART/sigbad.sig" "tst:test/sigbad.bin=$SIGART/sigbad.bin" \
+           "ns:test/sigbad.bin=$SIGART/sigbad.bin" )
 # sigunk: stesso sidecar con `key_id` azzerato (chiave ignota all'anchor).
 D_UNK="$(bash "$ROOT/scripts/sign-bins.sh" digest "$SIGART/sigunk.bin")"
 cp "$GPU_SIG" "$SIGART/sigunk.sig"
 head -c 8 /dev/zero | dd of="$SIGART/sigunk.sig" bs=1 seek=4 conv=notrunc 2>/dev/null
 SEED_NS+=( "sig:$D_UNK=$SIGART/sigunk.sig" "tst:test/sigunk.bin=$SIGART/sigunk.bin" )
 echo "[arca] + artefatti firma t66 (unsigned in vela, sigbad, sigunk)"
+
+# t67 (ADR-0079 fase 3): helper firmato con la chiave `system` ma spedito in
+# un bucket NON obbligatorio (`tst`). La classe viene dalla firma (contenuto),
+# non dal bucket: cardo registra System nella trust table del kernel e lo
+# spawn vede la classe autorevole. Contenuto distinto da `unsigned.bin`
+# (byte flippato) perche' la firma e' content-addressed: non deve rendere
+# firmata la copia usata dal caso t66.
+DEMO_BIN="$ROOT/testland/build/userdemo.bin"
+[ -f "$DEMO_BIN" ] || { echo "[arca] errore: userdemo.bin mancante (artefatto t67)" >&2; exit 1; }
+flip_byte "$DEMO_BIN" "$SIGART/sigtest.bin" 300
+SIGTEST_OUT="$(bash "$ROOT/scripts/sign-bins.sh" one sys "$SIGART/sigtest.bin")"
+D_SIGTEST="${SIGTEST_OUT%% *}"
+S_SIGTEST="${SIGTEST_OUT#* }"
+SEED_NS+=( "sig:$D_SIGTEST=$S_SIGTEST" "tst:test/sigtest.bin=$SIGART/sigtest.bin" \
+           "ns:test/sigtest.bin=$SIGART/sigtest.bin" )
+echo "[arca] + artefatto firma t67 (sigtest: system in tst)"
 # Hello std nativo (S1.3): solo se compilato via scripts/build-pal.sh (fuori
 # dal gate default: rust-lang/rust + ~10 min di build). Niente fail-loud qui:
 # il gate non dipende dalla PAL.

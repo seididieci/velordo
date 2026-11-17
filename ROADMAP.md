@@ -971,14 +971,26 @@ Voci con scope e vittoria dichiarati (non date).
       classe nel PCB), rotazione/revoca manuali, chiavi di test nel repo.
       **Bug trovato**: l'anchor scrive `%016x` (BE) mentre il sidecar usa LE —
       il primo giro scartava tutte le righe; parse corretto `from_be_bytes`.
-- [ ] **Privilegi — classi e spawn attestato** (ADR-0079, fase 3): `Class`
-      nel PCB (`System`/`ThirdParty`/`Untrusted`), trust table nel kernel
-      (32 voci) registrabile **solo** da cardo via `SYS_TRUST_IMAGE = 64`,
-      gate su `service_register`, `dma_alloc` device, `map_mmio`,
-      `io_ranges`; la classe si legge in `w1` di `R_RIGHTS_EXECUTE` (fase 2)
-      e va scritta nel PCB, così vale anche per `libr::exec`. Vittoria: un
-      probe figlio di init ma non firmato **non** registra `Service::Net`
-      (t67 nel gate); un probe `System` sì.
+- [x] **Privilegi — classi e spawn attestato** (completata, ADR-0079, fase 3):
+      trust table nel kernel (32 voci, `SYS_TRUST_IMAGE = 64` registrabile
+      **solo** da cardo/init), `image_class` nel PCB, classe **ricalcolata**
+      dal kernel sui byte caricati (lookup `ImageId`) — TOCTOU chiuso senza
+      crypto nel TCB: se i byte cambiano tra la verifica di cardo e il load
+      l'id non combacia e la classe cade su `Untrusted`. Cardo registra
+      l'identità verificata in `R_RIGHTS_EXECUTE`; il path POSIX passa da
+      `bucket="ns"` + key = path (il **VFS** detiene la verità sui path, e
+      `mandatory` vale anche per prefissi `bin/`/`usr/bin/`). `libr::exec` e la
+      shell verificano prima di eseguire (`libr::verify_exec`); init verifica
+      prima di ogni `spawn_image` da disco (fail-closed); embedded e init sono
+      `System` per costruzione. Gate strutturali su classe `System`:
+      `service_register` (tranne `Test`), `dma_alloc` slot ≥ 1, `map_mmio`,
+      `io_ranges`. `peer_info` riporta la classe in `rdx`
+      (`civis::peer_info_class`). Vittoria: **t67** (helper firmato `system`
+      in `tst` → `System`; non firmato → `Untrusted`; copia con un bit diverso
+      → `Untrusted`; usertests `Untrusted` non registra `Service::Net`) →
+      `usertests 63/63`, gate 6/6, shell `run`/`native`/`source` PASS.
+      Limiti dichiarati: fase 4 (`io_ranges` dal manifest) e file fuori dal
+      namespace (FAT, `Untrusted`).
 - [ ] **Privilegi — `io_ranges` e bisogni dal manifest** (ADR-0079, fase 4):
       le porte I/O dei driver escono da `NAMED_BINARIES` e arrivano dalla
       trust entry (manifest firmato); `SpawnMeta.io_ranges` ignorato per

@@ -252,14 +252,14 @@ artefatti li seeda `arca-tool.sh`):
 #### 6.8 Limiti dichiarati di fase 2
 
 - **`libr::exec` (POSIX) non passa da `R_RIGHTS_EXECUTE`**: legge per path e
-  spawna i byte. La firma è obbligatoria sul path nativo (`interpres` → shell
-  nativa); il buco si chiude in fase 3, quando la classe entra nel PCB e lo
-  spawn attestato vale per **tutti** i chiamanti. Dichiararlo ora è meglio che
-  scoprirlo dopo.
-- **TOCTOU verifica→lettura**: tra il verdetto e la `spawn_image` l'oggetto
-  può cambiare. La finestra è ristretta e il digest è ricalcolato dal kernel
-  allo spawn, ma il confronto "classe del verdetto == classe dell'immagine
-  caricata" diventa possibile solo in fase 3 (classe nel PCB).
+  spawna i byte. ~~La firma è obbligatoria sul path nativo (`interpres` → shell
+  nativa); il buco si chiude in fase 3~~ **chiuso in fase 3 (ADR-0079)**:
+  `libr::exec`/`libr::verify_exec` e la shell verificano per path via cardo
+  (`bucket="ns"`), e il kernel assegna la classe ricalcolando l'`ImageId` sui
+  byte caricati.
+- **TOCTOU verifica→lettura**: ~~tra il verdetto e la `spawn_image` l'oggetto
+  può cambiare~~ **chiuso in fase 3**: il kernel ricalcola l'`ImageId` e fa
+  lookup nella trust table; byte diversi → `Untrusted` (mai promozione).
 - **Seed di fallback da FAT** (`seed_sys_disk`) scrive immagini **non
   firmate**: nel boot reale quelle chiavi esistono già (seed host) e il
   fallback non scatta; se scattasse, quelle immagini sarebbero `Untrusted`.

@@ -134,8 +134,32 @@ pub fn exec(path: &str, argv: &[&str]) -> Result<(), Error> {
     exec_env(path, argv, &[])
 }
 
+/// Verifica di firma per un `exec` per path (ADR-0079 fase 3): chiede a cardo
+/// il verdetto su `path` (namespace `ns`: il VFS detiene la verita' sui path)
+/// e registra l'identita' nella trust table del kernel. `Ok(())` = eseguibile
+/// (la classe la decide il kernel al load, ricalcolando l'id); `Denied` =
+/// firma assente in un path di sistema o sidecar invalido.
+///
+/// Da chiamare nel processo che **legge** i byte e prima dell'`exec`
+/// (la shell fa fork+exec: il figlio ha l'FS avvelenato, verifica il parent).
+pub fn verify_exec(path: &str) -> Result<(), Error> {
+    let ns_key = path.trim_start_matches('/');
+    match civis::fs::rights::rights_execute_verdict(b"ns", ns_key.as_bytes()) {
+        Ok((true, _class)) => Ok(()),
+        Ok((false, _)) => Err(Error::Denied),
+        // Non e' nel namespace (es. file su FAT): prosegui, sara' Untrusted.
+        Err(Error::NotFound) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// `exec_env(path, argv, env)`: come `exec` con in piu' l'environment (43a).
 /// `env` = coppie (nome, valore); stesse regole di `serialize_argv_redir_env`.
+///
+/// ADR-0079 fase 3: prima di sostituire l'immagine chiede a cardo il verdetto
+/// di firma per il path (`verify_exec`). Il kernel, al `SYS_EXEC`, ricalcola
+/// l'`ImageId` sui byte caricati e fa lookup: se i byte sono cambiati tra la
+/// verifica e l'exec la classe cade su `Untrusted` (TOCTOU chiuso).
 #[inline]
 pub fn exec_env(path: &str, argv: &[&str], env: &[(&str, &str)]) -> Result<(), Error> {
     let img = match load_file(path) {
@@ -146,5 +170,6 @@ pub fn exec_env(path: &str, argv: &[&str], env: &[(&str, &str)]) -> Result<(), E
         Some(b) => b,
         None => return Err(Error::TooBig),
     };
+    verify_exec(path)?;
     exec_image_args(&img, &buf)
 }

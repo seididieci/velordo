@@ -134,11 +134,12 @@ pub(super) fn sys_spawn_image(img_ptr: u64, img_len: usize, meta_ptr: u64, meta_
         },
         None => None,
     };
-    // Porte I/O: solo init (pid 1). Gli altri processi girano senza porte
-    // (solo init/disk/fs sono embedded, Fase 21: gli altri partono da disco
-    // con le porte del manifest): chiederle = -1.
-    let is_init = current_id() == 1;
-    if !is_init && meta.io_count != 0 {
+    // Porte I/O (ADR-0079 fase 3): riservate a codice `System` (init e i
+    // driver embedded/firmati). Chi non lo e' e le chiede = -1 (fail loud:
+    // il campo non viene "ignorato in silenzio").
+    let caller_class = crate::ordo::sched::process_image_class(current_id() as usize)
+        .unwrap_or(syscall_numbers::ImageClass::Untrusted);
+    if caller_class != syscall_numbers::ImageClass::System && meta.io_count != 0 {
         return -1;
     }
     let prio = match meta.prio {

@@ -212,6 +212,14 @@ pub const SYS_GETCWD: u64 = 60;
 /// (PCD|PWT) e non-owned (il teardown non libera frame device). Ristretta
 /// all'owner di `Service::Gpu`. Ritorna 0 o -1.
 pub const SYS_MAP_MMIO: u64 = 61;
+/// Registra `image_id → classe` nella trust table del kernel (ADR-0079,
+/// fase 3). Registrabile solo da cardo (figlio di init): il kernel calcola
+/// l'`ImageId` sui byte caricati allo spawn/exec e fa lookup qui per
+/// assegnare `ImageClass` al PCB. Max 32 entry, mai sovrascritte da altri.
+/// `class` = `ImageClass` (0=Untrusted, 1=ThirdParty, 2=System).
+/// Argomenti: `arg1 = image_id_lo`, `arg2 = image_id_hi`, `arg3 = class`.
+/// Ritorna 0 se registrata, -1 se tabella piena / chiamante non autorizzato.
+pub const SYS_TRUST_IMAGE: u64 = 64;
 pub const CWD_MAX: usize = 256;
 
 /// Base fisica della finestra MMIO device (L0b, QEMU-scoped): buco PCI sopra

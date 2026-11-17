@@ -142,6 +142,10 @@ pub fn exec_current(bytes: &[u8], args_block: Option<&[u8]>) -> Result<(), ()> {
         let p = &mut sched.processes[me];
         p.text_id = new_text;
         p.image_id = image_id;
+        // ADR-0079 fase 3: la classe si RICALCOLA dai byte caricati (mai
+        // ereditata): se l'oggetto e' cambiato tra il check di cardo e l'exec,
+        // l'ImageId qui e' diverso e il lookup cade su Untrusted.
+        p.image_class = super::trust_lookup(image_id);
         // S2.5b: contenuto resettato (l'indirizzo pool resta: stesso pid).
         unsafe { crate::ordo::context::fpu_init(p.saved.fpu as *mut [u128; 32]) };
     }

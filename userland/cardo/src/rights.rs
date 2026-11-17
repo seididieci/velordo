@@ -202,12 +202,25 @@ pub fn handle_rights_execute(
     let Some(disk) = disk else {
         return Some((civis::ERR_DENIED, 0));
     };
-    let verdict = match verify::verify_object(disk, bucket, key) {
+    let (verdict, id) = match verify::verify_object(disk, bucket, key) {
         Ok(v) => v,
         Err(e) => return Some((e, 0)),
     };
-    match verify::verdict_for(bucket, verdict) {
-        Ok((w0, class)) => Some((w0, class.as_u64())),
+    match verify::verdict_for(bucket, key, verdict) {
+        Ok((w0, class)) => {
+            // ADR-0079 fase 3: registra l'identita' verificata nella trust
+            // table del kernel. Il kernel, allo spawn/exec, ricalcola l'id
+            // sui byte caricati e lo confronta: se l'oggetto e' cambiato tra
+            // questa verifica e l'esecuzione, l'id non combacia e la classe
+            // cade su Untrusted (TOCTOU chiuso senza crypto nel kernel).
+            //
+            // La registrazione e' best-effort per il verdetto (un fallimento
+            // = immagine eseguita Untrusted, mai promozione), ma loud nel log.
+            if let Err(e) = civis::trust_image(id, class) {
+                println!("[cardo] trust_image({:016x}{:016x}) fallita: {:?}", id.hi, id.lo, e);
+            }
+            Some((w0, class.as_u64()))
+        }
         Err(e) => Some((e, 0)),
     }
 }

@@ -29,7 +29,7 @@ pub use stdio::{
     clear_stdio, set_stdio, stderr_fd, stdin_byte, stdin_fd, stdio_active, stdio_restore,
     stdout_fd, RedirEntry,
 };
-pub use exec::{exec, exec_env, serialize_argv, serialize_argv_redir, serialize_argv_redir_env};
+pub use exec::{exec, exec_env, serialize_argv, serialize_argv_redir, serialize_argv_redir_env, verify_exec};
 pub use fork::{fork, ForkResult};
 pub use posix::{
     EBADF, EAFNOSUPPORT, EINVAL, EIO, ENOMEM, ENOTCONN, EOPNOTSUPP, ETIMEDOUT, EPERM,

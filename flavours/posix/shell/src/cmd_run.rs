@@ -441,6 +441,16 @@ fn load_prog(prog: &str, rest: &[&str]) -> Result<LoadedProg, ()> {
             return Err(());
         }
     };
+    // ADR-0079 fase 3: verifica firma/classe ORA (nel parent: il figlio
+    // post-fork ha l'FS avvelenato e puo' solo exec). Un diniego esplicito
+    // ferma il lancio; cardo registra l'identita' nella trust table del
+    // kernel, che al load ricalcola l'id e assegna la classe.
+    if let Err(_) = libr::verify_exec(&path) {
+        term::term_err("run: exec negato (firma) ");
+        term::term_err(prog);
+        term::term_err("\n");
+        return Err(());
+    }
     // Shebang: solo testo con `#!` in testa (l'ELF passa oltre: magic diverso).
     // Convenzione classica: `#!interp [arg]` su una riga (`\r` tollerato).
     if img.len() > 2 && img[0] == b'#' && img[1] == b'!' {

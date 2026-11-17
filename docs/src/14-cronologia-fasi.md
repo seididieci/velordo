@@ -3808,3 +3808,45 @@
       **Limiti dichiarati**: `libr::exec` POSIX legge per path e non chiede il
       verdetto (si chiude in fase 3 con la classe nel PCB), TOCTOU
       verifica→spawn, rotazione/revoca manuali, chiavi di test nel repo.
+
+- [x] **Privilegi — classi e spawn attestato** (2026-11, ADR-0079, fase 3):
+      la classe non è più una dichiarazione: il **kernel** la calcola. Trust
+      table statica di 32 voci (`{ImageId, ImageClass}`) in
+      `kernel/src/ordo/sched.rs`, registrabile **solo** da cardo (owner di
+      `Service::Cardo`) o init via `SYS_TRUST_IMAGE = 64` — un figlio di init
+      qualsiasi non basta: sarebbe un buco (promuoverebbe immagini
+      arbitrarie). `create_user`/`exec_current` ricalcolano l'`ImageId` sui
+      byte che stanno per mappare e fanno lookup → `image_class` nel PCB
+      (default `Untrusted`, mai ereditata da `exec`). **TOCTOU chiuso senza
+      crypto nel kernel**: se l'oggetto cambia tra la verifica di cardo e il
+      load, l'id è diverso, la trust entry non combacia e la classe cade su
+      `Untrusted` — si confronta un `[u64; 2]` già calcolato, non si verifica
+      una firma.
+      **Path POSIX**: `libr::exec`/`verify_exec` e la shell (`load_prog`)
+      chiedono a cardo `R_RIGHTS_EXECUTE` con `bucket="ns"` e key = path senza
+      `/`: il **VFS** detiene la verità sui path, e `mandatory` vale anche per
+      prefisso (`bin/`, `usr/bin/`), non solo per bucket. Un diniego ferma
+      l'esecuzione; un file fuori dal namespace (FAT) prosegue `Untrusted`.
+      init verifica prima di ogni `spawn_image` da disco (fail-closed);
+      embedded (`rector`/`cardo`/`block`/`vestigia`) e init sono `System` per
+      costruzione (`set_image_class`).
+      **Gate strutturali** su `System`: `service_register` (lineage **e**
+      classe, `Test` esente), `dma_alloc` slot ≥ 1, `map_mmio` (owner **e**
+      classe), `io_ranges` in `spawn_image`. `peer_info` riporta la classe in
+      `rdx` (`civis::peer_info_class`).
+      **Vittoria**: t67 — helper firmato `system` spedito in `tst` → `System`
+      (la firma vince sul bucket); non firmato → `Untrusted`; TOCTOU (verificato
+      il contenuto su disco, spawn di una copia con un bit diverso) →
+      `Untrusted`; usertests (figlio di init, `Untrusted`) non registra
+      `Service::Net`. `[usertests] PASS 63/63`, gate 6/6, shell
+      `run`/`native`/`source` PASS, zero FAIL/PANIC/FAULT.
+      **Limiti**: fase 4 (`io_ranges` dal manifest) da fare; i file fuori dal
+      namespace restano `Untrusted`.
+      **Bug/lezioni**: `sigbad.bin` (byte 100 flippato) non è un ELF valido →
+      lo spawn fallisce prima del load; il caso TOCTOU si prova meglio
+      verificando il contenuto vero e spawnando byte diversi in memoria. E il
+      gate `service_register` richiede **lineage e** classe: usertests è figlio
+      di init ma `tst` non firmato, quindi `Untrusted` (t67 lo isola).
+      Nota operativa: le fasi shell usano il kernel/`rector` **di produzione**
+      — vanno ricompilati userland e kernel dopo un `run-tests.sh` (che lascia
+      il `rector` con la suite e il boot supera il timeout del login).

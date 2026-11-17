@@ -227,3 +227,31 @@ pub fn process_image_id(pid: usize) -> Option<syscall_numbers::ImageId> {
     }
     Some(p.image_id)
 }
+
+/// Classe di privilegio dell'immagine di `pid` (ADR-0079 fase 3). `None` se il
+/// pid non esiste o e' terminato. Meccanismo neutro: il kernel espone la
+/// classe, le decisioni (chi puo' fare cosa) vivono nei gate strutturali.
+pub fn process_image_class(pid: usize) -> Option<syscall_numbers::ImageClass> {
+    let guard = SCHED.lock();
+    let sched = guard.as_ref()?;
+    if pid >= sched.processes.len() {
+        return None;
+    }
+    let p = &sched.processes[pid];
+    if p.state == State::Terminated {
+        return None;
+    }
+    Some(p.image_class)
+}
+
+/// Imposta la classe di un processo appena creato (ADR-0079 fase 3): serve ai
+/// binari **embedded** nel kernel (TCB per costruzione: `rector`, `cardo`,
+/// `block`, `vestigia`), che non passano dalla verifica di cardo e quindi non
+/// hanno una trust entry. Solo il kernel la chiama.
+pub fn set_image_class(pid: usize, class: syscall_numbers::ImageClass) {
+    let mut guard = SCHED.lock();
+    let Some(sched) = guard.as_mut() else { return };
+    if let Some(p) = sched.processes.get_mut(pid) {
+        p.image_class = class;
+    }
+}

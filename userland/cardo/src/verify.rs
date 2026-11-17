@@ -21,6 +21,11 @@ use super::*;
 
 /// Bucket in cui un'immagine senza firma **non** e' eseguibile.
 const MANDATORY_SIGNED: [&[u8]; 3] = [b"sys", b"vela", b"usr"];
+/// Prefissi di path (nel namespace `ns`) che corrispondono a software
+/// spedito: la firma e' obbligatoria anche quando l'oggetto e' indirizzato
+/// per path POSIX (`/usr/bin/foo` → `ns:usr/bin/foo`). Il VFS detiene la
+/// verita' sui path: cardo decide qui, non il client.
+const MANDATORY_PATH_PREFIXES: [&[u8]; 2] = [b"bin/", b"usr/bin/"];
 
 /// Esito della verifica (la classe e' valida solo per `Signed`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -34,9 +39,16 @@ pub enum Verdict {
     Bad,
 }
 
-/// Il bucket pretende una firma valida?
-pub fn mandatory(bucket: &[u8]) -> bool {
-    MANDATORY_SIGNED.iter().any(|b| *b == bucket)
+/// Il bucket (o il path nel namespace `ns`) pretende una firma valida?
+///
+/// Due forme, stessa regola: il software spedito e' firmato, che lo si
+/// indirizzi per bucket (`sys`/`vela`/`usr`) o per path POSIX (`bin/`,
+/// `usr/bin/` nel namespace). Il path e' la forma che usa `libr::exec`.
+pub fn mandatory(bucket: &[u8], key: &[u8]) -> bool {
+    if MANDATORY_SIGNED.iter().any(|b| *b == bucket) {
+        return true;
+    }
+    bucket == b"ns" && MANDATORY_PATH_PREFIXES.iter().any(|p| key.starts_with(p))
 }
 
 /// Voce di cache: il verdetto dipende dal contenuto (ImageId), dalla chiave
@@ -115,7 +127,9 @@ fn cache_put(id: civis::ImageId, key_id: u64, image_sig: &[u8; sig::SIG_LEN], v:
     }
 }
 
-/// Verifica l'oggetto `bucket/key` e ne ritorna il verdetto.
+/// Verifica l'oggetto `bucket/key` e ne ritorna il verdetto **e l'`ImageId`**
+/// dei byte verificati (ADR-0079 fase 3: cardo registra l'id nella trust table
+/// del kernel, che lo riusa allo spawn/exec per assegnare la classe).
 ///
 /// `#[inline(never)]`: firewall LTO. Cardo ha 16 KiB di stack e questo e' il
 /// punto in cui entrano LTO + catena del motore; i byte dell'immagine vivono
@@ -128,7 +142,7 @@ pub fn verify_object(
     disk: &btree_drv::DiskEngine,
     bucket: &[u8],
     key: &[u8],
-) -> Result<Verdict, u64> {
+) -> Result<(Verdict, civis::ImageId), u64> {
     let data = disk.get(bucket, key).ok_or(civis::ERR_NOTFOUND)?;
     let digest = sig::digest(&data);
     let id = civis::ImageId::from_digest(&digest);
@@ -142,7 +156,7 @@ pub fn verify_object(
     };
 
     if let Some(v) = cache_get(id, key_id, &image_sig) {
-        return Ok(v);
+        return Ok((v, id));
     }
 
     let verdict = match sidecar {
@@ -154,7 +168,7 @@ pub fn verify_object(
         },
     };
     cache_put(id, key_id, &image_sig, verdict);
-    Ok(verdict)
+    Ok((verdict, id))
 }
 
 /// Verdetto applicato alla policy dei bucket: `Ok(0)` eseguibile + classe,
@@ -162,12 +176,17 @@ pub fn verify_object(
 ///
 /// Tabella (ADR-0078 §fase 2):
 /// - `Bad` → negato ovunque;
-/// - `Unsigned` → negato nei bucket obbligatori, altrimenti `Untrusted`;
+/// - `Unsigned` → negato nei bucket obbligatori (e nei path di sistema),
+///   altrimenti `Untrusted`;
 /// - `Signed(c)` → eseguibile con classe `c`.
-pub fn verdict_for(bucket: &[u8], v: Verdict) -> Result<(u64, civis::ImageClass), u64> {
+pub fn verdict_for(
+    bucket: &[u8],
+    key: &[u8],
+    v: Verdict,
+) -> Result<(u64, civis::ImageClass), u64> {
     match v {
         Verdict::Bad => Err(civis::ERR_DENIED),
-        Verdict::Unsigned if mandatory(bucket) => Err(civis::ERR_DENIED),
+        Verdict::Unsigned if mandatory(bucket, key) => Err(civis::ERR_DENIED),
         Verdict::Unsigned => Ok((0, civis::ImageClass::Untrusted)),
         Verdict::Signed(c) => Ok((0, c)),
     }

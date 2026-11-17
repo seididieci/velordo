@@ -325,6 +325,21 @@ fn spawn_entry(meta: &SvcMeta) -> Option<i64> {
                 return None;
             }
         };
+        // ADR-0079 fase 3: cardo verifica la firma e registra l'identita'
+        // nella trust table del kernel (il kernel assegna la classe al
+        // load). Fail-closed su diniego: un servizio non firmato in `sys`/
+        // `vela` non parte.
+        match civis::fs::rights::rights_execute_verdict(bucket, key) {
+            Ok((true, _class)) => {}
+            Ok((false, _)) => {
+                println!(" -> FAILED (firma assente/negata: fail-closed)");
+                return None;
+            }
+            Err(e) => {
+                println!(" -> FAILED (verifica firma: {:?})", e);
+                return None;
+            }
+        }
         return spawn_image_from_vec(&img, meta);
     }
     spawn_child(meta.bin)

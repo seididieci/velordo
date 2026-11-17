@@ -5,14 +5,12 @@
 **Accepted** (2026-11). Fasi 3–4. Dipende da ADR-0077 (bucket protetti) e
 ADR-0078 (identità firmata).
 
-**Stato**: la classe è già calcolata e trasmessa, ma non ancora *nel PCB*.
-ADR-0078 fase 2 (implementata) fa rispondere a `R_RIGHTS_EXECUTE` `w0` =
-verdetto e `w1` = `ImageClass` (`syscall-numbers::ImageClass`, ri-esportato da
-`civis`), con il verdetto **riferito al contenuto** (il sidecar è indicizzato
-dal digest): due copie degli stessi byte hanno la stessa classe, una copia
-manomessa non ne ha nessuna. La fase 3 incomincia da lì: portare quel `w1` nel
-PCB via trust table, senza ri-verificare firme nel kernel. Il test nuovo della
-fase 3 sarà **t67** (t66 è occupato dalla firma).
+**Stato**: **fase 3 implementata** (2026-11): trust table nel kernel (32 voci),
+`SYS_TRUST_IMAGE = 64` registrabile solo da cardo, `ImageClass` nel PCB
+(`image_class`), classe calcolata dal kernel ricalcolando l'`ImageId` sui byte
+caricati, gate su `service_register`/`dma_alloc` device/`map_mmio`/`io_ranges`,
+`peer_info` riporta la classe in `rdx`, t67 nel gate. Fase 4 (`io_ranges` dal
+manifest) da fare. Vedi §Implementazione.
 
 ## Context
 
@@ -88,11 +86,77 @@ Le porte I/O di un driver passano dal manifest firmato alla trust entry
 (`io_ranges[≤4]`), e spariscono da `NAMED_BINARIES`. Aggiungere un driver
 diventa: build, firma, seed, riga di manifest — **zero rebuild del kernel**.
 
+## Implementazione (fase 3)
+
+### Trust table e `SYS_TRUST_IMAGE`
+
+`kernel/src/ordo/sched.rs`: tabella statica di 32 entry `{ImageId, ImageClass,
+used}`. `trust_lookup` (chiamata sotto `SCHED.lock` da `create_user` /
+`exec_current`) è O(32) e non prende lock. `trust_register` (da
+`sys_trust_image`) autorizza **solo** init o l'owner di `Service::Cardo`: il
+writer della tabella deve essere uno, il servizio che verifica le firme. Un
+figlio di init qualsiasi non basta — sarebbe un buco (chiunque spawato da init
+promuoverebbe immagini arbitrarie).
+
+`SYS_TRUST_IMAGE = 64` (argomenti `id_lo`, `id_hi`, `class`; 0 o -1). È l'unica
+syscall nuova della fase.
+
+### La classe segue i byte caricati (TOCTOU chiuso)
+
+Il kernel **non** si fida della classe dichiarata: la ricalcola. `create_user`
+e `exec_current` calcolano già `ImageId` sui byte che stanno per mappare; il
+PCB riceve `image_class = trust_lookup(image_id)`. Se l'oggetto cambia tra la
+verifica di cardo e il load, l'`ImageId` è diverso, la trust entry non
+combacia e la classe cade su `Untrusted` — mai una promozione.
+
+Nessuna crypto nel kernel: si confronta un `[u64; 2]` già calcolato (ADR-0078
+§Alternatives), non si verifica una firma.
+
+### Flusso per path (POSIX) e per bucket (nativo)
+
+- **POSIX** (`libr::exec`/`verify_exec`, shell `load_prog`): cardo riceve
+  `R_RIGHTS_EXECUTE` con `bucket = "ns"` e `key` = path senza `/` iniziale. Il
+  **VFS** detiene la verità sui path: cardo mappa path→oggetto e decide
+  `mandatory` anche per prefisso (`bin/`, `usr/bin/`), non solo per bucket. La
+  verifica registra l'identità nella trust table; il kernel assegna la classe
+  all'exec. Un diniego esplicito ferma l'esecuzione; un file fuori dal
+  namespace (es. FAT) prosegue `Untrusted`.
+- **Nativo** (`interpres`): bucket/key piatti, come in fase 2.
+- **init**: prima di ogni `spawn_image` da disco chiama `R_RIGHTS_EXECUTE`
+  (fail-closed su diniego), così la trust entry esiste prima dello spawn.
+- **Embedded** (`rector`, `cardo`, `block`, `vestigia`) e **init**: `System` per
+  costruzione (`set_image_class` dal kernel), non passano dal volume.
+
+### Gate strutturali
+
+| Punto | Regola |
+|---|---|
+| `service_register` | slot ≠ `Test`: figlio di init **e** classe `System` (lineage + autenticità) |
+| `dma_alloc` slot ≥ 1 | classe `System` (lo slot 0 staging resta aperto) |
+| `map_mmio` | owner del device **e** classe `System` |
+| `io_ranges` in `spawn_image` | classe `System` (chi non lo è e le chiede → -1) |
+
+### Osservabilità e test
+
+`SYS_PEER_INFO` riporta la classe in `rdx` (`civis::peer_info_class`): un
+client vede la classe **autorevole** del peer. **t67** verifica: (1) helper
+firmato `system` spedito in `tst` → `System` (la firma vince sul bucket);
+(2) helper non firmato → `Untrusted`; (3) TOCTOU: verificato il contenuto su
+disco, si spawna una copia con un bit diverso → `Untrusted`; (4) gate: usertests
+(figlio di init, `Untrusted`) non registra `Service::Net`.
+
+### Limiti dichiarati
+
+- **Fase 4 non inclusa**: le `io_ranges` dei driver restano in
+  `NAMED_BINARIES` (compilate); arrivare dal manifest è il lavoro successivo.
+- **TOCTOU residuo per init**: init è TCB e può sostituire un oggetto tra
+  verifica e load; il risultato è comunque `Untrusted`, mai una promozione.
+- **`libr::exec` su file fuori dal namespace** (FAT) non ha verifica di firma:
+  esegue `Untrusted` (il gate `service_register`/device resta chiuso).
+
 ## Consequences
 
-### Positive
-
-- Il privilegio poggia su autenticità, non su lineage: "figlio di init" resta
+### Positive- Il privilegio poggia su autenticità, non su lineage: "figlio di init" resta
   necessario ma non sufficiente.
 - Aggiungere un driver non tocca il kernel.
 - La classe è un dato del PCB: leggibile da `ps`/log per diagnosi.
@@ -112,6 +176,8 @@ diventa: build, firma, seed, riga di manifest — **zero rebuild del kernel**.
 
 - `SYS_TRUST_IMAGE` è l'unica syscall nuova; nessun tag IPC nuovo.
 - La classe non cambia l'ABI di spawn/exec: resta `spawn_image(bytes)`.
+- `peer_info` guadagna `rdx` (la classe): i client che ignorano il registro
+  restano validi (`civis::peer_info` invariata, `peer_info_class` nuova).
 
 ## Alternatives Considered
 
@@ -133,3 +199,8 @@ diventa: build, firma, seed, riga di manifest — **zero rebuild del kernel**.
 - `kernel/src/syscall/service.rs` (`service_register`), `kernel/src/syscall/mem.rs`
   (`dma_alloc`, `map_mmio`), `kernel/src/user_binary.rs` (`NAMED_BINARIES`),
   `kernel/src/ordo/process.rs` (PCB)
+- Fase 3: `kernel/src/ordo/sched.rs` (trust table), `kernel/src/syscall/misc.rs`
+  (`sys_trust_image`), `kernel/src/ordo/sched/exec.rs` (`exec_current`),
+  `libs/civis/src/spawn.rs` (`trust_image`, `peer_info_class`),
+  `userland/cardo/src/{verify,rights}.rs`, `flavours/posix/libr/src/exec.rs`
+  (`verify_exec`), `testland/usertests/src/t_sig.rs` (t67)

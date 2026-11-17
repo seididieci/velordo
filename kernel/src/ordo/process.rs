@@ -231,6 +231,12 @@ pub struct Process {
     /// byte). Meccanismo neutro: il kernel misura ed espone (36.2), la policy
     /// vive fuori (init manifest, `FS_REGISTER` in cardo).
     pub image_id: syscall_numbers::ImageId,
+    /// Classe di privilegio dell'immagine (ADR-0079, fase 3): assegnata dal
+    /// kernel dopo lookup nella trust table (popolata da cardo via
+    /// `SYS_TRUST_IMAGE`). Default `Untrusted`; il kernel la imposta allo
+    /// spawn/exec calcolando l'`ImageId` sui byte caricati e confrontandolo
+    /// con la trust table. Mai ereditata da `exec` (ricalcolata).
+    pub image_class: syscall_numbers::ImageClass,
     /// Gruppo thread (S-T, ADR-0046): `Some(leader)` se questo PCB e' un
     /// thread 1:1 (condivide cr3/canali/fd/heap/VMA del leader, `None`
     /// per processi e leader. Il teardown mm/canali/notifiche avviene solo
@@ -337,6 +343,7 @@ impl Process {
             cbs_server: None,
             text_id: 0,
             image_id: syscall_numbers::ImageId::default(),
+            image_class: syscall_numbers::ImageClass::Untrusted,
             thread_group: None,
             fs_base: 0,
             futex_woken: None,
@@ -458,6 +465,7 @@ impl Process {
             cbs_server: None,
             text_id,
             image_id,
+            image_class: crate::ordo::sched::trust_lookup(image_id),
             thread_group: None,
             fs_base: 0,
             futex_woken: None,
@@ -528,6 +536,7 @@ impl Process {
             cbs_server: None,
             text_id,
             image_id,
+            image_class: crate::ordo::sched::trust_lookup(image_id),
             thread_group: None,
             fs_base: 0,
             futex_woken: None,
@@ -616,6 +625,7 @@ impl Process {
             cbs_server,
             text_id,
             image_id,
+            image_class: crate::ordo::sched::trust_lookup(image_id),
             thread_group: Some(leader),
             fs_base,
             futex_woken: None,

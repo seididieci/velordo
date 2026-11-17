@@ -8,7 +8,7 @@ use super::exec::sys_exec;
 use super::cwd::{sys_chdir, sys_getcwd};
 use super::thread::{sys_thread_create, sys_thread_exit, sys_thread_set_fs};
 use super::mem::{sys_mmap, sys_munmap, sys_mprotect, sys_shm_create, sys_shm_destroy, sys_shm_map, sys_map_physical, sys_map_mmio, sys_sbrk, sys_ring_alloc, sys_map_in, sys_dma_alloc, sys_dma_free};
-use super::misc::{sys_exit, sys_write, sys_getpid, sys_kill, sys_suspend, sys_resume, sys_get_ticks, sys_cbs_create, sys_cbs_attach, sys_cbs_get_info, sys_ps_info, sys_text_stats, sys_meminfo, sys_boot_cmdline};
+use super::misc::{sys_exit, sys_write, sys_getpid, sys_kill, sys_suspend, sys_resume, sys_get_ticks, sys_cbs_create, sys_cbs_attach, sys_cbs_get_info, sys_ps_info, sys_text_stats, sys_meminfo, sys_boot_cmdline, sys_trust_image};
 
 /// Handler di dispatch: legge gli argomenti riempiti dall'entry e chiama la
 /// syscall richiesta. Firmato `extern "C" fn() -> i64` per essere invocabile
@@ -85,6 +85,10 @@ pub(super) extern "C" fn syscall_handler() -> i64 {
             syscall_numbers::SYS_MEMINFO => sys_meminfo(),
             // Fase 2 (root su volume): cmdline PVH salvata al boot.
             syscall_numbers::SYS_BOOT_CMDLINE => sys_boot_cmdline((*p).arg1, (*p).arg2 as usize),
+            // Fase 3 (ADR-0079): registra image_id -> classe nella trust table.
+            syscall_numbers::SYS_TRUST_IMAGE => {
+                sys_trust_image((*p).arg1, (*p).arg2, (*p).arg3)
+            }
             // S-T (ADR-0046): thread 1:1 + TLS (futex in T3).
             syscall_numbers::SYS_THREAD_CREATE => {
                 sys_thread_create((*p).arg1, (*p).arg2, (*p).arg3, (*p).arg4)

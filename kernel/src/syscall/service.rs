@@ -28,6 +28,19 @@ pub(super) fn sys_service_register(service_disc: u64) -> i64 {
             );
             return -1;
         }
+        // ADR-0079 fase 3: lineage non basta, serve autenticita'. Uno slot
+        // privilegiato (tutto tranne `Test`, gia' esente sopra) richiede la
+        // classe `System`. Un figlio di init non firmato (o con firma
+        // third-party) non registra servizi di sistema.
+        let class = crate::ordo::sched::process_image_class(me)
+            .unwrap_or(syscall_numbers::ImageClass::Untrusted);
+        if class != syscall_numbers::ImageClass::System {
+            crate::serial_println!(
+                "[svc] register '{}' da pid={} rifiutato (classe {:?} != System)",
+                service_name(service), me, class
+            );
+            return -1;
+        }
     }
     match crate::relay::channels::register(service, me) {
         Ok(()) => {
@@ -119,11 +132,17 @@ pub(super) fn sys_peer_info(chan: usize) -> i64 {
     match crate::ordo::sched::process_image_id(peer) {
         Some(id) => {
             let (lo, hi) = id.regs();
+            // ADR-0079 fase 3: la classe viaggia in `rdx` (registro finora
+            // inutilizzato dalla risposta): il client puo' osservare la
+            // classe autorevole del peer, non una dichiarazione.
+            let class = crate::ordo::sched::process_image_class(peer)
+                .unwrap_or(syscall_numbers::ImageClass::Untrusted);
             unsafe {
                 let p = addr_of_mut!(PERCPU);
                 (*p).ipc_override = 1;
                 (*p).ret_rdi = lo;
                 (*p).ret_rsi = hi;
+                (*p).ret_rdx = class.as_u64();
             }
             0
         }

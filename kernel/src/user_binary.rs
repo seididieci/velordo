@@ -112,8 +112,12 @@ pub fn spawn_image(
 /// prima di qualunque altro processo user, cosi' init sia l'antenato dei servizi
 /// che poi creera' via `spawn` (Fase 8.1). Parent e canale `None` (kernel).
 pub fn spawn_init() -> usize {
-    spawn_user("rector", crate::ordo::sched::Priority::Normal, rector_elf(), None, None, &[])
-        .expect("spawn di init fallito")
+    let pid = spawn_user("rector", crate::ordo::sched::Priority::Normal, rector_elf(), None, None, &[])
+        .expect("spawn di init fallito");
+    // ADR-0079 fase 3: init e' TCB per costruzione (lo spawna il kernel), e
+    // deve poter registrare `Service::Init` (gate su classe `System`).
+    crate::ordo::sched::set_image_class(pid, syscall_numbers::ImageClass::System);
+    pid
 }
 
 /// Descrizione di un binario embedded, per cercarlo per nome (syscall `spawn`).
@@ -167,5 +171,10 @@ pub fn spawn_named(name: &str, parent: Option<usize>, parent_chan: Option<usize>
     let bin = NAMED_BINARIES.iter().find(|b| b.name == name)?;
     // Si usa il nome 'static della tabella (non il buffer temporaneo del
     // chiamante) perche' il Process conserva un `&'static str`.
-    spawn_user(bin.name, bin.priority, (bin.elf)(), parent, parent_chan, bin.io_ranges)
+    let pid = spawn_user(bin.name, bin.priority, (bin.elf)(), parent, parent_chan, bin.io_ranges)?;
+    // ADR-0079 fase 3: i binari embedded sono TCB per costruzione (il kernel
+    // li porta dentro di se'), quindi `System` senza passare dalla verifica di
+    // cardo (che non li vede: non sono oggetti del volume).
+    crate::ordo::sched::set_image_class(pid, syscall_numbers::ImageClass::System);
+    Some(pid)
 }

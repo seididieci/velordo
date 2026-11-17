@@ -229,12 +229,44 @@ pub fn peer_info(chan: u64) -> Result<ImageId, Error> {
     }
 }
 
+/// `peer_info_class(chan)`: come [`peer_info`] ma riporta anche la **classe**
+/// dell'immagine del peer (ADR-0079 fase 3, `rdx` del multi-registro).
+/// `(ImageId, ImageClass)`: la classe e' quella autorevole del kernel (trust
+/// table popolata da cardo), mai una dichiarazione del peer.
+#[inline]
+pub fn peer_info_class(chan: u64) -> Result<(ImageId, ImageClass), Error> {
+    let (rax, rdi, rsi, rdx, _) = unsafe { syscall4_out(SYS_PEER_INFO, chan, 0, 0, 0) };
+    if rax != 0 {
+        Err(Error::ServerDied)
+    } else {
+        Ok((ImageId::new(rdi, rsi), ImageClass::from_u64(rdx)))
+    }
+}
+
 /// Identita' crittografica dei byte di un'immagine (ADR-0078): BLAKE2s-256
 /// troncato a 128 bit. La stessa che il kernel misura allo spawn/exec, quindi
 /// un client puo' confrontare i byte che ha in mano con `peer_info`.
 #[inline]
 pub fn image_id(bytes: &[u8]) -> ImageId {
     ImageId::from_digest(&blake2s::blake2s(bytes))
+}
+
+/// Registra `id -> classe` nella trust table del kernel (ADR-0079 fase 3).
+///
+/// Chiamabile solo da cardo (owner di `Service::Cardo`) o init: il kernel e'
+/// il punto di enforcement della classe, e il writer della tabella deve essere
+/// UNO (il servizio che verifica le firme). Il kernel calcola l'`ImageId` sui
+/// byte caricati allo spawn/exec e fa lookup qui: se l'immagine cambia tra la
+/// verifica e l'esecuzione, l'id e' diverso e la classe cade su `Untrusted`
+/// (chiude il TOCTOU verifica→spawn senza crypto nel kernel).
+///
+/// `Denied` se il chiamante non e' autorizzato o la tabella e' piena.
+#[inline]
+pub fn trust_image(id: ImageId, class: ImageClass) -> Result<(), Error> {
+    let r = unsafe {
+        syscall4(SYS_TRUST_IMAGE, id.lo, id.hi, class.as_u64(), 0)
+    };
+    if r < 0 { Err(Error::Denied) } else { Ok(()) }
 }
 
 /// Fase 35 (hardening) — `init_bounce(service)`: chiede a init (canale di
