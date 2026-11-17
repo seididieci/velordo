@@ -1,0 +1,17 @@
+[package]
+name = "sign"
+version = "0.1.0"
+edition = "2021"
+
+# Tool host (std), fuori dal workspace del kernel: firma i `.bin` a build time
+# (o in release) con lo stesso formato che il guest verifica. Dipende da
+# `libs/sig` via path: magic, prefisso di dominio e layout del sidecar sono
+# una sola definizione (niente copie vendor da tenere d'accordo).
+[workspace]
+
+[dependencies]
+sig = { path = "../../libs/sig" }
+
+[profile.release]
+panic = "abort"
+opt-level = "z"

@@ -9,6 +9,8 @@ edition = "2024"
 civis = { path = "../../libs/civis" }
 blake2s = { path = "../../blake2s" }
 arcafs = { path = "../../arcafs" }
+# Firma delle immagini (ADR-0078, fase 2): formato+verifica Ed25519 nel guest.
+sig = { path = "../../libs/sig" }
 
 [profile.dev]
 panic = "abort"

@@ -141,6 +141,119 @@ pub fn load_tables(disk: &Option<btree_drv::DiskEngine>) {
             "test-policy",
         );
     }
+    load_anchor(disk);
+}
+
+// ── Anchor delle chiavi di firma (ADR-0078, fase 2) ─────────────────────
+// `sys:anchor` (dato seedato a build-time, come manifest/policy): righe
+// `key_id_hex pubkey_hex classe nome`, con `classe` = `system|thirdparty`.
+// La `key_id` dichiarata e' un indice, non una prova: viene RICALCOLATA dalla
+// pubkey e una riga incoerente viene scartata loud (una chiave non entra
+// nell'anchor per un errore di trascrizione).
+//
+// Anchor assente = tabella vuota = nessuna immagine firmata: i bucket
+// obbligatori negano l'esecuzione (fail-closed), il boot non si rompe (i
+// servizi sono spawati da init per object_id, non via `R_RIGHTS_EXECUTE`).
+
+/// Chiavi di firma massime (due oggi: system + thirdparty di test).
+const ANCHOR_MAX: usize = 8;
+
+#[derive(Clone, Copy)]
+pub struct AnchorKey {
+    /// Primi 8 byte di BLAKE2s-256(pk), come nel sidecar.
+    pub key_id: u64,
+    /// Chiave pubblica Ed25519 autorevole.
+    pub pk: [u8; sig::PUBLIC_KEY_LEN],
+    /// Classe che questa chiave trasmette alle immagini che firma.
+    pub class: civis::ImageClass,
+}
+
+static mut ANCHOR: [Option<AnchorKey>; ANCHOR_MAX] = [None; ANCHOR_MAX];
+
+/// Carica `sys:anchor` (prima del READY, come le altre tabelle).
+pub fn load_anchor(disk: &Option<btree_drv::DiskEngine>) {
+    let Some(engine) = disk.as_ref() else {
+        println!("[cardo] anchor: nessun volume, nessuna chiave (fail-closed)");
+        return;
+    };
+    let Some(data) = engine.get(b"sys", b"anchor") else {
+        println!("[cardo] anchor assente (sys:anchor): nessuna firma accettata");
+        return;
+    };
+    let mut n = 0usize;
+    let mut bad = 0usize;
+    for line in data.split(|&b| b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() || line[0] == b'#' {
+            continue;
+        }
+        let mut it = line.split(|&b| b == b' ');
+        let (Some(kid_s), Some(pk_s), Some(cls_s)) = (it.next(), it.next(), it.next()) else {
+            bad += 1;
+            continue;
+        };
+        let mut kid_b = [0u8; 8];
+        let mut pk = [0u8; sig::PUBLIC_KEY_LEN];
+        if !sig::hex_decode(kid_s, &mut kid_b) || !sig::hex_decode(pk_s, &mut pk) {
+            println!("[cardo] anchor: riga con hex invalido, scartata");
+            bad += 1;
+            continue;
+        }
+        let declared = u64::from_be_bytes(kid_b);
+        let real = sig::key_id(&pk);
+        if declared != real {
+            println!(
+                "[cardo] anchor: key_id {:016x} != {:016x} della pubkey, riga scartata",
+                declared, real
+            );
+            bad += 1;
+            continue;
+        }
+        let class = match cls_s {
+            b"system" => civis::ImageClass::System,
+            b"thirdparty" => civis::ImageClass::ThirdParty,
+            _ => {
+                println!(
+                    "[cardo] anchor: classe '{}' ignota, riga scartata",
+                    core::str::from_utf8(cls_s).unwrap_or("?")
+                );
+                bad += 1;
+                continue;
+            }
+        };
+        if n >= ANCHOR_MAX {
+            println!("[cardo] anchor: oltre {} chiavi, resto ignorato", ANCHOR_MAX);
+            break;
+        }
+        unsafe {
+            core::ptr::write(
+                core::ptr::addr_of_mut!(ANCHOR).cast::<Option<AnchorKey>>().add(n),
+                Some(AnchorKey { key_id: real, pk, class }),
+            );
+        }
+        n += 1;
+    }
+    println!(
+        "[cardo] anchor: {} chiavi da sys:anchor ({} righe scartate, {} B)",
+        n,
+        bad,
+        data.len()
+    );
+}
+
+/// Chiave autorevole per `key_id` (None = chiave ignota → firma rifiutata).
+pub fn anchor_key(key_id: u64) -> Option<AnchorKey> {
+    unsafe {
+        let anchor = core::ptr::addr_of!(ANCHOR).cast::<Option<AnchorKey>>();
+        for i in 0..ANCHOR_MAX {
+            if let Some(k) = core::ptr::read(anchor.add(i)) {
+                if k.key_id == key_id {
+                    return Some(k);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Default fail-closed per hash ignoto (Fase 45, SYNC escluso in Fase 52):
@@ -245,8 +358,18 @@ pub fn classify(chan: u64) -> Trust {
 /// Owner richiesto da un bucket dell'API oggetti (None = non protetto).
 pub fn protected_bucket(bucket: &[u8]) -> Option<civis::Service> {
     match bucket {
-        // Codice di sistema, programmi utente, suite e namespace stesso.
-        b"sys" | b"usr" | b"tst" | b"ns" => Some(civis::Service::Init),
+        // Codice di sistema, programmi utente, suite, namespace stesso e
+        // **firme** (ADR-0078 fase 2: solo init scrive i sidecar).
+        b"sys" | b"usr" | b"tst" | b"ns" | b"sig" => Some(civis::Service::Init),
+        // Driver (ADR-0078 fase 2): un `vela` scrivibile da chiunque
+        // permetteva di sostituire un driver firmato — la firma senza
+        // write-protection del bucket che la contiene e' teatro.
+        // L'unico writer *runtime* di `vela` è `seed_sys_disk` in server.rs:
+        // cardo stesso, prima del READY, nessun client ancora esistente. È
+        // intenzionale e non passa dal choke point (è il seed di boot, non
+        // un client arbitrario); le immagini che ne escono sono comunque non
+        // firmate -> classe Untrusted.
+        b"vela" => Some(civis::Service::Init),
         // Bucket con un solo scrittore legittimo.
         b"log" => Some(civis::Service::Vestigia),
         b"identis" => Some(civis::Service::Identis),

@@ -803,6 +803,11 @@ fn real_main(_sp: u64) -> ! {
         // Errori tipizzati (Fase 40): gli handler ritornano Result<u64, u64>
         // (Ok = valore, Err = sentinella ERR_*); `to_reply_res` la riversa
         // nel reply IPC e nel response frame.
+        //
+        // `reply_w1` = secondo registro della risposta, oggi usato solo da
+        // `R_RIGHTS_EXECUTE` (classe dell'immagine, ADR-0078 fase 2). Zero
+        // per tutte le altre op: il frame resta quello di sempre.
+        let mut reply_w1: u64 = 0;
         let result: Result<u64, u64> = match op_tag {
             R_OPEN => {
                 match core::str::from_utf8(&payload) {
@@ -1252,9 +1257,25 @@ fn real_main(_sp: u64) -> ! {
 
             // Verifica EXECUTE su un oggetto ArcaFS (S3.2b-1): payload
             // `[bucket_len][bucket]\0[key_len][key]\0` (formato
-            // `arcafs::wire`); reply 0 OK / ERR_DENIED scritta dal dispatch
-            // generico (un solo frame per op).
-            R_RIGHTS_EXECUTE => rights::handle_rights_execute(&rights, chan, &payload, ceiling).ok_or(ERR),
+            // `arcafs::wire`); reply `w0` = 0 OK / ERR_DENIED / ERR_NOTFOUND
+            // e `w1` = classe dell'immagine (ADR-0078 fase 2). La classe
+            // viaggia fuori dal "result" perche' il frame generico ha un solo
+            // registro.
+            R_RIGHTS_EXECUTE => {
+                match rights::handle_rights_execute(
+                    &rights,
+                    chan,
+                    &payload,
+                    ceiling,
+                    disk.as_ref(),
+                ) {
+                    Some((v, class)) => {
+                        reply_w1 = class;
+                        Ok(v)
+                    }
+                    None => Err(ERR),
+                }
+            }
 
             _ => {
                 // Tag sconosciuto: frame gia' consumato sopra, ritorna errore.
@@ -1283,10 +1304,10 @@ fn real_main(_sp: u64) -> ! {
                 }
             }
             _ => {
-                rings::resp_ring_write(mount::to_reply_res(result), 0, &[]);
+                rings::resp_ring_write(mount::to_reply_res(result), reply_w1, &[]);
             }
         }
 
-        let _ = civis::reply(0, mount::to_reply_res(result), 0);
+        let _ = civis::reply(0, mount::to_reply_res(result), reply_w1);
     }
 }

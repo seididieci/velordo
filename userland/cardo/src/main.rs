@@ -46,6 +46,7 @@ mod ramfs;
 mod rights;
 mod rings;
 mod server;
+mod verify;
 mod volume;
 // Wall-clock lazy dal servizio Time (Fase 50, P1 orologio): i provider
 // producono `Meta.mtime` da qui, mai gli handler.

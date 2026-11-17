@@ -1,0 +1,21 @@
+[package]
+name = "sig"
+version = "0.1.0"
+edition = "2021"
+
+# Crate fuori dal workspace del kernel: build freestanding/testabile separata.
+[workspace]
+
+[dependencies]
+# ADR-0078 fase 2: Ed25519 puro Rust, `no_std`. Le feature `std`/`random`/
+# `traits` restano spente: niente getrandom nel guest (la firma la fa il tool
+# host, la verifica non ha bisogno di casualita').
+ed25519-compact = { version = "=2.6.1", default-features = false }
+blake2s = { path = "../../blake2s" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"

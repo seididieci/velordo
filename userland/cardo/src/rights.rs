@@ -163,22 +163,28 @@ pub fn handle_rights_get(
 /// Verifica EXECUTE su un oggetto ArcaFS (S3.2b-1): il canale ha sia READ
 /// che EXECUTE per il bucket specificato? Payload `[bucket_len][bucket]\0
 /// [key_len][key]\0` nel ring (formato condiviso `arcafs::wire`, lo stesso di
-/// R_OBJ_GET/PUT); reply w0 = 0 OK / ERR_DENIED, scritta dal dispatch generico
-/// (un solo frame per op: qui NON si scrive, o resterebbe un frame stale nel
-/// response ring). Zero allocazioni.
+/// R_OBJ_GET/PUT); reply `w0` = 0 OK / ERR_DENIED / ERR_NOTFOUND, `w1` =
+/// **classe** dell'immagine (`ImageClass`, ADR-0078 fase 2).
+///
+/// La firma si verifica qui e non nel client: il verdetto e' autorevole e la
+/// classe e' quella che la fase 3 portera' nel PCB. Regole in `verify.rs`
+/// (firma obbligatoria in `sys`/`vela`/`usr`, `Bad` negato ovunque).
+///
+/// Ritorna `(w0, w1)`; `None` = errore interno (dispatch scrive ERR).
 pub fn handle_rights_execute(
     rights: &BTreeMap<u64, ChanRights>,
     chan: u64,
     payload: &[u8],
     ceiling: u32,
-) -> Option<u64> {
+    disk: Option<&btree_drv::DiskEngine>,
+) -> Option<(u64, u64)> {
     // Parse condiviso con R_OBJ_GET/PUT: qualunque malformazione → INVALID.
-    let (_bucket, key, _rest) = match arcafs::wire::parse_obj_prefix(payload) {
+    let (bucket, key, _rest) = match arcafs::wire::parse_obj_prefix(payload) {
         Some(v) => v,
-        None => return Some(civis::ERR_INVALID),
+        None => return Some((civis::ERR_INVALID, 0)),
     };
     if key.is_empty() {
-        return Some(civis::ERR_INVALID);
+        return Some((civis::ERR_INVALID, 0));
     }
 
     // Diritti EFFETTIVI del canale: serve READ + EXECUTE. Per un canale
@@ -188,9 +194,20 @@ pub fn handle_rights_execute(
     let ops = rights.get(&chan).map_or(ceiling, |r| r.ops);
     let has_read = ops & civis::RIGHTS_READ != 0;
     let has_execute = ops & civis::RIGHTS_EXECUTE != 0;
-    if has_read && has_execute {
-        Some(0)
-    } else {
-        Some(civis::ERR_DENIED)
+    if !(has_read && has_execute) {
+        return Some((civis::ERR_DENIED, 0));
+    }
+
+    // Senza volume non c'e' oggetto da verificare: negato (fail-closed).
+    let Some(disk) = disk else {
+        return Some((civis::ERR_DENIED, 0));
+    };
+    let verdict = match verify::verify_object(disk, bucket, key) {
+        Ok(v) => v,
+        Err(e) => return Some((e, 0)),
+    };
+    match verify::verdict_for(bucket, verdict) {
+        Ok((w0, class)) => Some((w0, class.as_u64())),
+        Err(e) => Some((e, 0)),
     }
 }
