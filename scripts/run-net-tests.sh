@@ -15,6 +15,13 @@
 # `civis::net` / `net-ep` (apertura, slot, cursori, backpressure): la suite
 # prova che il client del meccanismo parla lo stesso protocollo del servizio.
 #
+# ADR-0080 fase 6: `netudp`, `net3` e `net4` sono binari di test (`tst`),
+# quindi `Untrusted`: `net`/`siit` negano loro l'endpoint **diretto** (tetto
+# per classe) e passano dal broker (`netbroker`). Se passano, il modello
+# "codice non firmato = solo broker" e' verificato end-to-end. `posixsock` e
+# `nettcp` parlano con `net` in diretta: sono software spedito (`usr`,
+# `ThirdParty`) e provano il trasporto.
+#
 # Uso: ./scripts/run-net-tests.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -107,7 +114,8 @@ NET=1 RUN_TESTS=1 RUN_DISPLAY=none timeout "$TIMEOUT" ./run.sh >"$LOG" 2>&1 || t
 
 fail=0
 rg -q '\[net\] echo reply' "$LOG" || { echo "[net-tests] manca: echo reply (N1)"; fail=1; }
-rg -q '\[netudp\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: UDP echo (N2)"; fail=1; }
+rg -q '\[netbroker\] broker attivo' "$LOG" || { echo "[net-tests] manca: broker (ADR-0080 fase 6)"; fail=1; }
+rg -q '\[netudp\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: UDP echo via broker (N2)"; fail=1; }
 rg -q '\[net3\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: TCP loopback (N3/N6.1)"; fail=1; }
 rg -q '\[net4\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: SIIT (N4)"; fail=1; }
 rg -q '\[dns\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: DNS (N5)"; fail=1; }
@@ -117,9 +125,9 @@ if [ -n "${NET_TCP_PEER:-}" ]; then
     rg -q '\[nettcp\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: TCP rete reale (N6.1d)"; fail=1; }
 fi
 
-LOGRE='\[net\]|\[netdev\]|\[netecho\]|\[netudp\]|\[net3\]|\[net4\]|\[nettcp\]|\[siit\]|\[dns\]|\[dns-host\]|\[posixsock\]'
+LOGRE='\[net\]|\[netdev\]|\[netecho\]|\[netbroker\]|\[netudp\]|\[net3\]|\[net4\]|\[nettcp\]|\[siit\]|\[dns\]|\[dns-host\]|\[posixsock\]'
 if [ "$fail" = "0" ]; then
-    echo "[net-tests] PASS: echo reply + UDP echo + TCP (handshake e echo reali) + IPv4 SIIT + DNS probe + upstream DNS + socket POSIX${NET_TCP_PEER:+ + TCP rete reale}"
+    echo "[net-tests] PASS: echo reply + UDP echo + TCP (handshake e echo reali) + IPv4 SIIT + DNS probe + upstream DNS + socket POSIX (probe di policy via broker)${NET_TCP_PEER:+ + TCP rete reale}"
     rg "$LOGRE" "$LOG" | tail -45
     exit 0
 fi

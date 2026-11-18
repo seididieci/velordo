@@ -238,9 +238,10 @@ pub fn t_custos() -> bool {
     }
 
     // (7) Enforcement nel servizio (solo con `net=1`, fuori dal gate).
-    // `net` chiede a Custos: questa immagine (`usertests`) non ha grant,
-    // quindi una porta nota e' negata e una effimera resta libera. In un boot
-    // senza rete il servizio non c'e' e il ramo si salta.
+    // `usertests` e' `Untrusted` (suite in `tst`): `net` nega ogni bind
+    // diretto, anche effimero. Il traffico del codice non firmato passa per
+    // netbroker (fase 6b). In un boot senza rete il servizio non c'e' e il
+    // ramo si salta.
     if let Ok(c) = civis::service_lookup(civis::Service::Net) {
         use civis::net::{Endpoint, Flow, Proto};
         let net_chan = c as u64;
@@ -253,10 +254,12 @@ pub fn t_custos() -> bool {
                 pass = false;
             }
         }
+        // Effimera: negato a Untrusted (gate di classe, fase 6).
         match Endpoint::open(net_chan, Proto::Udp, Flow::Ephemeral) {
-            Ok(mut ep) => ep.close(),
-            Err(e) => {
-                println!("[usertests] t69: bind effimero negato ({:?})", e);
+            Err(_) => {}
+            Ok(mut ep) => {
+                ep.close();
+                println!("[usertests] t69: bind effimero concesso a Untrusted (atteso negato)");
                 pass = false;
             }
         }

@@ -11,10 +11,11 @@
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 65/65
+#   [usertests] PASS 66/66
 #   [threadtest] PASS 12/12
 # (Fase 30.1: t65 shm; ADR-0078 fase 2: t66 firma; ADR-0079 fase 3: t67 classe;
-#  ADR-0079 fase 4: t68 porte I/O dal manifest)
+#  ADR-0079 fase 4: t68 porte I/O dal manifest; ADR-0080 fase 6: t70 consenso
+#  per immagine + broker)
 # N7.0 (ADR-0074): nessuna riga nuova — il client di rete vive in `civis::net`
 # e il formato degli slot in `libs/net-ep`; i percorsi di rete si provano nei
 # run dedicati (scripts/run-net-tests.sh, scripts/run-tls-tests.sh).

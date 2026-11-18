@@ -3942,3 +3942,64 @@
       `testsarca` in quel boot non sono 65/65 perché il run non imposta
       `ARCA_IMG=1` (un solo disco: `t32` conta i dischi) — differenza
       d'ambiente, non una regressione.
+
+- [x] **Policy — broker di rete e consenso per immagine** (2026-11-18,
+      ADR-0080, fase 6): il privilegio di rete diventa **strutturale** e il
+      consenso diventa un dato per immagine.
+      **Tetto per classe, non per tabella**: `net` (`NET_EP_OPEN`) e `siit`
+      (`SIIT_EP_OPEN`) leggono `peer_info_class` (classe misurata dal kernel,
+      ADR-0079) e negano **ogni** endpoint a `Untrusted`, effimera compresa.
+      Nessuna riga di policy riapre quella porta: per il codice non firmato
+      l'unica strada è il broker.
+      **`netbroker`** (`Service::NetBroker = 19`, `SERVICE_COUNT = 20`,
+      `userland/netbroker`, `libs/broker-proto`, client `civis::broker`): API
+      a ring gemella di `net` (`BROKER_OPEN/TX/CLOSE/STATS` = `0x90`–`0x93`,
+      slot in `libs/net-ep`). Per ogni cliente apre l'endpoint vero (in `net`,
+      o in `siit` con `proto = NET_PROTO_IPV4` per l'uscita IPv4) e inoltra
+      nei due sensi. Politica: **allowlist di porte** (7/8/30000; effimere
+      libere), **destinazioni** loopback/link-local/multicast libere e
+      globali solo con `CUSTOS_AUTHORIZE` deciso **all'apertura**, **rate
+      limit** per identità (50 richieste / 50 tick), **audit** in Vestigia su
+      open/deny/tx/close (il `tx` una volta per finestra: il log non sta nel
+      data path), **backpressure senza drop silenzioso** (`Full` = slot
+      intatto, il cliente ritenta).
+      **Consenso**: `CUSTOS_AUTHORIZE = 0x83` risponde `policy admin ∩
+      consenso`; `CUSTOS_CONSENT = 0x84` scrive la decisione **solo con un
+      token di sessione valido** (session owner o root — senza, un figlio che
+      eredita `VELORDO_SESSION` si autoconsentirebbe). Due dati, un writer
+      (`Custos`): `usr:consent` (tabella autorevole per immagine, quella che
+      il broker consulta) e `usr:<nome>:consent` (provenienza: chi ha
+      acconsentito). Cardo ha il carve-out `consent_writer` (solo
+      `Custos`/init, **anche con `RIGHTS_ALL`**). Nella shell nativa
+      `consent <prog> on|off`; al lancio di un programma senza riga un
+      **avviso non bloccante** (il dialogo `s/n` arriva con il DE, fase 7).
+      **Probe**: `netudp`/`net3`/`net4` restano in `tst` (`Untrusted`) e
+      passano **solo** dal broker — è il modello vero; `nettcp`, `tlsprobe`,
+      `posixsock` parlano con `net` in diretta, quindi sono software spedito
+      in `usr` (`ThirdParty`): provano il trasporto, non la policy.
+      **Destinazioni**: locali = loopback/link-local/multicast e, per lo SIIT,
+      gli IPv4 privati/di laboratorio (`10/8`, `172.16/12`, `192.168/16`,
+      `127/8`, `169.254/16`); **rete globale** = consenso + grant. `net4`
+      verifica entrambe: il payload verso `10.0.0.1` passa (plumbing SIIT
+      coperto), quello verso un IPv4 pubblico è negato all'`Untrusted`.
+      **Tre bug trovati dalle prove di rete** (tutti nel broker, nessuno
+      visibile nel gate): (1) il campo indirizzo di uno slot IPv4 va in coda
+      a una `addr` di 16 byte, non in testa — `copy_from_slice` panico;
+      (2) `net_ep::write` vuole `addr.len() == layout.addr_len()`, quindi
+      l'inoltro deve passare `&dst[..4]`, altrimenti l'upstream rifiuta ogni
+      slot; (3) la policy di destinazione confrontava il prefisso SIIT che nel
+      broker **non esiste più** (lo slot IPv4 porta solo i 4 byte): va decisa
+      sulla forma del layout. Lezione: un proxy a due layout ha **due**
+      rappresentazioni dello stesso indirizzo, e il confine è il layout.
+      **Vittoria**: t70 in `usertests` (`[usertests] PASS 66/66`, gate 6/6,
+      zero FAIL/PANIC/FAULT), grant senza consenso negato, scrittura senza
+      token rifiutata, consenso persistito in `usr:consent` e
+      `usr:root:consent`, revoca effettiva, consenso che **non** crea
+      privilegio senza grant, `obj_put usr:consent` da usertests negato;
+      con `net=1` (ramo condizionale) `net` nega l'endpoint a `Untrusted` e
+      il broker lo serve (porta 9 negata dall'allowlist, effimera concessa).
+      Unit host 127/127 (`broker-proto` inclusi).
+      **Limiti dichiarati**: rate limit e audit in RAM (restart del broker
+      azzera i contatori), consenso senza scadenza (one-shot = fase 7), revoca
+      non propagata alle cache già decise, prompt `s/n` al lancio rinviato
+      (DE + S3.3(c)).

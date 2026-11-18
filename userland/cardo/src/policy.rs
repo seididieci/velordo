@@ -542,6 +542,12 @@ fn caps_writer(trust: Trust) -> bool {
     matches!(trust, Trust::Init | Trust::Owner(civis::Service::Custos))
 }
 
+/// Scrittura di `usr:<nome>:consent` (ADR-0080, fase 6): solo init o
+/// Custos (il service owner del consenso per immagine).
+fn consent_writer(trust: Trust) -> bool {
+    matches!(trust, Trust::Init | Trust::Owner(civis::Service::Custos))
+}
+
 /// Il peer puo' scrivere un target protetto di proprieta' `owner`?
 fn allowed(owner: civis::Service, ceiling: u32, trust: Trust) -> bool {
     if ceiling == civis::RIGHTS_ALL || trust == Trust::Init {
@@ -590,6 +596,15 @@ pub fn write_allowed(
         // unico Custos. Vale anche con ceiling ALL (vedi `caps_writer`).
         if bucket == b"sys" && key == b"caps" {
             return caps_writer(trust);
+        }
+        // Consenso per immagine (ADR-0080, fase 6): `usr:consent` e' la
+        // tabella autorevole (una riga per immagine), `usr:<nome>:consent` la
+        // provenienza (chi ha acconsentito). Writer unico Custos. Il bucket
+        // `usr` e' protetto (owner Init): serve questo carve-out, e NON passa
+        // da `allowed()` — un ceiling `RIGHTS_ALL` non basta (la suite lo ha
+        // per costruzione, e il consenso decide chi accede alla rete).
+        if bucket == b"usr" && (key == b"consent" || key.ends_with(b":consent")) {
+            return consent_writer(trust);
         }
         return match protected_bucket(bucket) {
             Some(owner) => allowed(owner, ceiling, trust),

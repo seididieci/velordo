@@ -788,6 +788,14 @@ const SVC_DNS: SvcMeta = SvcMeta {
     obj: Some((b"sys", b"bin/dns.bin")),
     prio: 16,
 };
+/// Broker di rete (ADR-0080, fase 6): serve il codice non firmato, che dopo il
+/// gate di classe non puo' parlare direttamente con `net`/`siit`. Parte dopo
+/// `net` (si attacca a lui) e solo con `net=1`.
+const SVC_NETBROKER: SvcMeta = SvcMeta {
+    bin: b"netbroker",
+    obj: Some((b"sys", b"bin/netbroker.bin")),
+    prio: 16,
+};
 const SVC_LOGIN: SvcMeta = SvcMeta {
     bin: b"identis-login",
     obj: Some((b"sys", b"bin/identis-login.bin")),
@@ -833,18 +841,27 @@ const TEST_NET3: SvcMeta = SvcMeta { bin: b"net3", obj: Some((b"tst", b"test/net
 const TEST_NET4: SvcMeta = SvcMeta { bin: b"net4", obj: Some((b"tst", b"test/net4.bin")), prio: 16 };
 // Probe TCP su rete reale (N6.1d): solo con `net=1`, dopo net4; si salta da
 // solo se manca `sys:nettcp.conf` (echo server sull'host).
+// N6.1d: il probe TCP di rete reale parla con `net` in diretta (`civis::net`
+// `Stream`): e' software spedito, quindi vive in `usr` ed e' `ThirdParty`.
+// Testa il TCP reale, non la policy (quella la prova `netudp`/`net3` via
+// broker, da `tst` = `Untrusted`).
 #[cfg(not(feature = "skip_tests"))]
-const TEST_NETTCP: SvcMeta = SvcMeta { bin: b"nettcp", obj: Some((b"tst", b"test/nettcp.bin")), prio: 16 };
+const TEST_NETTCP: SvcMeta = SvcMeta { bin: b"nettcp", obj: Some((b"usr", b"nettcp")), prio: 16 };
 // Resolver DNS (N5, ADR-0069): eseguito solo con `net=1`, dopo net4.
 const TEST_DNS: SvcMeta = SvcMeta { bin: b"dnsprobe", obj: Some((b"tst", b"test/dnsprobe.bin")), prio: 16 };
 // Socket POSIX (N7.1, ADR-0076): personalità `libr` sopra `civis::net`,
 // solo con `net=1`, dopo il resolver (usa `netecho` UDP 7 e TCP 8).
+// N7.1: parla con `net` attraverso la personalita' POSIX, quindi e' software
+// spedito (`usr`, `ThirdParty`). La strada del codice non firmato verso la
+// rete e' il broker (ADR-0080 fase 6), provata da netudp/net3/net4.
 #[cfg(not(feature = "skip_tests"))]
-const TEST_POSIXSOCK: SvcMeta = SvcMeta { bin: b"posixsock", obj: Some((b"tst", b"test/posixsock.bin")), prio: 16 };
+const TEST_POSIXSOCK: SvcMeta = SvcMeta { bin: b"posixsock", obj: Some((b"usr", b"posixsock")), prio: 16 };
 // Probe TLS 1.3 (N6.2, ADR-0072): solo con `net=1` **e** `tls=1`; si salta da
 // solo se manca `sys:tls.conf` (server TLS sull'host, script dedicato).
+// N6.2: parla col servizio `net` in diretta (`tls_net`): software spedito in
+// `usr` (`ThirdParty`), come `posixsock`. Testa TLS, non la policy.
 #[cfg(not(feature = "skip_tests"))]
-const TEST_TLSPROBE: SvcMeta = SvcMeta { bin: b"tlsprobe", obj: Some((b"tst", b"test/tlsprobe.bin")), prio: 16 };
+const TEST_TLSPROBE: SvcMeta = SvcMeta { bin: b"tlsprobe", obj: Some((b"usr", b"tlsprobe")), prio: 16 };
 #[cfg(not(feature = "skip_tests"))]
 const TESTS: SvcMeta = SvcMeta { bin: b"usertests", obj: Some((b"tst", b"test/tests.bin")), prio: 16 };
 // Thread 1:1 (S-T, ADR-0046): dopo usertests (nessuna dipendenza dai diritti),
@@ -1016,6 +1033,8 @@ fn real_main(_sp: u64) -> ! {
             println!("[init] siit FAILED");
         } else if boot_svc(&SVC_DNS, false).is_none() {
             println!("[init] dns FAILED");
+        } else if boot_svc(&SVC_NETBROKER, true).is_none() {
+            println!("[init] netbroker FAILED");
         } else {
             let _ = civis::vestigia::log(b"init", b"net ready");
         }
@@ -1051,6 +1070,7 @@ fn real_main(_sp: u64) -> ! {
         Supervised::new(&SVC_NET, civis::Service::Net),
         Supervised::new(&SVC_SIIT, civis::Service::Siit),
         Supervised::new(&SVC_DNS, civis::Service::Dns),
+        Supervised::new(&SVC_NETBROKER, civis::Service::NetBroker),
         // Il **login** (programma di autenticazione): politica di morte
         // propria — si riavvia solo se ha fallito (vedi `OnDeath`).
         Supervised {
@@ -1071,6 +1091,7 @@ fn real_main(_sp: u64) -> ! {
                 | civis::Service::NetDev
                 | civis::Service::Siit
                 | civis::Service::Dns
+                | civis::Service::NetBroker
         ) {
             e.disabled = !net_enabled;
         }

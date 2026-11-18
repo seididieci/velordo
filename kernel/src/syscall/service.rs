@@ -177,6 +177,7 @@ fn service_from_disc(disc: u64) -> Option<syscall_numbers::Service> {
         16 => Some(Siit),
         17 => Some(Dns),
         18 => Some(Custos),
+        19 => Some(NetBroker),
         _ => None,
     }
 }
@@ -203,6 +204,7 @@ fn service_name(s: syscall_numbers::Service) -> &'static str {
         syscall_numbers::Service::Siit => "siit",
         syscall_numbers::Service::Dns => "dns",
         syscall_numbers::Service::Custos => "custos",
+        syscall_numbers::Service::NetBroker => "netbroker",
     }
 }
 

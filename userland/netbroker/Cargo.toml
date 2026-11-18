@@ -1,0 +1,21 @@
+[package]
+name = "netbroker"
+version = "0.1.0"
+edition = "2024"
+
+# Crate fuori dal workspace del kernel: build freestanding separata.
+[workspace]
+
+[dependencies]
+civis = { path = "../../libs/civis" }
+broker-proto = { path = "../../libs/broker-proto" }
+net-ep = { path = "../../libs/net-ep" }
+syscall-numbers = { path = "../../syscall-numbers" }
+custos-proto = { path = "../../libs/custos-proto" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"

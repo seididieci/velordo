@@ -530,6 +530,7 @@ fn execute_command(cmd: &str, args: &[&str], session_token: Option<u64>) -> CmdR
             let roles = args.get(1).copied();
             cmd_create_user(session_token, name, roles)
         }
+        "consent" => cmd_consent(session_token, &args),
         "logout" => {
             // Il programma esterno stampa il messaggio; il bounce lo fa la
             // shell, che e' figlia di init (`INIT_BOUNCE` va sul canale di
@@ -557,6 +558,7 @@ fn cmd_help() {
     console_write_str("Comandi disponibili:\n");
     console_write_str("  help              - mostra questa guida\n");
     console_write_str("  create-user [nome] [ruoli] - crea un utente (ruoli: root|net-admin|hw-admin|user)\n");
+    console_write_str("  consent <prog> on|off - consenso rete per un programma (ADR-0080)\n");
     console_write_str("  users             - elenca gli utenti registrati\n");
     console_write_str("  exit              - chiudi la shell\n");
     console_write_str("  logout            - torna al prompt di login\n");
@@ -656,6 +658,98 @@ fn cmd_create_user(
     CmdResult::Ok
 }
 
+/// `consent <prog> on|off` (ADR-0080, fase 6): registra il consenso di rete
+/// dell'utente corrente per un'**immagine** (il contenuto del binario, non il
+/// nome). Il consenso si somma al grant admin (`sys:caps`): senza uno dei due
+/// il broker nega le destinazioni globali.
+fn cmd_consent(session_token: Option<u64>, args: &[&str]) -> CmdResult {
+    let Some(prog) = args.first().copied() else {
+        console_write_str("uso: consent <prog> on|off\n");
+        return CmdResult::Ok;
+    };
+    let decision = match args.get(1).copied() {
+        Some("on") => true,
+        Some("off") => false,
+        _ => {
+            console_write_str("uso: consent <prog> on|off\n");
+            return CmdResult::Ok;
+        }
+    };
+    let token = match session_token {
+        Some(t) => t,
+        None => {
+            console_write_str("ERRORE: nessuna sessione attiva (login richiesto)\n");
+            return CmdResult::Ok;
+        }
+    };
+    // L'identita' e' quella dei byte: si legge l'oggetto e si misura.
+    let Some(img) = load_program(prog) else {
+        console_write_str("ERRORE: programma non trovato: ");
+        console_write_str(prog);
+        console_write_str("\n");
+        return CmdResult::Ok;
+    };
+    let id = civis::image_id(&img);
+    let chan = match resolve_custos() {
+        Ok(c) => c,
+        Err(_) => {
+            console_write_str("ERRORE: servizio Custos non disponibile\n");
+            return CmdResult::Ok;
+        }
+    };
+    let user = read_user();
+    if custos_proto::consent_write(chan, token, user, id.lo, id.hi, decision) {
+        console_write_str("consenso ");
+        console_write_str(if decision { "ON " } else { "OFF " });
+        console_write_str(prog);
+        console_write_str(" (");
+        console_write_str(&alloc::format!("{:016x}{:016x}", id.hi, id.lo));
+        console_write_str(")\n");
+    } else {
+        console_write_str("ERRORE: consenso rifiutato (sessione scaduta?)\n");
+        return CmdResult::TokenExpired;
+    }
+    CmdResult::Ok
+}
+
+/// `true` se l'immagine `id` non ha una riga di consenso allow
+/// (`usr:consent`). Fail-closed: se Custos non risponde, si avvisa (il broker
+/// neghera' comunque; l'avviso e' un servizio all'utente, non una decisione).
+fn consent_missing(id: civis::ImageId) -> bool {
+    let Ok(chan) = resolve_custos() else {
+        return true;
+    };
+    match custos_proto::consent_read(chan, read_user(), id.lo, id.hi) {
+        Some(true) => false,
+        _ => true,
+    }
+}
+
+/// Carica i byte del programma `prog` dai bucket eseguibili (stessa ricerca
+/// piatta di `try_execute_external`).
+fn load_program(prog: &str) -> Option<Vec<u8>> {
+    if prog.is_empty() || prog.contains('/') {
+        return None;
+    }
+    let buckets = civis::ipc::bin_list().ok()?;
+    for b in &buckets {
+        if let Ok(data) = civis::fs::obj::obj_get(b.as_slice(), prog.as_bytes()) {
+            return Some(data);
+        }
+    }
+    None
+}
+
+/// Risolve il servizio Custos per nome (con retry breve).
+fn resolve_custos() -> Result<u64, &'static str> {
+    for _ in 0..IDENTIS_RESOLVE_RETRIES {
+        match civis::service_lookup(civis::Service::Custos) {
+            Ok(c) if c > 0 => return Ok(c as u64),
+            _ => core::hint::spin_loop(),
+        }
+    }
+    Err("Custos non trovato")
+}
 /// S3.2b — Tenta di eseguire un programma esterno da un bucket `binary`.
 /// La shell scopre i bucket tramite BIN_LIST, cerca il nome PIATTO
 /// `<programma>` (i bucket binary non hanno sottocartelle, ADR-0064),
@@ -719,8 +813,23 @@ fn try_execute_external(program: &str, args: &[&str]) -> bool {
             }
         }
 
-        // 5. Esegui l'immagine con spawn_image, passando argv + env.
-        // Il blocco packed deve restare vivo fino a dopo la syscall
+        // 5. Consenso di rete (ADR-0080, fase 6): se l'immagine non ha una
+        // riga in `usr:consent`, il programma parte lo stesso ma il broker
+        // neghera' le destinazioni globali. Il messaggio e' **non
+        // bloccante**: la shell non puo' sapere se il programma usa la rete,
+        // e un prompt su ogni lancio (anche `users`/`logout`) romperebbe le
+        // esecuzioni non interattive. Il dialogo s/n all'avvio arriva con il
+        // DE (fase 7).
+        let id = civis::image_id(&obj);
+        if consent_missing(id) {
+            console_write_str("[shell] avviso: nessun consenso di rete per '");
+            console_write_str(program);
+            console_write_str("' (usa `consent ");
+            console_write_str(program);
+            console_write_str(" on`)\n");
+        }
+
+        // 6. Esegui l'immagine con spawn_image, passando argv + env.        // Il blocco packed deve restare vivo fino a dopo la syscall
         // (il kernel lo copia). Env: VELORDO_SESSION=<hex> per i programmi
         // che lo richiedono (es. `users`).
         let mut argv: Vec<&[u8]> = Vec::with_capacity(args.len() + 1);

@@ -27,6 +27,8 @@
 #![no_std]
 
 extern crate alloc;
+use alloc::string::String;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use civis;
@@ -36,6 +38,12 @@ use civis::Error;
 pub const MAGIC_QUERY: &[u8; 4] = b"ACQS";
 /// Magic del payload di grant/revoca.
 pub const MAGIC_GRANT: &[u8; 4] = b"ACQG";
+/// Magic del payload di autorizzazione (AUTHZ): chiede se un'identita' e'
+/// autorizzata per una capability, includendo il consenso per immagine.
+pub const MAGIC_AUTHZ: &[u8; 4] = b"AAZS";
+/// Magic del payload di consenso (ACNS): scrive/legge una riga di
+/// `usr:<nome>:consent` per una immagine (identificata da ImageId).
+pub const MAGIC_ACNS: &[u8; 4] = b"AACN";
 
 /// Versione del protocollo (campo del payload).
 pub const PROTO_VERSION: u32 = 1;
@@ -60,6 +68,131 @@ pub const CAP_HW_DMA: u64 = 4;
 /// `true` se `kind` e' una capability conosciuta.
 pub fn valid_kind(kind: u64) -> bool {
     matches!(kind, CAP_NET_BIND | CAP_NET_USE | CAP_HW_MMIO | CAP_HW_DMA)
+}
+
+/// Operazione sul consenso.
+pub const CONSENT_READ: u64 = 0;
+/// Scrive/aggiorna una riga di consenso (create-or-replace).
+pub const CONSENT_WRITE: u64 = 1;
+
+/// Costruttore interno: magic + versione + campi u64.
+fn build_base(magic: &[u8; 4], fields: &[u64]) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.extend_from_slice(magic);
+    v.extend_from_slice(&PROTO_VERSION.to_le_bytes());
+    for &f in fields {
+        push_u64(&mut v, f);
+    }
+    v
+}
+
+/// Payload di autorizzazione: magic + versione + identita' + capability.
+/// Stessa forma di `build_query` ma con `MAGIC_AUTHZ`.
+pub fn build_authz(id_lo: u64, id_hi: u64, kind: u64, arg: u64) -> Vec<u8> {
+    build_base(MAGIC_AUTHZ, &[id_lo, id_hi, kind, arg])
+}
+
+/// Payload di consenso (scrittura): magic + versione + op=WRITE +
+/// token + nome_len + nome + id_lo + id_hi + decision.
+/// Il token e' richiesto per autorizzare la scrittura (session owner o root).
+pub fn build_consent_write(
+    token: u64,
+    user: &str,
+    id_lo: u64,
+    id_hi: u64,
+    decision: bool,
+) -> Vec<u8> {
+    let name = user.as_bytes();
+    let mut v = build_base(MAGIC_ACNS, &[
+        CONSENT_WRITE as u64,
+        token,
+        name.len() as u64,
+        id_lo,
+        id_hi,
+        decision as u64,
+    ]);
+    v.extend_from_slice(name);
+    v
+}
+
+/// Payload di consenso (lettura): magic + versione + op=READ +
+/// nome_len + nome + id_lo + id_hi.
+pub fn build_consent_read(user: &str, id_lo: u64, id_hi: u64) -> Vec<u8> {
+    let name = user.as_bytes();
+    let mut v = build_base(
+        MAGIC_ACNS,
+        &[CONSENT_READ as u64, name.len() as u64, id_lo, id_hi],
+    );
+    v.extend_from_slice(name);
+    v
+}
+
+/// `(id_lo, id_hi, kind, arg)` per AUTHZ.
+pub fn parse_authz(buf: &[u8]) -> Result<(u64, u64, u64, u64), &'static str> {
+    if buf.len() < 8 || &buf[0..4] != MAGIC_AUTHZ {
+        return Err("magic non riconosciuto");
+    }
+    let lo = u64_at(buf, 8)?;
+    let hi = u64_at(buf, 16)?;
+    let kind = u64_at(buf, 24)?;
+    let arg = u64_at(buf, 32)?;
+    if !valid_kind(kind) {
+        return Err("capability sconosciuta");
+    }
+    Ok((lo, hi, kind, arg))
+}
+
+/// `(op, token?, nome, id_lo, id_hi, decision?)` per ACNS.
+/// `token` e' `Some` solo per `CONSENT_WRITE`; `decision` e' `Some` solo per
+/// `CONSENT_WRITE`.
+///
+/// Layout (i campi stanno tutti **prima** del nome, come li scrivono i
+/// costruttori qui sopra: il nome e' l'ultimo pezzo, di lunghezza `name_len`):
+///
+/// ```text
+/// offset:  0        4     8    16      24        32      40      48     56
+/// WRITE: [ACNS][ver:4][op:8][token:8][name_len:8][id_lo:8][id_hi:8][dec:8][nome]
+/// READ:  [ACNS][ver:4][op:8][name_len:8][id_lo:8][id_hi:8][nome]
+/// ```
+pub fn parse_consent(
+    buf: &[u8],
+) -> Result<(u64, Option<u64>, String, u64, u64, Option<bool>), &'static str> {
+    if buf.len() < 16 || &buf[0..4] != MAGIC_ACNS {
+        return Err("magic non riconosciuto");
+    }
+    let op = u64_at(buf, 8)?;
+    let (token, name_len, id_lo, id_hi, decision, name_off) = match op {
+        CONSENT_WRITE => (
+            Some(u64_at(buf, 16)?),
+            u64_at(buf, 24)? as usize,
+            u64_at(buf, 32)?,
+            u64_at(buf, 40)?,
+            Some(u64_at(buf, 48)?),
+            8 + 6 * 8,
+        ),
+        CONSENT_READ => (
+            None,
+            u64_at(buf, 16)? as usize,
+            u64_at(buf, 24)?,
+            u64_at(buf, 32)?,
+            None,
+            8 + 4 * 8,
+        ),
+        _ => return Err("operazione consenso non valida"),
+    };
+    if buf.len() < name_off + name_len {
+        return Err("payload troncato");
+    }
+    let name = core::str::from_utf8(&buf[name_off..name_off + name_len])
+        .map_err(|_| "nome non UTF-8")?
+        .to_string();
+    if let Some(d) = decision {
+        if d > 1 {
+            return Err("decisione non valida");
+        }
+        return Ok((op, token, name, id_lo, id_hi, Some(d == 1)));
+    }
+    Ok((op, token, name, id_lo, id_hi, None))
 }
 
 // ── Codici di risposta (w0) ────────────────────────────────────────────────
@@ -256,5 +389,60 @@ pub fn query(
     match send_payload(chan, civis::CUSTOS_QUERY, &payload) {
         Ok(r) => r.w0 == R_OK && r.w1 == 1,
         Err(_) => false,
+    }
+}
+
+/// `true` se l'identita' `(lo, hi)` e' autorizzata per `(kind, arg)`,
+/// tenendo conto del consenso per immagine (ADR-0080, fase 6).
+///
+/// Come `query` ma sul tag `CUSTOS_AUTHORIZE`: il server combina policy
+/// admin + consenso prima di rispondere.
+pub fn authorize(
+    chan: u64,
+    id_lo: u64,
+    id_hi: u64,
+    kind: u64,
+    arg: u64,
+) -> bool {
+    let payload = build_authz(id_lo, id_hi, kind, arg);
+    match send_payload(chan, civis::CUSTOS_AUTHORIZE, &payload) {
+        Ok(r) => r.w0 == R_OK && r.w1 == 1,
+        Err(_) => false,
+    }
+}
+
+/// Scrive una riga di consenso per `(user, id_lo, id_hi)`: `decision`
+/// `true` = consente, `false` = nega. `token` e' il token di sessione del
+/// chiamante (richiesto: solo session owner o root possono scrivere).
+/// Ritorna `true` se Custos ha accettato la scrittura (persistenza prima
+/// della RAM).
+pub fn consent_write(
+    chan: u64,
+    token: u64,
+    user: &str,
+    id_lo: u64,
+    id_hi: u64,
+    decision: bool,
+) -> bool {
+    let payload = build_consent_write(token, user, id_lo, id_hi, decision);
+    match send_payload(chan, civis::CUSTOS_CONSENT, &payload) {
+        Ok(r) => r.w0 == R_OK,
+        Err(_) => false,
+    }
+}
+
+/// Legge il consenso per `(user, id_lo, id_hi)`. Ritorna `Some(true)` se
+/// c'e' una riga e consente, `Some(false)` se c'e' e nega, `None` se
+/// assente o errore.
+pub fn consent_read(
+    chan: u64,
+    user: &str,
+    id_lo: u64,
+    id_hi: u64,
+) -> Option<bool> {
+    let payload = build_consent_read(user, id_lo, id_hi);
+    match send_payload(chan, civis::CUSTOS_CONSENT, &payload) {
+        Ok(r) if r.w0 == R_OK => Some(r.w1 == 1),
+        _ => None,
     }
 }

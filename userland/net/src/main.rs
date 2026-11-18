@@ -850,13 +850,23 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
             let proto = (m.w0 >> 16) as u16;
             let local_port = (m.w0 & 0xffff) as u16;
             let flags = m.w1;
-            let peer_id = match civis::peer_info(m.channel) {
-                Ok(h) => h,
+            let (peer_id, class) = match civis::peer_info_class(m.channel) {
+                Ok(v) => v,
                 Err(_) => {
                     let _ = civis::reply(NET_EP_OPEN, !0u64, 0);
                     return;
                 }
             };
+            // ADR-0080, fase 6: `Untrusted` non ottiene mai Service::Net.
+            // Il traffico del codice non firmato passa attraverso netbroker.
+            if class == civis::ImageClass::Untrusted {
+                civis::println!(
+                    "[net] bind negato a {:016x}{:016x}: classe Untrusted (usa netbroker)",
+                    peer_id.hi, peer_id.lo
+                );
+                let _ = civis::reply(NET_EP_OPEN, !0u64, 0);
+                return;
+            }
             if proto != NET_PROTO_UDP as u16 && proto != NET_PROTO_TCP as u16 {
                 let _ = civis::reply(NET_EP_OPEN, !0u64, 0);
                 return;

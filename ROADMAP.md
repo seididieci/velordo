@@ -1030,13 +1030,28 @@ Voci con scope e vittoria dichiarati (non date).
       per grant seedato, un'identità senza riga è negata, revoca effettiva;
       unit host 125/125. Limiti: `CAP_HW_*`/`CAP_NET_USE` dichiarative,
       consenso `usr:<nome>:consent` e broker rinvíati alla fase 6.
-- [ ] **Policy — broker di rete e grant runtime** (ADR-0080, fase 6):
-      `userland/netbroker` (`Service::NetBroker = 19`) con
-      `BROKER_RESOLVE`/`BROKER_CONNECT` a proxy, allowlist di porte, rate
-      limit per identità e audit in Vestigia; il codice `Untrusted` non
-      ottiene mai `Service::Net`; consenso statico per ruolo (prompt = fase 7).
-      Vittoria: un programma non firmato naviga solo via broker, il tentativo
-      diretto è negato, rate limit e audit attivi.
+- [x] **Policy — broker di rete e grant runtime** (completata, ADR-0080,
+      fase 6): `userland/netbroker` (`Service::NetBroker = 19`,
+      `SERVICE_COUNT = 20`), API a ring `BROKER_OPEN/TX/CLOSE/STATS`
+      (`0x90`–`0x93`, client `civis::broker`, formato slot in `net-ep`).
+      **Tetto strutturale per classe** (non una tabella): `net` e `siit`
+      leggono `peer_info_class` e negano ogni endpoint a `Untrusted` — il
+      broker è l'unica strada. Broker: allowlist di porte (7/8/30000), rate
+      limit per identità, audit in Vestigia, backpressure senza drop
+      silenzioso, uscita IPv4 via `siit` (`proto = NET_PROTO_IPV4`) e
+      destinazioni globali solo con consenso + grant (`CUSTOS_AUTHORIZE`,
+      deciso all'apertura). **Consenso per immagine**:
+      `CUSTOS_AUTHORIZE=0x83` (`policy admin ∩ consenso`) e
+      `CUSTOS_CONSENT=0x84` (scrittura con token di sessione, revoca),
+      `usr:consent` (tabella autorevole) + `usr:<nome>:consent`
+      (provenienza), carve-out `consent_writer` in cardo; nella shell nativa
+      `consent <prog> on|off` + avviso al lancio. Vittoria: t70
+      (`usertests 66/66`, gate 6/6, zero FAIL/PANIC/FAULT); nel run di rete
+      dedicato `netudp`/`net3`/`net4` (`tst`, quindi `Untrusted`) navigano
+      **solo** via broker. Il tentativo diretto da `Untrusted` è negato da
+      `net` (t69/t70). Limiti: rate limit e audit in RAM (restart azzera i
+      contatori), consenso senza scadenza, prompt `s/n` al lancio rinviato
+      alla fase 7 (DE + S3.3(c)).
 - [ ] **Rete N6.4–N8** (pianificata, ADR-0068/0069/0070): DoH sulla stessa
       API di trasporto; VT-d/IOMMU.
       Config `sys:net` con policy di subtree in cardo (`sys:identis` rinomina

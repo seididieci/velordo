@@ -32,11 +32,19 @@ name = "blake2s"
 version = "0.1.0"
 
 [[package]]
+name = "broker-proto"
+version = "0.1.0"
+dependencies = [
+ "syscall-numbers",
+]
+
+[[package]]
 name = "civis"
 version = "0.1.0"
 dependencies = [
  "arcafs",
  "blake2s",
+ "broker-proto",
  "net-ep",
  "syscall-numbers",
  "vfscli",
@@ -47,6 +55,13 @@ name = "const_fn"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "413d67b29ef1021b4d60f4aa1e925ca031751e213832b4b1d588fae623c05c60"
+
+[[package]]
+name = "custos-proto"
+version = "0.1.0"
+dependencies = [
+ "civis",
+]
 
 [[package]]
 name = "identis-proto"
@@ -61,6 +76,7 @@ version = "0.1.0"
 dependencies = [
  "blake2s",
  "civis",
+ "custos-proto",
  "identis-proto",
 ]
 

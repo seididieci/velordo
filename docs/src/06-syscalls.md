@@ -359,20 +359,40 @@ Servizi: `Service::Net = 14`, `NetDev = 15`, `Siit = 16`, `Dns = 17`.
 Partono solo con `net=1` in cmdline. Dettagli e traiettoria in
 [ADR-0069](./adr/0069-stack-rete-ipv6-capability.md).
 
-**Policy per identità (ADR-0080, fase 5)**: `Service::Custos = 18` (totale
-`SERVICE_COUNT = 19`). Il server di policy espone tre tag (payload chunked in
-`libs/custos-proto`, nessuna syscall nuova):
+**Policy per identità (ADR-0080, fasi 5–6)**: `Service::Custos = 18` e
+`Service::NetBroker = 19` (totale `SERVICE_COUNT = 20`). Il server di policy
+espone cinque tag (payload chunked in `libs/custos-proto`, nessuna syscall
+nuova):
 
 | Tag | Nome | Semantica |
 |-----|------|-----------|
 | 0x73 | `IDENTIS_WHOAMI` | `w1` = token → `w0` = codice, `w1` = maschera ruoli **live** |
-| 0x80 | `CUSTOS_QUERY` | identità + capability → `w0` = OK, `w1` = `1/0` |
+| 0x80 | `CUSTOS_QUERY` | identità + capability → `w0` = OK, `w1` = `1/0` (solo `sys:caps`) |
 | 0x81 | `CUSTOS_GRANT` | token + identità + capability + decisione → `w0` = codice |
 | 0x82 | `CUSTOS_STATUS` | diagnostica → `w1` = numero di voci in `sys:caps` |
+| 0x83 | `CUSTOS_AUTHORIZE` | identità + capability → `w0` = OK, `w1` = `1/0`: **grant admin ∩ consenso** |
+| 0x84 | `CUSTOS_CONSENT` | op READ/WRITE + token + utente + identità (+ decisione) |
 
 `net` usa `CUSTOS_QUERY` per il bind delle porte note (cache per identità +
 porta, fail-closed: errore IPC = negato). `Custos` è l'unico writer di
-`sys:caps`; cardo lo legge direttamente (niente IPC di policy nel loop FS).
+`sys:caps` e di `usr:consent` / `usr:<nome>:consent`; cardo li legge
+direttamente (niente IPC di policy nel loop FS).
+
+**Broker di rete (ADR-0080, fase 6)**: `Service::NetBroker = 19`, API a ring
+gemella di quella di `net` (formato degli slot in `libs/net-ep`, client
+`civis::broker`):
+
+| Tag | Nome | Semantica |
+|-----|------|-----------|
+| 0x90 | `BROKER_OPEN` | `w0` = proto<<16 \| porta, `w1` = flag → `w0` = ep_id, `w1` = ring_shm_id \| porta<<32 |
+| 0x91 | `BROKER_TX` | `w0` = ep_id, `w1` = slot → `w0` = 0 preso in carico / `!0` = `Full` |
+| 0x92 | `BROKER_CLOSE` | `w0` = ep_id → (0,0) |
+| 0x93 | `BROKER_STATS` | `w0` = ep_id → `(rx, tx)` |
+
+Il **tetto è strutturale**: `net` (`NET_EP_OPEN`) e `siit` (`SIIT_EP_OPEN`)
+negano ogni endpoint alle immagini `Untrusted` (classe misurata dal kernel,
+`SYS_PEER_INFO` + trust table), quindi per il codice non firmato il broker è
+l'unica strada. `proto = NET_PROTO_IPV4` sceglie l'uscita IPv4 (`siit`).
 
 ### I/O
 

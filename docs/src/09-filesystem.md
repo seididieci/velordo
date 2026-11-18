@@ -274,6 +274,16 @@ usertests 17/17, shell 3/3.
   (`caps_writer`): solo `Custos` o init, **anche con `RIGHTS_ALL`** — il
   tetto ops non basta, perché `sys:caps` decide chi può bindare. `sys:policy`
   resta invece la tabella delle op FS di cardo (writer init).
+- **Consenso per immagine** (ADR-0080 fase 6): due dati nel bucket `usr`,
+  entrambi con writer unico `Custos` (carve-out `consent_writer`, come
+  `caps_writer`: solo `Custos`/init **anche con `RIGHTS_ALL`**):
+  `usr:consent` è la tabella **autorevole** (`<hi> <lo> <decisione> [utente]`,
+  una riga per immagine, l'ultima vince) e `usr:<nome>:consent` la
+  **provenienza** (chi ha acconsentito, per utente). L'autorizzazione è
+  `sys:caps ∩ usr:consent`: il consenso non crea privilegio dove manca il
+  grant, e il grant non basta senza consenso (assente = negato, fail-closed).
+  La scrittura richiede un token di sessione valido (session owner o root):
+  senza, il prompt sarebbe teatro.
 
 ## Contratto di durabilita' (Fase 52, P3)
 

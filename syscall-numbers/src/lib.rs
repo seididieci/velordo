@@ -650,6 +650,21 @@ pub const DNS_EP_CLOSE: u64 = 0x89;
 /// `w0` = endpoint_id. Reply: `w0` = rx_pkts, `w1` = tx_pkts.
 pub const DNS_EP_STATS: u64 = 0x8A;
 
+// ── Endpoint broker di rete (ADR-0080, fase 6) ────────────────────
+/// `BROKER_OPEN {proto, local_port, flags}` → `{endpoint_id, ring_shm_id}`.
+/// `w0` = proto<<16 | local_port, `w1` = flags. Reply: `w0` = endpoint_id,
+/// `w1` = ring_shm_id.
+pub const BROKER_OPEN: u64 = 0x90;
+/// `BROKER_TX {ep_id}` → invia payload applicativo tramite il broker.
+/// `w0` = endpoint_id, `w1` = slot index. Reply `w0` = 0 / !0.
+pub const BROKER_TX: u64 = 0x91;
+/// `BROKER_CLOSE {ep_id}` → chiude l'endpoint e libera il ring.
+/// `w0` = endpoint_id. Reply (0,0).
+pub const BROKER_CLOSE: u64 = 0x92;
+/// `BROKER_STATS {ep_id}` → statistiche endpoint broker.
+/// `w0` = endpoint_id. Reply: `w0` = rx_pkts, `w1` = tx_pkts.
+pub const BROKER_STATS: u64 = 0x93;
+
 // Alias brevi per comodità d'uso nei clienti DNS.
 pub const DNS_OPEN: u64 = DNS_EP_OPEN;
 pub const DNS_TX: u64 = DNS_EP_TX;
@@ -752,6 +767,8 @@ pub const IDENTIS_WHOAMI: u64 = 0x73;
 pub const CUSTOS_QUERY: u64 = 0x80;  // query capability (payload) -> w0=0 OK, w1=1/0
 pub const CUSTOS_GRANT: u64 = 0x81;  // grant/revoca (payload, token) -> w0=codice
 pub const CUSTOS_STATUS: u64 = 0x82; // diagnostica -> w0=0 OK, w1=numero grant
+pub const CUSTOS_AUTHORIZE: u64 = 0x83; // autorizza (identita' + consenso) -> w0=0 OK, w1=1/0
+pub const CUSTOS_CONSENT: u64 = 0x84;   // scrivi/legge consenso usr:<nome>:consent -> w0=codice
 
 // ── Protocollo DISK_* (data-plane cardo→block, Fase 16) ───────────────
 // Single source of truth dei tag (Fase 16c): prima duplicati in
@@ -1219,13 +1236,18 @@ pub enum Service {
     /// risolti live presso `Identis`. Unico writer di `sys:caps`;
     /// fail-closed se la policy manca. Supervisionato da init.
     Custos = 18,
+    /// Broker di rete per codice non firmato (ADR-0080, fase 6): `Untrusted`
+    /// non ottiene mai `Service::Net`/`Service::Siit`; tutto il traffico di
+    /// un `Untrusted` passa attraverso il broker, che applica allowlist,
+    /// rate limit per identita' e consenso per immagine.
+    NetBroker = 19,
 }
 
 /// Massimo numero di servizi conosciuti = dimensione del registro kernel.
 /// Fase 39: 8→16; Fase 50: slot 9 = `Time`; Fase 57/R8: slot 10 = `Vestigia`;
 /// Fase N4: slot 16 = `Siit`; Fase N5: slot 17 = `Dns`; ADR-0080 fase 5:
-/// slot 18 = `Custos`.
-pub const SERVICE_COUNT: usize = 19;
+/// slot 18 = `Custos`; ADR-0080 fase 6: slot 19 = `NetBroker`.
+pub const SERVICE_COUNT: usize = 20;
 
 /// Canale predefinito del processo: il canale di nascita verso il parent.
 /// Ogni processo nasce con canale 0 = parent (o `CHANNEL_NONE` per init/idle).

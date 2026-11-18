@@ -1,16 +1,19 @@
 //! net3 — probe di rete TCP (N3, test fuori gate).
 //!
-//! Apre un endpoint TCP CONNECT verso `::1:8` (netecho), invia un payload
-//! applicativo tramite il servizio `net` (che incapsula e fa l'handshake),
-//! valida SYN+ACK ed eco e segnala TEST_DONE ad init.
-//! Eseguito solo con `net=1`.
+//! Apre un endpoint TCP CONNECT verso `::1:8` (netecho) tramite il
+//! **broker** (`netbroker`, ADR-0080 fase 6), invia un payload applicativo
+//! (l'incapsulamento e l'handshake sono del core in `net`), valida SYN+ACK ed
+//! eco e segnala TEST_DONE ad init. Eseguito solo con `net=1`.
+//!
+//! Come `netudp`, il probe e' `Untrusted`: il broker e' la sua unica strada
+//! verso la rete.
 //!
 //! Dal N7.0 ring, slot ed eventi sono in `civis::net` (ADR-0074).
 
 #![no_std]
 #![no_main]
 
-use civis::net::{Endpoint, Event, Flow, Proto, SendError, PAYLOAD_MAX};
+use civis::broker::{BrokerEndpoint as Endpoint, Event, Flow, Proto, SendError};
 use civis::println;
 
 static FUTEX: u32 = 0;
@@ -30,10 +33,10 @@ civis::entry!(real_main);
 fn real_main(_sp: u64) -> ! {
     let mut all_ok = true;
 
-    // Risolve il servizio net.
+    // Risolve il broker.
     let mut net_chan = 0u64;
     for _ in 0..200 {
-        if let Ok(c) = civis::service_lookup(civis::Service::Net) {
+        if let Ok(c) = civis::service_lookup(civis::Service::NetBroker) {
             if c > 0 {
                 net_chan = c as u64;
                 break;
@@ -46,7 +49,7 @@ fn real_main(_sp: u64) -> ! {
         );
     }
     if net_chan == 0 {
-        println!("[net3] FAIL: servizio net non trovato");
+        println!("[net3] FAIL: servizio netbroker non trovato");
         finish(false);
     }
 
@@ -80,7 +83,7 @@ fn real_main(_sp: u64) -> ! {
     }
 
     // Attende SYNACK (handshake) e poi l'eco dei dati.
-    let mut buf = [0u8; PAYLOAD_MAX];
+    let mut buf = [0u8; civis::NET_EP_SLOT_SIZE - 23];
     let mut synack_ok = false;
     let mut echo_ok = false;
     let mut retries = 0u32;

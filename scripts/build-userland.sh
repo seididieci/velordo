@@ -99,6 +99,10 @@ build_one userland/siit userland/siit/src/siit.ld siit.bin siit
 # e incluso nel manifest degli hash prima di gen-service-hashes.
 build_one userland/dns userland/dns/src/dns.ld dns.bin dns
 
+# Broker di rete per codice non firmato (ADR-0080, fase 6): servizio di
+# sistema, parte solo con `net=1`. Va nel manifest Strato 2 (firma `sys`).
+build_one userland/netbroker userland/netbroker/src/netbroker.ld netbroker.bin netbroker
+
 # Tool guest ArcaFS (Fase 54, P5; Fase 58.4: dir `userland/tools/`): `list`/
 # `stat` dalla shell, in /bin. Nativo (solo meccanismo) ma usa `libr::entry!`
 # per onorare il redirect. Prima di gen-service-hashes (policy restrittiva).

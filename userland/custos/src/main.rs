@@ -38,6 +38,16 @@ civis::entry!(real_main);
 const CAPS_BUCKET: &[u8] = b"sys";
 const CAPS_KEY: &[u8] = b"caps";
 
+/// Bucket delle righe di consenso (`usr:<nome>:consent`).
+const CONSENT_BUCKET: &[u8] = b"usr";
+/// Prefisso della chiave di consenso per un utente: `<nome>:consent`.
+fn consent_key(user: &str) -> alloc::vec::Vec<u8> {
+    let mut k = alloc::vec::Vec::from(user.as_bytes());
+    k.push(b':');
+    k.extend_from_slice(b"consent");
+    k
+}
+
 /// Voci massime della tabella (una per identita'+capability).
 const CAPS_MAX: usize = 64;
 /// Dimensione massima del payload accettata (4 KiB).
@@ -175,7 +185,10 @@ fn handle_msg(m: civis::IpcMsg) {
     }
 
     match m.tag {
-        civis::CUSTOS_QUERY | civis::CUSTOS_GRANT => handle_chunked(m),
+        civis::CUSTOS_QUERY
+        | civis::CUSTOS_GRANT
+        | civis::CUSTOS_AUTHORIZE
+        | civis::CUSTOS_CONSENT => handle_chunked(m),
         civis::CUSTOS_STATUS => handle_status(m),
         civis::EXIT_NOTIFY => unsafe {
             if TXN_ACTIVE && TXN_CHAN == m.channel {
@@ -245,6 +258,8 @@ fn dispatch_payload(tag: u64, buf: &[u8]) -> (u64, u64) {
     match tag {
         civis::CUSTOS_QUERY => do_query(buf),
         civis::CUSTOS_GRANT => do_grant(buf),
+        civis::CUSTOS_AUTHORIZE => do_authorize(buf),
+        civis::CUSTOS_CONSENT => do_consent(buf),
         _ => (proto::R_PROTOCOL, 0),
     }
 }
@@ -311,6 +326,202 @@ fn do_grant(buf: &[u8]) -> (u64, u64) {
     );
     (proto::R_OK, 0)
 }
+
+/// Autorizza: policy admin (`sys:caps`) **e** consenso per immagine.
+///
+/// Reply `(R_OK, 1|0)`. Due domande distinte, entrambe necessarie:
+///  1. l'amministratore ha concesso la capability a questa immagine
+///     (`sys:caps`, fase 5)?  senza grant il consenso di un utente non
+///     crea privilegio dal nulla;
+///  2. un utente ha dato il consenso **per questa immagine** (`usr:consent`,
+///     fase 6)?  assente = negato.
+///
+/// Fail-closed: qualunque errore di lettura = negato.
+fn do_authorize(buf: &[u8]) -> (u64, u64) {
+    let (id_lo, id_hi, kind, arg) = match proto::parse_authz(buf) {
+        Ok(v) => v,
+        Err(_) => return (proto::R_PROTOCOL, 0),
+    };
+
+    if !lookup(id_lo, id_hi, kind, arg).unwrap_or(false) {
+        return (proto::R_OK, 0);
+    }
+    if !consent_allowed(id_lo, id_hi) {
+        civis::println!(
+            "[custos] authorize {:016x}{:016x} kind={} arg={}: consenso mancante",
+            id_hi, id_lo, kind, arg
+        );
+        return (proto::R_OK, 0);
+    }
+    (proto::R_OK, 1)
+}
+
+/// Consenso: lettura e scrittura delle righe per immagine.
+///
+/// Reply `(R_OK, decisione|0)`. La scrittura richiede un token di sessione
+/// valido (session owner o root): senza, il consenso sarebbe scrivibile da
+/// chiunque e il prompt all'avvio sarebbe teatro.
+fn do_consent(buf: &[u8]) -> (u64, u64) {
+    let (op, token_opt, user, id_lo, id_hi, decision_opt) = match proto::parse_consent(buf) {
+        Ok(v) => v,
+        Err(_) => return (proto::R_PROTOCOL, 0),
+    };
+
+    match op {
+        proto::CONSENT_READ => (proto::R_OK, consent_allowed(id_lo, id_hi) as u64),
+        proto::CONSENT_WRITE => {
+            let Some(token) = token_opt else {
+                return (proto::R_PROTOCOL, 0);
+            };
+            // Sessione valida obbligatoria (Identis decide chi e' vivo).
+            if let Err(code) = whoami(token) {
+                civis::println!("[custos] consent {}: sessione non valida ({})", user, code);
+                return (code, 0);
+            }
+            let decision = decision_opt.unwrap_or(false);
+            if let Err(e) = persist_consent(&user, id_lo, id_hi, decision) {
+                civis::println!(
+                    "[custos] consent {} {:016x}{:016x}: scrittura usr:consent fallita ({:?})",
+                    user,
+                    id_hi,
+                    id_lo,
+                    e
+                );
+                return (proto::R_FS_ERROR, 0);
+            }
+            civis::println!(
+                "[custos] consent {} {:016x}{:016x} -> {}",
+                user,
+                id_hi,
+                id_lo,
+                if decision { "allow" } else { "deny" }
+            );
+            (proto::R_OK, 0)
+        }
+        _ => (proto::R_PROTOCOL, 0),
+    }
+}
+
+/// Chiave della tabella autorevole del consenso (`usr:consent`): una riga
+/// per immagine, `hi lo decisione [utente]`.
+const CONSENT_INDEX: &[u8] = b"consent";
+
+/// Consenso per immagine: legge la tabella `usr:consent` (autoritativa per
+/// l'autorizzazione). Assente o illeggibile = negato.
+fn consent_allowed(id_lo: u64, id_hi: u64) -> bool {
+    match civis::obj_get(CONSENT_BUCKET, CONSENT_INDEX) {
+        Ok(data) => consent_line_allowed(&data, id_lo, id_hi),
+        Err(_) => false,
+    }
+}
+
+/// Cerca la decisione per `(id_lo, id_hi)` nel contenuto della tabella
+/// (`<hi> <lo> <decisione> [utente]` per riga, l'ultima vince).
+fn consent_line_allowed(data: &[u8], id_lo: u64, id_hi: u64) -> bool {
+    let Ok(text) = core::str::from_utf8(data) else {
+        return false;
+    };
+    let mut last: Option<bool> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let parsed = (|| {
+            let hi = parse_hex(it.next()?)?;
+            let lo = parse_hex(it.next()?)?;
+            let decision = parse_dec(it.next()?)?;
+            (decision <= 1).then_some((hi, lo, decision == 1))
+        })();
+        let Some((hi, lo, allowed)) = parsed else { continue };
+        if hi == id_hi && lo == id_lo {
+            last = Some(allowed);
+        }
+    }
+    last.unwrap_or(false)
+}
+
+/// Persiste il consenso per `(user, id_lo, id_hi)`.
+///
+/// Due dati, un solo writer (Custos), scritti in quest'ordine:
+///  1. `usr:consent` — la **tabella autorevole** per immagine: e' cio' che
+///     `CUSTOS_AUTHORIZE` consulta (l'autorizzazione non conosce l'utente);
+///  2. `usr:<nome>:consent` — la **provenienza**: chi ha dato il consenso su
+///     quell'immagine (serve a revocare per utente e a spiegare la tabella).
+///
+/// Un errore sulla provenienza non annulla l'autorizzazione (la tabella e'
+/// gia' scritta): si logga e basta. Un errore sulla tabella e' fail-closed:
+/// il chiamante riceve `R_FS_ERROR` e la decisione non e' attiva.
+fn persist_consent(
+    user: &str,
+    id_lo: u64,
+    id_hi: u64,
+    allowed: bool,
+) -> Result<(), civis::Error> {
+    let index = civis::obj_get(CONSENT_BUCKET, CONSENT_INDEX).unwrap_or_default();
+    let text = core::str::from_utf8(&index).unwrap_or("");
+    let mut out = String::new();
+    let mut found = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let same = (|| {
+            let hi = parse_hex(it.next()?)?;
+            let lo = parse_hex(it.next()?)?;
+            Some(hi == id_hi && lo == id_lo)
+        })();
+        if same == Some(true) {
+            found = true;
+            continue; // sostituita sotto (l'ultima vince)
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !found && !allowed {
+        // Una revoca di una riga inesistente non crea nulla: assente = negato
+        // e' gia' la risposta giusta, e la tabella non cresce senza fine.
+    } else {
+        out.push_str(&format!(
+            "{:016x} {:016x} {} {}\n",
+            id_hi,
+            id_lo,
+            allowed as u64,
+            user
+        ));
+    }
+    civis::obj_put(CONSENT_BUCKET, CONSENT_INDEX, out.as_bytes())?;
+
+    // Provenienza (best effort: non decide nulla).
+    let key = consent_key(user);
+    let prev = civis::obj_get(CONSENT_BUCKET, &key).unwrap_or_default();
+    let prev_text = core::str::from_utf8(&prev).unwrap_or("");
+    let mut per_user = String::new();
+    for line in prev_text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let same = (|| {
+            let hi = parse_hex(it.next()?)?;
+            let lo = parse_hex(it.next()?)?;
+            Some(hi == id_hi && lo == id_lo)
+        })();
+        if same != Some(true) {
+            per_user.push_str(line);
+            per_user.push('\n');
+        }
+    }
+    per_user.push_str(&format!("{:016x} {:016x} {}\n", id_hi, id_lo, allowed as u64));
+    let _ = civis::obj_put(CONSENT_BUCKET, &key, per_user.as_bytes());
+    Ok(())
+}
+
+// ── Tabella ────────────────────────────────────────────────────────────────
 
 /// STATUS: numero di voci della tabella (diagnostica).
 fn handle_status(m: civis::IpcMsg) {

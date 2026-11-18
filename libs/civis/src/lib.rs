@@ -94,7 +94,10 @@ pub use syscall_numbers::EXIT_NOTIFY;
 /// Tag IPC del servizio Identis (ADR-0055).
 pub use syscall_numbers::{IDENTIS_ADD_USER, IDENTIS_LIST, IDENTIS_VERIFY, IDENTIS_WHOAMI};
 /// Tag IPC del servizio Custos (ADR-0080, fase 5): server di policy.
-pub use syscall_numbers::{CUSTOS_GRANT, CUSTOS_QUERY, CUSTOS_STATUS};
+pub use syscall_numbers::{CUSTOS_AUTHORIZE, CUSTOS_CONSENT, CUSTOS_GRANT, CUSTOS_QUERY, CUSTOS_STATUS};
+/// Tag IPC del broker di rete (ADR-0080, fase 6): proxy a ring per il
+/// codice non firmato.
+pub use syscall_numbers::{BROKER_CLOSE, BROKER_OPEN, BROKER_STATS, BROKER_TX};
 /// Tag del cancel cooperativo parent→figlio (Fase 44b, job control: Ctrl-C).
 pub use syscall_numbers::JOB_CANCEL;
 /// Tag della notify kernel→kbd su IRQ1 (Fase 15, bridge interrupt→IPC).
@@ -281,6 +284,7 @@ pub mod ipc;
 /// invio/ricezione sugli slot (formato in `net-ep`) e stream TCP blocking.
 /// Meccanismo neutro: nessun verbo POSIX, nessun tipo di socket.
 pub mod net;
+pub mod broker;
 pub mod print;
 pub mod spawn;
 pub mod sys;

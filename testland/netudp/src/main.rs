@@ -1,8 +1,12 @@
 //! netudp — probe di rete UDP (N2, test fuori gate).
 //!
-//! Apre un endpoint UDP ephemeral presso il servizio `net`, invia un
-//! datagramma a `::1:7` (netecho), valida l'eco ricevuta e segnala
-//! TEST_DONE ad init. Eseguito solo con `net=1`.
+//! Apre un endpoint UDP ephemeral presso il **broker** (`netbroker`,
+//! ADR-0080 fase 6), invia un datagramma a `::1:7` (netecho), valida l'eco
+//! ricevuta e segnala TEST_DONE ad init. Eseguito solo con `net=1`.
+//!
+//! Il probe e' un binario di test (`tst`), quindi `Untrusted`: `net` gli
+//! nega l'endpoint diretto (gate di classe) e la strada legittima e' il
+//! broker, che applica allowlist e rate limit e inoltra per lui.
 //!
 //! Dal N7.0 apertura, slot e cursori sono in `civis::net` (ADR-0074): qui
 //! resta solo la politica del probe.
@@ -10,7 +14,7 @@
 #![no_std]
 #![no_main]
 
-use civis::net::{Endpoint, Event, Flow, Proto, SendError, PAYLOAD_MAX};
+use civis::broker::{BrokerEndpoint as Endpoint, Event, Flow, Proto, SendError};
 use civis::println;
 
 static FUTEX: u32 = 0;
@@ -30,10 +34,10 @@ civis::entry!(real_main);
 fn real_main(_sp: u64) -> ! {
     let mut all_ok = true;
 
-    // Risolve il servizio net.
+    // Risolve il broker (il servizio che rappresenta il codice non firmato).
     let mut net_chan = 0u64;
     for _ in 0..200 {
-        if let Ok(c) = civis::service_lookup(civis::Service::Net) {
+        if let Ok(c) = civis::service_lookup(civis::Service::NetBroker) {
             if c > 0 {
                 net_chan = c as u64;
                 break;
@@ -46,7 +50,7 @@ fn real_main(_sp: u64) -> ! {
         );
     }
     if net_chan == 0 {
-        println!("[netudp] FAIL: servizio net non trovato");
+        println!("[netudp] FAIL: servizio netbroker non trovato");
         finish(false);
     }
 
@@ -81,7 +85,7 @@ fn real_main(_sp: u64) -> ! {
     }
 
     // Aspetta l'eco sul ring RX.
-    let mut buf = [0u8; PAYLOAD_MAX];
+    let mut buf = [0u8; civis::NET_EP_SLOT_SIZE - 23];
     let mut echo_ok = false;
     let mut retries = 0u32;
     while retries < MAX_RETRIES {

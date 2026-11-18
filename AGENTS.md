@@ -169,7 +169,7 @@ velordo/
 
 ## Stato corrente
 
-Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 65/65` + `[threadtest] PASS 12/12` + shell nativa (fase `native` di `test-shell-all.sh`; le fasi POSIX sono storiche dal login nativo, ADR-0062), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
+Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 66/66` + `[threadtest] PASS 12/12` + shell nativa (fase `native` di `test-shell-all.sh`; le fasi POSIX sono storiche dal login nativo, ADR-0062), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
 - **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
   BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
@@ -262,9 +262,9 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   (0x8B)** di `net` (selettore link-local/global/router, 16 byte in due
   parole)).
   Kernel:
-  `Service::Net=14`/`NetDev=15`/`Siit=16`/`Dns=17`/`Custos=18`,
+  `Service::Net=14`/`NetDev=15`/`Siit=16`/`Dns=17`/`Custos=18`/`NetBroker=19`,
   `MSI_VECTOR_NET=0x51`, finestra MMIO per servizio, grant DMA per NetDev,
-  `SERVICE_COUNT=19`.
+  `SERVICE_COUNT=20`.
   I servizi partono solo con `net=1` in cmdline (run dedicato, fuori dal
   gate). Test: `./scripts/run-net-tests.sh` (passt, IPv6 reale): SLAAC +
   **echo reply** (N1), `[netudp] risultato: PASS` (N2: endpoint ephemeral →
@@ -499,8 +499,20 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   `caps_writer` = solo Custos/init **anche con `RIGHTS_ALL`**; ruoli multipli
   `nome:hash:ruolo[,ruolo...]` + `IDENTIS_WHOAMI` live; `net` fa bind delle
   porte note via `CUSTOS_QUERY` con cache per (identità, porta) e
-  fail-closed; t69, `usertests 65/65`). Fase 6 (`netbroker` + consenso
-  `usr:<nome>:consent`) da fare.
+  fail-closed; t69). **Fase 6 fatta**: `NetBroker` = `Service::NetBroker = 19`
+  (`SERVICE_COUNT = 20`) con `BROKER_OPEN/TX/CLOSE/STATS` (`0x90`–`0x93`,
+  client `civis::broker`, slot in `net-ep`), allowlist di porte + rate limit
+  per identità + audit in Vestigia + uscita IPv4 via `siit`; **tetto
+  strutturale per classe**: `net` (`NET_EP_OPEN`) e `siit` (`SIIT_EP_OPEN`)
+  negano ogni endpoint a `Untrusted` (`peer_info_class`) — nessuna tabella
+  può riaprirlo, il broker è l'unica strada. **Consenso per immagine**:
+  `CUSTOS_AUTHORIZE=0x83` (`policy admin ∩ consenso`), `CUSTOS_CONSENT=0x84`
+  (scrittura solo con token di sessione), `usr:consent` (tabella autorevole,
+  carve-out `consent_writer` in cardo) + `usr:<nome>:consent` (provenienza);
+  shell nativa `consent <prog> on|off`; t70, `usertests 66/66`. I probe
+  che parlano con `net` in diretta (`nettcp`, `tlsprobe`, `posixsock`) sono
+  `usr`/`ThirdParty` (provano il trasporto, non la policy); `netudp`/`net3`/
+  `net4` restano `tst`/`Untrusted` e passano **solo** dal broker.
 - **IPC reply implicita**: la reply del server va al peer del canale del
   messaggio correntemente elaborato (fissato da `recv` in `reply_chan`), non
   all'ultimo `send`. Piu' client concorrenti su un server sono quindi
@@ -665,7 +677,7 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 65/65
+#   [usertests] PASS 66/66
 #   [threadtest] PASS 12/12
 # KVM=1 accelera (-enable-kvm -cpu host, opt-in; senza /dev/kvm resta TCG).
 # Il timeout chiude il boot al prompt del login: il contratto sono le PASS.

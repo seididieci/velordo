@@ -1,48 +1,39 @@
 //! net4 — probe di rete IPv4/SIIT (N4, test fuori gate).
 //!
-//! Apre un endpoint UDP presso il servizio `siit`, invia un payload a un
-//! indirizzo IPv4 (in formato SIIT 64:ff9b::/96) e valida che il
-//! traduttore lo abbia accettato. Segnala TEST_DONE ad init.
-//! Eseguito solo con `net=1`.
+//! Apre un endpoint IPv4 tramite il **broker** (`netbroker`, ADR-0080 fase 6)
+//! e invia un payload a un indirizzo IPv6 in formato SIIT (`64:ff9b::/96`):
+//! il broker sceglie l'uscita IPv4 e inoltra a `siit`, che traduce. Segnala
+//! TEST_DONE ad init. Eseguito solo con `net=1`.
 //!
-//! Dal N7.0 il formato dello slot è quello unico di `net_ep` (ADR-0074);
-//! `siit` usa il layout IPv4 (11 byte di metadati), quindi qui si usa il
-//! codec direttamente e non `civis::net::Endpoint` (che parla con `net`).
+//! Il probe e' un binario di test (`tst`), quindi `Untrusted`: sia `net` sia
+//! `siit` gli negano l'endpoint diretto (gate di classe) e la strada
+//! legittima e' il broker, che applica allowlist, rate limit e consenso.
 
 #![no_std]
 #![no_main]
 
+use civis::broker::{BrokerEndpoint, Event, Flow, Proto, SendError};
 use civis::println;
-use core::ptr::write_volatile;
-use core::sync::atomic::{fence, Ordering};
 
-// ── Costanti endpoint SIIT (da civis) ─────────────────────────────────
-use civis::{
-    NET_EP_FLAG_EPHEMERAL, NET_EP_RING_HDR, NET_EP_RX_RING_OFF, NET_EP_SLOT_SIZE,
-    NET_EP_TX_RING_OFF, NET_PROTO_IPV4, SIIT_EP_CLOSE, SIIT_EP_OPEN, SIIT_EP_TX,
-};
-
-/// Layout IPv4: `[len:2][dst_ipv4:4][dst_port:2][src_port:2][evento:1][payload]`.
-const SLOT: net_ep::Layout = net_ep::Layout::IPV4;
-
-// Eventi slot SIIT.
-const EV_DATA: u8 = 0;
+static FUTEX: u32 = 0;
 
 /// Indirizzo IPv4 destinatario (10.0.0.1, mappato in IPv6 SIIT).
 const DST_IPV4: [u8; 4] = [10, 0, 0, 1];
 /// Porta destinataria.
 const DST_PORT: u16 = 53;
+/// Payload del probe.
+const PAYLOAD: &[u8] = b"net4-siit-probe";
 
 // Entry point.
 civis::entry!(real_main);
 
 fn real_main(_sp: u64) -> ! {
-    // Risolve il servizio siit.
-    let mut siit_chan = 0u64;
+    // Risolve il broker.
+    let mut broker_chan = 0u64;
     for _ in 0..200 {
-        if let Ok(c) = civis::service_lookup(civis::Service::Siit) {
+        if let Ok(c) = civis::service_lookup(civis::Service::NetBroker) {
             if c > 0 {
-                siit_chan = c as u64;
+                broker_chan = c as u64;
                 break;
             }
         }
@@ -52,96 +43,63 @@ fn real_main(_sp: u64) -> ! {
             (civis::get_ticks() + 1) as u64,
         );
     }
-    if siit_chan == 0 {
-        println!("[net4] FAIL: servizio siit non trovato");
+    if broker_chan == 0 {
+        println!("[net4] FAIL: servizio netbroker non trovato");
         finish(false);
     }
 
-    // Apre endpoint UDP ephemeral presso siit.
-    let r = match civis::send(
-        siit_chan,
-        SIIT_EP_OPEN,
-        u64::from(NET_PROTO_IPV4) << 16, // porta 0 = ephemeral
-        NET_EP_FLAG_EPHEMERAL as u64,
-    ) {
-        Ok(r) => r,
+    // Endpoint IPv4 (uscita SIIT) con porta effimera.
+    let mut ep = match BrokerEndpoint::open(broker_chan, Proto::Ipv4, Flow::Ephemeral) {
+        Ok(ep) => ep,
         Err(_) => {
-            println!("[net4] FAIL: open fallito (IPC)");
+            println!("[net4] FAIL: open IPv4 rifiutato dal broker");
             finish(false);
         }
     };
-    if r.w0 == !0u64 {
-        println!("[net4] FAIL: open rifiutato (policy)");
-        finish(false);
-    }
-    let ep_id = r.w0 as u16;
-    let ring_id = (r.w1 & 0xffff_ffff) as u32;
-    let local_port = (r.w1 >> 32) as u16;
     println!(
-        "[net4] endpoint SIIT aperto id={} porta={} ring={}",
-        ep_id, local_port, ring_id
+        "[net4] endpoint IPv4 aperto id={} porta={}",
+        ep.id(),
+        ep.local_port()
     );
 
-    // Mappa lo shm dell'endpoint.
-    let ring_base = match civis::shm_map(ring_id, 0, civis::PROT_READ | civis::PROT_WRITE) {
-        Ok(b) => b,
-        Err(_) => {
-            println!("[net4] FAIL: shm map fallito");
-            finish(false);
-        }
-    } as *mut u8;
+    // Indirizzo SIIT: 64:ff9b:: + i 4 byte dell'IPv4.
+    let mut dst = [0u8; 16];
+    dst[..6].copy_from_slice(&[0x64, 0xff, 0x9b, 0, 0, 0]);
+    dst[12..].copy_from_slice(&DST_IPV4);
 
-    // Inizializza head/tail.
-    unsafe {
-        write_volatile(ring_base.add(NET_EP_RX_RING_OFF) as *mut u32, 0);
-        write_volatile(ring_base.add(NET_EP_RX_RING_OFF + 4) as *mut u32, 0);
-        write_volatile(ring_base.add(NET_EP_TX_RING_OFF) as *mut u32, 0);
-        write_volatile(ring_base.add(NET_EP_TX_RING_OFF + 4) as *mut u32, 0);
-    }
-
-    // Scrive nello slot TX 0: payload + destinatario IPv4.
-    let payload: &[u8] = b"net4-siiit-probe";
-    let total = SLOT.total(payload.len());
-    if total > NET_EP_SLOT_SIZE {
-        println!("[net4] FAIL: payload troppo grande per lo slot");
-        finish(false);
-    }
-    let p = unsafe { ring_base.add(NET_EP_TX_RING_OFF + NET_EP_RING_HDR) };
-    let win = unsafe { core::slice::from_raw_parts_mut(p, total) };
-    if net_ep::write(win, SLOT, &DST_IPV4, DST_PORT, local_port, EV_DATA, payload).is_none() {
-        println!("[net4] FAIL: slot TX non scrivibile");
-        finish(false);
-    }
-    fence(Ordering::Release);
-    unsafe {
-        write_volatile(
-            ring_base.add(NET_EP_TX_RING_OFF + 4) as *mut u32,
-            1, // tail = 1
-        )
-    };
-
-    // Notifica siit di tradurre e inviare (slot 0).
-    let all_ok = match civis::send(siit_chan, SIIT_EP_TX, ep_id as u64, 0) {
-        Ok(r) if r.w0 == 0 => {
+    let all_ok = match ep.send(dst, DST_PORT, Event::Data, PAYLOAD) {
+        Ok(()) => {
             println!(
-                "[net4] payload IPv4 accettato da siit: PASS (dst={}.{}.{}.{}:{})",
+                "[net4] payload IPv4 accettato: PASS (dst={}.{}.{}.{}:{})",
                 DST_IPV4[0], DST_IPV4[1], DST_IPV4[2], DST_IPV4[3], DST_PORT
             );
             true
         }
-        Ok(r) => {
-            println!("[net4] FAIL: siit ha rifiutato il payload (w0={})", r.w0);
+        Err(SendError::Full) => {
+            println!("[net4] FAIL: backpressure dal broker");
             false
         }
         Err(_) => {
-            println!("[net4] FAIL: invio a siit fallito (IPC)");
+            println!("[net4] FAIL: invio rifiutato dal broker");
             false
         }
     };
 
-    // Chiude l'endpoint.
-    let _ = civis::send(siit_chan, SIIT_EP_CLOSE, ep_id as u64, 0);
+    // Destinazione **globale** (un IPv4 pubblico): il broker nega il codice
+    // non firmato senza consenso. E' la proprieta' della fase 6: la rete
+    // pubblica non e' un diritto del binario, e' una concessione dell'utente.
+    let mut public = [0u8; 16];
+    public[..6].copy_from_slice(&[0x64, 0xff, 0x9b, 0, 0, 0]);
+    public[12..].copy_from_slice(&[93, 184, 216, 34]);
+    match ep.send(public, 80, Event::Data, PAYLOAD) {
+        Err(_) => println!("[net4] destinazione globale negata all'Untrusted: PASS"),
+        Ok(()) => {
+            println!("[net4] FAIL: destinazione globale concessa senza consenso");
+            return finish(false);
+        }
+    }
 
+    ep.close();
     finish(all_ok);
 }
 
@@ -167,5 +125,3 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     let _ = civis::send(civis::CHANNEL_PARENT, civis::TEST_DONE, 0, 0);
     civis::exit(1)
 }
-
-static FUTEX: u32 = 0;

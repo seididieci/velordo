@@ -2,11 +2,17 @@
 
 ## Status
 
-**Accepted** (2026-11). Fasi 5–6. Dipende da ADR-0078 (identità) e ADR-0079
-(classi). **Fase 5 implementata** (2026-11-18): `Custos`, ruoli multipli,
-policy per identità di `net`, t69. **Fase 6** (`netbroker` + consenso
-`usr:<nome>:consent`) resta da fare. La fase 7 (consenso con prompt) resta
-**parcheggiata**: richiede il DE e la capability di sessione (S3.3(c)).
+**Accepted** (2026-11). Fasi 5–6, entrambe **implementate**. Dipende da
+ADR-0078 (identità) e ADR-0079 (classi).
+
+- **Fase 5** (2026-11-18): `Custos`, ruoli multipli, policy per identità di
+  `net`, t69.
+- **Fase 6** (2026-11-18): `netbroker` (`Service::NetBroker = 19`,
+  `SERVICE_COUNT = 20`), tetto **strutturale** per classe su `net` e `siit`,
+  consenso per immagine (`usr:consent` + `usr:<nome>:consent`), t70,
+  `consent <prog> on|off` nella shell nativa.
+- La fase 7 (prompt di consenso con dialogo, consenso one-shot) resta
+  **parcheggiata**: richiede il DE e la capability di sessione (S3.3(c)).
 
 ## Context
 
@@ -118,10 +124,29 @@ tetto è strutturale e non dipende dalla correttezza di una tabella.
 
 ### 5. Consenso: statico ora, prompt in fase 7
 
-In fase 6 il consenso è **statico per ruolo**: `Custos` consulta
-`usr:<nome>:consent`; se manca, nega e logga. Il dialogo al primo avvio
-(fase 7) richiede il DE e la sessione-capability di S3.3(c) — senza quella il
-consenso sarebbe rubabile insieme al token.
+Due dati, un solo writer (`Custos`), separati per ruolo:
+
+| Dato | Cosa dice | Chi lo scrive |
+|---|---|---|
+| `usr:consent` | tabella **autorevole** per immagine: `<hi> <lo> <decisione> [utente]` | solo Custos (`CUSTOS_CONSENT`) |
+| `usr:<nome>:consent` | **provenienza**: chi ha dato il consenso su quell'immagine | solo Custos (stessa transazione) |
+
+L'autorizzazione (`CUSTOS_AUTHORIZE`) è `policy admin ∩ consenso`:
+`sys:caps` (fase 5) non basta, `usr:consent` non basta. Assente = negato. La
+provenienza per utente permette la revoca per utente e rende la tabella
+spiegabile; l'indicizzazione per immagine è necessaria perché chi autorizza
+(il broker) conosce l'`ImageId`, non l'utente.
+
+La scrittura richiede un **token di sessione valido** (session owner o root):
+senza, chiunque (anche un figlio che eredita `VELORDO_SESSION`) si
+autoconsentirebbe e il consenso sarebbe teatro.
+
+Nella shell nativa il consenso si dà con `consent <prog> on|off`; al lancio
+di un programma senza riga la shell stampa un **avviso non bloccante** (la
+shell non sa se il programma usa la rete, e un prompt su ogni lancio
+romperebbe le esecuzioni non interattive). Il dialogo `s/n` all'avvio arriva
+con la fase 7 (DE + sessione-capability di S3.3(c)): senza quella il consenso
+sarebbe rubabile insieme al token.
 
 ## Consequences
 
@@ -147,11 +172,17 @@ consenso sarebbe rubabile insieme al token.
 ### Neutral
 
 - Nessuna syscall nuova (solo servizi e tag IPC: `CUSTOS_QUERY=0x80`,
-  `CUSTOS_GRANT=0x81`, `CUSTOS_STATUS=0x82`, `IDENTIS_WHOAMI=0x73`).
-- Il kernel resta senza policy: `Custos` è userspace.
-- Test: `t69` in `usertests` (gate `usertests 65/65`); il comportamento di
-  `net` è verificato dal run dedicato `scripts/run-net-tests.sh` (fuori dal
-  gate, `net=1`).
+  `CUSTOS_GRANT=0x81`, `CUSTOS_STATUS=0x82`, `CUSTOS_AUTHORIZE=0x83`,
+  `CUSTOS_CONSENT=0x84`, `IDENTIS_WHOAMI=0x73`,
+  `BROKER_OPEN/TX/CLOSE/STATS=0x90–0x93`). Il kernel conosce l'enum
+  `Service::NetBroker` e lo slot 19, nient'altro.
+- Il kernel resta senza policy: `Custos` e `netbroker` sono userspace.
+- Test: `t69` e `t70` in `usertests` (gate `usertests 66/66`); il
+  comportamento di `net`, `siit` e del broker è verificato dal run dedicato
+  `scripts/run-net-tests.sh` (fuori dal gate, `net=1`).
+- Debiti dichiarati: rate limit e audit del broker sono in RAM (un restart
+  del broker azzera i contatori), il consenso non ha ancora scadenza
+  (one-shot) e non c'è revoca a caldo dei grant già in cache nei client.
 
 ## Alternatives Considered
 
@@ -169,7 +200,13 @@ consenso sarebbe rubabile insieme al token.
 - ADR-0055/0058 (utenti, token, S3.3), ADR-0069 (endpoint di rete),
   ADR-0077/0078/0079
 - `userland/custos/src/main.rs`, `libs/custos-proto` (fase 5)
-- `userland/net/src/main.rs` (`can_bind` + cache, `query_custos`)
+- `userland/net/src/main.rs` (`can_bind` + cache, `query_custos`, gate di
+  classe su `NET_EP_OPEN`), `userland/siit/src/main.rs` (stesso gate su
+  `SIIT_EP_OPEN`)
+- `userland/netbroker/src/main.rs`, `libs/broker-proto`, `libs/civis/src/broker.rs`
+- `userland/custos/src/main.rs` (`AUTHORIZE`, `CONSENT`, `usr:consent`),
+  `userland/interpres/src/main.rs` (`consent <prog> on|off`),
+  `testland/usertests/src/t_consent.rs` (t70)
 - `userland/identis/src/main.rs` (ruoli, `IDENTIS_WHOAMI`, `roles_of`)
 - `userland/cardo/src/policy.rs` (`ceiling_for`, `caps_writer`)
 - `docs/src/14-cronologia-fasi.md` (voce fase 5)

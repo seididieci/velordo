@@ -129,6 +129,9 @@ seed_bin userland/build/identis-login.bin bin/identis-login.bin sys bin/identis-
 # Server di policy per identita' (ADR-0080, fase 5): servizio di sistema,
 # unico writer di `sys:caps`, supervisionato da init.
 seed_bin userland/build/custos.bin bin/custos.bin sys bin/custos.bin
+# Broker di rete (ADR-0080, fase 6): servizio di sistema che serve il codice
+# non firmato (a cui `net`/`siit` negano l'endpoint diretto).
+seed_bin userland/build/netbroker.bin bin/netbroker.bin sys bin/netbroker.bin
 # Personalita' POSIX in `/bin/posix` (D1: MOVE da /bin, solo ArcaFS).
 seed_bin flavours/posix/build/usershell.bin bin/posix/shell.bin sys bin/posix/shell.bin
 seed_bin flavours/posix/build/userposix.bin bin/posix/posix.bin sys bin/posix/posix.bin
@@ -211,14 +214,19 @@ seed_bin testland/build/identistest.bin test/idtest.bin tst test/idtest.bin
 seed_bin testland/build/netudp.bin test/netudp.bin tst test/netudp.bin
 seed_bin testland/build/net3.bin test/net3.bin tst test/net3.bin
 seed_bin testland/build/net4.bin test/net4.bin tst test/net4.bin
+# N6.1d: il probe TCP di rete reale parla con `net` in diretta -> `usr`
+# (ThirdParty, firmato); in `tst` resta la copia non firmata per ispezione.
 seed_bin testland/build/nettcp.bin test/nettcp.bin tst test/nettcp.bin
+seed_bin testland/build/nettcp.bin usr/bin/nettcp.bin usr nettcp
 seed_bin testland/build/dnsprobe.bin test/dnsprobe.bin tst test/dnsprobe.bin
 # Probe socket POSIX (N7.1, ADR-0076): oggetto in `tst` per init (net=1) e
 # path in `usr/bin` per l'uso manuale dalla shell nativa.
 seed_bin testland/build/posixsock.bin test/posixsock.bin tst test/posixsock.bin
 seed_bin testland/build/posixsock.bin usr/bin/posixsock.bin usr posixsock
 # Probe TLS 1.3 (N6.2, ADR-0072): fuori gate, eseguito solo con `tls=1`.
+# Parla con `net` in diretta: `usr` (ThirdParty, firmato), come `nettcp`.
 seed_bin testland/build/tlsprobe.bin test/tlsprobe.bin tst test/tlsprobe.bin
+seed_bin testland/build/tlsprobe.bin usr/bin/tlsprobe.bin usr tlsprobe
 seed_bin testland/build/userforeign.bin test/foreign.bin
 seed_bin flavours/posix/tests/build/userposixtests.bin test/posixtst.bin tst test/posixtst.bin
 

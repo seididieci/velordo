@@ -99,6 +99,7 @@ POLICY = {
     "netdev": 0x000,
     "net": 0x000,
     "netecho": 0x000,
+    "netbroker": 0x000,   # solo IPC/shm/vestigia: nessun accesso al FS
 }
 # Porte I/O per servizio (ADR-0079 fase 4): stessa verita' dei valori in
 # `syscall-numbers` (single source), ma espressa come **dato** del manifest.
