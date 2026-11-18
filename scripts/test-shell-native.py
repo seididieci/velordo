@@ -84,6 +84,14 @@ def main():
         out = run_cmd(sh, "users", b"Utenti registrati")
         c.check("users dopo lo spawn (ring sincronizzato)",
                 b"Utenti registrati" in out and b"root" in out)
+        # Regressione (ADR-0080 fase 6): la shell spawnata dal login senza
+        # verifica era `Untrusted`, quindi con un tetto `DEFAULT_UNKNOWN_OPS`
+        # che non include `RIGHTS_EXECUTE`: ogni programma di `usr` falliva.
+        # Un diniego ora e' tipizzato (`EXECUTE negato`), quindi qui non deve
+        # comparire ne' quello ne' un errore opaco: `users` deve funzionare.
+        c.check("nessun diniego/errore di permesso su usr",
+                b"ERRORE rights_execute" not in out
+                and b"EXECUTE negato" not in out)
 
         # Suggerimento inline (stile oh-my-zsh): digitando `us` la history
         # propone il resto di `users` (`ers`) in Slate, poi riporta il cursore

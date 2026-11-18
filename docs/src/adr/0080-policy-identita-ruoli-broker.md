@@ -184,6 +184,41 @@ sarebbe rubabile insieme al token.
   del broker azzera i contatori), il consenso non ha ancora scadenza
   (one-shot) e non c'è revoca a caldo dei grant già in cache nei client.
 
+### Bug trovato provando il sistema (fase 6, chiuso)
+
+**La shell nativa non eseguiva più nulla da `/usr/bin`** (`ERRORE
+rights_execute: Failed` su `users`, `dns-resolve`, …), anche dopo il
+consenso — il consenso governa la rete, non l'esecuzione.
+
+Cause, due sovrapposte:
+
+1. `identis-login::spawn_shell` spawnava la shell con `obj_get` +
+   `spawn_image` **senza verificare l'oggetto**. La classe di un'immagine
+   arriva al kernel dalla trust table, che cardo popola su
+   `R_RIGHTS_EXECUTE`: senza verifica la shell era `Untrusted`, quindi
+   `ceiling_for` le dava `DEFAULT_UNKNOWN_OPS` (`0x19F`), che **non**
+   include `RIGHTS_EXECUTE` (`0x1000`, nato dopo quel default). Fix: il
+   login verifica `sys:bin/interpres.bin` prima dello spawn e non parte se
+   non è eseguibile (fail-closed, come `init` — ADR-0079).
+2. Il choke point centrale di cardo rispondeva **`ERR`** (non `ERR_DENIED`)
+   a un bit di diritto mancante: il client vedeva `Error::Failed` e la
+   diagnosi era impossibile. Fix: `ERR_DENIED`, così un permesso mancante è
+   un verdetto (`EXECUTE negato`) e non un guasto.
+
+Origine della regressione: **la fase 5**, non la fase 6. Fino ad allora il
+tetto della shell era la sua riga `sys:policy` (`ALL`) anche senza verifica;
+la difesa in profondità della fase 5 («una riga `ALL` non promuove un
+`Untrusted`») l'ha declassata a `0x19F`, togliendole `EXECUTE`. È rimasto
+latente finché qualcuno non ha eseguito un programma da `/usr/bin` dopo quel
+commit.
+
+Lezione: **ogni** spawner da disco deve verificare prima di `spawn_image`
+(non solo `init`); e un diniego va tipizzato nel choke point, altrimenti
+l'errore più banale del mondo — un permesso mancante — si traveste da crash.
+Il buco di copertura: la fase `native` di `test-shell-all.sh` eseguiva
+`users` ma il test non è nel gate automatico, e nessun test verificava il
+diniego tipizzato (ora sì: 31 check, incluso il negativo).
+
 ## Alternatives Considered
 
 - **Root unico**: più semplice, ma ogni delega richiede root e il consenso

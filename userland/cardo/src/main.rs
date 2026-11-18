@@ -74,7 +74,7 @@ use civis::{
 // Sentinelle di errore FS (Fase 40): i rifiuti tipizzati viaggiano qui invece
 // del generico ERR; il client li mappa in `posix::Error`. Fase 42: ERR_EMPTY
 // (pipe vuota, riprova) + ERR_CLOSED (estremita' chiusa).
-use civis::{ERR_NOTFOUND, ERR_ISDIR, ERR_NOTDIR, ERR_EXISTS, ERR_READONLY, ERR_BUSY, ERR_INVALID, ERR_EMPTY, ERR_CLOSED, ERR_NOSPC};
+use civis::{ERR_NOTFOUND, ERR_ISDIR, ERR_NOTDIR, ERR_EXISTS, ERR_READONLY, ERR_BUSY, ERR_INVALID, ERR_EMPTY, ERR_CLOSED, ERR_NOSPC, ERR_DENIED};
 // Tag DEV_* op + device types (DocsD: single source in `syscall-numbers`).
 use civis::{
     DEV_CLOSE, DEV_CONSOLE, DEV_KBD, DEV_KEYBOARD, DEV_NULL, DEV_OPEN, DEV_READ,

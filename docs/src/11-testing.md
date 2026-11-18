@@ -234,7 +234,7 @@ read-write si corromperebbero):
 | File | Fase | Check |
 |------|------|-------|
 | `test-shell-base.py` | 9.4/18/19/20 (ls/cat/mkdir, backspace, builtin, cd/pwd, ls -l, kill, ps, rm/cp/mv, FAT scrivibile, clear) + guardia CPU al prompt (ADR-0067) | 29 |
-| `test-shell-native.py` | S3.2b-4/ADR-0064 + ADR-0065 (shell nativa: `BIN_LIST` → oggetto piatto `usr` → EXECUTE → spawn con argv → exit, ring sincronizzato, comando ignoto; interprete: variabili, aritmetica, if/while/for, commenti, `dump`/`type`; prompt una volta per riga, hint inline, Up) + guardia CPU al prompt `create-user` (ADR-0067) | 30 |
+| `test-shell-native.py` | S3.2b-4/ADR-0064 + ADR-0065 (shell nativa: `BIN_LIST` → oggetto piatto `usr` → EXECUTE → spawn con argv → exit, ring sincronizzato, comando ignoto; interprete: variabili, aritmetica, if/while/for, commenti, `dump`/`type`; prompt una volta per riga, hint inline, Up) + nessun diniego/errore di permesso su `usr` (la shell spawnata dal login è verificata: ADR-0080 fase 6) + guardia CPU al prompt `create-user` (ADR-0067) | 31 |
 | `test-shell-run.py` | 37.2 (run fg/bg, argv, exit-code, jobs/wait) | 8 |
 | `test-shell-redirect.py` | 40.4 (`> >> < 2> 2>&1` + run redirectato) | 20 |
 | `test-shell-41.py` | 41 (quoting/escape, `$VAR/$?/~/$$`, `; && \|\|`, commenti, glob) | 37 |
@@ -246,7 +246,7 @@ read-write si corromperebbero):
 | `test-shell-44b.py` | 44b (Ctrl-C → 130 su fg non cooperante, selettivita', cleanup) | 5 |
 | `foreign.bin`     | t57: attore "ignoto" fuori tabella policy — default fail-closed   | — |
 
-La fase `native` e' **30/30 verde**. Le 10 fasi POSIX (179 check) restano la
+La fase `native` e' **31/31 verde**. Le 10 fasi POSIX (179 check) restano la
 specifica eseguibile del parser/redirect/pipe POSIX: non sono nel gate di boot
 (il login nativo non le lancia da solo), ma `test-shell-all.sh` le guida via
 `boot()` digitando `usershell` al prompt nativo. `base` e `native` includono

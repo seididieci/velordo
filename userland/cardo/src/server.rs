@@ -695,8 +695,13 @@ fn real_main(_sp: u64) -> ! {
         if let Some(bit) = rights::op_bit(op_tag) {
             if rights::rights_ops(&rights, chan) & ceiling & bit == 0 {
                 rings::req_ring_consume(20 + expect);
-                rings::resp_ring_write(ERR, 0, &[]);
-                let _ = civis::reply(0, ERR, 0);
+                // Diniego **tipizzato** (`ERR_DENIED`, non `ERR`): un permesso
+                // mancante e' un verdetto, non un guasto interno. Con `ERR` il
+                // client vedeva `Error::Failed` ("errore") e la diagnosi era
+                // impossibile: la shell non verificata riportava "ERRORE
+                // rights_execute: Failed" invece di "EXECUTE negato".
+                rings::resp_ring_write(ERR_DENIED, 0, &[]);
+                let _ = civis::reply(0, ERR_DENIED, 0);
                 continue;
             }
         }

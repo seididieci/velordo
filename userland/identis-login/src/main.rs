@@ -173,7 +173,31 @@ const MAX_ATTEMPTS: u32 = 3;
 /// Passa le variabili d'ambiente `VELORDO_SESSION` (token hex) e
 /// `VELORDO_USER` (nome utente): servono alla shell per il prompt con
 /// glifi Nerd Font.
+///
+/// **Verifica prima dello spawn** (ADR-0078/0079, come `init`): la classe di
+/// un'immagine arriva al kernel dalla trust table, che cardo popola quando
+/// qualcuno **verifica** l'oggetto (`R_RIGHTS_EXECUTE`). Senza questa
+/// chiamata il login spawnava la shell come `Untrusted`: `ceiling_for` le
+/// dava `DEFAULT_UNKNOWN_OPS` (che non include `RIGHTS_EXECUTE`) e ogni
+/// esecuzione di un programma da `/usr/bin` falliva con un `ERR` opaco.
+/// Fail-closed: se l'oggetto non e' eseguibile la shell non parte e il
+/// motivo e' scritto sul terminale.
 fn spawn_shell() {
+    match civis::fs::rights::rights_execute_verdict(b"sys", b"bin/interpres.bin") {
+        Ok((true, _class)) => {}
+        Ok((false, _)) => {
+            console_write(b"[login] shell nativa non eseguibile (firma assente o negata)\n");
+            return;
+        }
+        Err(e) => {
+            console_write(b"[login] verifica shell fallita: ");
+            let msg = format!("{:?}", e);
+            console_write(msg.as_bytes());
+            console_write(b"\n");
+            return;
+        }
+    }
+
     let img = match civis::obj_get(b"sys", b"bin/interpres.bin") {
         Ok(v) if !v.is_empty() => v,
         _ => {

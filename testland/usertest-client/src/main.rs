@@ -666,8 +666,10 @@ fn run_dupsibclaim(nonce: u64) -> (bool, usize) {
 }
 
 /// Fase 40 (t54): droppa RIGHTS_SEEK sul proprio canale (solo shrink, resto
-/// intatto) e verifica che lseek venga rifiutato con Failed (il choke
-/// centrale risponde ERR generico). Ritorna (ok, detail).
+/// intatto) e verifica che lseek venga rifiutato con **`Denied`**: il choke
+/// centrale di cardo tipizza i dinieghi per bit mancante (`ERR_DENIED`), cosi'
+/// un permesso negato non si confonde con un guasto interno (`ERR`). Ritorna
+/// (ok, detail).
 fn run_seekdeny() -> (bool, usize) {
     let fd = match civis::open("/t54seek.txt", civis::OPEN_CREATE) {
         Ok(f) => f,
@@ -679,7 +681,7 @@ fn run_seekdeny() -> (bool, usize) {
     let r = civis::lseek(fd, 0, civis::SEEK_START);
     let _ = civis::close(fd);
     match r {
-        Err(civis::Error::Failed) => (true, 0),
+        Err(civis::Error::Denied) => (true, 0),
         _ => (false, 2),
     }
 }

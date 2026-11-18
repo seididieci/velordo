@@ -4003,3 +4003,24 @@
       azzera i contatori), consenso senza scadenza (one-shot = fase 7), revoca
       non propagata alle cache già decise, prompt `s/n` al lancio rinviato
       (DE + S3.3(c)).
+      **Bug trovato provando il sistema (chiuso in questa fase)**: la shell
+      nativa non eseguiva più nulla da `/usr/bin` (`ERRORE rights_execute:
+      Failed`), e il consenso non c'entrava. Due cause sovrapposte: (1)
+      `identis-login::spawn_shell` spawnava la shell senza verificarla, quindi
+      era `Untrusted` e il suo tetto (`DEFAULT_UNKNOWN_OPS`) non include
+      `RIGHTS_EXECUTE` — la classe al kernel arriva dalla trust table, che
+      cardo popola **solo** quando qualcuno verifica; (2) il choke point di
+      cardo rispondeva `ERR` invece di `ERR_DENIED` a un bit mancante, e il
+      client lo riportava come `Failed` (uno spaventapasseri: sembrava un
+      guasto). Fix: il login verifica `sys:bin/interpres.bin` prima dello
+      spawn (fail-closed, come `init`) e il diniego per ops è tipizzato.
+      Copertura: la fase `native` di `test-shell-all.sh` ora controlla anche
+      che non compaia un diniego/errore di permesso su `usr` (passa:
+      `runhello` e `users` eseguibili).
+      **L'origine e' la fase 5, non la fase 6**: prima della difesa in
+      profondita' («una riga `ALL` non promuove un `Untrusted`») il tetto
+      della shell era la riga `sys:policy` = `ALL` anche senza verifica; da
+      li' in poi la shell non verificata ha perso `RIGHTS_EXECUTE` e il
+      difetto e' rimasto latente (`spawn_shell` non ha **mai** verificato,
+      dalla nascita in ADR-0058). Lezione: ogni spawner da disco deve
+      verificare prima di `spawn_image`, non solo `init`.

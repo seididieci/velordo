@@ -33,7 +33,7 @@ Due tabelle generate con lo stesso pattern del manifest (Fase 36):
   - hash noto al manifest → mask della riga.
   - hash noto ai test → ALL.
   - ignoto → `DEFAULT_UNKNOWN_OPS = 0x19F` (niente MOUNT/UMOUNT/GRANT/PIPE).
-- Nel choke point: `drop_mask & ceiling & bit == 0` → ERR. La policy non allarga mai: DROP resta irrevocabile, GET riporta il tetto.
+- Nel choke point: `drop_mask & ceiling & bit == 0` → `ERR_DENIED` (un permesso mancante è un verdetto, non un guasto: con `ERR` il client vedeva `Error::Failed` e la causa era indistinguibile da un errore interno — corretto in ADR-0080 fase 6). La policy non allarga mai: DROP resta irrevocabile, GET riporta il tetto.
 - Carve-out: init-child (parent==1, difesa in profondita'), slot Test aperto.
 
 ### 45.3 — Test
