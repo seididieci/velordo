@@ -104,6 +104,18 @@ impl Endpoint {
     }
 }
 
+/// Voci della cache delle decisioni di bind (identita'+porta).
+const BIND_CACHE_MAX: usize = 16;
+
+/// Una decisione di bind in cache.
+#[derive(Clone, Copy)]
+pub struct BindCache {
+    id_lo: u64,
+    id_hi: u64,
+    port: u16,
+    allowed: bool,
+}
+
 /// Stato del servizio.
 pub struct NetService {
     pub net: Net,
@@ -112,7 +124,16 @@ pub struct NetService {
     pub endpoints: [Endpoint; MAX_ENDPOINTS],
     pub next_ep_id: u16,
     pub ephemeral_port: u16,
-    pub policy_allow_wk: bool,     // consente bind porte ben note (config)
+    /// Canale verso Custos (ADR-0080, fase 5), risolto lazy al primo bind
+    /// di porta nota; 0 = non ancora risolto.
+    pub custos_chan: u64,
+    /// Cache delle decisioni per `(identita', porta)`: il servizio e'
+    /// single-threaded e la query e' sincrona, quindi la cache evita un
+    /// round trip IPC per ogni apertura ripetuta. Vive sull'heap (Vec) e non
+    /// nella struct: `NetService` viene costruito prima del `Box` e ogni
+    /// byte in piu' sulla struct e' un byte sullo stack da 16 KiB (il
+    /// servizio e' gia' al limite con la tabella TCP).
+    pub bind_cache: Vec<BindCache>,
     /// Buffer di drain TCP (heap: 2 KiB sullo stack di un servizio da 16 KiB
     /// non ci stanno).
     tcp_rx: alloc::vec::Vec<u8>,
@@ -134,7 +155,8 @@ impl NetService {
             endpoints: [Endpoint::free(); MAX_ENDPOINTS],
             next_ep_id: 1,
             ephemeral_port: 49152,
-            policy_allow_wk: false,
+            custos_chan: 0,
+            bind_cache: Vec::new(),
             tcp_rx: alloc::vec![0u8; NET_EP_SLOT_SIZE - 2 - 23],
         }
     }
@@ -316,33 +338,77 @@ impl NetService {
         };
     }
 
-    /// Carica la policy da `sys:net.conf`.
-    pub fn load_policy(&mut self) {
-        let Ok(data) = civis::obj_get(b"sys", b"net.conf") else {
-            return;
-        };
-        let txt = core::str::from_utf8(&data).unwrap_or("");
-        for line in txt.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let parts: Vec<&str> = line.splitn(2, ':').collect();
-            if parts.len() != 2 {
-                continue;
-            }
-            let _hash = u64::from_str_radix(parts[0], 16).unwrap_or(0);
-            let _port: u16 = parts[1].parse().unwrap_or(0);
-            self.policy_allow_wk = true;
-        }
-    }
-
-    /// Verifica se un peer può bindare `port`.
-    pub fn can_bind(&self, _peer_id: civis::ImageId, port: u16) -> bool {
+    /// Decisione di bind per `(identita', porta)`, da Custos (ADR-0080).
+    ///
+    /// Le porte effimere (>= 49152) sono sempre libere: sono assegnate dal
+    /// servizio e non hanno un significato privilegiato. Per le porte note
+    /// la decisione e' per **immagine** (`ImageId`), non per utente, e si
+    /// chiede a Custos una volta sola (poi in cache). Fail-closed: Custos
+    /// assente o muto = negato.
+    pub fn can_bind(&mut self, peer_id: civis::ImageId, port: u16) -> bool {
         if port >= 49152 {
             return true;
         }
-        self.policy_allow_wk
+        if let Some(idx) = self.bind_cache_lookup(peer_id, port) {
+            return self.bind_cache[idx].allowed;
+        }
+        let allowed = self.query_custos(peer_id, port);
+        self.bind_cache_store(peer_id, port, allowed);
+        allowed
+    }
+
+    /// Lookup della cache: `Some(indice)` se la decisione e' gia' nota.
+    fn bind_cache_lookup(&self, id: civis::ImageId, port: u16) -> Option<usize> {
+        self.bind_cache
+            .iter()
+            .position(|e| e.id_lo == id.lo && e.id_hi == id.hi && e.port == port)
+    }
+
+    /// Scrive la decisione nella cache (aggiorna la voce o la accoda fino al
+    /// tetto; oltre, la decisione resta valida ma non viene ricordata).
+    fn bind_cache_store(&mut self, id: civis::ImageId, port: u16, allowed: bool) {
+        if let Some(i) = self.bind_cache_lookup(id, port) {
+            self.bind_cache[i].allowed = allowed;
+            return;
+        }
+        if self.bind_cache.len() < BIND_CACHE_MAX {
+            self.bind_cache.push(BindCache {
+                id_lo: id.lo,
+                id_hi: id.hi,
+                port,
+                allowed,
+            });
+        }
+    }
+
+    /// Chiede a Custos se `peer_id` puo' bindare `port`. Risolve il canale
+    /// lazy (il servizio parte prima di Custos in alcuni boot).
+    fn query_custos(&mut self, peer_id: civis::ImageId, port: u16) -> bool {
+        if self.custos_chan == 0 {
+            for _ in 0..100 {
+                if let Ok(c) = civis::service_lookup(civis::Service::Custos) {
+                    if c > 0 {
+                        self.custos_chan = c as u64;
+                        break;
+                    }
+                }
+                let _ = civis::futex_wait(
+                    &FUTEX as *const u32 as usize,
+                    0,
+                    (civis::get_ticks() + 1) as u64,
+                );
+            }
+        }
+        if self.custos_chan == 0 {
+            return false;
+        }
+        custos_proto::query(
+            self.custos_chan,
+            peer_id.lo,
+            peer_id.hi,
+            custos_proto::CAP_NET_BIND,
+            port as u64,
+        )
     }
 }
 
@@ -618,7 +684,6 @@ fn real_main(_sp: u64) -> ! {
     // troppo grande per lo stack user da 16 KiB (stack overflow = #PF sulla
     // guardia, e `net` ripartiva in loop).
     let mut svc = alloc::boxed::Box::new(NetService::new());
-    svc.load_policy();
 
     // Risolve il driver.
     let mut driver = 0u64;

@@ -415,12 +415,20 @@ pub fn ceiling_for(chan: u64) -> u32 {    // (1) init: TCB pid 1, fuori manifest
         return civis::RIGHTS_ALL;
     }
     // (2+3) identita' nota: cerca prima nei servizi, poi nei test.
-    if let Ok(id) = civis::peer_info(chan) {
+    if let Ok((id, class)) = civis::peer_info_class(chan) {
         unsafe {
             let n = *core::ptr::addr_of!(SERVICE_N);
             for i in 0..n {
                 let (pid, mask) = *core::ptr::addr_of!(SERVICE_POLICY[i]);
                 if pid == id {
+                    // Difesa in profondita' (ADR-0080, fase 5): una riga di
+                    // policy NON promuove un'immagine non firmata a
+                    // `RIGHTS_ALL`. I binari della suite restano ALL perche'
+                    // vivono in `sys:test-policy` (build, non runtime): qui
+                    // parliamo della tabella dei servizi.
+                    if mask == civis::RIGHTS_ALL && class != civis::ImageClass::System {
+                        return DEFAULT_UNKNOWN_OPS;
+                    }
                     return mask;
                 }
             }
@@ -476,7 +484,11 @@ pub fn classify(chan: u64) -> Trust {
     if pid == 1 {
         return Trust::Init;
     }
-    for svc in [civis::Service::Identis, civis::Service::Vestigia] {
+    for svc in [
+        civis::Service::Identis,
+        civis::Service::Vestigia,
+        civis::Service::Custos,
+    ] {
         if civis::service_pid(svc).ok() == Some(pid) {
             return Trust::Owner(svc);
         }
@@ -521,6 +533,15 @@ pub fn protected_path(path: &str) -> Option<civis::Service> {
     None
 }
 
+/// Writer di `sys:caps` (ADR-0080, fase 5): **solo** Custos o init.
+///
+/// Non passa da `allowed()`: un ceiling `RIGHTS_ALL` non basta (la suite lo
+/// ha per costruzione, e `sys:caps` decide chi puo' bindare). La capability
+/// di scrittura e' dell'owner del dato, non del tetto ops.
+fn caps_writer(trust: Trust) -> bool {
+    matches!(trust, Trust::Init | Trust::Owner(civis::Service::Custos))
+}
+
 /// Il peer puo' scrivere un target protetto di proprieta' `owner`?
 fn allowed(owner: civis::Service, ceiling: u32, trust: Trust) -> bool {
     if ceiling == civis::RIGHTS_ALL || trust == Trust::Init {
@@ -561,10 +582,15 @@ pub fn write_allowed(
 
     // API oggetti: il bucket e' nel prefisso `bucket\0key\0`.
     if matches!(op_tag, civis::R_OBJ_PUT | civis::R_OBJ_DELETE) {
-        let bucket = match arcafs::wire::parse_obj_prefix(payload) {
-            Some((b, _, _)) => b,
+        let (bucket, key) = match arcafs::wire::parse_obj_prefix(payload) {
+            Some((b, k, _)) => (b, k),
             None => return true, // malformato: lo rifiuta l'handler
         };
+        // `sys:caps` (ADR-0080, fase 5): policy di capability, writer
+        // unico Custos. Vale anche con ceiling ALL (vedi `caps_writer`).
+        if bucket == b"sys" && key == b"caps" {
+            return caps_writer(trust);
+        }
         return match protected_bucket(bucket) {
             Some(owner) => allowed(owner, ceiling, trust),
             None => true,
@@ -574,10 +600,15 @@ pub fn write_allowed(
     // Scrittura su un fd gia' aperto: il target e' il path dell'fd.
     if op_tag == civis::R_WRITE {
         return match ftable.get(chan, w0 as u32) {
-            Some((path, _, _, _)) => match protected_path(path) {
-                Some(owner) => allowed(owner, ceiling, trust),
-                None => true,
-            },
+            Some((path, _, _, _)) => {
+                if rights::normalize_sub_view(path) == "sys:caps" {
+                    return caps_writer(trust);
+                }
+                match protected_path(path) {
+                    Some(owner) => allowed(owner, ceiling, trust),
+                    None => true,
+                }
+            }
             // Pipe, fd remoto (gia' servito prima) o fd ignoto: non e' un
             // path del namespace, nessun bucket da proteggere.
             None => true,
@@ -608,6 +639,12 @@ pub fn write_allowed(
     for part in text.split('\0') {
         let p = part.trim_end_matches('\0');
         if p.is_empty() {
+            continue;
+        }
+        if rights::normalize_sub_view(p) == "sys:caps" {
+            if !caps_writer(trust) {
+                return false;
+            }
             continue;
         }
         if let Some(owner) = protected_path(p) {

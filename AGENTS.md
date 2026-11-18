@@ -108,8 +108,10 @@ velordo/
 ├── libs/
 │   ├── civis/          # meccanismo di sistema condiviso (ex libr): sys/ipc/heap/
 │   │                   #   fs/spawn/print/args/net + hook `persona` (ADR-0041)
+│   ├── identis-proto/  # protocollo IPC di Identis (ruoli, WHOAMI)
 │   ├── net/            # core rete puro (Ethernet/IPv6/NDP/TCP/SIIT/DNS)
 │   ├── net-ep/         # formato degli slot dei ring endpoint (N7.0, ADR-0074)
+│   ├── custos-proto/   # protocollo IPC di Custos (ADR-0080 fase 5)
 │   ├── sig/            # firma Ed25519 delle immagini (ADR-0078 fase 2)
 │   ├── tls/ tls-net/   # TLS 1.3 puro + newtype `TcpStream` (N6.2/N6.3)
 │   └── vela/           # codice driver condiviso (hub/block/input/gpu)
@@ -136,8 +138,9 @@ velordo/
 ├── run.sh              # build userland + testland + kernel + QEMU (PVH)
 ├── userland/           # servizi NATIVI: init, block, cardo, gpu, kbd, vela,
 │   │                   #   porta, vestigia, time, uptime, console (console
-│   │                   #   server D3); tools/arca (nativo, linka `libr`
-│   │                   #   solo per l'entry/redirect)
+│   │                   #   server D3), custos (policy per identita', ADR-0080);
+│   │                   #   tools/arca (nativo, linka `libr` solo per
+│   │                   #   l'entry/redirect)
 │   └── build/          # output .bin dei servizi nativi
 ├── libs/term/          # terminale (D3, ADR-0060): protocollo display (`disp`)
 │                       #   + modello a celle/UTF-8/font TTF rasterizzato/
@@ -166,7 +169,7 @@ velordo/
 
 ## Stato corrente
 
-Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 64/64` + `[threadtest] PASS 12/12` + shell nativa (fase `native` di `test-shell-all.sh`; le fasi POSIX sono storiche dal login nativo, ADR-0062), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
+Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 65/65` + `[threadtest] PASS 12/12` + shell nativa (fase `native` di `test-shell-all.sh`; le fasi POSIX sono storiche dal login nativo, ADR-0062), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
 - **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
   BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
@@ -259,8 +262,9 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   (0x8B)** di `net` (selettore link-local/global/router, 16 byte in due
   parole)).
   Kernel:
-  `Service::Net=14`/`NetDev=15`/`Siit=16`/`Dns=17`, `MSI_VECTOR_NET=0x51`,
-  finestra MMIO per servizio, grant DMA per NetDev, `SERVICE_COUNT=18`.
+  `Service::Net=14`/`NetDev=15`/`Siit=16`/`Dns=17`/`Custos=18`,
+  `MSI_VECTOR_NET=0x51`, finestra MMIO per servizio, grant DMA per NetDev,
+  `SERVICE_COUNT=19`.
   I servizi partono solo con `net=1` in cmdline (run dedicato, fuori dal
   gate). Test: `./scripts/run-net-tests.sh` (passt, IPv6 reale): SLAAC +
   **echo reply** (N1), `[netudp] risultato: PASS` (N2: endpoint ephemeral →
@@ -489,7 +493,14 @@ Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
   firma Ed25519, verifica in cardo), ADR-0079 (fasi 3–4 fatte: classi
   System/ThirdParty/Untrusted nel PCB via `SYS_TRUST_IMAGE`, porte I/O dal
   manifest, gate strutturali, `SYS_SPAWN` solo init, t67/t68), ADR-0080
-  (`Custos`, ruoli, broker di rete).
+  (fase 5 fatta: `Custos` = `Service::Custos = 18`, unico writer di
+  **`sys:caps`** — deviazione dichiarata da `sys:policy`, che resta la
+  tabella ops di cardo; cardo legge `sys:caps` direttamente con il carve-out
+  `caps_writer` = solo Custos/init **anche con `RIGHTS_ALL`**; ruoli multipli
+  `nome:hash:ruolo[,ruolo...]` + `IDENTIS_WHOAMI` live; `net` fa bind delle
+  porte note via `CUSTOS_QUERY` con cache per (identità, porta) e
+  fail-closed; t69, `usertests 65/65`). Fase 6 (`netbroker` + consenso
+  `usr:<nome>:consent`) da fare.
 - **IPC reply implicita**: la reply del server va al peer del canale del
   messaggio correntemente elaborato (fissato da `recv` in `reply_chan`), non
   all'ultimo `send`. Piu' client concorrenti su un server sono quindi
@@ -654,12 +665,12 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 64/64
+#   [usertests] PASS 65/65
 #   [threadtest] PASS 12/12
 # KVM=1 accelera (-enable-kvm -cpu host, opt-in; senza /dev/kvm resta TCG).
 # Il timeout chiude il boot al prompt del login: il contratto sono le PASS.
 timeout 300 ./run-tests.sh > /tmp/boot.log
-rg '\[testfs\] PASS 5/5|\[testsarca\] PASS 64/64|\[posixtests\] PASS 4/4|\[identistest\] PASS 11/11|\[usertests\] PASS 64/64|\[threadtest\] PASS 12/12' /tmp/boot.log
+rg '\[testfs\] PASS 5/5|\[testsarca\] PASS 64/64|\[posixtests\] PASS 4/4|\[identistest\] PASS 11/11|\[usertests\] PASS 65/65|\[threadtest\] PASS 12/12' /tmp/boot.log
 test "$(rg -c 'FAIL|PANIC|#.* FAULT' /tmp/boot.log)" = "0"
 ```
 

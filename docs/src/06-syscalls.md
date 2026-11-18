@@ -355,9 +355,24 @@ kernel resta fuori dal percorso dati. Chi scrive un client usa
 il lato client di `dns` usano il codec (`net_ep::Layout::IPV4`) ma tengono i
 propri tag.
 
-Servizi: `Service::Net = 14`, `NetDev = 15`, `Siit = 16`, `Dns = 17`
-(`SERVICE_COUNT = 18`). Partono solo con `net=1` in cmdline. Dettagli e
-traiettoria in [ADR-0069](./adr/0069-stack-rete-ipv6-capability.md).
+Servizi: `Service::Net = 14`, `NetDev = 15`, `Siit = 16`, `Dns = 17`.
+Partono solo con `net=1` in cmdline. Dettagli e traiettoria in
+[ADR-0069](./adr/0069-stack-rete-ipv6-capability.md).
+
+**Policy per identità (ADR-0080, fase 5)**: `Service::Custos = 18` (totale
+`SERVICE_COUNT = 19`). Il server di policy espone tre tag (payload chunked in
+`libs/custos-proto`, nessuna syscall nuova):
+
+| Tag | Nome | Semantica |
+|-----|------|-----------|
+| 0x73 | `IDENTIS_WHOAMI` | `w1` = token → `w0` = codice, `w1` = maschera ruoli **live** |
+| 0x80 | `CUSTOS_QUERY` | identità + capability → `w0` = OK, `w1` = `1/0` |
+| 0x81 | `CUSTOS_GRANT` | token + identità + capability + decisione → `w0` = codice |
+| 0x82 | `CUSTOS_STATUS` | diagnostica → `w1` = numero di voci in `sys:caps` |
+
+`net` usa `CUSTOS_QUERY` per il bind delle porte note (cache per identità +
+porta, fail-closed: errore IPC = negato). `Custos` è l'unico writer di
+`sys:caps`; cardo lo legge direttamente (niente IPC di policy nel loop FS).
 
 ### I/O
 

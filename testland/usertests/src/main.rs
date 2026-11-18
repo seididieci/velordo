@@ -29,6 +29,7 @@ use civis::println;
 mod helpers;
 mod t_async;
 mod t_basic;
+mod t_custos;
 mod t_display;
 mod t_fs;
 mod t_ipc_sched;
@@ -113,6 +114,7 @@ fn real_main(_sp: u64) -> ! {
     helpers::report(&mut total, &mut ok, "t66 firma immagini + classi", t_sig::t_signature());
     helpers::report(&mut total, &mut ok, "t67 classe nel PCB (kernel)", t_sig::t_image_class());
     helpers::report(&mut total, &mut ok, "t68 porte I/O dal manifest", t_sig::t_io_ranges());
+    helpers::report(&mut total, &mut ok, "t69 Custos: ruoli e capability", t_custos::t_custos());
     // t34 per ULTIMO: i drop sono irrevocabili sul canale di usertests.
     helpers::report(&mut total, &mut ok, "t34 diritti per-canale lato server", t_fs::t_rights());
 

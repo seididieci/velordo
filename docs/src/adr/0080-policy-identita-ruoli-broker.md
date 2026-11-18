@@ -3,8 +3,10 @@
 ## Status
 
 **Accepted** (2026-11). Fasi 5–6. Dipende da ADR-0078 (identità) e ADR-0079
-(classi). La fase 7 (consenso con prompt) resta **parcheggiata**: richiede il
-DE e la capability di sessione (S3.3(c)).
+(classi). **Fase 5 implementata** (2026-11-18): `Custos`, ruoli multipli,
+policy per identità di `net`, t69. **Fase 6** (`netbroker` + consenso
+`usr:<nome>:consent`) resta da fare. La fase 7 (consenso con prompt) resta
+**parcheggiata**: richiede il DE e la capability di sessione (S3.3(c)).
 
 ## Context
 
@@ -28,13 +30,39 @@ Oggi:
 
 Nuovo servizio nativo (`Service::Custos = 18`, `SERVICE_COUNT` 19):
 
-- possiede `sys:policy` (policy amministrativa, firmata) e
+- possiede `sys:caps` (policy amministrativa delle capability; **dato
+  seedato a build-time**, unico writer runtime `Custos`) e, in fase 6,
   `usr:<nome>:consent` (decisioni per utente);
 - espone `CUSTOS_QUERY(identity, capability) → granted` e
   `CUSTOS_GRANT(identity, capability, decisione)`;
 - il grant effettivo è
   `manifest ∩ policy admin ∩ consenso dell'utente`;
 - **fail-closed**: policy assente o illeggibile → nega.
+
+**Deviazione dichiarata (fase 5): un dato separato, `sys:caps`.** Il testo
+originale diceva `sys:policy`; realizzarlo così avrebbe costretto cardo a
+rileggere la policy a ogni handshake o a chiamare `Custos` mentre applica
+un handshake — con un ciclo cardo↔Custos e un deadlock possibile durante un
+restart. Le due domande restano separate:
+
+| Dato | Domanda | Writer runtime |
+|---|---|---|
+| `sys:policy` / `sys:test-policy` | quali **op FS** per immagine (cardo) | init (seed di build) |
+| `sys:caps` | quali **capability** (rete, hardware) per immagine | solo `Custos` |
+
+Formato di `sys:caps` (una riga per voce, l'ultima vince):
+
+```text
+<hi:016x> <lo:016x> <kind> <arg> <decisione>
+```
+
+`hi`/`lo` sono le due metà dell'`ImageId`; `decisione` è `1` (concesso) o
+`0` (revocato). Capability: `CAP_NET_BIND=1` (`arg` = porta locale),
+`CAP_NET_USE=2`, `CAP_HW_MMIO=3`, `CAP_HW_DMA=4` (le ultime tre dichiarative
+in fase 5). Il seed di build concede a `netecho` le porte 7/8 e a `siit` la
+30000 (`scripts/gen-service-hashes.sh`); tutte le altre identità partono
+senza grant. `Custos` persiste **prima** su FS e poi muta la RAM: un errore
+di scrittura non lascia stato divergente.
 
 `Custos` è TCB di policy: piccolo, single-thread, nessuna allocazione non
 controllata.
@@ -50,17 +78,31 @@ Ruoli con capability set:
 | `hw-admin` | hardware (DMA/MMIO — ma la classe `System` resta strutturale) |
 | `user` | solo risorse della propria sessione (home, rete via broker con consenso) |
 
-`IDENTIS_ADD_USER` accetta il ruolo; la sessione porta il ruolo (non solo
-"root sì/no"). Regola anti *confused deputy*: un utente può concedere solo
-`min(richiesta, autorità del proprio ruolo, policy admin)`.
+`IDENTIS_ADD_USER` accetta una lista di ruoli (`nome:hash:ruolo[,ruolo...]`),
+retrocompatibile con la riga a due campi (→ `user`). La **sessione porta solo
+l'identità**: i ruoli si risolvono **live** dal bucket (nuovo
+`IDENTIS_WHOAMI`), quindi cambiarli non richiede un nuovo login. Regola anti
+*confused deputy*: un utente può concedere solo
+`min(richiesta, autorità del proprio ruolo, policy admin)` — root concede
+tutto, un `net-admin`/`hw-admin` concede solo i ruoli che possiede (più
+`user`), un `user` non concede nulla. Lo stesso criterio vale per
+`CUSTOS_GRANT`: `NET_*` richiede `net-admin`, `HW_*` richiede `hw-admin`,
+root copre tutto.
 
 ### 3. Policy per identità, non per hash
 
 - cardo: `ceiling_for` usa l'identità (`peer_info` a 128 bit + classe) e la
-  riga di `sys:policy`;
+  riga di `sys:policy`; in difesa in profondità una riga `RIGHTS_ALL` della
+  tabella **servizi** non promuove a ALL un'immagine non `System` (i binari
+  della suite restano ALL perché vivono in `sys:test-policy`, che è build);
 - `net`: `can_bind(identity, port)` consulta `Custos`; lo stub
-  `policy_allow_wk` sparisce. Le porte ben note richiedono un grant esplicito
-  per identità.
+  `policy_allow_wk` è sparito. Le porte effimere (≥ 49152) restano sempre
+  libere; le porte ben note richiedono un grant esplicito per identità. La
+  decisione è in cache per `(identità, porta)` (il servizio è
+  single-threaded); `Full`/errore IPC = negato.
+- cardo legge `sys:caps` **direttamente**, senza chiamare `Custos`:
+  un'eccezione motivata dal deadlock cardo↔Custos (cardo è single-threaded e
+  non può bloccarsi in IPC mentre serve un handshake).
 
 ### 4. Broker di rete per il codice non firmato
 
@@ -104,8 +146,12 @@ consenso sarebbe rubabile insieme al token.
 
 ### Neutral
 
-- Nessuna syscall nuova (solo servizi e tag IPC).
+- Nessuna syscall nuova (solo servizi e tag IPC: `CUSTOS_QUERY=0x80`,
+  `CUSTOS_GRANT=0x81`, `CUSTOS_STATUS=0x82`, `IDENTIS_WHOAMI=0x73`).
 - Il kernel resta senza policy: `Custos` è userspace.
+- Test: `t69` in `usertests` (gate `usertests 65/65`); il comportamento di
+  `net` è verificato dal run dedicato `scripts/run-net-tests.sh` (fuori dal
+  gate, `net=1`).
 
 ## Alternatives Considered
 
@@ -122,6 +168,8 @@ consenso sarebbe rubabile insieme al token.
 
 - ADR-0055/0058 (utenti, token, S3.3), ADR-0069 (endpoint di rete),
   ADR-0077/0078/0079
-- `userland/net/src/main.rs` (`load_policy`, `can_bind` — stub da sostituire)
-- `userland/identis/src/main.rs` (utenti, sessione)
-- `userland/cardo/src/policy.rs` (`ceiling_for`)
+- `userland/custos/src/main.rs`, `libs/custos-proto` (fase 5)
+- `userland/net/src/main.rs` (`can_bind` + cache, `query_custos`)
+- `userland/identis/src/main.rs` (ruoli, `IDENTIS_WHOAMI`, `roles_of`)
+- `userland/cardo/src/policy.rs` (`ceiling_for`, `caps_writer`)
+- `docs/src/14-cronologia-fasi.md` (voce fase 5)

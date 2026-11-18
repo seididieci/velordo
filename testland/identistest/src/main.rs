@@ -86,7 +86,7 @@ fn real_main(_sp: u64) -> ! {
 
     // t4: creazione utente SENZA token -> rifiutata.
     let hash = blake2s(NEW_PWD.as_bytes());
-    let payload = proto::build_add_user(0, NEW_USER, &hash);
+    let payload = proto::build_add_user(0, NEW_USER, &hash, proto::ROLE_USER);
     let r = proto::send_payload_retry(chan, civis::IDENTIS_ADD_USER, &payload, RETRIES);
     all_ok &= check(
         4,
@@ -95,12 +95,12 @@ fn real_main(_sp: u64) -> ! {
     );
 
     // t5: creazione utente con token valido -> OK.
-    let payload = proto::build_add_user(token, NEW_USER, &hash);
+    let payload = proto::build_add_user(token, NEW_USER, &hash, proto::ROLE_USER);
     let r = proto::send_payload_retry(chan, civis::IDENTIS_ADD_USER, &payload, RETRIES);
     all_ok &= check(5, "add_user alice", matches!(r, Ok(r) if r.ok()));
 
     // t6: stesso nome di nuovo -> gia' esistente.
-    let payload = proto::build_add_user(token, NEW_USER, &hash);
+    let payload = proto::build_add_user(token, NEW_USER, &hash, proto::ROLE_USER);
     let r = proto::send_payload_retry(chan, civis::IDENTIS_ADD_USER, &payload, RETRIES);
     all_ok &= check(
         6,
@@ -109,7 +109,7 @@ fn real_main(_sp: u64) -> ! {
     );
 
     // t7: nome non conforme (maiuscole e caratteri fuori charset).
-    let payload = proto::build_add_user(token, "Bob!", &hash);
+    let payload = proto::build_add_user(token, "Bob!", &hash, proto::ROLE_USER);
     let r = proto::send_payload_retry(chan, civis::IDENTIS_ADD_USER, &payload, RETRIES);
     all_ok &= check(
         7,
@@ -118,7 +118,7 @@ fn real_main(_sp: u64) -> ! {
     );
 
     // t8: nome vuoto -> non valido.
-    let payload = proto::build_add_user(token, "", &hash);
+    let payload = proto::build_add_user(token, "", &hash, proto::ROLE_USER);
     let r = proto::send_payload_retry(chan, civis::IDENTIS_ADD_USER, &payload, RETRIES);
     all_ok &= check(
         8,
@@ -147,7 +147,8 @@ fn real_main(_sp: u64) -> ! {
     // NOTA: legge diretta del bucket — valida finche' il bucket non e'
     // protetto (debito dichiarato in ADR-0056, chiusura Fase 3.3: da li'
     // questo caso passa per LIST).
-    let expected = format!("{}:{}", NEW_USER, hex::encode(&hash));
+    // Formato ADR-0080 fase 5: la riga porta anche i ruoli.
+    let expected = format!("{}:{}:{}", NEW_USER, hex::encode(&hash), proto::format_roles(proto::ROLE_USER));
     all_ok &= check(
         11,
         "bucket contiene alice",

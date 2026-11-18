@@ -11,7 +11,7 @@
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 64/64
+#   [usertests] PASS 65/65
 #   [threadtest] PASS 12/12
 # (Fase 30.1: t65 shm; ADR-0078 fase 2: t66 firma; ADR-0079 fase 3: t67 classe;
 #  ADR-0079 fase 4: t68 porte I/O dal manifest)

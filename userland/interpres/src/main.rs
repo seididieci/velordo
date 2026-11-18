@@ -7,7 +7,7 @@
 //!
 //! Comandi S3.2a:
 //!   `help`           mostra i comandi disponibili
-//!   `create-user [nome]`  crea un utente (token VELORDO_SESSION richiesto)
+//!   `create-user [nome] [ruoli]`  crea un utente (token VELORDO_SESSION richiesto)
 //!   `exit`           chiude la shell
 //!
 //! Comandi S3.2b — esecuzione esterna da bucket `binary`:
@@ -527,7 +527,8 @@ fn execute_command(cmd: &str, args: &[&str], session_token: Option<u64>) -> CmdR
         }
         "create-user" => {
             let name = args.first().copied();
-            cmd_create_user(session_token, name)
+            let roles = args.get(1).copied();
+            cmd_create_user(session_token, name, roles)
         }
         "logout" => {
             // Il programma esterno stampa il messaggio; il bounce lo fa la
@@ -555,15 +556,19 @@ fn execute_command(cmd: &str, args: &[&str], session_token: Option<u64>) -> CmdR
 fn cmd_help() {
     console_write_str("Comandi disponibili:\n");
     console_write_str("  help              - mostra questa guida\n");
-    console_write_str("  create-user [nome]- crea un nuovo utente (richiede sessione root)\n");
+    console_write_str("  create-user [nome] [ruoli] - crea un utente (ruoli: root|net-admin|hw-admin|user)\n");
     console_write_str("  users             - elenca gli utenti registrati\n");
     console_write_str("  exit              - chiudi la shell\n");
     console_write_str("  logout            - torna al prompt di login\n");
     console_write_str("  <programma>       - esegue un programma da un bucket eseguibile\n");
 }
 
-/// Crea un nuovo utente.
-fn cmd_create_user(session_token: Option<u64>, name_arg: Option<&str>) -> CmdResult {
+/// Crea un nuovo utente (ruoli opzionali: `create-user alice net-admin,user`).
+fn cmd_create_user(
+    session_token: Option<u64>,
+    name_arg: Option<&str>,
+    roles_arg: Option<&str>,
+) -> CmdResult {
     let token = match session_token {
         Some(t) => t,
         None => {
@@ -594,6 +599,18 @@ fn cmd_create_user(session_token: Option<u64>, name_arg: Option<&str>) -> CmdRes
         return CmdResult::Ok;
     }
 
+    // Ruoli (ADR-0080, fase 5): default `user`.
+    let roles = match roles_arg {
+        Some(spec) => match proto::parse_roles(spec) {
+            Some(r) => r,
+            None => {
+                console_write_str("ERRORE: ruoli non validi (root|net-admin|hw-admin|user, virgola)\n");
+                return CmdResult::Ok;
+            }
+        },
+        None => proto::ROLE_USER,
+    };
+
     // Password (con conferma).
     console_write_str("Password: ");
     let pwd = read_line_from_keyboard(true);
@@ -612,7 +629,7 @@ fn cmd_create_user(session_token: Option<u64>, name_arg: Option<&str>) -> CmdRes
 
     // L'hash si calcola qui: la password non lascia mai il processo.
     let hash = blake2s(pwd.as_bytes());
-    let payload = proto::build_add_user(token, &name, &hash);
+    let payload = proto::build_add_user(token, &name, &hash, roles);
 
     let chan = match resolve_identis() {
         Ok(c) => c,

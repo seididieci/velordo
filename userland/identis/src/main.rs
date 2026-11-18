@@ -1,14 +1,18 @@
 //! Servizio Identis (ADR-0055, Fase 3.1): identita' e autenticazione utenti.
 //!
 //! Detiene il bucket ArcaFS `identis:config` (una riga per utente:
-//! `nome:hash_hex_bLAKE2s256`). Espone tre operazioni IPC:
+//! `nome:hash_hex_bLAKE2s256:ruolo[,ruolo...]`). Espone quattro operazioni:
 //!
 //! - `IDENTIS_VERIFY` (0x70): verifica le credenziali; se tornano giuste
 //!   **emette un token di sessione** (w1 della reply) legato all'utente.
-//! - `IDENTIS_ADD_USER` (0x71): crea un utente. Richiede un token di
-//!   sessione **root** nel payload (la password non transita mai in chiaro:
-//!   il client calcola l'hash BLAKE2s-256 in locale).
+//! - `IDENTIS_ADD_USER` (0x71): crea un utente con i suoi ruoli. Richiede
+//!   una sessione con autorita' sufficiente (root, oppure un amministratore
+//!   per i ruoli che possiede); la password non transita mai in chiaro: il
+//!   client calcola l'hash BLAKE2s-256 in locale.
 //! - `IDENTIS_LIST` (0x72): numero utenti registrati (w1 della reply).
+//! - `IDENTIS_WHOAMI` (0x73): ruoli **correnti** dell'utente del token.
+//!   La sessione porta solo l'identita': i ruoli si risolvono live, quindi
+//!   cambiarli non richiede un nuovo login (ADR-0080, fase 5).
 //!
 //! Il framing dei payload e' condiviso (`libs/identis-proto`): qui il
 //! framing e' lato server (stato, validazione, scrittura del bucket).
@@ -134,6 +138,7 @@ fn handle_msg(m: civis::IpcMsg) {
     match m.tag {
         civis::IDENTIS_VERIFY | civis::IDENTIS_ADD_USER => handle_chunked(m),
         civis::IDENTIS_LIST => handle_list(m),
+        civis::IDENTIS_WHOAMI => handle_whoami(m),
         civis::EXIT_NOTIFY => {
             // Morte di un peer: se era il client della transazione, scatta.
             unsafe {
@@ -245,9 +250,9 @@ fn do_verify(buf: &[u8]) -> (u64, u64) {
     (proto::R_OK, token)
 }
 
-/// Crea un utente: token di sessione root + nome valido + nome non gia' preso.
+/// Crea un utente: sessione autorizzata + nome valido + nome non gia' preso.
 fn do_add_user(buf: &[u8]) -> (u64, u64) {
-    let (token, name, hash) = match proto::parse_add_user(buf) {
+    let (token, name, hash, roles) = match proto::parse_add_user(buf) {
         Ok(v) => v,
         Err(_) => return (proto::R_PROTOCOL, 0),
     };
@@ -261,10 +266,14 @@ fn do_add_user(buf: &[u8]) -> (u64, u64) {
         }
     };
 
-    // 2. La sessione deve essere di root (un utente normale non crea utenti).
-    if user != DEFAULT_USER {
+    // 2. Autorita' AL MOMENTO della chiamata: i ruoli del chiamante si
+    //    leggono live dal bucket (la sessione non li copia). `min(richiesta,
+    //    ruoli del chiamante)`: un `user` non crea nessuno, un `net-admin`
+    //    non crea `root` (ADR-0080, fase 5).
+    let requester = roles_of(&user).unwrap_or(proto::ROLE_USER);
+    if !proto::can_grant_roles(requester, roles) {
         civis::println!(
-            "[identis] add_user '{}': sessione di '{}' non autorizzata",
+            "[identis] add_user '{}': sessione di '{}' senza autorita' per i ruoli richiesti",
             name, user
         );
         return (proto::R_UNAUTHORIZED, 0);
@@ -283,9 +292,13 @@ fn do_add_user(buf: &[u8]) -> (u64, u64) {
     }
 
     // 5. Scrittura nel bucket (solo Identis scrive qui).
-    match append_bucket_entry(&name, &hex::encode(&hash)) {
+    match append_bucket_entry(&name, &hex::encode(&hash), roles) {
         Ok(()) => {
-            civis::println!("[identis] utente '{}' creato", name);
+            civis::println!(
+                "[identis] utente '{}' creato (ruoli: {})",
+                name,
+                proto::format_roles(roles)
+            );
             (proto::R_OK, 0)
         }
         Err(()) => {
@@ -293,6 +306,22 @@ fn do_add_user(buf: &[u8]) -> (u64, u64) {
             (proto::R_FS_ERROR, 0)
         }
     }
+}
+
+/// WHOAMI: ruoli correnti dell'utente del token (letti live dal bucket).
+fn handle_whoami(m: civis::IpcMsg) {
+    unsafe {
+        if TXN_ACTIVE {
+            reply(m.tag, proto::R_BUSY, 0);
+            return;
+        }
+    }
+    let Some(user) = session_lookup(m.w1) else {
+        reply(m.tag, proto::R_TOKEN_INVALID, 0);
+        return;
+    };
+    let roles = roles_of(&user).unwrap_or(proto::ROLE_USER);
+    reply(m.tag, proto::R_OK, roles);
 }
 
 // ── Operazione LIST ───────────────────────────────────────────────────────
@@ -421,12 +450,33 @@ fn seed_value() -> u64 {
 fn load_bucket_entry(name: &str) -> Option<String> {
     let all = read_bucket_all().ok()?;
     for line in all.lines() {
-        let mut parts = line.splitn(2, ':');
+        let mut parts = line.splitn(3, ':');
         let stored_name = parts.next()?;
         let stored_hash = parts.next()?;
         if stored_name == name {
             return Some(String::from(stored_hash));
         }
+    }
+    None
+}
+
+/// Ruoli correnti dell'utente `name` (`None` se non registrato).
+///
+/// Terza colonna `ruolo[,ruolo...]`; una riga a due campi (formato storico)
+/// vale `ROLE_USER`. Un ruolo sconosciuto e' fail-closed sull'utente semplice.
+fn roles_of(name: &str) -> Option<u64> {
+    let all = read_bucket_all().ok()?;
+    for line in all.lines() {
+        let mut parts = line.splitn(3, ':');
+        let stored_name = parts.next()?;
+        let _hash = parts.next()?;
+        if stored_name != name {
+            continue;
+        }
+        return Some(match parts.next() {
+            Some(spec) => proto::parse_roles(spec).unwrap_or(proto::ROLE_USER),
+            None => proto::ROLE_USER,
+        });
     }
     None
 }
@@ -456,10 +506,10 @@ fn read_bucket_all() -> Result<String, civis::Error> {
     Ok(out)
 }
 
-/// Appende una riga `nome:hash` al bucket.
-fn append_bucket_entry(name: &str, hash_hex: &str) -> Result<(), ()> {
+/// Appende una riga `nome:hash:ruoli` al bucket.
+fn append_bucket_entry(name: &str, hash_hex: &str, roles: u64) -> Result<(), ()> {
     let fd = civis::open(BUCKET_PATH, civis::OPEN_APPEND).map_err(|_| ())?;
-    let line = format!("{}:{}\n", name, hash_hex);
+    let line = format!("{}:{}:{}\n", name, hash_hex, proto::format_roles(roles));
     let n = civis::write_fs(fd, line.as_bytes(), line.len()).map_err(|_| ())?;
     let _ = civis::close(fd);
     if n != line.len() {
@@ -474,7 +524,7 @@ fn ensure_bucket() -> Result<(), civis::Error> {
         Ok(f) => f,
         Err(_) => {
             let fd = civis::open(BUCKET_PATH, civis::OPEN_CREATE)?;
-            let line = format!("{}:{}\n", DEFAULT_USER, DEFAULT_HASH_HEX);
+            let line = format!("{}:{}:root\n", DEFAULT_USER, DEFAULT_HASH_HEX);
             let _ = civis::write_fs(fd, line.as_bytes(), line.len());
             let _ = civis::close(fd);
             civis::println!("[identis] bucket creato con utente di default 'root'");
@@ -487,7 +537,7 @@ fn ensure_bucket() -> Result<(), civis::Error> {
     let _ = civis::close(fd);
     if n == 0 {
         let fd = civis::open(BUCKET_PATH, civis::OPEN_APPEND)?;
-        let line = format!("{}:{}\n", DEFAULT_USER, DEFAULT_HASH_HEX);
+        let line = format!("{}:{}:root\n", DEFAULT_USER, DEFAULT_HASH_HEX);
         let _ = civis::write_fs(fd, line.as_bytes(), line.len());
         let _ = civis::close(fd);
         civis::println!("[identis] bucket vuoto, aggiunto utente di default 'root'");

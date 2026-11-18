@@ -14,7 +14,7 @@ nulla da solo.
 ## Stato (completate 1-57)
 
 Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
-`[identistest] PASS 11/11` + `[usertests] PASS 61/61` + `[threadtest] PASS 12/12`,
+`[identistest] PASS 11/11` + `[usertests] PASS 65/65` + `[threadtest] PASS 12/12`,
 zero FAIL/PANIC/FAULT. La suite FAT32 e' **fuori dal gate** (ADR-0059:
 `scripts/run-fat-tests.sh`).
 
@@ -1010,13 +1010,26 @@ Voci con scope e vittoria dichiarati (non date).
       gpu/console/kbd/usertime/netdev prendono le porte dal manifest, zero
       rebuild del kernel. Limiti: porte embedded compilate, revoca a caldo
       assente, conf PCI senza IOMMU (ADR-0026).
-- [ ] **Policy — identità, ruoli e `Custos`** (ADR-0080, fase 5): nuovo
-      servizio `Custos` (`Service::Custos = 18`) che possiede `sys:policy` e
-      `usr:<nome>:consent`; ruoli multipli in Identis (`root`, `net-admin`,
-      `hw-admin`, `user`); policy per identità in cardo e in `net` (sparisce
-      lo stub `policy_allow_wk`: oggi chiunque può bindare 7/8/53/853 appena
-      esiste `sys:net.conf`). Vittoria: `netecho` binda 7 e 8, un altro
-      binario firmato no; un utente `user` non concede `net-admin`.
+- [x] **Policy — identità, ruoli e `Custos`** (completata, ADR-0080, fase 5):
+      nuovo servizio `Custos` (`Service::Custos = 18`, `SERVICE_COUNT = 19`)
+      con `CUSTOS_QUERY`/`GRANT`/`STATUS`; unico writer di **`sys:caps`**
+      (deviazione dichiarata da `sys:policy`: cardo legge la capability
+      direttamente, niente IPC di policy nel loop FS). Ruoli multipli in
+      Identis (`nome:hash:ruolo[,ruolo...]`, retrocompatibile) + `WHOAMI`
+      live: la sessione porta solo l'identità. Autorità
+      `min(richiesta, ruoli del chiamante)`: root concede tutto, un admin
+      solo il proprio dominio, un `user` nulla; `CUSTOS_GRANT` è autorizzato
+      via ruoli live. `net` non ha più lo stub `policy_allow_wk`: bind delle
+      porte note via `CUSTOS_QUERY` con cache per `(identità, porta)`,
+      fail-closed (effimere ≥ 49152 sempre libere). Cardo: carve-out
+      `sys:caps` (solo Custos/init **anche con `RIGHTS_ALL`**) e
+      difesa-in-profondità `ceiling_for` (una riga `RIGHTS_ALL` servizi non
+      promuove un'immagine non `System`). Vittoria: t69 (`usertests 65/65`,
+      gate 6/6, zero FAIL/PANIC/FAULT) + run di rete dedicato
+      (`scripts/run-net-tests.sh` PASS, out-of-gate): `netecho` binda 7 e 8
+      per grant seedato, un'identità senza riga è negata, revoca effettiva;
+      unit host 125/125. Limiti: `CAP_HW_*`/`CAP_NET_USE` dichiarative,
+      consenso `usr:<nome>:consent` e broker rinvíati alla fase 6.
 - [ ] **Policy — broker di rete e grant runtime** (ADR-0080, fase 6):
       `userland/netbroker` (`Service::NetBroker = 19`) con
       `BROKER_RESOLVE`/`BROKER_CONNECT` a proxy, allowlist di porte, rate

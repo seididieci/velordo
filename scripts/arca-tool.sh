@@ -126,6 +126,9 @@ seed_bin userland/build/vestigia.bin bin/vestigia.bin sys bin/vestigia.bin
 # (ADR-0059: il boot non carica piu' da /fat, tutto da ArcaFS).
 seed_bin userland/build/identis.bin bin/identis.bin sys bin/identis.bin
 seed_bin userland/build/identis-login.bin bin/identis-login.bin sys bin/identis-login.bin
+# Server di policy per identita' (ADR-0080, fase 5): servizio di sistema,
+# unico writer di `sys:caps`, supervisionato da init.
+seed_bin userland/build/custos.bin bin/custos.bin sys bin/custos.bin
 # Personalita' POSIX in `/bin/posix` (D1: MOVE da /bin, solo ArcaFS).
 seed_bin flavours/posix/build/usershell.bin bin/posix/shell.bin sys bin/posix/shell.bin
 seed_bin flavours/posix/build/userposix.bin bin/posix/posix.bin sys bin/posix/posix.bin
@@ -169,6 +172,15 @@ if [ -f "$IOP_BIN" ]; then
     printf 'ioprobe %s 80-80\n' "$IOP_DIGEST" >> "$ROOT/build-meta/manifest-io.txt"
 else
     echo "[arca] avviso: ioprobe.bin assente (artefatto t68 non seedato)" >&2
+fi
+# Policy delle capability (ADR-0080, fase 5): dato generato a build-time
+# (l'identita' e' il contenuto del binario) e scritto a runtime solo da Custos.
+if [ -f "build-meta/caps.txt" ]; then
+    SEED_NS+=( "sys:caps=$(pwd)/build-meta/caps.txt" )
+    echo "[arca] + sys:caps (build-meta/caps.txt)"
+else
+    echo "[arca] errore: build-meta/caps.txt mancante (build-userland.sh prima)" >&2
+    exit 1
 fi
 for pair in "manifest:manifest-io.txt" "policy:policy.txt" "test-policy:test_policy.txt" "anchor:anchor.txt"; do
     key="${pair%%:*}"; file="${pair##*:}"
@@ -474,7 +486,7 @@ fi
 # Seed bucket Identis (ADR-0055): utente root con hash BLAKE2s-256 di "root".
 # Seedato sempre (gate inclusi): il volume parte con un utente valido.
 IDENTIS_CFG="$(mktemp)"
-printf 'root:%s\n' "0cb8a879dc5d94ed67eb49cc7a4d3052d6a346f2e28fcd9e10e5822aba92eb39" > "$IDENTIS_CFG"
+printf 'root:%s:root\n' "0cb8a879dc5d94ed67eb49cc7a4d3052d6a346f2e28fcd9e10e5822aba92eb39" > "$IDENTIS_CFG"
 SEED_NS+=( "ns:identis:config=$IDENTIS_CFG" )
 echo "[arca] + identis:config (root/root)"
 $TOOL_BIN seed "$OUT" "${SEED_NS[@]}"

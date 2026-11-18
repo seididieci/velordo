@@ -749,6 +749,14 @@ const SVC_IDENTIS: SvcMeta = SvcMeta {
     obj: Some((b"sys", b"bin/identis.bin")),
     prio: 16,
 };
+/// Server di policy per identita' (ADR-0080, fase 5): capability per
+/// `ImageId`, unico writer di `sys:caps`. Parte dopo Identis (gli chiede i
+/// ruoli live per i GRANT) e prima della suite (t69 lo interroga).
+const SVC_CUSTOS: SvcMeta = SvcMeta {
+    bin: b"custos",
+    obj: Some((b"sys", b"bin/custos.bin")),
+    prio: 16,
+};
 /// Driver virtio-net (ADR-0069): possiede il device, le virtqueue e il ring
 /// condiviso con `net`. Parte solo con `net=1` in cmdline (run dedicato).
 const SVC_NETDEV: SvcMeta = SvcMeta {
@@ -985,6 +993,14 @@ fn real_main(_sp: u64) -> ! {
     }
     let _ = civis::vestigia::log(b"init", b"identis ready");
 
+    // Custos (ADR-0080, fase 5): policy per identita'. Dopo Identis (per i
+    // ruoli live dei GRANT) e prima della suite (t69).
+    if boot_svc(&SVC_CUSTOS, true).is_none() {
+        println!("[init] boot FAILED (custos), panic");
+        civis::exit(1);
+    }
+    let _ = civis::vestigia::log(b"init", b"custos ready");
+
     // Rete (ADR-0069): solo con `net=1` in cmdline (run dedicato, fuori dal
     // gate). Il driver `netdev` parte prima del servizio `net` (che si
     // attacca a lui). Se il device non c'e', il driver lo dice e resta vivo;
@@ -1028,6 +1044,7 @@ fn real_main(_sp: u64) -> ! {
         Supervised::new(&SVC_POSIX, civis::Service::Posix),
         Supervised::new(&SVC_TIME, civis::Service::Time),
         Supervised::new(&SVC_VESTIGIA, civis::Service::Vestigia),
+        Supervised::new(&SVC_CUSTOS, civis::Service::Custos),
         // Rete (ADR-0069): pid -1 se non spawnati (net=1 assente); il loop
         // di supervisione salta i pid negativi.
         Supervised::new(&SVC_NETDEV, civis::Service::NetDev),

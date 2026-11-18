@@ -46,8 +46,9 @@ done
 mkdir -p "$OUT_DIR"
 man_tmp="$OUT.tmp"
 pol_tmp="$POL_OUT.tmp"
+caps_tmp="$OUT_DIR/caps.txt.tmp"
 
-python3 - "${BUILD_DIRS[@]}" "$man_tmp" "$pol_tmp" <<'EOF'
+python3 - "${BUILD_DIRS[@]}" "$man_tmp" "$pol_tmp" "$caps_tmp" <<'EOF'
 import glob, hashlib, os, sys
 
 def fnv1a(data: bytes) -> int:
@@ -57,8 +58,8 @@ def fnv1a(data: bytes) -> int:
         h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
     return h
 
-dirs = sys.argv[1:-2]
-man_tmp, pol_tmp = sys.argv[-2], sys.argv[-1]
+dirs = sys.argv[1:-3]
+man_tmp, pol_tmp, caps_tmp = sys.argv[-3], sys.argv[-2], sys.argv[-1]
 bins = sorted(p for d in dirs for p in glob.glob(os.path.join(d, "*.bin")))
 if not bins:
     sys.exit("nessun .bin in %s" % ", ".join(dirs))
@@ -117,6 +118,14 @@ IO = {
 }
 DEFAULT_MASK = 0x1FFF  # ALL (servizi TCB, incluso EXECUTE)
 
+# Capability di rete concesse di default (ADR-0080, fase 5):
+# `sys:caps` seedato qui perche' l'identita' e' il contenuto del binario.
+# CAP_NET_BIND = 1 (vedi libs/custos-proto): arg = porta locale.
+CAPS = {
+    "netecho": [7, 8],      # echo UDP 7 + listener TCP 8
+    "siit": [30000],        # traduttore SIIT/NAT64
+}
+
 
 def io_spec(stem):
     rs = IO.get(stem)
@@ -127,6 +136,7 @@ def io_spec(stem):
 
 manifest = []
 policy = []
+caps = []
 for p in bins:
     with open(p, "rb") as f:
         data = f.read()
@@ -139,6 +149,8 @@ for p in bins:
     manifest.append("%s %s %s" % (stem, digest.hex(), io_spec(stem)))
     mask = POLICY.get(stem, DEFAULT_MASK)
     policy.append("%016x %016x %03x %s" % (id_hi, id_lo, mask, stem))
+    for port in CAPS.get(stem, []):
+        caps.append("%016x %016x %d %d 1" % (id_hi, id_lo, 1, port))
 
 with open(man_tmp, "w") as f:
     f.write("# Generato da scripts/gen-service-hashes.sh — non modificare a mano.\n")
@@ -149,9 +161,17 @@ with open(pol_tmp, "w") as f:
     f.write("# Generato da scripts/gen-service-hashes.sh — non modificare a mano.\n")
     f.write("\n".join(policy) + "\n")
 print("[gen-hashes] policy %d righe -> %s" % (len(policy), pol_tmp))
+
+with open(caps_tmp, "w") as f:
+    f.write("# Generato da scripts/gen-service-hashes.sh — non modificare a mano.\n")
+    f.write("# <hi16> <lo16> <kind> <arg> <decision>  (ADR-0080, fase 5)\n")
+    f.write("\n".join(caps) + "\n")
+print("[gen-hashes] caps %d righe -> %s" % (len(caps), caps_tmp))
 EOF
 
 mv "$man_tmp" "$OUT"
 echo "[gen-hashes] scritto $OUT"
 mv "$pol_tmp" "$POL_OUT"
 echo "[gen-hashes] scritta $POL_OUT"
+mv "$caps_tmp" "$OUT_DIR/caps.txt"
+echo "[gen-hashes] scritta $OUT_DIR/caps.txt"

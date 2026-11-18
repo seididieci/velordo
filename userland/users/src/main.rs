@@ -113,11 +113,16 @@ fn run_text_mode(token: u64) {
                 if line.is_empty() {
                     continue;
                 }
-                let mut parts = line.splitn(2, ':');
+                // Formato `nome:hash:ruoli` (ADR-0080, fase 5).
+                let mut parts = line.splitn(3, ':');
                 if let Some(name) = parts.next() {
+                    let _hash = parts.next();
+                    let roles = parts.next().unwrap_or("user");
                     console_write(b"  ");
                     console_write(name.as_bytes());
-                    console_write(b"\n");
+                    console_write(b"  [");
+                    console_write(roles.as_bytes());
+                    console_write(b"]\n");
                 }
             }
         }

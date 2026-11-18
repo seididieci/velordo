@@ -740,6 +740,18 @@ pub const EXIT_NOTIFY: u64 = 0x7C;
 pub const IDENTIS_VERIFY: u64 = 0x70;   // verify credenziali -> w0=0 OK (w1=token) / 1 FAIL
 pub const IDENTIS_ADD_USER: u64 = 0x71; // crea utente (token root nel payload) -> w0=0 OK / 2..8 errore
 pub const IDENTIS_LIST: u64 = 0x72;     // w1=token -> w1=numero utenti (elenco dei nomi: multi-frame, Fase 3.2)
+/// `w1` = token di sessione -> `w0` = codice, `w1` = maschera dei ruoli
+/// correnti dell'utente (ADR-0080, fase 5). I ruoli si leggono **live** da
+/// `identis:config`: cambiarli ha effetto senza rifare il login.
+pub const IDENTIS_WHOAMI: u64 = 0x73;
+
+// ── Protocollo Custos (ADR-0080, fase 5) ──────────────────────────────
+// Server di policy per identita': `QUERY` e `GRANT` hanno il payload chunked
+// (`libs/custos-proto`), `STATUS` e' un frame singolo. Nessuna syscall nuova:
+// il kernel non conosce le capability, le decide un servizio.
+pub const CUSTOS_QUERY: u64 = 0x80;  // query capability (payload) -> w0=0 OK, w1=1/0
+pub const CUSTOS_GRANT: u64 = 0x81;  // grant/revoca (payload, token) -> w0=codice
+pub const CUSTOS_STATUS: u64 = 0x82; // diagnostica -> w0=0 OK, w1=numero grant
 
 // ── Protocollo DISK_* (data-plane cardo→block, Fase 16) ───────────────
 // Single source of truth dei tag (Fase 16c): prima duplicati in
@@ -1202,14 +1214,18 @@ pub enum Service {
     /// Resolver DNS plain (ADR-0069, N5): risolve nomi a indirizzi IPv6/IPv4
     /// tramite query DNS su UDP/TCP porta 53. Userspace, sopra `Net`.
     Dns = 17,
+    /// Server di policy per identita' (ADR-0080, fase 5): decide le
+    /// capability (bind di rete, uso hardware) per `ImageId`, con i ruoli
+    /// risolti live presso `Identis`. Unico writer di `sys:caps`;
+    /// fail-closed se la policy manca. Supervisionato da init.
+    Custos = 18,
 }
 
 /// Massimo numero di servizi conosciuti = dimensione del registro kernel.
 /// Fase 39: 8→16; Fase 50: slot 9 = `Time`; Fase 57/R8: slot 10 = `Vestigia`;
-/// Fase N4: slot 16 = `Siit`; Fase N5: slot 17 = `Dns`; liberi 11-15.
-
-/// Massimo numero di servizi conosciuti = dimensione del registro kernel.
-pub const SERVICE_COUNT: usize = 18;
+/// Fase N4: slot 16 = `Siit`; Fase N5: slot 17 = `Dns`; ADR-0080 fase 5:
+/// slot 18 = `Custos`.
+pub const SERVICE_COUNT: usize = 19;
 
 /// Canale predefinito del processo: il canale di nascita verso il parent.
 /// Ogni processo nasce con canale 0 = parent (o `CHANNEL_NONE` per init/idle).

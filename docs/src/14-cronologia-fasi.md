@@ -3883,3 +3883,62 @@
       aggiunta da `arca-tool.sh` (`manifest-io.txt`).
       **Limiti**: porte embedded compilate, revoca a caldo assente, conf PCI
       senza IOMMU (contenimento nullo, ADR-0026).
+
+- [x] **Policy — `Custos`, ruoli e capability per identità** (2026-11-18,
+      ADR-0080, fase 5): il sistema sa **cosa può fare** un'immagine.
+      `Service::Custos = 18` (`SERVICE_COUNT = 19`) è un servizio di policy
+      minimale, single-thread, in `libs/custos-proto` + `userland/custos`.
+      **Deviazione dichiarata** dal testo ADR: il dato è **`sys:caps`**, non
+      `sys:policy`. `sys:policy` resta la tabella ops FS di cardo (writer
+      init); far scrivere a `Custos` il file che cardo legge a ogni handshake
+      avrebbe creato un ciclo cardo↔Custos (cardo è single-threaded: un IPC
+      mentre serve un client = deadlock). Righe
+      `<hi> <lo> <kind> <arg> <decisione>` (hex/decimale), capability
+      `NET_BIND=1` (arg = porta), `NET_USE=2`, `HW_MMIO=3`, `HW_DMA=4`
+      (le ultime tre dichiarative); l'ultima voce vince. Il dato è generato
+      a build-time da `gen-service-hashes.sh` (conosce gli `ImageId` perché
+      li misura: `netecho` → 7/8, `siit` → 30000) e scritto a runtime solo
+      da `Custos`; cardo ha il carve-out `caps_writer` (solo Custos/init,
+      **anche con `RIGHTS_ALL`** — il tetto ops non copre la chiave).
+      `Custos` persiste **prima** su FS e poi muta la RAM.
+      **Ruoli multipli**: bucket `identis:config` a tre campi
+      (`nome:hash:ruolo[,ruolo...]`, due campi storici = `user`). La sessione
+      porta **solo l'identità**: i ruoli si risolvono **live** con
+      `IDENTIS_WHOAMI = 0x73`, quindi cambiarli non richiede un nuovo login.
+      Autorità `min(richiesta, ruoli del chiamante)`: root concede tutto, un
+      `net-admin`/`hw-admin` solo i ruoli che possiede (+ `user`), un `user`
+      nulla. `CUSTOS_GRANT` si autorizza via ruoli live: `NET_*` →
+      `net-admin`, `HW_*` → `hw-admin`, root copre tutto.
+      **`net`**: sparisce `policy_allow_wk`/`load_policy`; `can_bind` consulta
+      `Custos` per le porte note (effimere ≥ 49152 sempre libere) con cache
+      per `(identità, porta)` e fail-closed (errore IPC = negato).
+      **Cardo**: `ceiling_for` usa `peer_info_class`; in difesa in profondità
+      una riga `RIGHTS_ALL` della tabella servizi non promuove a ALL
+      un'immagine non `System` (la suite resta ALL via `sys:test-policy`).
+      **Vittoria**: t69 in `usertests` — grant seedati di `netecho` (7/8 sì,
+      9 no), identità ignota negata, `WHOAMI` esatto per root /
+      `net-admin,user` / `user`, un `user` non crea utenti né fa `GRANT`, un
+      `net-admin` concede rete ma non hardware, root concede e revoca,
+      `obj_put sys:caps` da usertests **negato** (carve-out) e riga del grant
+      persistita. `[usertests] PASS 65/65`, gate 6/6, zero FAIL/PANIC/FAULT;
+      `scripts/run-net-tests.sh` PASS (fuori gate: `net=1`);
+      unit host 125/125.
+      **Bug trovato dalla prova di rete**: `net` moriva con `#PF` sulla
+      guardia dello stack (16 KiB) appena dopo l'apertura TCP di `net3`.
+      Causa: la cache dei bind come array inline nella struct (+512 B)
+      costruita **prima** del `Box` — `real_main` teneva la struct sullo
+      stack per tutta la vita del servizio, e `tcp_input` (`sub rsp,0x2A8`)
+      scavalcava la guardia. Fix: cache su heap (`Vec`), struct della stessa
+      taglia di prima. Lezione: in un servizio da 16 KiB ogni campo della
+      struct boxata è un byte sullo stack; la dimensione del frame di
+      `real_main` è permanente.
+      **Limiti**: `usr:<nome>:consent` e `netbroker` (fase 6), revoca a caldo
+      delle capability dichiarative, token bearer in env (ADR-0058).
+      **Nota sul run di rete** (fuori gate): `usertests` gira anche lì e t69
+      ha il ramo condizionale `service_lookup(Service::Net)` — porta nota
+      senza grant **negata**, effimera libera (in un boot senza rete il ramo
+      si salta; il gate resta identico). Il contratto di
+      `scripts/run-net-tests.sh` sono i marker dei probe: `usertests`/
+      `testsarca` in quel boot non sono 65/65 perché il run non imposta
+      `ARCA_IMG=1` (un solo disco: `t32` conta i dischi) — differenza
+      d'ambiente, non una regressione.

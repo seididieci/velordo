@@ -265,6 +265,15 @@ usertests 17/17, shell 3/3.
   `gen-service-hashes.sh`). Cardo la registra insieme alla classe
   (`TrustIo`), il kernel la scrive nella I/O bitmap del TSS: `SpawnMeta`
   non concede più porte.
+- **Capability per identità** (ADR-0080 fase 5): `sys:caps` è la policy
+  amministrativa delle capability (una riga `<hi> <lo> <kind> <arg>
+  <decisione>`, vedi [ADR-0080](./adr/0080-policy-identita-ruoli-broker.md)).
+  È un dato **seedato a build-time** (`scripts/gen-service-hashes.sh`, che
+  conosce gli `ImageId` perché li misura) e ha un unico writer runtime:
+  `Custos`. Cardo protegge la chiave con un carve-out dedicato
+  (`caps_writer`): solo `Custos` o init, **anche con `RIGHTS_ALL`** — il
+  tetto ops non basta, perché `sys:caps` decide chi può bindare. `sys:policy`
+  resta invece la tabella delle op FS di cardo (writer init).
 
 ## Contratto di durabilita' (Fase 52, P3)
 

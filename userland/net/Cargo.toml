@@ -10,6 +10,7 @@ edition = "2024"
 civis = { path = "../../libs/civis" }
 net = { path = "../../libs/net" }
 net-ep = { path = "../../libs/net-ep" }
+custos-proto = { path = "../../libs/custos-proto" }
 
 [profile.dev]
 panic = "abort"

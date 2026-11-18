@@ -87,6 +87,10 @@ build_one userland/vestigia userland/vestigia/src/vestigia.ld vestigia.bin   ves
 # e incluso nel manifest degli hash prima di gen-service-hashes.
 build_one userland/netecho userland/netecho/src/netecho.ld netecho.bin netecho
 
+# Server di policy per identita' (ADR-0080, fase 5): unico writer di
+# `sys:caps`. Va nel manifest Strato 2 (classe System per la firma `sys`).
+build_one userland/custos userland/custos/src/custos.ld custos.bin custos
+
 # Traduttore IPv4 SIIT/NAT64 (N4, ADR-0069): parte solo con `net=1`, ma va
 # costruito e incluso nel manifest degli hash prima di gen-service-hashes.
 build_one userland/siit userland/siit/src/siit.ld siit.bin siit

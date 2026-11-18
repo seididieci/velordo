@@ -7,6 +7,10 @@
 //!   fare nulla (Identis rifiuta comunque, ma falliamo subito e pulito).
 //! - Il **nome utente** arriva da argv (`create-user alice`) o e' chiesto
 //!   alla tastiera.
+//! - I **ruoli** (ADR-0080, fase 5) arrivano da argv[2] come
+//!   `ruolo[,ruolo...]` (`root`, `net-admin`, `hw-admin`, `user`); il
+//!   default e' `user`. Identis verifica l'autorita' del chiamante: un
+//!   utente semplice non crea nessuno, un amministratore non crea `root`.
 //! - La **password** e' sempre digitata alla tastiera (con conferma): non
 //!   transita in argv ne' in ambiente, e l'hash BLAKE2s-256 e' calcolato
 //!   **in locale** — nel payload IPC c'e' solo l'hash.
@@ -93,6 +97,15 @@ fn real_main(sp: u64) -> ! {
         civis::exit(1);
     }
 
+    // Ruoli: argv[2] opzionale (`net-admin,user`); default `user`.
+    let roles = match argv_roles(sp) {
+        Some(r) => r,
+        None => {
+            console_write(b"[create-user] ERRORE: ruoli non validi (root|net-admin|hw-admin|user, separati da virgola)\n");
+            civis::exit(1);
+        }
+    };
+
     // Password (conferma inclusa).
     console_write(b"[create-user] Password: ");
     let pwd = read_line_from_keyboard(true);
@@ -110,7 +123,7 @@ fn real_main(sp: u64) -> ! {
 
     // L'hash si calcola qui: la password non lascia mai il processo.
     let hash = blake2s(pwd.as_bytes());
-    let payload = proto::build_add_user(token, &name, &hash);
+    let payload = proto::build_add_user(token, &name, &hash, roles);
 
     let chan = match resolve_identis() {
         Ok(c) => c,
@@ -147,6 +160,19 @@ fn read_session_token(sp: u64) -> Result<u64, &'static str> {
         .get(ENV_SESSION)
         .ok_or("nessuna sessione: login non riuscito o VELORDO_SESSION assente")?;
     hex::parse_u64(raw).ok_or("token di sessione malformato")
+}
+
+/// Ruoli da argv[2] (`ruolo[,ruolo...]`), default `user`.
+fn argv_roles(sp: u64) -> Option<u64> {
+    let Some(args) = civis::args_from_stack(sp) else {
+        return Some(proto::ROLE_USER);
+    };
+    match args.get(2) {
+        Some(raw) if !raw.is_empty() => {
+            proto::parse_roles(core::str::from_utf8(raw).ok()?)
+        }
+        _ => Some(proto::ROLE_USER),
+    }
 }
 
 /// Nome utente da argv[1] (se presente e non vuoto).

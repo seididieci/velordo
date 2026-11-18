@@ -57,6 +57,106 @@ pub const MAX_NAME: usize = 32;
 /// Chunk massimo per messaggio (byte utili in w1).
 pub const CHUNK: usize = 4;
 
+// ── Ruoli (ADR-0080, fase 5) ───────────────────────────────────────────────
+//
+// Un utente puo' avere PIU' ruoli. La maschera viaggia nel payload di
+// `ADD_USER` e nella reply di `WHOAMI`; nel bucket `identis:config` la terza
+// colonna e' `ruolo[,ruolo...]` (`nome:hash:ruolo[,ruolo...]`). Riga a due
+// campi (formato storico) = `ROLE_USER`.
+
+/// Utente semplice: nessuna autorita' di concessione.
+pub const ROLE_USER: u64 = 1 << 0;
+/// Amministratore di rete: puo' concedere bind di porte note e creare utenti.
+pub const ROLE_NET_ADMIN: u64 = 1 << 1;
+/// Amministratore hardware: puo' concedere l'uso di device (MMIO/DMA).
+pub const ROLE_HW_ADMIN: u64 = 1 << 2;
+/// Superutente: ogni ruolo e ogni concessione.
+pub const ROLE_ROOT: u64 = 1 << 3;
+
+/// Maschera di tutti i ruoli validi.
+pub const ROLE_ALL: u64 = ROLE_USER | ROLE_NET_ADMIN | ROLE_HW_ADMIN | ROLE_ROOT;
+
+/// Maschera con un ruolo valido e nessun bit ignoto.
+pub fn valid_roles(mask: u64) -> bool {
+    mask != 0 && (mask & !ROLE_ALL) == 0
+}
+
+/// Nome canonico di un singolo bit di ruolo (`None` se non e' un bit singolo).
+pub fn role_name(bit: u64) -> Option<&'static str> {
+    match bit {
+        ROLE_USER => Some("user"),
+        ROLE_NET_ADMIN => Some("net-admin"),
+        ROLE_HW_ADMIN => Some("hw-admin"),
+        ROLE_ROOT => Some("root"),
+        _ => None,
+    }
+}
+
+/// Parsa `ruolo[,ruolo...]` (spazi ai lati tollerati). `None` se vuota o con
+/// un nome sconosciuto: fail-loud, il chiamante decide il default.
+pub fn parse_roles(s: &str) -> Option<u64> {
+    let mut mask = 0u64;
+    for part in s.split(',') {
+        let part = part.trim();
+        let bit = match part {
+            "user" => ROLE_USER,
+            "net-admin" => ROLE_NET_ADMIN,
+            "hw-admin" => ROLE_HW_ADMIN,
+            "root" => ROLE_ROOT,
+            _ => return None,
+        };
+        mask |= bit;
+    }
+    if valid_roles(mask) {
+        Some(mask)
+    } else {
+        None
+    }
+}
+
+/// Formato canonico per bucket e console: `root,net-admin`.
+pub fn format_roles(mask: u64) -> String {
+    let mut out = String::new();
+    for bit in [ROLE_ROOT, ROLE_NET_ADMIN, ROLE_HW_ADMIN, ROLE_USER] {
+        if mask & bit == 0 {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(',');
+        }
+        out.push_str(role_name(bit).unwrap_or("?"));
+    }
+    if out.is_empty() {
+        out.push_str("user");
+    }
+    out
+}
+
+/// `true` se un utente con i ruoli `requester` puo' concedere `requested`.
+///
+/// Regola (ADR-0080): `min(richiesta, ruoli del chiamante)`. Root concede
+/// tutto; un amministratore concede solo i ruoli che possiede (piu' `user`);
+/// un utente semplice non concede nulla.
+pub fn can_grant_roles(requester: u64, requested: u64) -> bool {
+    if requester & ROLE_ROOT != 0 {
+        return true;
+    }
+    if requester & (ROLE_NET_ADMIN | ROLE_HW_ADMIN) == 0 {
+        return false;
+    }
+    if requested & ROLE_ROOT != 0 {
+        return false;
+    }
+    if requested & ROLE_NET_ADMIN != 0 && requester & ROLE_NET_ADMIN == 0 {
+        return false;
+    }
+    if requested & ROLE_HW_ADMIN != 0 && requester & ROLE_HW_ADMIN == 0 {
+        return false;
+    }
+    valid_roles(requested)
+}
+
+
 // ── Codici di risposta ─────────────────────────────────────────────────────
 
 /// Operazione riuscita.
@@ -121,8 +221,8 @@ pub fn build_verify(name: &str, hash: &[u8; HASH_LEN]) -> Vec<u8> {
     v
 }
 
-/// Payload di creazione utente: magic + versione + token + nome + hash.
-pub fn build_add_user(token: u64, name: &str, hash: &[u8; HASH_LEN]) -> Vec<u8> {
+/// Payload di creazione utente: magic + versione + token + nome + hash + ruoli.
+pub fn build_add_user(token: u64, name: &str, hash: &[u8; HASH_LEN], roles: u64) -> Vec<u8> {
     let mut v = Vec::new();
     v.extend_from_slice(MAGIC_ADD_USER);
     v.extend_from_slice(&PROTO_VERSION.to_le_bytes());
@@ -131,6 +231,7 @@ pub fn build_add_user(token: u64, name: &str, hash: &[u8; HASH_LEN]) -> Vec<u8> 
     v.extend_from_slice(name.as_bytes());
     v.extend_from_slice(&(hash.len() as u32).to_le_bytes());
     v.extend_from_slice(hash);
+    v.extend_from_slice(&roles.to_le_bytes());
     v
 }
 
@@ -180,8 +281,9 @@ pub fn parse_verify(buf: &[u8]) -> Result<(String, [u8; HASH_LEN]), &'static str
     Ok((name, hash))
 }
 
-/// Estrae token + nome + hash da un payload di creazione utente.
-pub fn parse_add_user(buf: &[u8]) -> Result<(u64, String, [u8; HASH_LEN]), &'static str> {
+/// Estrae token + nome + hash + ruoli da un payload di creazione utente.
+/// Senza il campo ruoli (payload storico) il nuovo utente e' `ROLE_USER`.
+pub fn parse_add_user(buf: &[u8]) -> Result<(u64, String, [u8; HASH_LEN], u64), &'static str> {
     if buf.len() < 16 || &buf[0..4] != MAGIC_ADD_USER {
         return Err("magic non riconosciuto");
     }
@@ -201,7 +303,13 @@ pub fn parse_add_user(buf: &[u8]) -> Result<(u64, String, [u8; HASH_LEN]), &'sta
     }
     let mut hash = [0u8; HASH_LEN];
     hash.copy_from_slice(&buf[off..off + HASH_LEN]);
-    Ok((token, name, hash))
+    off += HASH_LEN;
+    let roles = match u64_at(buf, off) {
+        Ok(r) if valid_roles(r) => r,
+        Ok(_) => return Err("ruoli non validi"),
+        Err(_) => ROLE_USER,
+    };
+    Ok((token, name, hash, roles))
 }
 
 // ── Validazione del nome utente (server-side, autorevole) ─────────────────
