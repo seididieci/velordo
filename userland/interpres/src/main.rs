@@ -119,7 +119,6 @@ struct LineEditor<'a> {
     buffer: String,
     history: &'a mut History,
     last_exit: u8,
-    kb_fd: i64,
     /// `true` when continuing after a `{` (multi-line block).
     continuation: bool,
     /// Celle occupate dal suggerimento attualmente disegnato (0 = nessuno).
@@ -127,12 +126,11 @@ struct LineEditor<'a> {
 }
 
 impl<'a> LineEditor<'a> {
-    fn new(history: &'a mut History, last_exit: u8, kb_fd: i64) -> Self {
+    fn new(history: &'a mut History, last_exit: u8) -> Self {
         Self {
             buffer: String::new(),
             history,
             last_exit,
-            kb_fd,
             continuation: false,
             hint_len: 0,
         }
@@ -235,18 +233,25 @@ impl<'a> LineEditor<'a> {
         self.draw_prompt();
         let mut byte = [0u8; 1];
         loop {
-            let n = civis::read_fs(self.kb_fd, &mut byte, 1).unwrap_or(0);
+            let n = civis::input::read(&mut byte);
             if n == 0 {
-                wait_input_tick();
+                // Nessun byte: si dorme su `recv` (evento di porta), non a
+                // tick (E0, ADR-0082). Se la sorgente e' persa, uscita loud.
+                if !civis::input::wait() {
+                    console_write_str("[shell] ERRORE: input della tastiera perso\n");
+                    civis::exit(1);
+                }
                 continue;
             }
             let c = byte[0];
             match c {
                 0x1b => {
-                    // Escape sequence: read two more bytes if available
-                    let _ = civis::read_fs(self.kb_fd, &mut byte, 1).unwrap_or(0);
+                    // Escape sequence: i 3 byte arrivano nello stesso lotto
+                    // decodificato da porta (read non bloccante: se mancano,
+                    // si scarta la sequenza, come prima).
+                    let _ = civis::input::read(&mut byte);
                     let b1 = byte[0];
-                    let _ = civis::read_fs(self.kb_fd, &mut byte, 1).unwrap_or(0);
+                    let _ = civis::input::read(&mut byte);
                     let b2 = byte[0];
                     match (b1 as char, b2 as char) {
                         ('[', 'A') => { // Up
@@ -302,7 +307,6 @@ mod env;
 civis::entry!(real_main);
 
 const CONSOLE_PATH: &str = "/dev/console";
-const KEYBOARD_PATH: &str = "/dev/input/keyboard";
 
 /// Variabile d'ambiente con il token di sessione (hex).
 const ENV_SESSION: &str = "VELORDO_SESSION";
@@ -385,14 +389,12 @@ fn real_main(_sp: u64) -> ! {
     let mut interp_env = env::Env::new();
     let mut history = History::new();
 
-    // Apri tastiera una sola volta per tutta la sessione REPL.
-    let kb_fd = match civis::open(KEYBOARD_PATH, 0) {
-        Ok(f) => f,
-        Err(_) => {
-            console_write_str("[shell] ERRORE: impossibile aprire tastiera\n");
-            civis::exit(1);
-        }
-    };
+    // Sottoscrive l'input come evento (E0, ADR-0082): il device si apre una
+    // volta per tutta la sessione REPL, il focus e' LIFO in `porta`.
+    if civis::input::attach().is_err() {
+        console_write_str("[shell] ERRORE: impossibile aprire tastiera\n");
+        civis::exit(1);
+    }
 
     loop {
         // Read a line, supporting multi‑line blocks. L'editor e' in uno scope
@@ -400,7 +402,7 @@ fn real_main(_sp: u64) -> ! {
         let mut accumulated = String::new();
         let mut brace_depth: i32 = 0;
         {
-            let mut editor = LineEditor::new(&mut history, last_exit, kb_fd);
+            let mut editor = LineEditor::new(&mut history, last_exit);
             loop {
                 let raw_line = editor.read();
                 editor.clear_buffer();
@@ -1133,41 +1135,27 @@ fn trim_str(s: &str) -> &str {
     if end <= start { "" } else { &s[start..end] }
 }
 
-/// Word futex dell'attesa input: mai scritta (0), l'indirizzo e' la chiave del
-/// waiter per `(mm, addr)`. Condivisa dai due lettori (prompt REPL e prompt
-/// `read_line_from_keyboard`): un solo wait alla volta, shell single-threaded.
-static INPUT_FUTEX: u32 = 0;
-
-/// Attesa di un tick quando la tastiera e' vuota: drena le notifiche IPC
-/// (non-blocking) e dorme con `futex_wait` — il processo va `Blocked`, il PIT
-/// continua a girare e lo risveglia alla deadline. **Mai** un `continue` nudo
-/// su `read_fs`: sarebbe un busy-wait al 100% di CPU (regressione reale: la
-/// `futex_wait` fu sostituita da un commento in `0a54272`).
-fn wait_input_tick() {
-    let _ = civis::recv_poll();
-    let deadline = civis::get_ticks() + 1;
-    let _ = civis::futex_wait(core::ptr::addr_of!(INPUT_FUTEX) as usize, 0, deadline as u64);
-}
-
 /// Legge una riga terminata da newline dalla tastiera. Con `mask` l'eco e'
-/// mascherato (password: niente in chiaro).
+/// mascherato (password: niente in chiaro). La sottoscrizione e' quella del
+/// processo (`civis::input::attach` in `real_main`, idempotente): qui si
+/// legge/drena soltanto, senza aprire un secondo fd ne' pollare a tick.
 fn read_line_from_keyboard(mask: bool) -> String {
-    let fd = match civis::open(KEYBOARD_PATH, 0) {
-        Ok(f) => f,
-        Err(_) => {
-            console_write_str("[shell] ERRORE: impossibile aprire tastiera\n");
-            civis::exit(1);
-        }
-    };
+    if civis::input::attach().is_err() {
+        console_write_str("[shell] ERRORE: impossibile aprire tastiera\n");
+        civis::exit(1);
+    }
 
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
 
     loop {
-        let n = civis::read_fs(fd, &mut byte, 1).unwrap_or(0);
+        let n = civis::input::read(&mut byte);
         if n == 0 {
-            // Niente di nuovo: drena la coda IPC e dorme un tick (mai spin).
-            wait_input_tick();
+            // Niente di nuovo: dorme su un evento di porta (mai spin/tick).
+            if !civis::input::wait() {
+                console_write_str("[shell] ERRORE: input della tastiera perso\n");
+                civis::exit(1);
+            }
             continue;
         }
         let b = byte[0];
@@ -1189,7 +1177,6 @@ fn read_line_from_keyboard(mask: bool) -> String {
         }
     }
 
-    let _ = civis::close(fd);
     String::from_utf8(buf).unwrap_or_default()
 }
 

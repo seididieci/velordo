@@ -326,12 +326,28 @@ nei test).
 | `CONSOLE_*` | 0x79-0x7B | `QUERY`/`SET_MODE`/`STATE` (client→console, D4) |
 | `EXIT_NOTIFY` | 0x7C | morte peer (kernel→tutti i peer, `w0` = code, `w1` = pid) |
 | `KBD_NOTIFY` | 0x40 | scancode pronti (kbd→porta) |
+| `INPUT_ATTACH` | 0x46 | sottoscrizione all'input: client→porta, sync (reply 0). Focus **LIFO** (E0, ADR-0082) |
+| `INPUT_DETACH` | 0x47 | rinuncia al focus: client→porta, sync (E0) |
+| `INPUT_NOTIFY` | 0x48 | tasti decodificati: porta→sottoscrittore con focus, **fire-and-forget** (`w0` = byte in coda). Hint coalescente, non il dato (E0) |
 | `IRQ_NOTIFY_KBD` | 0x41 | bridge interrupt→IPC (kernel→kbd) |
 | `IRQ_NOTIFY_DISK` | 0x42 | bridge interrupt→IPC (kernel→block, Fase 38 ATA DMA) |
 | `IRQ_NOTIFY_GPU` | 0x44 | bridge interrupt→IPC (kernel→gpu, L0a/L0b: config change virtio-gpu via MSI-X) |
 | `SVC_READY` | 0x7D | servizio pronto (fire-and-forget a init sul canale di nascita) |
 | `TEST_DONE` | 0x7E | fine test (sul canale di nascita verso init) |
 | `CHANNEL_PARENT` | 0 | alias canale di nascita verso il parent |
+
+### Eventi di input: notify + drain (E0, ADR-0082)
+
+La tastiera non si interroga a tick: `porta` manda `INPUT_NOTIFY` al
+sottoscrittore che ha il **focus** (LIFO: l'ultimo `INPUT_ATTACH`, potato su
+`INPUT_DETACH` o `EXIT_NOTIFY`). Il notify è un **hint coalescente**, non il
+dato: il client si blocca in `recv()`, poi drena `/dev/input/keyboard` finché
+`read` non ritorna 0. Un notify perso o ridondante non perde tasti, e la coda
+async (8 slot) non è nel percorso dati. `civis::input` incapsula attach
+(idempotente, con retry durante il boot/riavvio di porta), `read` e `wait`
+(su morte di porta: una riattaccata, poi uscita loud). Il meccanismo è neutro
+(byte, non tipi di terminale): la shell nativa, `identis-login` e
+`create-user` lo usano; la shell POSIX resta sul path a polling (personalità).
 
 ### Trappola: un tag di richiesta non può valere `EXIT_NOTIFY`
 

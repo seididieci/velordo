@@ -478,6 +478,18 @@ pub const FS_BUF_REG: u64 = 0x31;
 pub const BIN_LIST: u64 = 0x41;
 pub const KBD_NOTIFY: u64 = 0x40;
 pub const JOB_CANCEL: u64 = 0x43;
+// ── Eventi di input (E0, ADR-0082) ──────────────────────────────────
+// - INPUT_ATTACH (0x46): client → porta, "voglio i tasti". Sync (reply 0).
+//   Il cliente deve avere gia' un canale verso porta (`service_lookup`).
+//   Il focus e' LIFO: l'ultimo attaccato vince, alla morte si torna al
+//   precedente (primo mattone del DE: chi ha il focus riceve i tasti).
+// - INPUT_DETACH (0x47): client → porta, rinuncia esplicita al focus.
+// - INPUT_NOTIFY (0x48): porta → sottoscrittore, fire-and-forget. `w0` = byte
+//   in coda. E' un HINT coalescente, non il dato: la verita' sono i byte letti
+//   da `/dev/input/keyboard`, quindi un notify perso non perde tasti.
+pub const INPUT_ATTACH: u64 = 0x46;
+pub const INPUT_DETACH: u64 = 0x47;
+pub const INPUT_NOTIFY: u64 = 0x48;
 pub const SVC_READY: u64 = 0x7D;
 pub const TEST_DONE: u64 = 0x7E;
 pub const INIT_BOUNCE: u64 = 0x7F;
@@ -1184,9 +1196,11 @@ pub enum Service {
     /// scancode raw sul device `/dev/kbd`. Il kernel (IRQ1) risolve questo
     /// servizio per nome e sveglia l'owner (routing + EOI, mai lettura porte).
     Kbd = 5,
-    /// Soglia d'ingresso in userspace (Fase 15, `porta`, R9): decodifica i tasti,
-    /// fa echo e serve `/dev/input/keyboard`. Registrato per la supervisione
-    /// init (restart); nessun altro lo risolve per nome (i client usano il FS).
+    /// Soglia d'ingresso in userspace (Fase 15, `porta`, R9): decodifica i tasti
+    /// e serve `/dev/input/keyboard`. Registrato per la supervisione init
+    /// (restart) e risolto **per nome dai lettori** (E0, ADR-0082): il
+    /// canale diretto serve a `INPUT_ATTACH`/`INPUT_DETACH` (focus LIFO) e a
+    /// ricevere `INPUT_NOTIFY`; i byte restano sul device via FS.
     Porta = 6,
     /// Driver ATA a blocchi in userspace (Fase 16, `block`, R6): rileva i dischi,
     /// espone `/dev/sdX` (+`/dev/sdXn` per le partizioni MBR). cardo lo

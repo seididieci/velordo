@@ -196,6 +196,9 @@ pub use syscall_numbers::{CONSOLE_ERR, CONSOLE_OUT};
 pub use syscall_numbers::{
     BIN_LIST, FS_BUF_REG, FS_NOTIFY, FS_REGISTER, INIT_BOUNCE, KBD_NOTIFY, SVC_READY, TEST_DONE,
 };
+/// Tag degli eventi di input (E0, ADR-0082): `INPUT_ATTACH`/`INPUT_DETACH`
+/// (client → porta) e `INPUT_NOTIFY` (porta → sottoscrittore con focus).
+pub use syscall_numbers::{INPUT_ATTACH, INPUT_DETACH, INPUT_NOTIFY};
 /// Tag DEV_* op + device type (DocsD): stesso pattern, prima duplicati in
 /// cardo/block/vela/gpu/kbd/tty.
 pub use syscall_numbers::{
@@ -280,6 +283,10 @@ pub mod persona;
 
 pub mod fs;
 pub mod ipc;
+/// Input della tastiera come **eventi** (E0, ADR-0082): sottoscrizione a
+/// `porta` (focus LIFO) + attesa bloccante su `INPUT_NOTIFY` invece del
+/// polling a tick. Meccanismo neutro: byte, nessun tipo di terminale.
+pub mod input;
 /// Client degli endpoint del servizio `net` (N7.0, ADR-0074): apertura,
 /// invio/ricezione sugli slot (formato in `net-ep`) e stream TCP blocking.
 /// Meccanismo neutro: nessun verbo POSIX, nessun tipo di socket.

@@ -26,7 +26,6 @@ use identis_proto as proto;
 civis::entry!(real_main);
 
 const CONSOLE_PATH: &str = "/dev/console";
-const KEYBOARD_PATH: &str = "/dev/input/keyboard";
 
 /// Token di sessione dell'ultimo login riuscito. Lo userà la shell nativa
 /// (Fase 3.2) per passare la sessione ai programmi che ne hanno bisogno
@@ -251,29 +250,27 @@ const RETRIES: u32 = 20;
 
 /// Legge una riga terminata da newline dalla tastiera. Con `mask` l'eco e'
 /// mascherato (password: niente in chiaro nel log).
+///
+/// E0 (ADR-0082): sottoscrizione a `porta` (focus LIFO) e attesa **bloccante**
+/// su `INPUT_NOTIFY` invece del polling a tick. `attach` e' idempotente: il
+/// primo campo paga l'handshake, i successivi sono no-op.
 fn read_line_from_keyboard(mask: bool) -> String {
-    let fd = match civis::open(KEYBOARD_PATH, 0) {
-        Ok(f) => f,
-        Err(_) => {
-            console_write(b"[login] ERRORE: impossibile aprire tastiera\n");
-            civis::exit(1);
-        }
-    };
+    if civis::input::attach().is_err() {
+        console_write(b"[login] ERRORE: impossibile aprire tastiera\n");
+        civis::exit(1);
+    }
 
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
 
-    // Futex word locale per il wait: zero-initialized nel BSS, mai toccata da altri.
-    static FUTEX_WORD: u32 = 0;
-
     loop {
-        let n = civis::read_fs(fd, &mut byte, 1).unwrap_or(0);
+        let n = civis::input::read(&mut byte);
         if n == 0 {
-            // Niente di nuovo: prima controlla la coda IPC (non-blocking)
-            // per eventuali eventi in arrivo, poi dormi 1 tick. Se c'e'
-            // qualcos'altro nel ring buffer lo legge subito — zero latenza.
-            let _ = civis::recv_poll();
-            let _ = civis::futex_wait(&FUTEX_WORD as *const u32 as usize, 0, (civis::get_ticks() + 1) as u64);
+            // Niente di nuovo: dorme su un evento (mai un tick a vuoto).
+            if !civis::input::wait() {
+                console_write(b"[login] ERRORE: input della tastiera perso\n");
+                civis::exit(1);
+            }
             continue;
         }
         let b = byte[0];
@@ -299,7 +296,6 @@ fn read_line_from_keyboard(mask: bool) -> String {
         }
     }
 
-    let _ = civis::close(fd);
     String::from_utf8(buf).unwrap_or_default()
 }
 

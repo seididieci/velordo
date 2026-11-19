@@ -169,7 +169,7 @@ velordo/
 
 ## Stato corrente
 
-Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 66/66` + `[threadtest] PASS 12/12` + `[shell-native] PASS 31/31` (la shell nativa gira nella **stessa** QEMU del gate: login via `sendkey` e `--attach-pid`, `scripts/test-shell-native.py`), zero FAIL/PANIC/FAULT; il gate stampa `[gate] PASS/FAIL` ed **esce != 0** (vedi `docs/src/11-testing.md`). Le fasi POSIX restano storiche dal login nativo (ADR-0062). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
+Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 66/66` + `[threadtest] PASS 12/12` + `[shell-native] PASS 32/32` (la shell nativa gira nella **stessa** QEMU del gate: login via `sendkey` e `--attach-pid`, `scripts/test-shell-native.py`), zero FAIL/PANIC/FAULT; il gate stampa `[gate] PASS/FAIL` ed **esce != 0** (vedi `docs/src/11-testing.md`). Le fasi POSIX restano storiche dal login nativo (ADR-0062). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
 - **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
   BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
@@ -343,6 +343,18 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   binario è in `usr/bin/posixsock.bin` per l'uso manuale dalla shell. Gate
   invariato (6/6, zero FAIL/PANIC/FAULT).
   Prossimo: DoH (N6.4), poi VT-d.
+- **Input a eventi (E0, ADR-0082)**: il device `/dev/input/keyboard` risponde
+  subito (`0` = vuoto), quindi l'evento arriva per IPC: `porta` tiene i
+  sottoscrittori (`INPUT_ATTACH`/`INPUT_DETACH`, tag 0x46/0x47) con focus
+  **LIFO** e manda `INPUT_NOTIFY` (0x48, fire-and-forget, hint coalescente)
+  al titolare quando decodifica tasti; il client dorme in `recv()`
+  (`civis::input::wait`, su morte di porta una riattaccata poi uscita loud) e
+  **drena** il device finche' `civis::input::read` non ritorna 0. **Nessuna
+  modifica al kernel.** `interpres`, `identis-login` e `create-user` non
+  pollano piu' (CPU al prompt 1,0% / 2,0% misurata; gate `< 5%` su entrambi i
+  prompt); la shell POSIX resta a polling (personalita', debito dichiarato).
+  E1 (`SYS_RECV` con deadline) ed E2 (eventi di rete) sono il seguito
+  dichiarato nello stesso ADR.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
@@ -673,8 +685,8 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 
 # Gate di regressione (un solo boot, ADR-0081): 6 righe di suite + shell
 # nativa, ZERO FAIL/PANIC/FAULT. Il prompt del login e' il segnale di fine
-# suite; da li' il gate si attacca alla stessa QEMU e gira i 31 check della
-# shell (`[shell-native] PASS 31/31`). Il gate stampa `[gate] PASS/FAIL` ed
+# suite; da li' il gate si attacca alla stessa QEMU e gira i 32 check della
+# shell (`[shell-native] PASS 32/32`). Il gate stampa `[gate] PASS/FAIL` ed
 # esce != 0: niente piu' timeout esterno che chiude il boot.
 # (ADR-0059: la suite FAT32 e' fuori dal gate -> scripts/run-fat-tests.sh)
 #   [testfs] PASS 5/5
@@ -683,7 +695,7 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 #   [identistest] PASS 11/11
 #   [usertests] PASS 66/66
 #   [threadtest] PASS 12/12
-#   [shell-native] PASS 31/31
+#   [shell-native] PASS 32/32
 # KVM=1 accelera (-enable-kvm -cpu host, opt-in; senza /dev/kvm resta TCG).
 # Valvole: GATE_SHELL=0 (solo suite), GATE_TIMEOUT (600), SHELL_TIMEOUT (900).
 timeout 1800 ./run-tests.sh > /tmp/boot.log 2>&1
@@ -723,14 +735,18 @@ test "$(rg -c 'FAIL|PANIC|#.* FAULT' /tmp/boot.log)" = "0"
    lì si usa `send_raw` (D5/ADR-0062). Con `send()` la sequenza di
    cancellazione (3 byte) arrivava come 7 e il mirror seriale non combaciava
    col terminale.
-9. **Attese di input in userland: futex, non spin (ADR-0067)**: quando
-   `read_fs` non ha byte, il loop deve dormire con
-   `futex_wait(word, 0, get_ticks()+1)` (processo `Blocked`, PIT attivo),
-   mai `continue` nudo né `spin_brief()` illimitato: al prompt la CPU va al
-   100% (misurato 99,7% in POSIX shell e in `read_line_from_keyboard`).
-   Lo spin va bene solo per bound di microsecondi (continuazioni ESC) e
-   durante un comando foreground (`wait_fg`/`cancel_job`). Le fasi shell
-   `base`/`native` campionano la CPU di QEMU e falliscono sopra il 50%.
+9. **Attese di input in userland: eventi, non polling (E0/ADR-0082, ADR-0067)**:
+   i lettori della tastiera (`interpres`, `identis-login`, `create-user`) si
+   bloccano in `civis::input::wait()` (un `recv` sull'`INPUT_NOTIFY` di
+   `porta`), mai in `spin_loop()` ne' in un `futex_wait` a 1 tick. Se
+   `civis::input::read` ritorna 0 si chiama `wait`; il notify e' un **hint**,
+   dopo ogni risveglio si **drena** il device finche' non ritorna 0 (mai
+   mettere i byte nel notify: la coda async e' 8 slot). Restano a tick solo
+   le attese senza un produttore che notifica (es. retry di servizio, attach
+   durante un riavvio); lo spin puro solo per bound di microsecondi
+   (continuazioni ESC) e comandi foreground (`wait_fg`/`cancel_job`). La fase
+   shell `native` campiona la CPU di QEMU: prompt principale e `create-user`
+   sotto il **5%** (un busy-wait e' ~100%; `base` resta a 50%).
 10. **SSE2 userland e `mem*` (ADR-0071)**: lo userland compila con
     `targets/x86_64-unknown-velordo-user.json` (SSE2), il kernel resta
     `x86_64-unknown-none` soft-float. Con SSE2 LLVM **non** espande più

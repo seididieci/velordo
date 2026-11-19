@@ -41,6 +41,9 @@ use civis::{DEV_CLOSE, DEV_KEYBOARD, DEV_OPEN, DEV_READ, DEV_WRITE};
 /// Senza notify servirebbe pump in polling (sempre Ready → dilution scheduler).
 /// Single source in `syscall-numbers` (DocsB), via `civis`.
 use civis::KBD_NOTIFY;
+/// Eventi di input (E0, ADR-0082): attach/detach dei lettori e notify in
+/// uscita verso chi ha il focus.
+use civis::{INPUT_ATTACH, INPUT_DETACH, INPUT_NOTIFY};
 
 /// Device type per DEV_OPEN (stesso di prima: il path non cambia; valore in
 /// `syscall-numbers`, importato sopra).
@@ -107,6 +110,15 @@ struct Pending {
     kind: OpKind,
 }
 
+/// Sottoscrittore degli eventi di input (E0, ADR-0082). `chan` e' il canale
+/// diretto client→porta (`service_lookup`), `pid` l'identita' del client per
+/// riconoscerne la morte. Il focus e' LIFO: l'ultimo attaccato riceve i tasti.
+#[derive(Clone, Copy)]
+struct Sub {
+    chan: u64,
+    pid: i64,
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Phase {
     LookupFs,
@@ -133,6 +145,10 @@ struct Tty {
     pump_now: bool,
     /// Backoff dopo un pump fallito (vedi retry in collect PumpRead).
     pump_wait_until: i64,
+    /// Lettori sottoscritti agli eventi di input, in ordine di attach: il
+    /// **ultimo** ha il focus (LIFO). Potati su `INPUT_DETACH` e alla morte
+    /// del client (`EXIT_NOTIFY`), cosi' il focus torna al precedente.
+    subs: alloc::vec::Vec<Sub>,
 }
 
 impl Tty {
@@ -154,6 +170,7 @@ impl Tty {
             flush_wait_until: 0,
             pump_now: false,
             pump_wait_until: 0,
+            subs: alloc::vec::Vec::new(),
         }
     }
 
@@ -377,7 +394,10 @@ impl Tty {
 
     /// Decodifica scancode in byte per il client (Fase 43b, raw): SOLO coda
     /// input, mai eco (lo fa il lettore, la shell). Char-by-char immediato.
+    /// Se il lotto ha prodotto byte, sveglia il sottoscrittore con focus: il
+    /// notify e' un hint, i byte restano qui e si leggono col DEV_READ.
     fn decode_bytes(&mut self, scancodes: &[u8]) {
+        let before = self.input.len();
         for &sc in scancodes {
             if let Ok(Some(event)) = self.decoder.add_byte(sc) {
                 if let Some(decoded) = self.decoder.process_keyevent(event) {
@@ -403,6 +423,22 @@ impl Tty {
                     }
                 }
             }
+        }
+        if self.input.len() != before {
+            self.notify_input();
+        }
+    }
+
+    /// Sveglia il sottoscrittore con focus (LIFO). Fire-and-forget: non
+    /// aspettiamo reply e non blocchiamo il path del relay DEV (regola
+    /// anti-deadlock). Un canale morto (client uscito senza EXIT recapitato)
+    /// si pota qui, e il prossimo evento va al sottoscrittore precedente.
+    fn notify_input(&mut self) {
+        let Some(sub) = self.subs.last().copied() else {
+            return;
+        };
+        if civis::send_async(sub.chan, INPUT_NOTIFY, self.input.len() as u64, 0).is_err() {
+            self.subs.pop();
         }
     }
 
@@ -544,10 +580,30 @@ impl Tty {
             return;
         }
         if m.tag == civis::EXIT_NOTIFY {
+            // Se muore un lettore sottoscritto il focus torna al precedente
+            // (LIFO): non e' la morte di cardo, il boot SM resta dov'e'.
+            if self.subs.iter().any(|s| s.pid == m.w1 as i64) {
+                self.subs.retain(|s| s.pid != m.w1 as i64);
+                return;
+            }
             // cardo morto e rinato (o altro peer): riparte il boot async
             // (riapre i peer, ri-registra). Mai reply.
             println!("[porta] peer morto, riparto dal lookup");
             self.reset_to_lookup();
+            return;
+        }
+        if m.tag == INPUT_ATTACH {
+            // Focus LIFO: la stessa connessione si riposiziona in cima (un
+            // processo che ri-attacca non accumula voci ne' perde il focus).
+            self.subs.retain(|s| s.chan != m.channel);
+            let pid = civis::peer_pid(m.channel).unwrap_or(-1);
+            self.subs.push(Sub { chan: m.channel, pid });
+            let _ = civis::reply(0, 0, 0);
+            return;
+        }
+        if m.tag == INPUT_DETACH {
+            self.subs.retain(|s| s.chan != m.channel);
+            let _ = civis::reply(0, 0, 0);
             return;
         }
                 if m.tag == KBD_NOTIFY {

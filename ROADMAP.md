@@ -11,11 +11,11 @@ ricompilare se stesso. Ordina le priorita' (storage veloce prima, servizi
 fuori dal kernel poi, personalita' per software reale dopo) senza pianificare
 nulla da solo.
 
-## Stato (completate 1-57)
+## Stato (completate 1-57 + E0)
 
 Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` +
 `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 66/66` +
-`[threadtest] PASS 12/12` + `[shell-native] PASS 31/31` (la shell nativa gira
+`[threadtest] PASS 12/12` + `[shell-native] PASS 32/32` (la shell nativa gira
 nella stessa QEMU: login via `sendkey`, `--attach-pid`), zero FAIL/PANIC/FAULT;
 `./run-tests.sh` stampa `[gate] PASS/FAIL` ed esce `!= 0`. La suite FAT32 e'
 **fuori dal gate** (ADR-0059: `scripts/run-fat-tests.sh`).
@@ -78,6 +78,7 @@ nella stessa QEMU: login via `sendkey`, `--attach-pid`), zero FAIL/PANIC/FAULT;
 | 55 | ArcaFS A1+N0 (`R_OBJ_PUT/GET` + store in-memory, parser GPT per spec, mount MBR/GPT in partizione, `sys` seedato, init dual-mode + doppio pinning FNV/BLAKE2s, fallback FAT provato, testsarca 13/13, t58) | ✅ Completata |
 | 56 | Gestione utenti — Fase 3.1: protocollo Identis (`libs/identis-proto`: framing, magic, codici), **token di sessione** emesso da Identis al login, `IDENTIS_ADD_USER` (0x71) con validazione server-side del nome, `IDENTIS_LIST` (0x72), transazione **legata al canale** (BUSY + retry: il secondo client non corrompe piu' il buffer), client `create-user` (hash in locale, token da env `VELORDO_SESSION`), gate `identistest` 11/11 (ADR-0058) | ✅ Completata |
 | 57 | **FAT fuori dal boot e dalla suite** (ADR-0059): ArcaFS unico filesystem di sistema (init carica **tutto** da ArcaFS: `SvcMeta.path` sparisce, `inject-bins.sh` cancellato, `identis`/`login` ora pinnati come gli altri), suite FAT32 **fuori dal gate** (run dedicato `scripts/run-fat-tests.sh`), test migrati su ArcaFS con device **scoperti** per magic/UUID (mai per lettera), superblock **v4** (192 B: `label` + `mountpoint` dichiarato, il campo mountpoint era morto), tool host `arca create --label/--mountpoint` + `arca set`, uuid ArcaFS esposto dal driver disco (by-uuid 16 hex), gate 6 righe + shell 10/10 | ✅ Completata |
+| E0 | **Eventi, non polling — input della tastiera** (ADR-0082): `/dev/input/keyboard` risponde subito, quindi l'evento e' un messaggio — `porta` registra i sottoscrittori (`INPUT_ATTACH`/`INPUT_DETACH`, 0x46/0x47) con focus **LIFO** e manda `INPUT_NOTIFY` (0x48, hint coalescente) al titolare; il client dorme in `recv()` (`civis::input::wait`) e drena il device fino a 0 (`civis::input::read`). **Kernel intatto**; `interpres`/`identis-login`/`create-user` non pollano piu' (via `wait_input_tick`, `INPUT_FUTEX` e lo `spin_loop()` nudo). Gate `[shell-native] PASS 32/32` con due guardie CPU `< 5%` (prompt principale 1,0%, `create-user` 2,0%) | ✅ Completata |
 
 ## Lavoro recente (commit più recenti)
 
@@ -105,7 +106,10 @@ nella stessa QEMU: login via `sendkey`, `--attach-pid`), zero FAIL/PANIC/FAULT;
   `kbd_read_byte` (CPU host 99,7% al prompt `$ `) e la shell nativa aveva perso
   la futex in `read_line_from_keyboard` (99,7% ai prompt `create-user`);
   ora un `wait_input_tick()` (futex, deadline 1 tick) porta entrambi a
-  ~0%. Guardia CPU (`/proc/<qemu>/stat`) nelle fasi `base` e `native`
+  ~0%. Guardia CPU (`/proc/<qemu>/stat`) nelle fasi `base` e `native`.
+  **Superato da E0** (ADR-0082) per la shell nativa: il futex a 1 tick era
+  ancora polling; `interpres`/`identis-login`/`create-user` ora dormono su
+  `INPUT_NOTIFY` di `porta` (la POSIX shell resta sul futex, personalità)
 - **Console — Layer 0 sfondo** (`userland/console/`): immagine bitmap centrata
   con composizione alpha (ADR-0063), margini griglia, fallback colore pagina
 - **Console — Danno e rect di trasferimento** (`userland/console/`, `userland/gpu/`,
@@ -150,11 +154,34 @@ nella stessa QEMU: login via `sendkey`, `--attach-pid`), zero FAIL/PANIC/FAULT;
   `init_bounce` lo risolve per nome e il bounce rispawna. Corretto anche
   `Display` di `net::Ipv6Addr` (`:::1`). I dati strutturati (`VELORDO_DATA`)
   sono rinviati: il WIP non trasportava payload
+- **E0 — eventi, non polling** (`libs/civis/src/input.rs`,
+  `userland/porta/`, ADR-0082): l'ultimo salto dell'input era polling —
+  `/dev/input/keyboard` risponde subito (`0` = vuoto), quindi `porta` non
+  diceva *quando* arrivava un tasto e i lettori si svegliavano ogni tick
+  (`create-user` girava proprio a vuoto, `spin_loop()` nudo). Ora i tag
+  `INPUT_ATTACH`/`INPUT_DETACH` (0x46/0x47, focus **LIFO** in `porta`) e
+  `INPUT_NOTIFY` (0x48, hint coalescente): il client si blocca in `recv()` e
+  drena il device finche' `read` non ritorna 0 (`civis::input`).
+  **Kernel intatto**; CPU al prompt **1,0%** (shell) e **2,0%**
+  (`create-user`), gate `[shell-native] PASS 32/32` con due guardie `< 5%`
 
 ## Pianificate
 
 Voci con scope e vittoria dichiarati (non date).
 
+- [ ] **E1 — `SYS_RECV` con deadline** (ADR-0082): kernel `ipc_recv(deadline)`
+      + `recv_deadline` nel PCB + scansione in `tick_deadlines` (riuso futex),
+      timeout `-2`, **la coda vince sul timeout**, arg1 di `SYS_RECV` (0 = mai,
+      compatibile); `civis::recv_timeout`, `task::Sleep`, deadline minima fra i
+      task in `block_on`/`run`. Test: `t71` (scade; un messaggio in gara non si
+      perde), `t72` (`Sleep` + `Join`) → usertests 66→68. Vittoria: la shell
+      tiene orologio/uptime aggiornati mentre attende input, zero risvegli a vuoto.
+- [ ] **E2 — eventi di rete** (ADR-0082): owner channel per endpoint +
+      `NET_EP_EVENT` coalescente su enqueue/accept/fin/rst; `Endpoint::wait(deadline)`
+      e `net::Stream` componibile nell'executor; migrazione `netecho` (listener +
+      echo come due task), poi `dns`/`siit`/`broker`. Vittoria:
+      `run-net-tests.sh` PASS con la sola API a eventi; `rg futex_wait
+      userland/{net,dns,siit,netbroker}` → 0.
 - [x] **L0a — LAPIC minimale + convivenza PIC** (completata, ADR-0056;
       prerequisito video/MSI-X): enable LAPIC da MSR `0x1B` (xAPIC MMIO),
       pagina 2M UC, LINT0 ExtINT (PIC invariato per IRQ0/1/14/15), TPR 0,

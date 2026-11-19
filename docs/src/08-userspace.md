@@ -354,7 +354,11 @@ esteso cosi' (dettagli in `AGENTS.md` e ADR):
   event-driven); console ridotto a rendering (`/dev/console`) + `ESC[D/C/K`
   (43b); echo ed editing nella readline della shell. Regole: mai IPC
   sincrone servendo, mai spinner, boot async senza attese di wake,
-  handshake per canale.
+  handshake per canale. **E0 (ADR-0082)**: i lettori della tastiera non
+  pollano più — `INPUT_ATTACH`/`INPUT_DETACH` (focus LIFO in `porta`) e
+  `INPUT_NOTIFY` come hint, poi drain di `/dev/input/keyboard` (client
+  `civis::input`); la shell nativa, `identis-login` e `create-user` dormono
+  in `recv()` (CPU al prompt 1-2%).
 - **Fase 16 — Disk/ATA server in userspace** (implementata,
   [ADR-0012](./adr/0012-userspace-disk-driver.md)): `block` (driver ATA in
   ring 3, canale primario via `io_ranges` — il secondario e' probato ma non

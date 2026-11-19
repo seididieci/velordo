@@ -8,7 +8,7 @@ percorso completo: `BIN_LIST` -> `obj_get` -> `R_RIGHTS_EXECUTE` ->
 `spawn_image` con argv -> exit notificato al padre, e verifica che il
 response ring resti sincronizzato (una op FS dopo lo spawn: `users`).
 
-Due modi, stessi 31 check:
+Due modi, stessi 32 check:
 
 - **autonomo** (default, `scripts/test-shell-all.sh native`): prepara il seed
   ArcaFS, boota QEMU, fa il login (`boot_native`), digita.
@@ -55,7 +55,7 @@ def _native_args(ap):
 
 
 def run_checks(sh, c):
-    """I 31 check della shell nativa (comuni a boot autonomo e gate)."""
+    """I 32 check della shell nativa (comuni a boot autonomo e gate)."""
     log = sh.read_log()
     banner = b"[shell] Velordo shell nativa"
     c.check("login -> shell nativa (banner)", banner in log)
@@ -63,6 +63,14 @@ def run_checks(sh, c):
     # (un `> ` sparso nei test non deve contare come prompt nativo).
     after_banner = log[log.rindex(banner):] if banner in log else b""
     c.check("prompt nativo pronto", b"> " in after_banner)
+
+    # E0 (ADR-0082): al prompt la shell dorme in `recv()` su un evento di
+    # `porta`, non si risveglia ogni tick. Un ritorno al polling si vede
+    # subito qui (prima: futex a 1 tick; con uno spin: ~100%).
+    time.sleep(T_WAIT_TAIL)
+    cpu_main = sh.cpu_percent(1.0)
+    print("info CPU prompt principale: %.1f%%" % cpu_main, flush=True)
+    c.check("prompt principale idle su eventi (CPU < 5%)", cpu_main < 5.0)
 
     # `help` e' un built-in: prova che il REPL risponde prima di toccare
     # il percorso esterno.
@@ -202,9 +210,10 @@ def run_checks(sh, c):
     c.check("scope if propagato", b"42" in out)
 
     # Regressione "CPU 100% al prompt" (ADR-0067): `create-user` senza
-    # argomento entra in `read_line_from_keyboard`, che deve dormire in
-    # futex, non girare a vuoto su `read_fs`. Poi Invio a vuoto (nome
-    # vuoto) per tornare al prompt.
+    # argomento entra in `read_line_from_keyboard`, che deve dormire su un
+    # evento di input (E0, ADR-0082; prima era un futex a 1 tick, e in questa
+    # versione del binario uno spin nudo). Poi Invio a vuoto (nome vuoto) per
+    # tornare al prompt.
     mark = len(sh.read_log())
     sh.type_text("create-user")
     sh.send_mon("sendkey ret")
@@ -215,8 +224,8 @@ def run_checks(sh, c):
     time.sleep(T_WAIT_TAIL)
     cpu = sh.cpu_percent(1.0)
     print("info CPU prompt create-user: %.1f%%" % cpu, flush=True)
-    c.check("prompt create-user idle senza busy-wait (CPU < 50%)",
-            cpu < 50.0)
+    c.check("prompt create-user idle senza busy-wait (CPU < 5%)",
+            cpu < 5.0)
     sh.send_mon("sendkey ret")
     time.sleep(T_RUN)
     c.check("nome vuoto rifiutato (ritorno al prompt)",

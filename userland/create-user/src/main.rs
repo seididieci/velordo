@@ -33,7 +33,6 @@ use identis_proto as proto;
 civis::entry!(real_main);
 
 const CONSOLE_PATH: &str = "/dev/console";
-const KEYBOARD_PATH: &str = "/dev/input/keyboard";
 
 /// Variabile d'ambiente con il token di sessione (hex).
 const ENV_SESSION: &str = "VELORDO_SESSION";
@@ -187,22 +186,26 @@ fn argv_name(sp: u64) -> Option<String> {
 
 /// Legge una riga terminata da newline dalla tastiera. Con `mask` l'eco e'
 /// mascherato (la password non finisce in chiaro nel log).
+///
+/// E0 (ADR-0082): il vecchio `spin_loop()` nudo quando il buffer era vuoto
+/// (busy-wait al 100%, contro ADR-0067) e' sparito: ci si blocca in `recv()`
+/// su un evento di `porta`, con sottoscrizione LIFO.
 fn read_line_from_keyboard(mask: bool) -> String {
-    let fd = match civis::open(KEYBOARD_PATH, 0) {
-        Ok(f) => f,
-        Err(_) => {
-            console_write(b"[create-user] ERRORE: impossibile aprire tastiera\n");
-            civis::exit(1);
-        }
-    };
+    if civis::input::attach().is_err() {
+        console_write(b"[create-user] ERRORE: impossibile aprire tastiera\n");
+        civis::exit(1);
+    }
 
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
 
     loop {
-        let n = civis::read_fs(fd, &mut byte, 1).unwrap_or(0);
+        let n = civis::input::read(&mut byte);
         if n == 0 {
-            core::hint::spin_loop();
+            if !civis::input::wait() {
+                console_write(b"[create-user] ERRORE: input della tastiera perso\n");
+                civis::exit(1);
+            }
             continue;
         }
         let b = byte[0];
@@ -228,7 +231,6 @@ fn read_line_from_keyboard(mask: bool) -> String {
         }
     }
 
-    let _ = civis::close(fd);
     String::from_utf8(buf).unwrap_or_default()
 }
 

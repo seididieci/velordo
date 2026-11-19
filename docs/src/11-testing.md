@@ -87,7 +87,7 @@ Il gate e' **end-to-end in un solo boot** (ADR-0081): `run-tests.sh` mette il
 seriale su file e apre il monitor QEMU (`SERIAL=file:… MONITOR=unix:…`),
 aspetta `[login] Nome utente:` (segnale di fine suite, al posto del vecchio
 timeout esterno), fa il login via `sendkey` e si attacca alla **stessa** QEMU
-(`scripts/test-shell-native.py --attach-pid`) per i **31 check** della shell
+(`scripts/test-shell-native.py --attach-pid`) per i **32 check** della shell
 nativa. Il gate e' autoverificante: esce `!= 0` se manca una riga, se compare
 `FAIL|PANIC|#.* FAULT` o se la fase shell fallisce. Valvole: `GATE_SHELL=0`
 (solo suite), `GATE_TIMEOUT` (attesa del prompt, default 600 s),
@@ -103,7 +103,7 @@ Righe di gate:
 [identistest] PASS 11/11
 [usertests] PASS 66/66
 [threadtest] PASS 12/12
-[shell-native] PASS 31/31
+[shell-native] PASS 32/32
 ```
 
 Il build userland (servizi nativi, test suite, flavour POSIX) usa
@@ -247,7 +247,7 @@ read-write si corromperebbero):
 | File | Fase | Check |
 |------|------|-------|
 | `test-shell-base.py` | 9.4/18/19/20 (ls/cat/mkdir, backspace, builtin, cd/pwd, ls -l, kill, ps, rm/cp/mv, FAT scrivibile, clear) + guardia CPU al prompt (ADR-0067) | 29 |
-| `test-shell-native.py` | S3.2b-4/ADR-0064 + ADR-0065 (shell nativa: `BIN_LIST` → oggetto piatto `usr` → EXECUTE → spawn con argv → exit, ring sincronizzato, comando ignoto; interprete: variabili, aritmetica, if/while/for, commenti, `dump`/`type`; prompt una volta per riga, hint inline, Up) + nessun diniego/errore di permesso su `usr` (la shell spawnata dal login è verificata: ADR-0080 fase 6) + guardia CPU al prompt `create-user` (ADR-0067) | 31 |
+| `test-shell-native.py` | S3.2b-4/ADR-0064 + ADR-0065 (shell nativa: `BIN_LIST` → oggetto piatto `usr` → EXECUTE → spawn con argv → exit, ring sincronizzato, comando ignoto; interprete: variabili, aritmetica, if/while/for, commenti, `dump`/`type`; prompt una volta per riga, hint inline, Up) + nessun diniego/errore di permesso su `usr` (la shell spawnata dal login è verificata: ADR-0080 fase 6) + guardia CPU al prompt principale e a quello di `create-user` (E0/ADR-0082: eventi, non polling; entrambe &lt; 5%) | 32 |
 | `test-shell-run.py` | 37.2 (run fg/bg, argv, exit-code, jobs/wait) | 8 |
 | `test-shell-redirect.py` | 40.4 (`> >> < 2> 2>&1` + run redirectato) | 20 |
 | `test-shell-41.py` | 41 (quoting/escape, `$VAR/$?/~/$$`, `; && \|\|`, commenti, glob) | 37 |
@@ -259,13 +259,16 @@ read-write si corromperebbero):
 | `test-shell-44b.py` | 44b (Ctrl-C → 130 su fg non cooperante, selettivita', cleanup) | 5 |
 | `foreign.bin`     | t57: attore "ignoto" fuori tabella policy — default fail-closed   | — |
 
-La fase `native` e' **31/31 verde e nel gate** (ADR-0081). Le 10 fasi POSIX
+La fase `native` e' **32/32 verde e nel gate** (ADR-0081, E0 in ADR-0082).
+Le 10 fasi POSIX
 (179 check) restano la
 specifica eseguibile del parser/redirect/pipe POSIX: non sono nel gate di boot
 (il login nativo non le lancia da solo), ma `test-shell-all.sh` le guida via
 `boot()` digitando `usershell` al prompt nativo. `base` e `native` includono
 la guardia CPU di ADR-0067: al prompt il processo QEMU deve stare sotto il
-50% (un busy-wait di attesa input e' ~100%). Stesso kernel produzione del gate:
+50% (un busy-wait di attesa input e' ~100%); la fase `native` ha la soglia
+stretta **&lt; 5%** sui due prompt dell'input a eventi (E0, ADR-0082: misurato
+1,0% principale e 2,0% `create-user`). Stesso kernel produzione del gate:
 il kernel
 embedda init/fs/disk, quindi va ricompilato DOPO `build-userland.sh` — ordine
 di `run.sh` — altrimenti il manifest Strato 2 di init non matcha i binari su

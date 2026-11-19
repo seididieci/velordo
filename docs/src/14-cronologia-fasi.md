@@ -4060,3 +4060,37 @@
       ha `sched_debug` (log più rumoroso). Il token `notests=1` (secondo
       boot) è stato scartato: `--attach` resta riusabile se servisse un
       volume pulito.
+- [x] **E0 — Eventi, non polling: input della tastiera** (2026-11-19,
+      ADR-0082): diagnosi corretta — il polling non era nel kernel (IRQ1 →
+      `KBD_NOTIFY` → `porta` già event-driven) ma **nell'ultimo salto**:
+      `/dev/input/keyboard` rispondeva subito (`0` = vuoto), quindi
+      `porta` non poteva dire *quando* arrivava un tasto e i lettori si
+      svegliavano a ogni tick (`futex_wait` a 1 tick in `interpres` e
+      `identis-login`; **`spin_loop()` nudo** in `create-user`, busy-wait al
+      100% contro ADR-0067, coperto dal gate solo con soglia 50%).
+      **Decisione: eventi, non `async`** (la sintassi non era il problema).
+      Tre tag in `syscall-numbers`/`civis`: `INPUT_ATTACH` (0x46, sync,
+      reply 0), `INPUT_DETACH` (0x47), `INPUT_NOTIFY` (0x48, porta →
+      sottoscrittore, **hint coalescente** con `w0` = byte in coda).
+      `porta` tiene i sottoscrittori con focus **LIFO** (l'ultimo attaccato
+      vince; `EXIT_NOTIFY` del titolare o `send_async` fallito lo pota e il
+      focus torna al precedente — primo mattone del DE). Il client si
+      blocca in `recv()` e **drena** il device finché `read` non ritorna 0:
+      un notify perso non perde tasti e la coda async (8 slot) non è nel
+      percorso dati. `civis::input` (`attach` idempotente con retry a 1 tick
+      solo durante boot/riavvio di porta, `read`, `wait` con una riattaccata
+      e poi uscita loud) è il client; `interpres`, `identis-login` e
+      `create-user` usano solo quello (spariti `wait_input_tick`,
+      `INPUT_FUTEX`, il `spin_loop()` e gli `open` per chiamata).
+      **Nessuna modifica al kernel**, niente `select`/`epoll`/eventfd,
+      niente reply differite; la shell POSIX resta a polling (personalità,
+      debito dichiarato). **Vittoria**: gate KVM `[gate] PASS` con
+      `[shell-native] PASS 32/32` (nuovo check CPU al prompt principale:
+      **1,0%**, e `create-user` **2,0%**, entrambi `< 5%`; prima c'era solo
+      `create-user` a soglia 50%), suite invariata (66/66, kernel intatto),
+      zero FAIL/PANIC/FAULT; `rg 'futex_wait|spin_loop\(\)'
+      userland/{interpres,identis-login,create-user}/src` → 0 nei loop di
+      input. **Lezione**: un `futex_wait` a 1 tick è un polling con le
+      sembianze di un'attesa — se il produttore non ha un campanello, il
+      consumatore non può dormire. Seguito dichiarato: E1 (`SYS_RECV` con
+      deadline, `task::Sleep`) ed E2 (eventi di rete).
