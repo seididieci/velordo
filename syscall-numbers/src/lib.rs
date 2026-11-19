@@ -616,6 +616,13 @@ pub const NET_ADDR: u64 = 0x8B;
 pub const NET_ADDR_LINK_LOCAL: u64 = 0;
 pub const NET_ADDR_GLOBAL: u64 = 1;
 pub const NET_ADDR_ROUTER: u64 = 2;
+/// `NET_EP_EVENT {ep_id}` → **hint** asincrono (fire-and-forget) dal servizio
+/// `net` al proprietario di un endpoint: nel suo ring RX ci sono nuovi slot
+/// (dati, `EV_ACCEPT`, `EV_FIN`, `EV_RST`, `EV_ABORT`). `w0` = endpoint_id,
+/// `w1` = 1. Il dato **non** viaggia nel messaggio: e' coalescente, il ring
+/// resta la verita' (E2, ADR-0084) — un hint perso non perde dati, il client
+/// ricontrolla il ring a ogni risveglio.
+pub const NET_EP_EVENT: u64 = 0x8C;
 
 // ── Ring per endpoint (SPSC, shm) ──────────────────────────────────
 /// Slot del ring per endpoint (per direzione).

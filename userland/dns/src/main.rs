@@ -568,12 +568,20 @@ fn forward_plain(
         if let Some(len) = up_take_reply(up, upstream, up_port, txid, client_id, out, &mut buf) {
             return Some(len);
         }
-        let now = civis::get_ticks() as u64;
-        if now >= deadline {
-            let _ = civis::print_string(b"[dns] upstream timeout\n");
-            return None;
+        // E2 (ADR-0084): si dorme sull'hint di `net` (`NET_EP_EVENT`), non su
+        // un tick. `Timeout` = deadline dell'upstream; `Dead` = servizio
+        // morto (la query fallisce, mai attesa infinita).
+        match up.wait(deadline) {
+            civis::net::Wait::Dead => {
+                let _ = civis::print_string(b"[dns] upstream: net morto\n");
+                return None;
+            }
+            civis::net::Wait::Timeout => {
+                let _ = civis::print_string(b"[dns] upstream timeout\n");
+                return None;
+            }
+            civis::net::Wait::Event => {}
         }
-        let _ = civis::futex_wait(&FUTEX as *const u32 as usize, 0, now + 1);
     }
 }
 
@@ -754,12 +762,20 @@ fn real_main(_sp: u64) -> ! {
     civis::signal_ready(1);
     civis::println!("[dns] resolver attivo, porta UDP {}", DNS_PORT);
 
+    // Loop di servizio a **eventi** (E2, ADR-0084): si dorme in `recv` e si
+    // serve quando arriva qualcosa. Nessun risveglio a tick: il resolver non
+    // ha lavoro periodico (le deadline delle query vivono dentro la query).
     loop {
-        let now = civis::get_ticks() as u64;
-        while let Some(m) = civis::recv_poll() {
-            handle_client(&mut svc, m);
+        let m = match civis::recv() {
+            Ok(m) => m,
+            Err(_) => civis::exit(1),
+        };
+        // Hint di rete stantio (endpoint upstream): non e' una richiesta, non
+        // si risponde (una reply qui sarebbe un messaggio spaiato a `net`).
+        if m.tag == civis::NET_EP_EVENT {
+            continue;
         }
-        let _ = civis::futex_wait(&FUTEX as *const u32 as usize, 0, (now + 1) as u64);
+        handle_client(&mut svc, m);
     }
 }
 
@@ -847,6 +863,16 @@ fn handle_client(svc: &mut DnsService, m: civis::IpcMsg) {
                 }
             };
 
+            // **Ack subito**, prima di qualunque attesa (E2, ADR-0084). La
+            // reply e' implicita al messaggio corrente (ADR-0008): mentre si
+            // aspetta l'upstream arrivano gli hint `NET_EP_EVENT` di `net`,
+            // che sposterebbero `reply_chan` — il client resterebbe appeso e
+            // `net` riceverebbe una reply spaiata. Il client non aspetta i
+            // dati nella reply (li legge dal ring RX, `ask` fa polling), quindi
+            // confermare qui e pubblicare dopo e' il contratto giusto anche
+            // per una query lenta (DoT: handshake + TLS).
+            let _ = civis::reply(DNS_TX, 0, 0);
+
             let mut resp = [0u8; MAX_DNS];
             let resp_len = match core::str::from_utf8(&name) {
                 Ok(n) => match lookup(&name, qtype) {
@@ -922,7 +948,6 @@ fn handle_client(svc: &mut DnsService, m: civis::IpcMsg) {
             if let Some(i) = svc.find_by_id(ep_id) {
                 svc.endpoints[i].tx_pkts = svc.endpoints[i].tx_pkts.saturating_add(1);
             }
-            let _ = civis::reply(DNS_TX, 0, 0);
         }
         DNS_CLOSE => {
             let ep_id = m.w0 as u16;

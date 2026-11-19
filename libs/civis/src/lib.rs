@@ -73,9 +73,10 @@ pub use syscall_numbers::{
     NET_EP_TX, NET_EP_TX_RING_OFF, NET_ECHO_PORT, NET_PROTO_DNS, NET_PROTO_IPV4, NET_PROTO_TCP,
     NET_PROTO_UDP, SIIT_EP_CLOSE, SIIT_EP_OPEN, SIIT_EP_TX,
 };
-/// Indirizzi del nodo interrogabili da un client (`NET_ADDR`, N6.0).
+/// Indirizzi del nodo interrogabili da un client (`NET_ADDR`, N6.0) e hint
+/// asincrono del servizio `net` (`NET_EP_EVENT`, E2/ADR-0084).
 pub use syscall_numbers::{
-    NET_ADDR, NET_ADDR_GLOBAL, NET_ADDR_LINK_LOCAL, NET_ADDR_ROUTER,
+    NET_ADDR, NET_ADDR_GLOBAL, NET_ADDR_LINK_LOCAL, NET_ADDR_ROUTER, NET_EP_EVENT,
 };
 /// Protocollo endpoint cliente→servizio DNS (N5, ADR-0069).
 pub use syscall_numbers::{

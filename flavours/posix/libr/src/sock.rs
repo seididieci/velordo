@@ -319,8 +319,9 @@ pub unsafe fn recv(fd: i64, buf: *mut u8, len: usize, flags: i64) -> i64 {
 
 /// `recvfrom(fd, buf, len, flags, addr, addrlen)` → byte ricevuti o `-errno`.
 ///
-/// Attesa bloccante a deadline (`futex_wait` a 1 tick, ADR-0067): niente spin
-/// puro. `-ETIMEDOUT` oltre `RECV_DEADLINE_TICKS`.
+/// Attesa bloccante a deadline sull'**evento** del servizio `net`
+/// (`Endpoint::wait`, E2/ADR-0084): niente spin ne' risveglio a tick.
+/// `-ETIMEDOUT` oltre `RECV_DEADLINE_TICKS`.
 ///
 /// # Safety
 /// `buf` deve puntare a `len` byte scrivibili; `addr`/`addrlen` o entrambi
@@ -364,11 +365,12 @@ pub unsafe fn recvfrom(
             got = Some(r);
             break;
         }
-        let _ = civis::futex_wait(
-            &FUTEX as *const u32 as usize,
-            0,
-            (civis::get_ticks() + 1) as u64,
-        );
+        // E2 (ADR-0084): dorme sull'hint del servizio, non a tick. Il ring
+        // e' stato ricontrollato sopra, quindi un hint perso non perde dati.
+        match s.ep.wait(deadline as u64) {
+            civis::net::Wait::Dead => return -crate::posix::ECONNRESET,
+            _ => {}
+        }
     }
     let Some(r) = got else {
         return -ETIMEDOUT;

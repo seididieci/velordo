@@ -11,7 +11,7 @@ ricompilare se stesso. Ordina le priorita' (storage veloce prima, servizi
 fuori dal kernel poi, personalita' per software reale dopo) senza pianificare
 nulla da solo.
 
-## Stato (completate 1-57 + E0 + E1)
+## Stato (completate 1-57 + E0 + E1 + E2)
 
 Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` +
 `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 68/68` +
@@ -80,6 +80,7 @@ nella stessa QEMU: login via `sendkey`, `--attach-pid`), zero FAIL/PANIC/FAULT;
 | 57 | **FAT fuori dal boot e dalla suite** (ADR-0059): ArcaFS unico filesystem di sistema (init carica **tutto** da ArcaFS: `SvcMeta.path` sparisce, `inject-bins.sh` cancellato, `identis`/`login` ora pinnati come gli altri), suite FAT32 **fuori dal gate** (run dedicato `scripts/run-fat-tests.sh`), test migrati su ArcaFS con device **scoperti** per magic/UUID (mai per lettera), superblock **v4** (192 B: `label` + `mountpoint` dichiarato, il campo mountpoint era morto), tool host `arca create --label/--mountpoint` + `arca set`, uuid ArcaFS esposto dal driver disco (by-uuid 16 hex), gate 6 righe + shell 10/10 | ✅ Completata |
 | E0 | **Eventi, non polling — input della tastiera** (ADR-0082): `/dev/input/keyboard` risponde subito, quindi l'evento e' un messaggio — `porta` registra i sottoscrittori (`INPUT_ATTACH`/`INPUT_DETACH`, 0x46/0x47) con focus **LIFO** e manda `INPUT_NOTIFY` (0x48, hint coalescente) al titolare; il client dorme in `recv()` (`civis::input::wait`) e drena il device fino a 0 (`civis::input::read`). **Kernel intatto**; `interpres`/`identis-login`/`create-user` non pollano piu' (via `wait_input_tick`, `INPUT_FUTEX` e lo `spin_loop()` nudo). Gate `[shell-native] PASS 32/32` con due guardie CPU `< 5%` (prompt principale 1,0%, `create-user` 2,0%) | ✅ Completata |
 | E1 | **`recv` con deadline — un messaggio *oppure* il tempo** (ADR-0083): `SYS_RECV` prende `arg1` = tick assoluto di scadenza (`0` = mai, compatibile: nessun chiamante cambia); timeout = `rax = -2` **senza consumare messaggi**, e **la coda vince** (un messaggio in gara si consegna sempre). La scadenza vive nel PCB (`recv_deadline`) e la scandisce `on_tick` accanto ai futex: nessuna tabella di timer, nessuno slot orfano. Meccanismo: `civis::ipc::recv_timeout`, `task::Sleep` + `Receivable::deadline()` (`block_on`/`run` armano la deadline minima, `Join` propaga quella dei figli), `input::wait_until`. Vittoria: la shell tiene l'**orologio del prompt vivo mentre dorme** (repaint in-place di 8 cifre, nessun prompt ridisegnato, un risveglio al secondo) e `useruptime` usa `block_on(Sleep)` al posto del futex-timer. Gate: t71/t72 (`usertests 68/68`) + 33° check della shell (l'ora avanza al prompt fermo) | ✅ Completata |
+| E2 | **Eventi di rete — il client dorme sull'hint di `net`** (ADR-0084): tag `NET_EP_EVENT` (0x8C, coalescente, fire-and-forget) dal servizio `net` al proprietario dell'endpoint quando scrive slot nuovi nel ring RX; `civis::net::{wait, pending}` + `Endpoint::{pending, wait}` sopra `recv_timeout` (E1) — **una sola** attesa, ring = verità, messaggi estranei nello stash di `civis::ipc` (mai persi). Migrati `netecho`, `dns` (loop + upstream), `siit`, `netbroker`, `Stream` (DoT/TLS) e `libr::sock::recvfrom`: **zero risvegli a tick** (`rg futex_wait libs/civis/src/net libs/tls-net` → 0, gate strutturale nello script di rete); restano solo i retry di boot e il tick del servizio `net` (timer TCP/NDP + poll del driver → N8). Vittoria: `run-net-tests.sh` PASS con la sola API a eventi + DoT invariato (`dot: PASS` ×2, `dotfail: PASS`) | ✅ Completata |
 
 ## Lavoro recente (commit più recenti)
 
@@ -193,12 +194,15 @@ Voci con scope e vittoria dichiarati (non date).
       `run`/`block_on`) → usertests 68/68 + 33° check shell. Vittoria: l'orologio
       del prompt avanza **mentre la shell dorme** (repaint in-place, un risveglio
       al secondo), `useruptime` su `block_on(Sleep)`.
-- [ ] **E2 — eventi di rete** (ADR-0082): owner channel per endpoint +
-      `NET_EP_EVENT` coalescente su enqueue/accept/fin/rst; `Endpoint::wait(deadline)`
-      e `net::Stream` componibile nell'executor; migrazione `netecho` (listener +
-      echo come due task), poi `dns`/`siit`/`broker`. Vittoria:
-      `run-net-tests.sh` PASS con la sola API a eventi; `rg futex_wait
-      userland/{net,dns,siit,netbroker}` → 0.
+- [x] **E2 — eventi di rete** (ADR-0084, completata 2026-11-19):
+      `NET_EP_EVENT` coalescente al proprietario dell'endpoint,
+      `civis::net::{wait, pending}` + `Endpoint::{pending, wait}` sopra
+      `recv_timeout` (E1) e stash dei messaggi estranei. Migrati `netecho`,
+      `dns` (loop + upstream), `siit`, `netbroker`, `Stream` (DoT/TLS) e
+      `libr::sock::recvfrom`. Vittoria: `run-net-tests.sh` PASS con la sola
+      API a eventi + gate strutturale `rg futex_wait libs/civis/src/net
+      libs/tls-net` → 0 (nei servizi restano i retry di boot; il tick del
+      servizio `net` è il timer TCP/NDP e il poll del driver → N8).
 - [x] **L0a — LAPIC minimale + convivenza PIC** (completata, ADR-0056;
       prerequisito video/MSI-X): enable LAPIC da MSR `0x1B` (xAPIC MMIO),
       pagina 2M UC, LINT0 ExtINT (PIC invariato per IRQ0/1/14/15), TPR 0,

@@ -330,6 +330,13 @@ log seriale.
   `[netbroker] broker attivo` (ADR-0080 fase 6), `[netudp] risultato: PASS`
   (N2), `[net3] risultato: PASS` (N3), `[net4] risultato: PASS` (N4),
   `[dns] risultato: PASS` (N5) e `[dns] upstream: PASS` (N6.0).
+  **E2 (ADR-0084)**: lo script include anche un **gate strutturale** — i
+  client di rete del meccanismo non fanno polling a tick
+  (`rg futex_wait libs/civis/src/net libs/tls-net/src` → 0) — e l'intera
+  suite gira con la sola API a **eventi** (`NET_EP_EVENT` +
+  `civis::net::wait`): `netecho`, `dns`, `siit`, `netbroker`, `Stream` e le
+  socket POSIX dormono sull'hint del servizio. I `futex_wait` che restano
+  nei servizi sono solo i retry di boot `service_lookup` (ADR-0067).
   I probe di **policy** (`netudp`/`net3`/`net4`) sono in `tst`, quindi
   `Untrusted`: `net`/`siit` negano loro l'endpoint diretto e navigano solo
   via broker — se passano, il modello della fase 6 è verificato end-to-end.

@@ -287,6 +287,28 @@ impl Endpoint {
         self.set_rx_head(tail);
     }
 
+    /// `true` se il ring RX ha almeno uno slot da leggere.
+    ///
+    /// E' il controllo che rende sicuro dormire su un hint (E2, ADR-0084):
+    /// il hint e' coalescente e puo' essere perso, il ring no.
+    pub fn pending(&self) -> bool {
+        if self.ring.is_null() {
+            return false;
+        }
+        let (head, tail) = self.rx_positions();
+        head != tail
+    }
+
+    /// Come [`pending`](Self::pending), ma se non c'e' nulla dorme su
+    /// [`super::wait`]: "evento in coda **oppure** tempo" (`deadline` in
+    /// tick, `0` = mai).
+    pub fn wait(&self, deadline: u64) -> super::Wait {
+        if self.pending() {
+            return super::Wait::Event;
+        }
+        super::wait(self.chan, deadline)
+    }
+
     /// Contatori dell'endpoint `(rx, tx)`, o `None` se l'endpoint non esiste.
     pub fn stats(&mut self) -> Option<(u64, u64)> {
         match crate::send(self.chan, NET_EP_STATS, self.id as u64, 0) {

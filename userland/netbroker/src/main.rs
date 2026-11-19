@@ -418,26 +418,64 @@ fn real_main(_sp: u64) -> ! {
         broker.net_chan
     );
 
+    // Loop di servizio a **eventi** (E2, ADR-0084): si serve tutto quello che
+    // c'e', poi si dorme finche' non arriva una richiesta di un cliente o un
+    // hint di rete (`NET_EP_EVENT`, che copre anche `siit`). Niente tick: il
+    // broker non ha lavoro periodico (i rate limit sono a finestra, non a
+    // campione).
     loop {
         let now = now_tick();
 
-        while let Some(m) = civis::recv_poll() {
-            handle_msg(&mut broker, m, now);
-        }
-
-        // Senso rete → cliente: drena i ring RX degli endpoint `net`.
+        // Senso rete → cliente: drena i ring RX degli endpoint a monte.
         for i in 0..MAX_CLIENTS {
             if broker.clients[i].state == ClientState::Bound {
                 drain_net(&mut broker, i);
             }
         }
 
-        let _ = civis::futex_wait(
-            &FUTEX as *const u32 as usize,
-            0,
-            (now + 1) as u64,
-        );
+        while let Some(m) = civis::recv_poll() {
+            // Hint di rete: il dato sta nel ring, l'ha gia' drenato sopra (o
+            // lo drenera' il giro dopo). Non e' una richiesta: niente reply.
+            if m.tag == civis::NET_EP_EVENT {
+                continue;
+            }
+            handle_msg(&mut broker, m, now);
+        }
+
+        // Dati arrivati durante il servizio (o hint perso a coda piena): si
+        // continua senza dormire.
+        if net_pending(&broker) {
+            continue;
+        }
+
+        // Attesa a eventi su `net` (e su `siit`: stesso canale di hint).
+        // `Dead` = servizio a monte morto: il broker non finge di funzionare.
+        match civis::net::wait(broker.net_chan, 0) {
+            civis::net::Wait::Dead => {
+                let _ = civis::print_string(b"[netbroker] servizio net morto\n");
+                civis::exit(1);
+            }
+            _ => {}
+        }
     }
+}
+
+/// `true` se un endpoint a monte ha slot nel ring RX da drenare (E2).
+fn net_pending(broker: &Broker) -> bool {
+    for i in 0..MAX_CLIENTS {
+        let c = &broker.clients[i];
+        if c.state != ClientState::Bound || c.net_ring.is_null() {
+            continue;
+        }
+        let head = unsafe { read_volatile(c.net_ring.add(NET_EP_RX_RING_OFF) as *const u32) };
+        let tail = unsafe {
+            read_volatile(c.net_ring.add(NET_EP_RX_RING_OFF + 4) as *const u32)
+        };
+        if head != tail {
+            return true;
+        }
+    }
+    false
 }
 
 /// Drena il ring RX di `net` del cliente `idx` e inoltra nel ring broker.

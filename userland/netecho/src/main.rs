@@ -80,6 +80,8 @@ fn real_main(_sp: u64) -> ! {
     let mut buf = [0u8; PAYLOAD_MAX];
 
     loop {
+        // Drena tutto quello che c'e': il ring e' la verita', l'hint e' solo
+        // un campanello (E2, ADR-0084).
         poll(&mut udp, Role::Udp, &mut children, &mut buf);
         poll(&mut tcp, Role::Listener, &mut children, &mut buf);
         for i in 0..MAX_CHILDREN {
@@ -92,11 +94,25 @@ fn real_main(_sp: u64) -> ! {
             poll(&mut child, Role::Child, &mut children, &mut buf);
             children[i] = Some(child);
         }
-        let _ = civis::futex_wait(
-            &FUTEX as *const u32 as usize,
-            0,
-            (civis::get_ticks() + 1) as u64,
-        );
+        // Dati arrivati durante il drenaggio (o un hint perso mentre la coda
+        // era piena): si continua a leggere senza dormire.
+        if udp.pending()
+            || tcp.pending()
+            || children.iter().flatten().any(|c| c.pending())
+        {
+            continue;
+        }
+        // Nulla da fare: si dorme finche' `net` non manda un hint. Niente
+        // risveglio a tick, nessun futex nel loop di servizio.
+        match civis::net::wait(net_chan, 0) {
+            civis::net::Wait::Dead => {
+                let _ = civis::print_string(b"[netecho] servizio net morto\n");
+                civis::exit(1);
+            }
+            // `Event`: c'e' qualcosa da drenare. `Timeout` impossibile con
+            // deadline 0 (resta gestito per esaustivita').
+            _ => {}
+        }
     }
 }
 

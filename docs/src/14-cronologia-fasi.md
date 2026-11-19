@@ -4156,3 +4156,49 @@
   aggiornamento in-place va verificato **a schermo** (screendump), perché un
   byte-stream corretto può disegnare una riga sbagliata — un check che
   controlla solo "ci sono le cifre" non vede un saldo di cursore errato.
+
+- **E2 — eventi di rete: il client dorme sull'hint di `net`** (ADR-0084).
+  Terzo passo del piano di ADR-0082, con lo **stesso** vocabolario di E0/E1
+  applicato al trasporto: dopo E1 il meccanismo sa aspettare "un messaggio
+  *oppure* il tempo", ma i client di rete continuavano a **pollare a tick** —
+  `Stream::read/write` con un futex a 1 tick, `netecho`/`dns`/`siit`/
+  `netbroker` con `recv_poll` + futex a 1 tick nei loop di servizio, `dns`
+  anche durante l'attesa dell'upstream, `libr::sock::recvfrom` sul percorso
+  POSIX. Il servizio `net` **sapeva** che c'erano dati nuovi ma lo diceva
+  male: riusava `NET_EP_TX` (un tag di richiesta) come notifica, con un
+  payload che nessuno leggeva.
+  **Decisione**: `NET_EP_EVENT` (0x8C) è un **hint coalescente** al
+  proprietario dell'endpoint quando il servizio scrive slot nuovi nel suo
+  ring RX (dati/accept/fin/rst/abort); il dato resta nel ring. Lato meccanismo
+  `civis::net::{wait, pending}` + `Endpoint::{pending, wait}` sopra
+  `recv_timeout` di E1: una sola attesa, e tre regole che la rendono sicura —
+  (1) **controlla il ring prima di dormire** (hint perso a coda piena = nessun
+  dato perso), (2) `Event` = "c'è qualcosa da fare" e i messaggi **estranei**
+  vanno nello stash di `civis::ipc` (letti da `recv`/`recv_poll`: mai persi,
+  risveglio immediato), (3) `Dead` solo sull'`EXIT_NOTIFY` del canale di
+  `net`. Migrati `netecho` (loop unico a eventi, `Dead` = uscita loud), `dns`
+  (loop bloccante + attesa upstream), `siit`, `netbroker`, `Stream`
+  (DoT/TLS) e `libr::sock::recvfrom`; il servizio `net` apre il giro con
+  `recv_timeout(prossimo tick)` così una richiesta di un client lo sveglia
+  **subito** invece di aspettare il tick.
+  **Trappole trovate in prova (entrambe deadlock veri, non teorici)**:
+  (1) la **reply implicita** è del messaggio corrente (ADR-0008): se un
+  servizio legge un hint **mentre ha una reply in sospeso**, `reply_chan`
+  cambia — il client resta appeso e il servizio manda una reply spaiata
+  (visto con `dns`: `dnsprobe` `BlockedOnReply` per sempre, nessun timeout
+  stampato). Regola: **si conferma prima (ack), si pubblica dopo nel ring**;
+  il client non aspetta i dati nella reply (li legge dal ring).
+  (2) la prima versione di `net::wait` metteva da parte il messaggio estraneo
+  e **restava** addormentata: il broker così non serviva più i client
+  (`netudp` appeso alla prima apertura). `Event` deve essere "c'è qualcosa da
+  fare", non solo "hint di rete".
+  Restano a tick i **retry di boot** `service_lookup` (attese senza produttore,
+  ADR-0067) e il servizio `net` (timer TCP/NDP + poll del ring del driver: il
+  driver non gli manda un evento di RX — N8, passo dichiarato).
+  **Vittoria**: `run-net-tests.sh` **PASS** con la sola API a eventi (echo
+  reply, UDP via broker, TCP handshake+echo, SIIT, DNS statico+upstream,
+  socket POSIX) + DoT invariato (`dot: PASS` x2, `dotfail: PASS`) + **gate
+  strutturale** nuovo nello script: `rg futex_wait libs/civis/src/net
+  libs/tls-net` → 0. **Lezione**: un hint non è un messaggio come gli altri —
+  chi lo legge non deve avere una reply aperta; e "c'è un evento" deve sempre
+  significare "torna al lavoro", mai "continua a dormire".

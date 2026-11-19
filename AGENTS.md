@@ -333,16 +333,35 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   intatto**. Scelta dichiarata (b): fd `64..72` riservati alle socket, i fd
   < 64 restano ai file (fd table unificata = follow-up); solo `AF_INET6`
   (`AF_INET` → `EAFNOSUPPORT`, IPv4 via `siit` è un follow-up); errori come
-  `-errno`. Invarianti: `Full` → `-EAGAIN` (mai drop silenzioso), attese con
-  `futex_wait` a 1 tick (ADR-0067), e **su TCP gli eventi di controllo non
-  sono dati** (`SynAck` scartato; `Fin`→0 = EOF, `Rst`→`-ECONNRESET` — il
-  primo giro del probe leggeva 0 byte e lo chiamava EOF). Vittoria: probe
+  `-errno`. Invarianti: `Full` → `-EAGAIN` (mai drop silenzioso), attese
+  sull'**evento** del servizio (`Endpoint::wait`, E2/ADR-0084), e **su TCP
+  gli eventi di controllo non sono dati** (`SynAck` scartato; `Fin`→0 = EOF,
+  `Rst`→`-ECONNRESET` — il primo giro del probe leggeva 0 byte e lo chiamava
+  EOF). Vittoria: probe
   `testland/posixsock` (init lo spawana con `net=1` dopo `dnsprobe`) fa echo
   UDP `netecho:7` + TCP `netecho:8` con le sole API POSIX →
   `[posixsock] risultato: PASS` in `scripts/run-net-tests.sh`; lo stesso
   binario è in `usr/bin/posixsock.bin` per l'uso manuale dalla shell. Gate
   invariato (6/6, zero FAIL/PANIC/FAULT).
-  Prossimo: DoH (N6.4), poi VT-d.
+  **E2 (ADR-0084, completato)**: `NET_EP_EVENT` (0x8C) è l'hint coalescente
+  che `net` manda al proprietario di un endpoint quando scrive slot nuovi nel
+  suo ring RX (dati/accept/fin/rst/abort); `civis::net::{wait, pending}` +
+  `Endpoint::{pending, wait}` dormono su `recv_timeout` (E1) con **una sola**
+  attesa e il ring come verità. Migrati `netecho`, `dns` (loop + upstream),
+  `siit`, `netbroker`, `Stream` (DoT/TLS) e `libr::sock::recvfrom`: **zero
+  risvegli a tick** (`rg futex_wait libs/civis/src/net libs/tls-net` → 0,
+  gate strutturale in `run-net-tests.sh`); nei servizi restano solo i retry
+  di boot `service_lookup` (ADR-0067) e il servizio `net` resta periodico per
+  timer TCP/NDP + poll del driver. **Trappola trovata a runtime**: la reply è
+  implicita al messaggio corrente — leggere un hint con una reply in sospeso
+  ne sposta il target (client appeso, reply spaiata): **si conferma prima
+  (ack) e si pubblica dopo nel ring** (in `dns`), mai dormire con una reply
+  aperta. Seconda trappola: `net::wait` che mette da parte un messaggio
+  estraneo e **resta** addormentato = deadlock del broker servito ai client →
+  `Event` significa "c'è qualcosa da fare" e i messaggi estranei vanno nello
+  stash di `civis::ipc` (letti da `recv`/`recv_poll`, mai persi).
+  Prossimo: evento di RX dal driver a `net` (N8, oggi è un poll a tick), DoH
+  (N6.4), poi VT-d.
 - **Input a eventi (E0, ADR-0082)**: il device `/dev/input/keyboard` risponde
   subito (`0` = vuoto), quindi l'evento arriva per IPC: `porta` tiene i
   sottoscrittori (`INPUT_ATTACH`/`INPUT_DETACH`, tag 0x46/0x47) con focus

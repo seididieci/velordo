@@ -2,11 +2,12 @@
 
 ## Status
 
-**Accepted** (2026-11-19). **E0 ed E1 implementate e nel gate.** E0 = input a
-eventi (notify + drain, nessuna modifica al kernel); E1 = `recv` con deadline
+**Accepted** (2026-11-19). **E0, E1 ed E2 implementate.** E0 = input a eventi
+(notify + drain, nessuna modifica al kernel); E1 = `recv` con deadline
 (ADR-0083, con una deviazione dichiarata rispetto al piano qui sotto: la
-scadenza viaggia su `SYS_RECV` invece di comporre `run([Input, Clock])`). E2
-(eventi di rete) è il piano dichiarato, non ancora realizzato.
+scadenza viaggia su `SYS_RECV` invece di comporre `run([Input, Clock])`); E2 =
+eventi di rete (ADR-0084: `NET_EP_EVENT` + `civis::net::wait`, zero polling a
+tick nei client di rete). Il piano E2 qui sotto è realizzato come scritto.
 
 Dipende da ADR-0008 (IPC per nome), ADR-0009 (IPC asincrona), ADR-0067
 (attese in futex) e ADR-0081 (gate end-to-end).
@@ -88,16 +89,19 @@ IPC (per questo è reply-only). E1 (**fatta**, ADR-0083):
   la deadline sta sulla stessa `recv` dell'input, non in `run([Input, Clock])`
   — vedi ADR-0083 §Alternatives).
 
-### E2 — eventi di rete (dove async paga sul serio)
+### E2 — eventi di rete (dove async paga sul serio) — **fatta**, ADR-0084
 
-- `net`: canale owner per endpoint + `NET_EP_EVENT` coalescente su
-  enqueue/accept/fin/rst;
-- `civis`: `Endpoint::wait(deadline)`; `net::Stream` componibile
-  nell'executor;
-- migrazione: `netecho` come prova (listener + echo come due task), poi
-  `dns`/`siit`/`broker`;
-- vittoria: `run-net-tests.sh` PASS con la sola API a eventi;
-  `rg futex_wait userland/{net,dns,siit,netbroker}` → 0.
+- `net`: `NET_EP_EVENT` (0x8C) coalescente al proprietario dell'endpoint su
+  enqueue/accept/fin/rst/abort;
+- `civis`: `net::wait(chan, deadline)` + `Endpoint::{pending, wait}` (sopra
+  `recv_timeout` di E1) e stash dei messaggi estranei;
+- migrazione: `netecho` (loop a eventi), `dns`/`siit`/`netbroker` (loop di
+  servizio bloccanti), `Stream` (DoT/TLS), `libr::sock` (socket POSIX);
+- vittoria: `run-net-tests.sh` PASS con la sola API a eventi e **gate
+  strutturale** `rg futex_wait libs/civis/src/net libs/tls-net` → 0. I
+  `futex_wait` che restano nei servizi sono solo i retry di boot
+  `service_lookup` (ADR-0067); il servizio `net` resta periodico per timer
+  TCP/NDP e poll del driver (evento di RX dal driver = N8, passo dichiarato).
 
 ## Consequences
 

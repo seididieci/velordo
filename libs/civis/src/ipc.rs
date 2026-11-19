@@ -138,6 +138,9 @@ pub fn wait_reply_chan(req_id: i64, chan: u64) -> Result<IpcMsg, WaitReplyError>
 /// Fallimento = `ServerDied` (Fase 39; in pratica non fallisce mai).
 #[inline]
 pub fn recv() -> Result<IpcMsg, Error> {
+    if let Some(m) = stash_pop() {
+        return Ok(m);
+    }
     let (rax, rdi, rsi, rdx, r10) = unsafe { syscall4_out(SYS_RECV, 0, 0, 0, 0) };
     if rax < 0 {
         return Err(Error::ServerDied);
@@ -150,11 +153,57 @@ pub fn recv() -> Result<IpcMsg, Error> {
 /// risposta async, `0` per una richiesta.
 #[inline]
 pub fn recv_poll() -> Option<IpcMsg> {
+    if let Some(m) = stash_pop() {
+        return Some(m);
+    }
     let (rax, rdi, rsi, rdx, r10) = unsafe { syscall4_out(SYS_RECV_NONBLOCK, 0, 0, 0, 0) };
     if rax < 0 {
         return None;
     }
     Some(decode_ipc_msg(rdi, rsi, rdx, r10))
+}
+
+/// Messaggi messi da parte da un'attesa selettiva (E2, ADR-0084).
+///
+/// `civis::net::wait` dorme su `recv_timeout` in attesa del suo hint
+/// (`NET_EP_EVENT`); un messaggio **estraneo** (es. la richiesta di un
+/// cliente arrivata mentre un resolver aspetta l'upstream) non e' suo e non
+/// va perso: finisce qui e `recv`/`recv_poll` lo restituiscono **prima** di
+/// leggere dal kernel. L'attesa selettiva non inventa un ordine nuovo: i
+/// messaggi si leggono uno alla volta e nessuno sparisce.
+///
+/// Il buffer crescerebbe solo se l'applicazione non leggesse mai: il modello
+/// resta "un `recv` per processo", quindi niente lock (un processo con
+/// thread che condividono la coda non e' supportato, come prima).
+static mut STASH: Option<alloc::vec::Vec<IpcMsg>> = None;
+
+/// Mette da parte un messaggio che un'attesa selettiva non consuma.
+pub(crate) fn stash_push(m: IpcMsg) {
+    // SAFETY: single-thread per processo (vedi doc di `STASH`); il prestito
+    // non sopravvive alla chiamata, quindi non c'e' aliasing fra le due
+    // funzioni.
+    unsafe {
+        let p = core::ptr::addr_of_mut!(STASH);
+        if (*p).is_none() {
+            *p = Some(alloc::vec::Vec::new());
+        }
+        if let Some(v) = (*p).as_mut() {
+            v.push(m);
+        }
+    }
+}
+
+/// Primo messaggio messo da parte (o `None`).
+#[inline]
+pub(crate) fn stash_pop() -> Option<IpcMsg> {
+    // SAFETY: come `stash_push`.
+    unsafe {
+        let p = core::ptr::addr_of_mut!(STASH);
+        match (*p).as_mut() {
+            Some(v) if !v.is_empty() => Some(v.remove(0)),
+            _ => None,
+        }
+    }
 }
 
 /// E1 (ADR-0083) — perche' una `recv_timeout` non ha restituito un messaggio.

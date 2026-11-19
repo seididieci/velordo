@@ -7,7 +7,7 @@
 
 use alloc::vec::Vec;
 
-use super::{Endpoint, Event, Flow, Proto, SendError};
+use super::{Endpoint, Event, Flow, Proto, SendError, Wait};
 use crate::NET_EP_SLOT_SIZE;
 
 /// Attesa massima di default per un record in arrivo (10 s a 100 Hz).
@@ -22,8 +22,6 @@ const WRITE_CHUNK: usize = 1024;
 
 /// Capacita' di un payload in uno slot (metadati IPv6 esclusi).
 const RX_CAP: usize = NET_EP_SLOT_SIZE - net_ep::Layout::IPV6.meta();
-
-static FUTEX: u32 = 0;
 
 /// Errore di stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,7 +130,11 @@ impl Stream {
             if crate::get_ticks() as u64 >= deadline {
                 return Err(StreamError::Timeout);
             }
-            Self::wait_tick();
+            // E2 (ADR-0084): niente risveglio a tick — si dorme sull'hint
+            // del servizio (`NET_EP_EVENT`), con la stessa deadline.
+            if let Wait::Dead = self.ep.wait(deadline) {
+                return Err(StreamError::Dead);
+            }
         }
     }
 
@@ -155,7 +157,11 @@ impl Stream {
                     if crate::get_ticks() as u64 >= deadline {
                         return Err(StreamError::Timeout);
                     }
-                    Self::wait_tick();
+                    // Lo slot si libera quando il core ha mandato i byte e il
+                    // servizio lo prende in carico: lo dice il suo hint.
+                    if let Wait::Dead = self.ep.wait(deadline) {
+                        return Err(StreamError::Dead);
+                    }
                 }
                 Err(SendError::Dead) => return Err(StreamError::Dead),
                 // Impossibile con `WRITE_CHUNK`; se accadesse, non e' un timeout.
@@ -178,13 +184,5 @@ impl Stream {
         out[..n].copy_from_slice(&self.buf[self.ppos..self.ppos + n]);
         self.ppos += n;
         n
-    }
-
-    fn wait_tick() {
-        let _ = crate::futex_wait(
-            &FUTEX as *const u32 as usize,
-            0,
-            (crate::get_ticks() + 1) as u64,
-        );
     }
 }

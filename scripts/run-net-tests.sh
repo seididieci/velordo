@@ -121,6 +121,16 @@ rg -q '\[net4\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: SIIT (N4)"
 rg -q '\[dns\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: DNS (N5)"; fail=1; }
 rg -q '\[dns\] upstream: PASS' "$LOG" || { echo "[net-tests] manca: upstream DNS (N6.0)"; fail=1; }
 rg -q '\[posixsock\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: socket POSIX (N7.1)"; fail=1; }
+
+# E2 (ADR-0084): il client di rete del **meccanismo** non fa polling — zero
+# risvegli a tick in `civis::net` e `tls-net` (chi si sveglia lo fa su
+# `NET_EP_EVENT` con `recv_timeout`). I `futex_wait` che restano nei servizi
+# sono solo i retry di boot `service_lookup` (ADR-0067), non attese di rete.
+if rg -q 'futex_wait' libs/civis/src/net libs/tls-net/src 2>/dev/null; then
+    echo "[net-tests] FAIL: polling a tick nel client di rete (civis::net / tls-net)"
+    rg -n 'futex_wait' libs/civis/src/net libs/tls-net/src || true
+    fail=1
+fi
 if [ -n "${NET_TCP_PEER:-}" ]; then
     rg -q '\[nettcp\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: TCP rete reale (N6.1d)"; fail=1; }
 fi

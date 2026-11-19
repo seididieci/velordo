@@ -31,8 +31,6 @@ use civis::{
     NET_EP_TX, NET_EP_TX_RING_OFF, NET_PROTO_TCP, NET_PROTO_UDP,
 };
 
-static FUTEX: u32 = 0;
-
 /// Stato di un endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EpState {
@@ -60,6 +58,23 @@ const EV_ACCEPT: u8 = 5;
 const EV_ABORT: u8 = 6;
 /// Nessuna connessione TCP associata all'endpoint.
 const NO_CONN: u8 = 0xff;
+
+/// Word futex solo-timer dei **retry di boot** (`service_lookup` di NetDev e
+/// Custos prima che siano registrati): sono attese senza un produttore che
+/// notifica, quindi restano a tick (ADR-0067). I loop di servizio non lo
+/// usano: si svegliano su IPC (E2, ADR-0084).
+static FUTEX: u32 = 0;
+
+/// Hint asincrono al proprietario di un endpoint (E2, ADR-0084): nel suo ring
+/// RX ci sono slot nuovi. **Coalescente e fire-and-forget**: il dato resta nel
+/// ring, il messaggio dice solo "guarda". Se la coda del client e' piena il
+/// hint si perde: non importa, il client controlla il ring prima di dormire
+/// (`civis::net::pending`) e un hint perso non perde mai dati.
+fn notify(chan: u64, ep_id: u16) {
+    if chan != 0 {
+        let _ = civis::send_async(chan, civis::NET_EP_EVENT, ep_id as u64, 1);
+    }
+}
 
 /// Tabella endpoint.
 #[derive(Clone, Copy)]
@@ -177,9 +192,7 @@ impl NetService {
                 EV_DATA,
                 &self.tcp_rx[..n],
             );
-            if ep.peer_chan != 0 {
-                let _ = civis::send_async(ep.peer_chan, NET_EP_TX, ep.ep_id as u64, 0);
-            }
+            notify(ep.peer_chan, ep.ep_id);
             if !wrote {
                 // Ring pieno: il resto resta nel core (riproveremo al
                 // prossimo segnale).
@@ -527,9 +540,7 @@ impl<'a> FrameSink for EpSink<'a> {
         let ep_id = ep.ep_id;
         let _ = ep;
         if NetService::ep_rx_write_full(ring, src, src_port, dst_port, EV_DATA, payload) {
-            if peer_chan != 0 {
-                let _ = civis::send_async(peer_chan, NET_EP_TX, ep_id as u64, 0);
-            }
+            notify(peer_chan, ep_id);
         }
     }
 
@@ -608,9 +619,8 @@ fn apply_accepted(svc: &mut NetService, conn: u8, port: u16) {
         listener.local_port,
         EV_ACCEPT,
         &payload,
-    ) && listener.peer_chan != 0
-    {
-        let _ = civis::send_async(listener.peer_chan, NET_EP_TX, listener.ep_id as u64, 0);
+    ) {
+        notify(listener.peer_chan, listener.ep_id);
     }
 }
 
@@ -639,9 +649,8 @@ fn apply_tcp_signal(svc: &mut NetService, conn: u8, signal: TcpSignal) {
             ep.local_port,
             ev,
             payload,
-        ) && ep.peer_chan != 0
-        {
-            let _ = civis::send_async(ep.peer_chan, NET_EP_TX, ep.ep_id as u64, 0);
+        ) {
+            notify(ep.peer_chan, ep.ep_id);
         }
     };
     match signal {
@@ -754,10 +763,29 @@ fn real_main(_sp: u64) -> ! {
     civis::signal_ready(1);
 
     loop {
+        // Attesa: fino al prossimo tick (timer TCP/NDP + poll del ring del
+        // driver) **oppure** una richiesta di un client, che sveglia il
+        // servizio subito invece di aspettare il tick (E2, ADR-0084). Il
+        // servizio resta periodico perche' il driver non gli manda ancora un
+        // evento di RX: risvegliarlo sull'IRQ del device e' il passo
+        // dichiarato (N8).
+        match civis::recv_timeout(civis::get_ticks() as u64 + 1) {
+            Ok(m) => {
+                // Hint di rete: non e' una richiesta (il servizio non ne
+                // manda a se stesso), lo si scarta come nel resto del loop.
+                if m.tag != civis::NET_EP_EVENT {
+                    handle_client(&mut svc, m);
+                }
+            }
+            Err(_) => {}
+        }
         let now = civis::get_ticks() as u64;
 
         // Client: richieste endpoint (NET_EP_*).
         while let Some(m) = civis::recv_poll() {
+            if m.tag == civis::NET_EP_EVENT {
+                continue;
+            }
             handle_client(&mut svc, m);
         }
 
@@ -833,13 +861,6 @@ fn real_main(_sp: u64) -> ! {
 
         // TX: il driver consuma il ring.
         let _ = civis::send(driver, civis::NET_TX, 0, 0);
-
-        // Dorme un tick.
-        let _ = civis::futex_wait(
-            &FUTEX as *const u32 as usize,
-            0,
-            (now + 1) as u64,
-        );
     }
 }
 
@@ -1064,14 +1085,7 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
                             event,
                             &payload[..payload_len],
                         ) {
-                            if dst_ep.peer_chan != 0 {
-                                let _ = civis::send_async(
-                                    dst_ep.peer_chan,
-                                    NET_EP_TX,
-                                    dst_ep.ep_id as u64,
-                                    0,
-                                );
-                            }
+                            notify(dst_ep.peer_chan, dst_ep.ep_id);
                             true
                         } else {
                             false // ring RX pieno

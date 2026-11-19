@@ -513,24 +513,48 @@ fn real_main(_sp: u64) -> ! {
         TRANSLATOR_PORT
     );
 
+    // Loop di servizio a **eventi** (E2, ADR-0084): si serve tutto quello che
+    // c'e' (richieste `SIIT_EP_*` e risposte IPv4 dal `net`), poi si dorme
+    // sull'hint del servizio. Niente tick.
     loop {
-        let now = civis::get_ticks() as u64;
-        svc.next_seq = now;
+        svc.next_seq = civis::get_ticks() as u64;
+
+        // Risposte in entrata dal net (il ring e' la verita').
+        handle_net_rx(&mut svc);
 
         // Clienti: richieste SIIT_EP_*.
         while let Some(m) = civis::recv_poll() {
+            // Hint di rete: non e' una richiesta, niente reply.
+            if m.tag == civis::NET_EP_EVENT {
+                continue;
+            }
             handle_client(&mut svc, m);
         }
 
-        // Risposte in entrata dal net.
-        handle_net_rx(&mut svc);
+        // Dati arrivati durante il servizio (o hint perso a coda piena).
+        if net_rx_pending(svc.net_ep_ring) {
+            continue;
+        }
 
-        let _ = civis::futex_wait(
-            &FUTEX as *const u32 as usize,
-            0,
-            (now + 1) as u64,
-        );
+        // Attesa a eventi: il traduttore non ha lavoro periodico.
+        match civis::net::wait(svc.net_chan, 0) {
+            civis::net::Wait::Dead => {
+                let _ = civis::print_string(b"[siit] servizio net morto\n");
+                civis::exit(1);
+            }
+            _ => {}
+        }
     }
+}
+
+/// `true` se il ring RX dell'endpoint verso `net` ha slot da drenare (E2).
+fn net_rx_pending(ring: *mut u8) -> bool {
+    if ring.is_null() {
+        return false;
+    }
+    let head = unsafe { read_volatile(ring.add(NET_EP_RX_RING_OFF) as *const u32) };
+    let tail = unsafe { read_volatile(ring.add(NET_EP_RX_RING_OFF + 4) as *const u32) };
+    head != tail
 }
 
 /// Gestisce messaggi clienti (SIIT_EP_*).
