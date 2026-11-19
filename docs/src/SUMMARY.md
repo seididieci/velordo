@@ -110,3 +110,4 @@
 - [ADR-0080: Policy per identità, ruoli e broker di rete](./adr/0080-policy-identita-ruoli-broker.md)
 - [ADR-0081: il gate end-to-end — la shell nativa nello stesso boot](./adr/0081-gate-shell-nativa.md)
 - [ADR-0082: Eventi, non polling — l'input della tastiera](./adr/0082-eventi-input-tastiera.md)
+- [ADR-0083: `recv` con deadline — un messaggio *oppure* il tempo](./adr/0083-recv-deadline.md)

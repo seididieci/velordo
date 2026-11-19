@@ -446,6 +446,10 @@ mod tests {
         assert_eq!(f.glyph_width_cells(b'A' as u32), 1);
         assert_eq!(f.glyph_width_cells(b' ' as u32), 1);
         assert_eq!(f.glyph_width_cells(0x2713), 1, "checkmark 10 px");
+        // E1 (ADR-0083): il prompt della shell repaint-a l'ora in-place
+        // contando 5 celle dopo l'ora (`" " ✓|✗ " " ">" " "`): entrambi i
+        // glifi di stato devono stare in UNA cella.
+        assert_eq!(f.glyph_width_cells(0x2717), 1, "ballot X 10 px");
         assert_eq!(f.glyph_width_cells(0x231B), 1, "non mappato (GID 0)");
     }
 

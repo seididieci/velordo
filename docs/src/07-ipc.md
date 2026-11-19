@@ -35,7 +35,7 @@ messaggio = registri CPU, semantica call/reply naturale per client/server (RPC).
 | Primitive | Numero | Semantica |
 |-----------|--------|-----------|
 | `send(channel, tag, w0, w1)` | 16 | consegna il messaggio sul canale e **blocca** finché il server non fa `reply` |
-| `recv()` | 17 | **blocca** finché non arriva un messaggio, poi lo restituisce |
+| `recv(deadline)` | 17 | **blocca** finché non arriva un messaggio, poi lo restituisce; **E1/ADR-0083**: `arg1` = tick assoluto di scadenza (`0` = mai), alla scadenza `rax = -2` |
 | `reply(tag, w0, w1)` | 18 | risponde al mittente in attesa e lo **sblocca** |
 | `send_async(channel, tag, w0, w1)` | 33 | come `send` ma **non blocca**: ritorna il `req_id` (>= 1) o -1 (Fase 13) |
 | `recv_nonblock()` | 34 | come `recv` ma ritorna -1 subito se la coda è vuota (Fase 13) |
@@ -54,6 +54,7 @@ multi-register via `ipc_override`: a `sysret`, se `ipc_override != 0`, svuota
 | `recv` ok (richiesta) | 0 | `rdi=channel, rsi=tag, rdx=w0, r10=w1` |
 | `recv` ok (risposta async) | 0 | `rdi=req_id negativo, rsi=tag, rdx=w0, r10=w1` |
 | `recv` err (nessun altro processo) | -1 | `rdi/rsi/rdx/r10=0` |
+| `recv` scadenza (E1, ADR-0083) | -2 | `rdi/rsi/rdx/r10=0`; nessun messaggio consumato (**la coda vince**) |
 | `reply` ok | 0 | — |
 | `reply` err (nessun messaggio in elaborazione) | -1 | — |
 | `send_async` ok | req_id (>= 1) | — |
@@ -93,13 +94,24 @@ pub fn ipc_send(channel: usize, tag: u64, w0: u64, w1: u64) -> IpcResult {
 ### recv
 
 ```rust
-pub fn ipc_recv() -> IpcResult {
+pub fn ipc_recv_until(deadline: u64) -> IpcResult {
     // 1. se msg_queue non vuota → pop: richieste (req_id >= 0) fissano
     //    reply_chan/reply_req ed espongono il channel; risposte async
-    //    espongono il req_id negativo. Ritorna subito.
-    // 2. altrimenti blocca (BlockedOnRecv); al risveglio loop (→ 1)
+    //    espongono il req_id negativo. Ritorna subito (e azzera recv_deadline).
+    // 2. se deadline != 0 e ora >= deadline → -2 (timeout, coda intatta):
+    //    controllato PRIMA di bloccarsi, cosi' un timer scaduto non finisce
+    //    nel ramo d'errore quando non c'e' un altro runnable.
+    // 3. altrimenti blocca (BlockedOnRecv + recv_deadline); al risveglio
+    //    loop (→ 1): un messaggio arrivato nel frattempo VINCE sul timeout.
 }
 ```
+
+`tick_recv_deadlines` (in `on_tick`, dopo `futex::tick_deadlines`) rimette
+`Ready` chi è ancora bloccato in `recv` con la scadenza passata: la syscall
+ricontrolla la coda prima di rispondere `-2`. La scadenza vive nel PCB
+(`recv_deadline`), quindi muore col processo: nessuna tabella di timer, nessuno
+slot orfano, nessun PID riusato che eredita una deadline. `civis` la espone
+come `ipc::recv_timeout(deadline) -> Result<IpcMsg, RecvError{Timeout,Dead}>`.
 
 ### reply
 
@@ -262,6 +274,14 @@ costruzione nel multi-task. Kernel invariato, reply implicita invariata.
 - Vincoli Fase 13 invariati (no mix sync/async, FIFO, FS 1-in-volo); t41
   (`block_on` + echo), t42 (`run` 2-task + `ServerDied`) e t43 (`Join`
   annidato) in suite.
+- **Timer (E1, ADR-0083)**: `Receivable::deadline()` (default 0 = nessun
+  timer) dichiara la prossima scadenza di un task; `block_on`/`run` dormono su
+  `recv_timeout(minima fra i task pending)` e `Join` propaga la minima dei
+  figli non finiti. `task::Sleep` (`until`/`ticks`/`remaining`) è il timer:
+  un task puo' attendere una reply **e** una scadenza con una sola attesa
+  bloccante (processo `Blocked`, sveglia il PIT, zero risvegli a vuoto).
+  Copertura: t71 (`recv_timeout`) e t72 (`Sleep` in `run`/`block_on` con
+  misure di tick); in produzione lo usa `useruptime`.
 
 ## Fase 14 — notifica unificata di morte + `wait_reply` con errore (ADR-0010)
 

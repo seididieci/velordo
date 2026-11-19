@@ -113,6 +113,13 @@ impl History {
 /// `2`/`22` (dim), quindi si usa un truecolor supportato.
 const HINT_COLOR: &[u8] = b"\x1b[38;2;141;150;168m";
 const HINT_RESET: &[u8] = b"\x1b[0m";
+/// Celle fra la fine dell'ora e il cursore: `" " + ✓/✗ + " " + ">" + " "`.
+/// Servono al repaint in-place dell'orologio (E1, ADR-0083): il prompt non
+/// si ridisegna (il gate conta i `" > "`), si spostano solo gli 8 caratteri
+/// dell'ora. Il console server muove di UNA cella per `ESC[D`/`ESC[C`
+/// (salta l'intero glifo se largo; qui il suffisso e' tutto da 1 cella).
+const CLOCK_SUFFIX_CELLS: usize = 5;
+const CLOCK_COLOR: &[u8] = HINT_COLOR;
 
 /// Line editor that supports arrow keys, backspace, and history navigation.
 struct LineEditor<'a> {
@@ -123,6 +130,10 @@ struct LineEditor<'a> {
     continuation: bool,
     /// Celle occupate dal suggerimento attualmente disegnato (0 = nessuno).
     hint_len: usize,
+    /// Ultima ora disegnata nel prompt (`HH:MM:SS`) e validita' (E1): il
+    /// repaint in-place scrive solo se le cifre sono cambiate.
+    clock: [u8; 8],
+    clock_valid: bool,
 }
 
 impl<'a> LineEditor<'a> {
@@ -133,6 +144,8 @@ impl<'a> LineEditor<'a> {
             last_exit,
             continuation: false,
             hint_len: 0,
+            clock: [0u8; 8],
+            clock_valid: false,
         }
     }
 
@@ -143,8 +156,45 @@ impl<'a> LineEditor<'a> {
             console_write(b"  ");
         } else {
             console_write(build_prompt(self.last_exit));
+            // Ricorda l'ora appena disegnata: il repaint in-place la
+            // confronta e non riscrive se il secondo non e' cambiato.
+            let t = get_time_str();
+            self.clock_valid = t.len() == 8;
+            if self.clock_valid {
+                self.clock.copy_from_slice(t.as_bytes());
+            }
         }
         self.hint_len = 0;
+    }
+
+    /// Ripulisce in-place le cifre dell'orologio nel prompt (E1, ADR-0083).
+    ///
+    /// Solo a buffer vuoto (nessun tasto digitato) e fuori continuazione:
+    /// il cursore e' subito dopo il prompt, quindi si torna indietro delle
+    /// celle del suffisso, si riscrive `HH:MM:SS` con lo stesso colore e si
+    /// torna avanti. Niente prompt ridisegnato: la riga e il suo `" > "`
+    /// restano gli stessi (il gate della shell conta i `" > "`).
+    fn refresh_clock(&mut self) {
+        if self.continuation || !self.buffer.is_empty() || self.hint_len != 0 {
+            return;
+        }
+        let t = get_time_str();
+        if t.len() != 8 || (self.clock_valid && &self.clock[..] == t.as_bytes()) {
+            return;
+        }
+        let mut out = Vec::with_capacity(48);
+        for _ in 0..CLOCK_SUFFIX_CELLS {
+            out.extend_from_slice(b"\x1b[D");
+        }
+        out.extend_from_slice(CLOCK_COLOR);
+        out.extend_from_slice(t.as_bytes());
+        out.extend_from_slice(HINT_RESET);
+        for _ in 0..CLOCK_SUFFIX_CELLS {
+            out.extend_from_slice(b"\x1b[C");
+        }
+        console_write(&out);
+        self.clock.copy_from_slice(t.as_bytes());
+        self.clock_valid = true;
     }
 
     /// Suffisso suggerito dalla history. Mai in continuazione ne' a buffer
@@ -235,11 +285,24 @@ impl<'a> LineEditor<'a> {
         loop {
             let n = civis::input::read(&mut byte);
             if n == 0 {
-                // Nessun byte: si dorme su `recv` (evento di porta), non a
-                // tick (E0, ADR-0082). Se la sorgente e' persa, uscita loud.
-                if !civis::input::wait() {
-                    console_write_str("[shell] ERRORE: input della tastiera perso\n");
-                    civis::exit(1);
+                // Nessun byte: si dorme su `recv` finche' non arriva un
+                // evento di `porta` (E0, ADR-0082) oppure scade il prossimo
+                // secondo (E1, ADR-0083) e l'orologio del prompt si aggiorna
+                // in-place. Mai un risveglio a tick; la scadenza si arma solo
+                // col prompt visibile e il buffer vuoto (e' li' che l'ora si
+                // vede). Se la sorgente e' persa, uscita loud.
+                let deadline = if !self.continuation && self.buffer.is_empty() {
+                    next_clock_deadline().unwrap_or(0)
+                } else {
+                    0
+                };
+                match civis::input::wait_until(deadline) {
+                    civis::input::Wait::Event => {}
+                    civis::input::Wait::Timeout => self.refresh_clock(),
+                    civis::input::Wait::Dead => {
+                        console_write_str("[shell] ERRORE: input della tastiera perso\n");
+                        civis::exit(1);
+                    }
                 }
                 continue;
             }
@@ -997,9 +1060,11 @@ fn read_user() -> &'static str {
     }
 }
 
-/// Restituisce l'ora corrente come `HH:MM:SS` (24h). Richiede il servizio Time.
+/// Restituisce l'ora corrente come `HH:MM:SS` (24h), esattamente 8 byte: il
+/// prompt e il repaint in-place (E1) si basano su questa lunghezza (il vecchio
+/// `\0` finale finiva nella cella dopo l'ora). Richiede il servizio Time.
 fn get_time_str() -> &'static str {
-    static mut BUF: [u8; 9] = [0u8; 9]; // "HH:MM:SS\0"
+    static mut BUF: [u8; 8] = [0u8; 8]; // "HH:MM:SS"
 
     let chan = match civis::service_lookup(civis::Service::Time) {
         Ok(c) => c as u64,
@@ -1020,7 +1085,6 @@ fn get_time_str() -> &'static str {
             BUF[5] = b':';
             BUF[6] = b'0' + s / 10;
             BUF[7] = b'0' + s % 10;
-            BUF[8] = 0;
         }
     } else {
         return "";
@@ -1029,6 +1093,15 @@ fn get_time_str() -> &'static str {
     // safe: BUF e' stato scritto in modo completo da questo stesso processo,
     // nessun altro lo modifica.
     unsafe { core::str::from_utf8(&*(&raw const BUF)).unwrap_or("") }
+}
+
+/// Deadline (tick assoluto) del prossimo confine di secondo, per aggiornare
+/// l'orologio del prompt mentre la shell dorme (E1, ADR-0083). `None` se il
+/// servizio Time non risponde: la shell ricade sull'attesa senza scadenza
+/// (un orologio fermo non deve fermare la shell).
+fn next_clock_deadline() -> Option<u64> {
+    let (_, cents) = civis::time::time_now().ok()?;
+    Some((civis::get_ticks() + (100 - cents.min(99) as i64)).max(0) as u64)
 }
 
 /// Costruisce il prompt con glifi Nerd Font e colori truecolor.

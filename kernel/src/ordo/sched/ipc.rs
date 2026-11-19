@@ -21,6 +21,11 @@ fn err_result() -> IpcResult {
     IpcResult { rax: -1, rdi: 0, rsi: 0, rdx: 0, r10: 0 }
 }
 
+/// E1 (ADR-0083): scadenza della `recv` (nessun messaggio consumato).
+fn timeout_result() -> IpcResult {
+    IpcResult { rax: -2, rdi: 0, rsi: 0, rdx: 0, r10: 0 }
+}
+
 /// Canale 0 = canale di nascita verso il parent (ADR-0008).
 fn resolve_chan(cur: usize, chan: usize, sched: &Scheduler) -> Option<usize> {
     if chan == syscall_numbers::CHANNEL_PARENT as usize {
@@ -74,6 +79,9 @@ pub fn ipc_send(channel: usize, tag: u64, w0: u64, w1: u64) -> IpcResult {
             d.msg_queue.push(crate::ordo::process::PendingMsg { channel: chan, req_id, tag, w0, w1 });
             if d.ipc_state == crate::ordo::process::IpcState::BlockedOnRecv {
                 d.ipc_state = crate::ordo::process::IpcState::None;
+                // E1: il messaggio chiude l'attesa con deadline (la coda
+                // vince: nessuna scadenza residua da far scattare).
+                d.recv_deadline = 0;
                 d.state = State::Ready;
                 sched.set_ready(dest);
             }
@@ -153,6 +161,8 @@ pub fn ipc_send_async(channel: usize, tag: u64, w0: u64, w1: u64) -> IpcResult {
         let pushed = d.msg_queue.try_push(crate::ordo::process::PendingMsg { channel: chan, req_id, tag, w0, w1 });
         if pushed && d.ipc_state == crate::ordo::process::IpcState::BlockedOnRecv {
             d.ipc_state = crate::ordo::process::IpcState::None;
+            // E1: la coda vince sulla deadline (vedi `ipc_send`).
+            d.recv_deadline = 0;
             d.state = State::Ready;
             sched.set_ready(dest);
         }
@@ -194,7 +204,17 @@ fn pop_msg(sched: &mut Scheduler, cur: usize) -> Option<IpcResult> {
     }
 }
 
-pub fn ipc_recv() -> IpcResult {
+/// E1 (ADR-0083) — `recv` con deadline: `deadline` = tick assoluto, 0 = mai.
+///
+/// Invarianti:
+/// - **la coda vince sul timeout**: un messaggio gia' in coda si consegna
+///   anche se nel frattempo il tick e' passato (mai perso perche' il timer
+///   e' scattato mentre lo schedulavamo);
+/// - timeout -> `rax = -2` e nessun messaggio consumato; il chiamante puo'
+///   riprovare senza ambiguita' (la coda non e' stata toccata);
+/// - la scadenza vive nel PCB (`recv_deadline`), non in una tabella: muore
+///   col processo, nessuno slot orfano da ripulire.
+pub fn ipc_recv_until(deadline: u64) -> IpcResult {
     loop {
         if !INITIALIZED.load(Ordering::Acquire) {
             return err_result();
@@ -207,8 +227,16 @@ pub fn ipc_recv() -> IpcResult {
                 None => return err_result(),
             };
             if let Some(res) = pop_msg(sched, cur) {
+                // Attesa finita con un messaggio: la deadline e' consumata.
+                sched.processes[cur].recv_deadline = 0;
+                sched.processes[cur].ipc_state = crate::ordo::process::IpcState::None;
                 return res;
             }
+            if deadline != 0 && crate::pit::ticks() >= deadline {
+                sched.processes[cur].recv_deadline = 0;
+                return timeout_result();
+            }
+            sched.processes[cur].recv_deadline = deadline;
             sched.processes[cur].ipc_state = crate::ordo::process::IpcState::BlockedOnRecv;
             sched.processes[cur].state = State::Blocked;
             sched.clear_ready(cur);
@@ -218,6 +246,7 @@ pub fn ipc_recv() -> IpcResult {
                     sched.processes[cur].state = State::Ready;
                     sched.set_ready(cur);
                     sched.processes[cur].ipc_state = crate::ordo::process::IpcState::None;
+                    sched.processes[cur].recv_deadline = 0;
                     None
                 }
             }
@@ -226,6 +255,29 @@ pub fn ipc_recv() -> IpcResult {
             Some((prev, next)) => switch_to(prev, next, guard),
             None => return err_result(),
         }
+    }
+}
+
+/// Sweep delle scadenze `recv` (E1, ADR-0083): chiamato da `on_tick` a lock
+/// tenuto, dopo i futex. Solo chi e' **ancora** bloccato in `recv` con una
+/// deadline: un processo gia' svegliato da un messaggio e' `Ready` (la coda
+/// vince) e non viene toccato qui.
+pub(super) fn tick_recv_deadlines(sched: &mut Scheduler, now: u64) {
+    for pid in 0..sched.processes.len() {
+        let hit = {
+            let p = &sched.processes[pid];
+            p.state == State::Blocked
+                && p.ipc_state == crate::ordo::process::IpcState::BlockedOnRecv
+                && p.recv_deadline != 0
+                && now >= p.recv_deadline
+        };
+        if !hit {
+            continue;
+        }
+        sched.processes[pid].recv_deadline = 0;
+        sched.processes[pid].ipc_state = crate::ordo::process::IpcState::None;
+        sched.processes[pid].state = State::Ready;
+        sched.set_ready(pid);
     }
 }
 

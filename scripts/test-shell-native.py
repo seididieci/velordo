@@ -8,7 +8,7 @@ percorso completo: `BIN_LIST` -> `obj_get` -> `R_RIGHTS_EXECUTE` ->
 `spawn_image` con argv -> exit notificato al padre, e verifica che il
 response ring resti sincronizzato (una op FS dopo lo spawn: `users`).
 
-Due modi, stessi 32 check:
+Due modi, stessi 33 check:
 
 - **autonomo** (default, `scripts/test-shell-all.sh native`): prepara il seed
   ArcaFS, boota QEMU, fa il login (`boot_native`), digita.
@@ -21,7 +21,7 @@ Due modi, stessi 32 check:
 
 Vedi scripts/shell_harness.py.
 """
-import sys, os, time
+import sys, os, time, re
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 from shell_harness import (Shell, Checker, prep_images, parse_shell_args,
                            T_WAIT_POLL, T_WAIT_TAIL, T_RUN)
@@ -55,7 +55,7 @@ def _native_args(ap):
 
 
 def run_checks(sh, c):
-    """I 32 check della shell nativa (comuni a boot autonomo e gate)."""
+    """I 33 check della shell nativa (comuni a boot autonomo e gate)."""
     log = sh.read_log()
     banner = b"[shell] Velordo shell nativa"
     c.check("login -> shell nativa (banner)", banner in log)
@@ -71,6 +71,22 @@ def run_checks(sh, c):
     cpu_main = sh.cpu_percent(1.0)
     print("info CPU prompt principale: %.1f%%" % cpu_main, flush=True)
     c.check("prompt principale idle su eventi (CPU < 5%)", cpu_main < 5.0)
+
+    # E1 (ADR-0083): l'orologio del prompt si aggiorna in-place mentre la
+    # shell e' ferma al prompt, senza ridisegnare il prompt: il repaint e'
+    # `ESC[D` x5 (le 5 celle fra ora e cursore: " ✓ > ") + l'ora + `ESC[C` x5.
+    # Il console server muove di UNA cella per sequenza (ignora i parametri
+    # CSI), quindi il repaint e' ripetuto, non `ESC[5D`. Si aspetta al prompt
+    # senza digitare e si verifica che l'ora compaia e avanzi fra due campioni.
+    clock_re = rb"(?:\x1b\[D){5}\x1b\[[0-9;]*m(\d\d:\d\d:\d\d)"
+    time.sleep(1.5)
+    ticks1 = re.findall(clock_re, sh.read_log())
+    first = ticks1[-1] if ticks1 else None
+    time.sleep(1.5)
+    ticks2 = re.findall(clock_re, sh.read_log())
+    second = ticks2[-1] if ticks2 else None
+    c.check("orologio prompt aggiorna in-place (E1)",
+            first is not None and second is not None and second != first)
 
     # `help` e' un built-in: prova che il REPL risponde prima di toccare
     # il percorso esterno.

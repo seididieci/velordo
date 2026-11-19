@@ -20,12 +20,18 @@
 //! Costi: zero heap per-op (task su stack, pin con `new_unchecked` contenuto;
 //! il `Waker` e' no-op su statiche). I server sono single-thread: niente lock,
 //! niente code condivise oltre gli slot dei task.
+//!
+//! E1 (ADR-0083): l'attesa dell'executor e' `recv_timeout(deadline minima fra
+//! i task pending)` — un messaggio **oppure** il tempo. `Sleep` e' il timer
+//! (tick assoluti) e si compone con tutto il resto (`join`, `run`), quindi un
+//! task puo' attendere IPC e rispettare una scadenza con **una sola** attesa
+//! bloccante (nessun risveglio a vuoto).
 
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
-use crate::{is_exit_notify, recv, recv_poll, IpcMsg, WaitReplyError};
+use crate::{is_exit_notify, recv_poll, recv_timeout, IpcMsg, RecvError, WaitReplyError};
 
 // ── Waker no-op ─────────────────────────────────────────────────────
 // L'executor ripolla SEMPRE dopo ogni cambio di stato (deposito da `recv`),
@@ -63,6 +69,15 @@ pub trait Receivable {
     fn accepts(&self, m: &IpcMsg) -> bool;
     /// Deposita un messaggio accettato (slot drenato a ogni poll).
     fn deposit(&mut self, m: IpcMsg);
+    /// E1 (ADR-0083): prossima scadenza assoluta in tick, `0` = nessun timer.
+    /// L'executor arma la **minima** fra i task pending e dorme su
+    /// `recv_timeout`: cosi' un task con timer (`Sleep`) avanza senza
+    /// risvegli a vuoto. Contratto: se diversa da 0 e' nel futuro — un valore
+    /// gia' scaduto con `poll` ancora `Pending` sarebbe un busy-loop (bug del
+    /// task, non dell'executor).
+    fn deadline(&self) -> u64 {
+        0
+    }
 }
 
 // ── Future di base ──────────────────────────────────────────────────
@@ -278,6 +293,21 @@ impl<A: Receivable + Future, B: Receivable + Future> Receivable for Join<A, B> {
             self.b.deposit(m);
         }
     }
+
+    /// E1: la scadenza piu' vicina fra i figli ancora pending (0 = nessuna).
+    fn deadline(&self) -> u64 {
+        earliest(self.done_a, self.a.deadline(), self.done_b, self.b.deadline())
+    }
+}
+
+/// Minimo fra due scadenze ignorando i task gia' completati (0 = nessuna).
+fn earliest(done_a: bool, a: u64, done_b: bool, b: u64) -> u64 {
+    match (done_a || a == 0, done_b || b == 0) {
+        (true, true) => 0,
+        (true, false) => b,
+        (false, true) => a,
+        (false, false) => a.min(b),
+    }
 }
 
 impl<A: Receivable + Future, B: Receivable + Future> Future for Join<A, B> {
@@ -311,8 +341,9 @@ impl<A: Receivable + Future, B: Receivable + Future> Future for Join<A, B> {
 }
 
 /// Esegue un singolo task fino a `Ready`. Tra un poll e l'altro resta
-/// bloccato in `recv` (UNA attesa in volo: come `wait_reply`, ma sopra
-/// qualunque `Receivable`, non solo reply).
+/// bloccato in `recv_timeout` (UNA attesa in volo: come `wait_reply`, ma sopra
+/// qualunque `Receivable`, non solo reply) con la deadline del task se ne ha
+/// una (E1): messaggio **o** tempo, mai un risveglio a vuoto.
 ///
 /// Dominio reply-only + EXIT (vedi modulo): il resto e' scartato.
 pub fn block_on<R: Receivable + Future>(fut: R) -> R::Output {
@@ -323,15 +354,19 @@ pub fn block_on<R: Receivable + Future>(fut: R) -> R::Output {
         if let Poll::Ready(v) = unsafe { pin_stack(&mut fut) }.poll(&mut cx) {
             return v;
         }
-        // Pending: solo un messaggio puo' sbloccarci. Lo instradiamo se nostro,
-        // altrimenti (traffico fuori dominio) lo scartiamo e ripolliamo.
-        if let Ok(m) = recv() {
-            if fut.accepts(&m) {
-                fut.deposit(m);
+        // Pending: un messaggio (instradato se nostro) o la scadenza del task.
+        // `Timeout` = ripolla: il task vede l'orologio avanzato.
+        match recv_timeout(fut.deadline()) {
+            Ok(m) => {
+                if fut.accepts(&m) {
+                    fut.deposit(m);
+                }
             }
+            Err(RecvError::Timeout) => {}
+            // `recv` fallita: niente da instradare, ripolla (il task resta
+            // Pending; in pratica non accade — vedi `wait_reply`).
+            Err(RecvError::Dead) => {}
         }
-        // `recv` fallita: niente da instradare, ripolla (il task resta
-        // Pending; in pratica non accade — vedi `wait_reply`).
     }
 }
 
@@ -362,14 +397,87 @@ pub fn run<const N: usize, R: Receivable + Future>(tasks: [R; N]) -> [R::Output;
         if remaining == 0 {
             break;
         }
-        // Tutti Pending: solo un messaggio puo' sbloccarci.
-        if let Ok(m) = recv() {
-            for i in 0..N {
-                if !done[i] && tasks[i].accepts(&m) {
-                    tasks[i].deposit(m);
+        // Tutti Pending: un messaggio o la scadenza piu' vicina fra i task.
+        let mut deadline = 0u64;
+        for i in 0..N {
+            if !done[i] {
+                deadline = min_deadline(deadline, tasks[i].deadline());
+            }
+        }
+        match recv_timeout(deadline) {
+            Ok(m) => {
+                for i in 0..N {
+                    if !done[i] && tasks[i].accepts(&m) {
+                        tasks[i].deposit(m);
+                    }
                 }
             }
+            Err(_) => {}
         }
     }
     outs.map(|o| o.expect("task::run: task marcato done senza output"))
+}
+
+/// Minimo fra due scadenze (`0` = nessuna).
+fn min_deadline(a: u64, b: u64) -> u64 {
+    match (a == 0, b == 0) {
+        (true, _) => b,
+        (_, true) => a,
+        _ => a.min(b),
+    }
+}
+
+// ── Timer (E1, ADR-0083) ────────────────────────────────────────────
+
+/// Attesa a tempo: completa quando l'orologio monotono (`get_ticks`, 100 Hz)
+/// raggiunge la deadline (tick assoluto).
+///
+/// In `block_on`/`run` non produce risvegli a vuoto: l'executor arma la
+/// deadline minima e dorme in `recv_timeout`, quindi il processo resta
+/// `Blocked` e lo sveglia il PIT alla scadenza. Componibile con `join`: un
+/// task puo' attendere una reply **e** una scadenza con una sola attesa.
+pub struct Sleep {
+    deadline: u64,
+}
+
+impl Sleep {
+    /// Fino al tick assoluto `deadline` (se gia' passato: pronto subito).
+    pub fn until(deadline: u64) -> Self {
+        Self { deadline }
+    }
+
+    /// Fino a `n` tick da adesso (100 Hz: `ticks(100)` = 1 s).
+    pub fn ticks(n: i64) -> Self {
+        Self { deadline: (crate::get_ticks() + n).max(0) as u64 }
+    }
+
+    /// Tick mancanti (0 = scaduto).
+    pub fn remaining(&self) -> u64 {
+        self.deadline.saturating_sub(crate::get_ticks().max(0) as u64)
+    }
+}
+
+impl Receivable for Sleep {
+    fn accepts(&self, _m: &IpcMsg) -> bool {
+        false // un timer non consuma messaggi
+    }
+
+    fn deposit(&mut self, _m: IpcMsg) {}
+
+    fn deadline(&self) -> u64 {
+        // Scaduto = nessun timer da attendere: il prossimo poll e' Ready.
+        if crate::get_ticks() as u64 >= self.deadline { 0 } else { self.deadline }
+    }
+}
+
+impl Future for Sleep {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+        if crate::get_ticks() as u64 >= self.deadline {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
 }

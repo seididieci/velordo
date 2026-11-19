@@ -157,6 +157,36 @@ pub fn recv_poll() -> Option<IpcMsg> {
     Some(decode_ipc_msg(rdi, rsi, rdx, r10))
 }
 
+/// E1 (ADR-0083) — perche' una `recv_timeout` non ha restituito un messaggio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecvError {
+    /// Scadenza raggiunta prima di un messaggio: la coda non e' stata toccata
+    /// (**la coda vince**: se un messaggio era gia' arrivato, e' stato
+    /// consegnato, mai un drop silenzioso).
+    Timeout,
+    /// Nessun peer di nascita / scheduler non pronto (come `recv`).
+    Dead,
+}
+
+/// E1 (ADR-0083) — `recv_timeout(deadline)`: come `recv`, ma si sveglia alla
+/// scadenza (`deadline` = tick assoluto, `0` = mai = `recv`).
+///
+/// E' l'attesa **unica** del meccanismo: "un messaggio oppure il tempo". Ci
+/// stanno sopra l'input a eventi (`civis::input::wait_until`) e l'executor
+/// (`task::block_on`/`run` armano la deadline minima fra i task), senza
+/// risvegli a vuoto: il processo resta `Blocked` e lo sveglia il PIT.
+#[inline]
+pub fn recv_timeout(deadline: u64) -> Result<IpcMsg, RecvError> {
+    let (rax, rdi, rsi, rdx, r10) = unsafe { syscall4_out(SYS_RECV, deadline, 0, 0, 0) };
+    if rax == -2 {
+        return Err(RecvError::Timeout);
+    }
+    if rax < 0 {
+        return Err(RecvError::Dead);
+    }
+    Ok(decode_ipc_msg(rdi, rsi, rdx, r10))
+}
+
 /// Decodifica i registri di ritorno di `recv`/`recv_poll`: se `rdi` (signed) e'
 /// negativo e' una risposta async e il request-id della richiesta originale e'
 /// `-(rdi as i64)`; altrimenti `rdi` e' il canale sorgente di una richiesta.

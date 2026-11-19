@@ -14,10 +14,11 @@ pub(super) fn sys_send_async(channel: usize, tag: u64, w0: u64, w1: u64) -> i64 
     crate::ordo::sched::ipc_send_async(channel, tag, w0, w1).rax
 }
 
-/// ADR-0008 — `recv()`: riceve il prossimo messaggio.
-/// Ritorna (channel, tag, w0, w1) in rdi/rsi/rdx/r10.
-pub(super) fn sys_recv() -> i64 {
-    apply_ipc(crate::ordo::sched::ipc_recv())
+/// ADR-0008 — `recv(deadline)`: riceve il prossimo messaggio.
+/// Ritorna (channel, tag, w0, w1) in rdi/rsi/rdx/r10; `rax = -2` alla
+/// scadenza della deadline (E1, ADR-0083).
+pub(super) fn sys_recv(deadline: u64) -> i64 {
+    apply_ipc(crate::ordo::sched::ipc_recv_until(deadline))
 }
 
 /// Fase 13 — `recv_nonblock()`: come recv ma ritorna -1 subito se la coda e'

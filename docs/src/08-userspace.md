@@ -358,7 +358,11 @@ esteso cosi' (dettagli in `AGENTS.md` e ADR):
   pollano più — `INPUT_ATTACH`/`INPUT_DETACH` (focus LIFO in `porta`) e
   `INPUT_NOTIFY` come hint, poi drain di `/dev/input/keyboard` (client
   `civis::input`); la shell nativa, `identis-login` e `create-user` dormono
-  in `recv()` (CPU al prompt 1-2%).
+  in `recv()` (CPU al prompt 1-2%). **E1 (ADR-0083)**: l'attesa ha anche una
+  scadenza (`recv_timeout`, timeout `-2`, la coda vince) — la shell la usa per
+  tenere vivo l'orologio del prompt con un repaint **in-place** delle 8 cifre
+  (un risveglio al secondo, prompt mai ridisegnato), e `useruptime` dorme su
+  `block_on(Sleep)` invece che su un futex-timer.
 - **Fase 16 — Disk/ATA server in userspace** (implementata,
   [ADR-0012](./adr/0012-userspace-disk-driver.md)): `block` (driver ATA in
   ring 3, canale primario via `io_ranges` — il secondario e' probato ma non

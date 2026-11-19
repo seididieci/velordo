@@ -85,7 +85,7 @@ La numerazione e' definita nel dispatch di `syscall_handler` in `kernel/src/sysc
 | 3-7 | (ritirate) | erano `open/read/write_fs/close/readdir` kernel-side; dalla Fase 9.6 sono IPC dirette client→cardo (wrapper `civis` su ring, Fase 10.2) |
 | 8 | `getpid()` | id del processo corrente |
 | 16 | `send(channel, tag, w0, w1)` | IPC per canale (0 = parent), Fase 7+13 |
-| 17 | `recv()` | IPC per canale: ritorna (channel, tag, w0, w1), Fase 7+13 |
+| 17 | `recv(deadline)` | IPC per canale: ritorna (channel, tag, w0, w1), Fase 7+13; **E1/ADR-0083**: `arg1` = tick assoluto di scadenza (0 = mai), alla scadenza `rax = -2` senza consumare messaggi (**la coda vince**) |
 | 18 | `reply(tag, w0, w1)` | risponde al messaggio corrente (reply implicita), Fase 7+13 |
 | 20 | `spawn(name)` | crea un processo dal binario **embedded** e ritorna il **canale di nascita** verso il figlio (Fase 8.1+13); **ADR-0079 fase 4**: solo init (pid 1) — gli altri usano `spawn_image`/`exec` |
 | 21 | `map_physical(phys, virt, count)` | mappa pagine fisiche nello spazio user (Fase 8.2) |
@@ -176,7 +176,7 @@ extern "C" fn syscall_handler() -> i64 {
         2  => sys_write((*p).arg1, (*p).arg2 as *const u8, (*p).arg3 as usize),
         8  => sys_getpid(),
         16 => sys_send((*p).arg1 as usize, (*p).arg2, (*p).arg3, (*p).arg4),
-        17 => sys_recv(),
+        17 => sys_recv((*p).arg1),
         18 => sys_reply((*p).arg1, (*p).arg2, (*p).arg3),
         20 => sys_spawn((*p).arg1, (*p).arg2 as usize),
         21 => sys_map_physical((*p).arg1, (*p).arg2, (*p).arg3 as usize),
@@ -209,7 +209,7 @@ extern "C" fn syscall_handler() -> i64 {
 | `exit` | 0 | Termina il processo corrente, da qualunque thread (`sched::exit_process`: tutto il gruppo) |
 | `getpid` | 8 | Restituisce il PID corrente |
 | `send` | 16 | IPC per canale (0 = parent): invia e blocca in attesa della reply |
-| `recv` | 17 | IPC per canale: blocca finche' non arriva un messaggio |
+| `recv` | 17 | IPC per canale: blocca finche' non arriva un messaggio; **E1/ADR-0083**: `arg1` = deadline in tick (0 = mai), scadenza → `-2` (coda vince) |
 | `reply` | 18 | risponde al messaggio corrente (reply implicita) |
 | `send_async` | 33 | IPC async: invia SENZA bloccare → req_id o -1 (Fase 13) |
 | `recv_nonblock` | 34 | IPC async: recv non bloccante, coda vuota → -1 (Fase 13) |

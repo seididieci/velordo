@@ -38,6 +38,7 @@ mod t_lifecycle;
 mod t_mapflap;
 mod t_policy;
 mod t_scroll;
+mod t_time;
 mod t_sig;
 mod t_stable;
 // ── main ─────────────────────────────────────────────────────────────
@@ -117,6 +118,8 @@ fn real_main(_sp: u64) -> ! {
     helpers::report(&mut total, &mut ok, "t68 porte I/O dal manifest", t_sig::t_io_ranges());
     helpers::report(&mut total, &mut ok, "t69 Custos: ruoli e capability", t_custos::t_custos());
     helpers::report(&mut total, &mut ok, "t70 consenso per immagine + broker", t_consent::t_consent());
+    helpers::report(&mut total, &mut ok, "t71 recv con deadline (timeout, messaggio vince, 1 tick)", t_time::t_recv_deadline());
+    helpers::report(&mut total, &mut ok, "t72 Sleep + join/run con misure di tick", t_time::t_sleep_join());
     // t34 per ULTIMO: i drop sono irrevocabili sul canale di usertests.
     helpers::report(&mut total, &mut ok, "t34 diritti per-canale lato server", t_fs::t_rights());
 

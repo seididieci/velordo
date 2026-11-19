@@ -20,10 +20,16 @@ pub const SYS_GETPID: u64 = 8;
 /// `reply(tag, w0, w1)` (reply implicita al messaggio corrente). Riusa il
 /// numero della vecchia send per PID (16).
 pub const SYS_SEND: u64 = 16;
-/// `recv()`: riceve il prossimo messaggio dalla propria coda e restituisce
-/// `(channel, tag, w0, w1)`. Per le richieste (`req_id >= 0`) `channel` porta
-/// il canale sorgente; per le risposte async (`req_id < 0`, Fase 13) porta il
-/// `req_id` negativo. Riusa il numero di SYS_RECV (17).
+/// `recv(deadline)`: riceve il prossimo messaggio dalla propria coda e
+/// restituisce `(channel, tag, w0, w1)`. Per le richieste (`req_id >= 0`)
+/// `channel` porta il canale sorgente; per le risposte async (`req_id < 0`,
+/// Fase 13) porta il `req_id` negativo. Riusa il numero di SYS_RECV (17).
+///
+/// E1 (ADR-0083): `arg1` = tick assoluto di scadenza (`0` = mai, compatibile
+/// con tutti i chiamanti precedenti). Alla scadenza `rax = -2` (timeout),
+/// nessun messaggio consumato; **la coda vince sul timeout** (un messaggio
+/// gia' arrivato si consegna anche se il tick e' passato mentre lo
+/// schedulavamo, mai perso). `-1` = errore/nessun peer.
 pub const SYS_RECV: u64 = 17;
 /// `reply(tag, w0, w1)`: risponde al mittente del messaggio che il chiamante
 /// sta correntemente elaborando (reply implicita, `reply_chan` di ADR-0008).

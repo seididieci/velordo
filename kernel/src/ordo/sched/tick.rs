@@ -32,6 +32,11 @@ pub fn on_tick() {
     // resto: i waiter scaduti tornano runnable nello stesso tick.
     super::futex::tick_deadlines(sched, crate::pit::ticks());
 
+    // E1 (ADR-0083): scadenze delle `recv` con deadline. Stesso giro, stesso
+    // lock: chi scade torna Ready e la syscall ricontrolla la coda prima di
+    // rispondere timeout (la coda vince).
+    super::ipc::tick_recv_deadlines(sched, crate::pit::ticks());
+
     // CBS: replenishment — se la deadline di un server e' scaduta, resetta
     // il budget e rimetti il processo in ready queue. Prima del decrement
     // cosi' un processo throttled puo' tornare schedulabile nello stesso tick.

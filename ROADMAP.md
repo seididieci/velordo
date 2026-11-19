@@ -11,11 +11,11 @@ ricompilare se stesso. Ordina le priorita' (storage veloce prima, servizi
 fuori dal kernel poi, personalita' per software reale dopo) senza pianificare
 nulla da solo.
 
-## Stato (completate 1-57 + E0)
+## Stato (completate 1-57 + E0 + E1)
 
 Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` +
-`[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 66/66` +
-`[threadtest] PASS 12/12` + `[shell-native] PASS 32/32` (la shell nativa gira
+`[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 68/68` +
+`[threadtest] PASS 12/12` + `[shell-native] PASS 33/33` (la shell nativa gira
 nella stessa QEMU: login via `sendkey`, `--attach-pid`), zero FAIL/PANIC/FAULT;
 `./run-tests.sh` stampa `[gate] PASS/FAIL` ed esce `!= 0`. La suite FAT32 e'
 **fuori dal gate** (ADR-0059: `scripts/run-fat-tests.sh`).
@@ -79,6 +79,7 @@ nella stessa QEMU: login via `sendkey`, `--attach-pid`), zero FAIL/PANIC/FAULT;
 | 56 | Gestione utenti — Fase 3.1: protocollo Identis (`libs/identis-proto`: framing, magic, codici), **token di sessione** emesso da Identis al login, `IDENTIS_ADD_USER` (0x71) con validazione server-side del nome, `IDENTIS_LIST` (0x72), transazione **legata al canale** (BUSY + retry: il secondo client non corrompe piu' il buffer), client `create-user` (hash in locale, token da env `VELORDO_SESSION`), gate `identistest` 11/11 (ADR-0058) | ✅ Completata |
 | 57 | **FAT fuori dal boot e dalla suite** (ADR-0059): ArcaFS unico filesystem di sistema (init carica **tutto** da ArcaFS: `SvcMeta.path` sparisce, `inject-bins.sh` cancellato, `identis`/`login` ora pinnati come gli altri), suite FAT32 **fuori dal gate** (run dedicato `scripts/run-fat-tests.sh`), test migrati su ArcaFS con device **scoperti** per magic/UUID (mai per lettera), superblock **v4** (192 B: `label` + `mountpoint` dichiarato, il campo mountpoint era morto), tool host `arca create --label/--mountpoint` + `arca set`, uuid ArcaFS esposto dal driver disco (by-uuid 16 hex), gate 6 righe + shell 10/10 | ✅ Completata |
 | E0 | **Eventi, non polling — input della tastiera** (ADR-0082): `/dev/input/keyboard` risponde subito, quindi l'evento e' un messaggio — `porta` registra i sottoscrittori (`INPUT_ATTACH`/`INPUT_DETACH`, 0x46/0x47) con focus **LIFO** e manda `INPUT_NOTIFY` (0x48, hint coalescente) al titolare; il client dorme in `recv()` (`civis::input::wait`) e drena il device fino a 0 (`civis::input::read`). **Kernel intatto**; `interpres`/`identis-login`/`create-user` non pollano piu' (via `wait_input_tick`, `INPUT_FUTEX` e lo `spin_loop()` nudo). Gate `[shell-native] PASS 32/32` con due guardie CPU `< 5%` (prompt principale 1,0%, `create-user` 2,0%) | ✅ Completata |
+| E1 | **`recv` con deadline — un messaggio *oppure* il tempo** (ADR-0083): `SYS_RECV` prende `arg1` = tick assoluto di scadenza (`0` = mai, compatibile: nessun chiamante cambia); timeout = `rax = -2` **senza consumare messaggi**, e **la coda vince** (un messaggio in gara si consegna sempre). La scadenza vive nel PCB (`recv_deadline`) e la scandisce `on_tick` accanto ai futex: nessuna tabella di timer, nessuno slot orfano. Meccanismo: `civis::ipc::recv_timeout`, `task::Sleep` + `Receivable::deadline()` (`block_on`/`run` armano la deadline minima, `Join` propaga quella dei figli), `input::wait_until`. Vittoria: la shell tiene l'**orologio del prompt vivo mentre dorme** (repaint in-place di 8 cifre, nessun prompt ridisegnato, un risveglio al secondo) e `useruptime` usa `block_on(Sleep)` al posto del futex-timer. Gate: t71/t72 (`usertests 68/68`) + 33° check della shell (l'ora avanza al prompt fermo) | ✅ Completata |
 
 ## Lavoro recente (commit più recenti)
 
@@ -164,18 +165,34 @@ nella stessa QEMU: login via `sendkey`, `--attach-pid`), zero FAIL/PANIC/FAULT;
   drena il device finche' `read` non ritorna 0 (`civis::input`).
   **Kernel intatto**; CPU al prompt **1,0%** (shell) e **2,0%**
   (`create-user`), gate `[shell-native] PASS 32/32` con due guardie `< 5%`
+- **E1 — `recv` con deadline** (`kernel/src/ordo/sched/ipc.rs`,
+  `libs/civis/src/{ipc,task,input}.rs`, ADR-0083): `SYS_RECV` prende `arg1` =
+  tick assoluto di scadenza (`0` = mai, quindi i ~40 chiamanti esistenti non
+  cambiano una riga), timeout = `rax = -2` senza consumare messaggi e **la coda
+  vince** (un messaggio arrivato mentre il timer scadeva si consegna: mai un
+  evento perso per un timer). La scadenza vive nel PCB (`recv_deadline`) e la
+  scandisce `on_tick` accanto ai futex — nessuna tabella di timer, nessuno slot
+  orfano. Lato meccanismo `recv_timeout` + `task::Sleep` + `Receivable::deadline()`
+  (l'executor dorme sulla deadline **minima** fra i task, `Join` propaga quella
+  dei figli) e `input::wait_until`. Vittoria: l'orologio del prompt **avanza
+  mentre la shell dorme** (repaint in-place di 8 cifre, nessun prompt
+  ridisegnato — il gate conta i `" > "`) e `useruptime` usa `block_on(Sleep)` al
+  posto del futex-timer; gate `usertests 68/68` (t71/t72) + `[shell-native] PASS
+  33/33` (33° check: l'ora avanza al prompt fermo)
 
 ## Pianificate
 
 Voci con scope e vittoria dichiarati (non date).
 
-- [ ] **E1 — `SYS_RECV` con deadline** (ADR-0082): kernel `ipc_recv(deadline)`
-      + `recv_deadline` nel PCB + scansione in `tick_deadlines` (riuso futex),
-      timeout `-2`, **la coda vince sul timeout**, arg1 di `SYS_RECV` (0 = mai,
-      compatibile); `civis::recv_timeout`, `task::Sleep`, deadline minima fra i
-      task in `block_on`/`run`. Test: `t71` (scade; un messaggio in gara non si
-      perde), `t72` (`Sleep` + `Join`) → usertests 66→68. Vittoria: la shell
-      tiene orologio/uptime aggiornati mentre attende input, zero risvegli a vuoto.
+- [x] **E1 — `SYS_RECV` con deadline** (ADR-0083, completata 2026-11-19):
+      `ipc_recv_until(deadline)` + `recv_deadline` nel PCB + sweep in `on_tick`
+      accanto ai futex, timeout `-2`, **la coda vince**, arg1 di `SYS_RECV`
+      (0 = mai); `civis::recv_timeout`, `task::Sleep` + `Receivable::deadline()`
+      (deadline minima in `block_on`/`run`, `Join` propaga), `input::wait_until`.
+      Test: t71 (scade; un messaggio in gara non si perde), t72 (`Sleep` in
+      `run`/`block_on`) → usertests 68/68 + 33° check shell. Vittoria: l'orologio
+      del prompt avanza **mentre la shell dorme** (repaint in-place, un risveglio
+      al secondo), `useruptime` su `block_on(Sleep)`.
 - [ ] **E2 — eventi di rete** (ADR-0082): owner channel per endpoint +
       `NET_EP_EVENT` coalescente su enqueue/accept/fin/rst; `Endpoint::wait(deadline)`
       e `net::Stream` componibile nell'executor; migrazione `netecho` (listener +

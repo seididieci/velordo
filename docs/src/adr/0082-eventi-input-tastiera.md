@@ -2,9 +2,11 @@
 
 ## Status
 
-**Accepted** (2026-11-19). **E0 implementata e nel gate.** E1 (kernel:
-`recv` con deadline) ed E2 (eventi di rete) sono il piano dichiarato, non
-ancora realizzate.
+**Accepted** (2026-11-19). **E0 ed E1 implementate e nel gate.** E0 = input a
+eventi (notify + drain, nessuna modifica al kernel); E1 = `recv` con deadline
+(ADR-0083, con una deviazione dichiarata rispetto al piano qui sotto: la
+scadenza viaggia su `SYS_RECV` invece di comporre `run([Input, Clock])`). E2
+(eventi di rete) è il piano dichiarato, non ancora realizzato.
 
 Dipende da ADR-0008 (IPC per nome), ADR-0009 (IPC asincrona), ADR-0067
 (attese in futex) e ADR-0081 (gate end-to-end).
@@ -71,18 +73,20 @@ Tre tag nuovi in `syscall-numbers` (riesportati da `civis`):
 
 `SYS_RECV` (17) blocca senza scadenza; `SYS_FUTEX_WAIT` (56) ha la deadline
 ma non lo sveglia un IPC. L'executor `civis::task` può quindi attendere **solo**
-IPC (per questo è reply-only). E1:
+IPC (per questo è reply-only). E1 (**fatta**, ADR-0083):
 
-- kernel: `ipc_recv(deadline)` + campo `recv_deadline` nel PCB, scansione in
-  `tick_deadlines` (riuso di quella dei futex); timeout = `-2`; **la coda
-  vince sul timeout**; arg1 di `SYS_RECV` (0 = mai, compatibile con tutti i
-  chiamanti attuali);
+- kernel: `ipc_recv_until(deadline)` + campo `recv_deadline` nel PCB, sweep in
+  `on_tick` accanto a quello dei futex; timeout = `-2`; **la coda vince sul
+  timeout**; arg1 di `SYS_RECV` (0 = mai, compatibile con tutti i chiamanti);
 - `civis`: `recv_timeout`, `task::Sleep`, `block_on`/`run` che armano la
-  deadline minima fra i task;
+  deadline minima fra i task, `input::wait_until`;
 - gate: `t71 recv con deadline` (scade; un messaggio in gara non si perde),
-  `t72 Sleep + Join` (usertests 66 → 68);
-- vittoria: la shell tiene orologio/uptime aggiornati *mentre* attende input
-  (`run([Input, Clock])`), zero risvegli a vuoto.
+  `t72 Sleep + Join` (usertests 66 → 68) + 33° check della shell (l'ora del
+  prompt avanza da ferma);
+- vittoria: la shell tiene l'orologio aggiornato *mentre* attende input, con
+  **una** attesa e zero risvegli a vuoto (deviazione dal piano originale:
+  la deadline sta sulla stessa `recv` dell'input, non in `run([Input, Clock])`
+  — vedi ADR-0083 §Alternatives).
 
 ### E2 — eventi di rete (dove async paga sul serio)
 
@@ -111,7 +115,7 @@ IPC (per questo è reply-only). E1:
   → 0 nei loop di input.
 - Focus LIFO già pronto per il DE e per i programmi foreground: chi muore
   lascia la tastiera al precedente senza codice nel client.
-- Il gate copre l'input end-to-end: se l'attach si rompe, login o i 32 check
+- Il gate copre l'input end-to-end: se l'attach si rompe, login o i check
   della shell falliscono subito.
 
 ### Negative

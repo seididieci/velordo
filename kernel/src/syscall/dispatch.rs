@@ -27,7 +27,7 @@ pub(super) extern "C" fn syscall_handler() -> i64 {
             syscall_numbers::SYS_GETPID => sys_getpid(),
             syscall_numbers::SYS_SEND => sys_send((*p).arg1 as usize, (*p).arg2, (*p).arg3, (*p).arg4),
             syscall_numbers::SYS_SEND_ASYNC => sys_send_async((*p).arg1 as usize, (*p).arg2, (*p).arg3, (*p).arg4),
-            syscall_numbers::SYS_RECV => sys_recv(),
+            syscall_numbers::SYS_RECV => sys_recv((*p).arg1),
             syscall_numbers::SYS_RECV_NONBLOCK => sys_recv_nonblock(),
             syscall_numbers::SYS_REPLY => sys_reply((*p).arg1, (*p).arg2, (*p).arg3),
             syscall_numbers::SYS_SERVICE_REGISTER => sys_service_register((*p).arg1),

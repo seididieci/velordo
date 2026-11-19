@@ -7,16 +7,16 @@
 # ed esegue usertestfs/usertestfat/usertests/testsarca in sequenza prima della
 # shell) e mette il seriale su file + il monitor su unix socket: cosi' la
 # stessa QEMU e' pilotabile via `sendkey` e, appena il login chiede le
-# credenziali, il gate si attacca (`--attach-pid`) e fa girare i 32 check
+# credenziali, il gate si attacca (`--attach-pid`) e fa girare i 33 check
 # della shell nativa (`scripts/test-shell-native.py`, gli stessi di
 # `scripts/test-shell-all.sh native`). Righe attese + zero FAIL/PANIC/FAULT:
 #   [testfs] PASS 5/5
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 66/66
+#   [usertests] PASS 68/68
 #   [threadtest] PASS 12/12
-#   [shell-native] PASS 32/32
+#   [shell-native] PASS 33/33
 # (Fase 30.1: t65 shm; ADR-0078 fase 2: t66 firma; ADR-0079 fase 3: t67 classe;
 #  ADR-0079 fase 4: t68 porte I/O dal manifest; ADR-0080 fase 6: t70 consenso
 #  per immagine + broker; ADR-0081: fase shell nativa nel gate)
@@ -100,7 +100,7 @@ if [ "$fail" -eq 0 ]; then
         '[testsarca] PASS 64/64' \
         '[posixtests] PASS 4/4' \
         '[identistest] PASS 11/11' \
-        '[usertests] PASS 66/66' \
+        '[usertests] PASS 68/68' \
         '[threadtest] PASS 12/12'
     do
         if ! rg -qF -- "$want" "$LOG"; then
@@ -115,11 +115,11 @@ if [ "$fail" -eq 0 ]; then
     fi
 fi
 
-# Fase shell nativa: stessa QEMU, login gia' al prompt. Gli stessi 32 check
+# Fase shell nativa: stessa QEMU, login gia' al prompt. Gli stessi 33 check
 # di `scripts/test-shell-all.sh native`, ma in attach (niente secondo boot,
 # niente secondo seed: il volume e' quello su cui ha girato la suite).
 if [ "$fail" -eq 0 ] && [ "${GATE_SHELL:-1}" = "1" ]; then
-    echo "[gate] shell nativa (32 check, --attach sul boot della suite)"
+    echo "[gate] shell nativa (33 check, --attach sul boot della suite)"
     if ! SHELL_KVM="${KVM:-0}" timeout "$SHELL_TIMEOUT" \
             python3 scripts/test-shell-native.py \
                 --attach-pid "$QEMU_PID" --mon "$MON" --serial "$LOG" \

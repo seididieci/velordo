@@ -252,6 +252,13 @@ pub struct Process {
     /// dallo svegliante (wake/deadline sweep) sotto lock, letto dal waiter
     /// al risveglio. Resettato a ogni WAIT.
     pub futex_woken: Option<bool>,
+    /// Scadenza assoluta della `recv` in corso (E1, ADR-0083): tick, 0 = mai.
+    /// Scritta da `ipc_recv` quando si blocca, azzerata quando l'attesa
+    /// finisce (messaggio o timeout). Il kernel la scandisce in `on_tick`
+    /// (stesso giro dei futex): alla scadenza il processo torna `Ready`, la
+    /// `recv` ricontrolla la coda (che **vince**) e altrimenti risponde
+    /// timeout. Nessuna tabella: la scadenza muore col PCB.
+    pub recv_deadline: u64,
     /// Directory di lavoro (S1.1): vive sul LEADER del gruppo (i thread la
     /// condividono come POSIX; il campo dei thread resta vuoto e ignorato).
     /// Buffer 256B = MAX_PATH cardo; `cwd_len` byte validi, sempre assoluta
@@ -347,6 +354,7 @@ impl Process {
             thread_group: None,
             fs_base: 0,
             futex_woken: None,
+            recv_deadline: 0,
             cwd: [0u8; 256],
             cwd_len: 0,
             exit_code: 0,
@@ -488,6 +496,7 @@ impl Process {
             thread_group: None,
             fs_base: 0,
             futex_woken: None,
+            recv_deadline: 0,
             cwd: [0u8; 256],
             cwd_len: 0,
             exit_code: 0,
@@ -559,6 +568,7 @@ impl Process {
             thread_group: None,
             fs_base: 0,
             futex_woken: None,
+            recv_deadline: 0,
             cwd: [0u8; 256],
             cwd_len: 0,
             exit_code: 0,
@@ -648,6 +658,7 @@ impl Process {
             thread_group: Some(leader),
             fs_base,
             futex_woken: None,
+            recv_deadline: 0,
             cwd: [0u8; 256],
             cwd_len: 0,
             exit_code: 0,

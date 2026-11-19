@@ -12,8 +12,13 @@
 //!
 //! Una sola sottoscrizione per processo (il modello IPC e' un `recv` per
 //! processo): le chiamate sono globali per address space, non per fd.
+//!
+//! E1 (ADR-0083): `wait_until(deadline)` e' la stessa attesa con una
+//! scadenza — "un tasto **oppure** il tempo" (`recv_timeout`). La usa la
+//! shell per tenere vivo l'orologio del prompt mentre dorme: un risveglio al
+//! secondo, non un tick.
 
-use crate::Error;
+use crate::{Error, RecvError};
 
 const KEYBOARD_PATH: &str = "/dev/input/keyboard";
 /// Tentativi di attach/reattach (uno per tick): copre il riavvio di `porta`
@@ -107,24 +112,51 @@ pub fn read(dst: &mut [u8]) -> usize {
 /// ADR-0067). Su morte di `porta` prova **una** riattaccata (init la
 /// risupervisiona), poi rinuncia.
 pub fn wait() -> bool {
+    matches!(wait_until(0), Wait::Event)
+}
+
+/// Esito di [`wait_until`] (E1, ADR-0083).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wait {
+    /// Un messaggio e' arrivato (di norma `INPUT_NOTIFY`): drena il device.
+    Event,
+    /// Scadenza raggiunta senza messaggi: la coda non e' stata toccata.
+    Timeout,
+    /// La sorgente e' persa (riattaccata fallita): uscita loud.
+    Dead,
+}
+
+/// Come [`wait`], ma si sveglia anche alla `deadline` (tick assoluto,
+/// `0` = mai). E' l'attesa **evento o tempo** su un solo `recv_timeout`:
+/// il processo resta `Blocked` e nessun risveglio e' sprecato (E1).
+///
+/// **La coda vince** (kernel): se un tasto e' arrivato mentre il tempo
+/// scadeva, si torna `Event` e il drain lo trova — mai un evento perso.
+pub fn wait_until(deadline: u64) -> Wait {
     loop {
         let pid = match sub() {
             Some(s) => s.pid,
-            None => return false,
+            None => return Wait::Dead,
         };
-        match crate::recv() {
+        match crate::recv_timeout(deadline) {
             Ok(m) => {
                 if m.tag == crate::EXIT_NOTIFY && pid >= 0 && m.w1 as i64 == pid {
                     // porta riavviata: riattacca una volta, poi loud.
                     if let Some(s) = take_sub() {
                         let _ = crate::close(s.fd);
                     }
-                    return attach().is_ok();
+                    return if attach().is_ok() { Wait::Event } else { Wait::Dead };
                 }
-                return true;
+                return Wait::Event;
             }
-            // Wake spurio (peer morto senza EXIT recapitato): riprova.
-            Err(_) => {}
+            Err(RecvError::Timeout) => return Wait::Timeout,
+            // Wake spurio (peer morto senza EXIT recapitato): se il tempo e'
+            // scaduto chiudi l'attesa, altrimenti riprova.
+            Err(RecvError::Dead) => {
+                if deadline != 0 && crate::get_ticks() as u64 >= deadline {
+                    return Wait::Timeout;
+                }
+            }
         }
     }
 }

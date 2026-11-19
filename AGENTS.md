@@ -169,7 +169,7 @@ velordo/
 
 ## Stato corrente
 
-Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 66/66` + `[threadtest] PASS 12/12` + `[shell-native] PASS 32/32` (la shell nativa gira nella **stessa** QEMU del gate: login via `sendkey` e `--attach-pid`, `scripts/test-shell-native.py`), zero FAIL/PANIC/FAULT; il gate stampa `[gate] PASS/FAIL` ed **esce != 0** (vedi `docs/src/11-testing.md`). Le fasi POSIX restano storiche dal login nativo (ADR-0062). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
+Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 68/68` + `[threadtest] PASS 12/12` + `[shell-native] PASS 33/33` (la shell nativa gira nella **stessa** QEMU del gate: login via `sendkey` e `--attach-pid`, `scripts/test-shell-native.py`), zero FAIL/PANIC/FAULT; il gate stampa `[gate] PASS/FAIL` ed **esce != 0** (vedi `docs/src/11-testing.md`). Le fasi POSIX restano storiche dal login nativo (ADR-0062). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
 - **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
   BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
@@ -353,8 +353,31 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   modifica al kernel.** `interpres`, `identis-login` e `create-user` non
   pollano piu' (CPU al prompt 1,0% / 2,0% misurata; gate `< 5%` su entrambi i
   prompt); la shell POSIX resta a polling (personalita', debito dichiarato).
-  E1 (`SYS_RECV` con deadline) ed E2 (eventi di rete) sono il seguito
-  dichiarato nello stesso ADR.
+  E2 (eventi di rete) e' il seguito dichiarato nello stesso ADR.
+- **`recv` con deadline (E1, ADR-0083)**: `SYS_RECV` (17) prende `arg1` = tick
+  assoluto di scadenza (`0` = mai: i chiamanti esistenti non cambiano), alla
+  scadenza `rax = -2` e **nessun messaggio consumato**; **la coda vince** (un
+  messaggio arrivato mentre il timer scadeva si consegna sempre). La scadenza
+  vive nel PCB (`Process::recv_deadline`) e la scandisce `on_tick` accanto ai
+  futex (`tick_recv_deadlines`): nessuna tabella di timer, nessuno slot orfano,
+  nessun PID riusato che eredita una deadline. Attenzione all'anti-deadlock di
+  `pick_next()` (nessun altro runnable = resta `Ready` e ritorna `-1`): la
+  syscall controlla l'orologio **prima** di bloccarsi, cosi' un timer scaduto
+  non diventa un errore. Meccanismo: `civis::ipc::recv_timeout` (`RecvError::
+  {Timeout, Dead}`), `task::Sleep` + `Receivable::deadline()` (l'executor dorme
+  sulla deadline **minima** fra i task pending, `Join` propaga quella dei figli),
+  `input::wait_until` (`Wait::{Event, Timeout, Dead}`; `wait()` =
+  `matches!(wait_until(0), Wait::Event)`). Vittoria: l'orologio del prompt della
+  shell **avanza mentre dorme** — repaint **in-place** di 8 cifre (`ESC[D`×5 +
+  `HH:MM:SS` + `ESC[C`×5; il console server muove di UNA cella per sequenza,
+  ignora i parametri CSI), solo con buffer vuoto e fuori continuazione, e **mai**
+  il prompt intero (il gate conta i `" > "`); `get_time_str` restituisce
+  esattamente 8 byte (il `\0` di prima finiva in una cella del prompt).
+  `useruptime` usa `block_on(Sleep)` al posto del futex-timer. Test: t71 (scade;
+  messaggio in gara non perso; 1 tick) e t72 (`Sleep` in `run`/`block_on` con
+  misure di tick) → `usertests 68/68`; 33° check della shell (l'ora avanza al
+  prompt fermo, forma `ESC[D`×5 + cifre). Guardia: `glyph_width_cells` di ✓ **e**
+  ✗ = 1 cella (unit test host in `libs/term`).
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
@@ -685,17 +708,17 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 
 # Gate di regressione (un solo boot, ADR-0081): 6 righe di suite + shell
 # nativa, ZERO FAIL/PANIC/FAULT. Il prompt del login e' il segnale di fine
-# suite; da li' il gate si attacca alla stessa QEMU e gira i 32 check della
-# shell (`[shell-native] PASS 32/32`). Il gate stampa `[gate] PASS/FAIL` ed
+# suite; da li' il gate si attacca alla stessa QEMU e gira i 33 check della
+# shell (`[shell-native] PASS 33/33`). Il gate stampa `[gate] PASS/FAIL` ed
 # esce != 0: niente piu' timeout esterno che chiude il boot.
 # (ADR-0059: la suite FAT32 e' fuori dal gate -> scripts/run-fat-tests.sh)
 #   [testfs] PASS 5/5
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 66/66
+#   [usertests] PASS 68/68
 #   [threadtest] PASS 12/12
-#   [shell-native] PASS 32/32
+#   [shell-native] PASS 33/33
 # KVM=1 accelera (-enable-kvm -cpu host, opt-in; senza /dev/kvm resta TCG).
 # Valvole: GATE_SHELL=0 (solo suite), GATE_TIMEOUT (600), SHELL_TIMEOUT (900).
 timeout 1800 ./run-tests.sh > /tmp/boot.log 2>&1

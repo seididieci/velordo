@@ -4094,3 +4094,54 @@
       sembianze di un'attesa — se il produttore non ha un campanello, il
       consumatore non può dormire. Seguito dichiarato: E1 (`SYS_RECV` con
       deadline, `task::Sleep`) ed E2 (eventi di rete).
+
+- **E1 — `recv` con deadline: un messaggio *oppure* il tempo** (ADR-0083).
+  E0 lasciò la shell su **una** attesa (`recv` sul canale di `porta`) senza
+  scadenza: l'orologio del prompt restava fermo finché non arrivava un tasto.
+  Le primitive erano monche per costruzione — `SYS_RECV` (17) sveglia su IPC
+  ma non ha deadline, `SYS_FUTEX_WAIT` (56) ha la deadline ma non lo sveglia
+  un IPC — e i vincoli del progetto escludono `select`/`epoll`/eventfd e i
+  risvegli a tick (ADR-0067, CPU al prompt 1,0%).
+  **Decisione**: la scadenza viaggia **su `SYS_RECV`** (`arg1` = tick
+  assoluto, `0` = mai quindi i ~40 chiamanti esistenti non cambiano una
+  riga); timeout = `rax = -2` **senza consumare messaggi**; **la coda vince
+  sul timeout** (un messaggio arrivato mentre il timer scadeva si consegna:
+  mai un evento perso per un timer — sweep e arrivo del tasto cadono nello
+  stesso tick). La scadenza vive nel **PCB** (`Process::recv_deadline`) e la
+  scandisce `on_tick` accanto ai futex (`tick_recv_deadlines`): niente
+  tabella di timer, niente slot orfani, nessun PID riusato che eredita una
+  deadline. **Trappola evitata**: l'anti-deadlock di `pick_next()` (nessun
+  altro runnable → il processo resta `Ready` e la syscall ritorna `-1`) —
+  se il tempo era già scaduto il `-1` sarebbe stato un hang mascherato da
+  errore, quindi la syscall controlla l'orologio **prima** di bloccarsi.
+  Lato meccanismo: `ipc::recv_timeout` (`RecvError::{Timeout, Dead}`),
+  `task::Sleep` + `Receivable::deadline()` (l'executor dorme sulla deadline
+  **minima** fra i task pending; `Join` propaga quella dei figli non finiti;
+  `Sleep` scaduto vale `deadline() == 0`, così non c'è mai un `Pending` con
+  deadline passata = busy-loop) e `input::wait_until`
+  (`Wait::{Event, Timeout, Dead}`; `wait()` = `matches!(wait_until(0),
+  Wait::Event)`). **Deviazione dichiarata**: il piano in ADR-0082 prevedeva
+  `run([Input, Clock])`; la deadline *sulla stessa attesa* fa la stessa cosa
+  con zero macchine in più e senza mettere i byte del device nel router.
+  **Vittoria**: l'orologio del prompt **avanza mentre la shell dorme** —
+  repaint **in-place** delle sole 8 cifre (`ESC[D`×5 + `HH:MM:SS` +
+  `ESC[C`×5; il console server muove di **una** cella per sequenza, ignora i
+  parametri CSI, quindi il movimento è ripetuto), armato solo a buffer vuoto
+  e fuori continuazione, e **mai** ridisegnando il prompt (il gate conta i
+  `" > "`: 1–2 per riga). Un risveglio al secondo, non al tick.
+  **Bug trovato per strada**: `get_time_str()` restituiva 9 byte
+  (`"HH:MM:SS\0"`, il `NUL` finiva in una cella del prompt) — ora 8 esatti,
+  che è anche la lunghezza su cui il repaint fa i conti; e il primo giro del
+  check falliva perché la regex cercava `ESC[5D` (che il console non
+  supporta). `useruptime` passa da `futex_wait`-timer a
+  `block_on(Sleep::until(..))`: il timer dell'executor ha un uso reale in
+  produzione e nel gate. Test nuovi: **t71** (deadline già passata →
+  `Timeout`; **la coda vince** con una deadline a +10000 tick; timeout a 1
+  tick senza hang né perdite) e **t72** (`run([Sleep(+30), Sleep(+60)])` ≥ 60
+  tick; `block_on(Sleep::ticks(25))` ≥ 25 tick) → `usertests 68/68`; **33°**
+  check della shell (l'ora compare e *avanza* al prompt fermo) → gate KVM
+  `[gate] PASS` con `[shell-native] PASS 33/33`, zero FAIL/PANIC/FAULT.
+  **Lezione**: "evento o tempo" è **una** attesa, non due — se la scadenza
+  sta nella syscall che già blocca, non serve nessun selettore; e un valore
+  di ritorno nuovo (`-2`) va distinto dal caso "nessun peer" (`-1`) in
+  **tutti** i punti in cui il kernel può uscire senza dormire.
