@@ -93,13 +93,20 @@ Il prompt mostra `HH:MM:SS`. A ogni `read()` che ritorna `0` la shell arma
 8 cifre**, in-place:
 
 ```
-ESC[D ×5   +  colore  +  HH:MM:SS  +  reset  +  ESC[C ×5
+ESC[D ×13  +  colore  +  HH:MM:SS  +  reset  +  ESC[C ×5
 ```
 
-Cinque celle sono il suffisso fra l'ora e il cursore (`" " ✓|✗ " " ">" " "`,
-entrambi i glifi di stato larghi **una** cella — guardato da un unit test in
-`libs/term`). Il console server muove di **una** cella per `ESC[D`/`ESC[C`
-(ignora i parametri CSI), quindi il repaint è ripetuto, non `ESC[5D`.
+Tredici indietro (8 cifre dell'ora + 5 del suffisso) e cinque avanti: **saldo
+zero** delle celle, il cursore torna esattamente dov'era. Il terminale deve
+muoversi di una cella e lasciare intatto il suffisso; scrivere 8 cifre partendo
+da 5 celle indietro (saldo +8) fa **crescere la riga di 8 celle al secondo e
+cancella il suffisso** — l'errore del primo giro, visibile subito a schermo
+(`10:40:2910:40:3010:40:31…`) e ora coperto dalla forma del check di gate.
+
+Le cinque celle del suffisso sono `" " ✓|✗ " " ">" " "`, con entrambi i glifi
+di stato larghi **una** cella (guardato da un unit test in `libs/term`). Il
+console server muove di **una** cella per `ESC[D`/`ESC[C` (ignora i parametri
+CSI), quindi il movimento è ripetuto, non `ESC[13D`.
 
 Vincoli scelti (tutti per non rompere ciò che il gate misura):
 
@@ -140,7 +147,8 @@ nel gate — se `Sleep` o la deadline minima si rompono, si vede subito.
   **t72** (`run` di due `Sleep` a +30/+60 tick → ≥ 60 tick; `block_on` di
   `Sleep::ticks(25)` → ≥ 25). usertests 66 → **68**.
 - Il gate copre anche l'orologio: **33° check** della shell nativa (l'ora
-  compare e *avanza* al prompt fermo, forma `ESC[D ×5` + cifre). Se il
+  compare e *avanza* al prompt fermo, forma esatta `ESC[D`×13 + ora +
+  `ESC[C`×5: un saldo diverso da zero, o un suffisso cancellato, fallisce). Se il
   repaint si rompe, il check fallisce.
 
 ### Negative
@@ -187,7 +195,8 @@ nel gate — se `Sleep` o la deadline minima si rompono, si vede subito.
   terminale.
 - **Ridisegnare l'ora senza muovere il cursore** (sovrascrittura con `\r` e
   riscrittura della riga): la riga contiene il comando digitato, che va
-  preservato; il movimento di 5 celle è la parte minima che tocca solo l'ora.
+  preservato; il movimento di 13+5 celle è la parte minima che tocca solo l'ora
+  (e il saldo nullo è ciò che tiene ferma la riga).
 
 ## References
 

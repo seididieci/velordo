@@ -4124,8 +4124,8 @@
   `run([Input, Clock])`; la deadline *sulla stessa attesa* fa la stessa cosa
   con zero macchine in più e senza mettere i byte del device nel router.
   **Vittoria**: l'orologio del prompt **avanza mentre la shell dorme** —
-  repaint **in-place** delle sole 8 cifre (`ESC[D`×5 + `HH:MM:SS` +
-  `ESC[C`×5; il console server muove di **una** cella per sequenza, ignora i
+  repaint **in-place** delle sole 8 cifre (`ESC[D`×13 + `HH:MM:SS` +
+  `ESC[C`×5, **saldo zero**; il console server muove di **una** cella per sequenza, ignora i
   parametri CSI, quindi il movimento è ripetuto), armato solo a buffer vuoto
   e fuori continuazione, e **mai** ridisegnando il prompt (il gate conta i
   `" > "`: 1–2 per riga). Un risveglio al secondo, non al tick.
@@ -4141,7 +4141,18 @@
   tick; `block_on(Sleep::ticks(25))` ≥ 25 tick) → `usertests 68/68`; **33°**
   check della shell (l'ora compare e *avanza* al prompt fermo) → gate KVM
   `[gate] PASS` con `[shell-native] PASS 33/33`, zero FAIL/PANIC/FAULT.
+  **Secondo bug, visto a schermo e non nel log**: il primo repaint tornava
+  indietro di **5** celle (il solo suffisso) e ne avanzava altrettante dopo
+  aver scritto **8** cifre — saldo **+8** per secondo: la riga cresceva
+  (`10:40:2910:40:3010:40:31…`) e il primo giro si mangiava il `✓ > `. Il
+  seriale era perfetto (i byte erano giusti): l'errore era l'aritmetica del
+  movimento. Ora 13 indietro (8 cifre + 5 suffisso) e 5 avanti: saldo zero.
+  Il check del gate ora fissa la **forma esatta** (`ESC[D`×13 + ora +
+  `ESC[C`×5), non solo la presenza delle cifre.
   **Lezione**: "evento o tempo" è **una** attesa, non due — se la scadenza
-  sta nella syscall che già blocca, non serve nessun selettore; e un valore
+  sta nella syscall che già blocca, non serve nessun selettore; un valore
   di ritorno nuovo (`-2`) va distinto dal caso "nessun peer" (`-1`) in
-  **tutti** i punti in cui il kernel può uscire senza dormire.
+  **tutti** i punti in cui il kernel può uscire senza dormire; e un
+  aggiornamento in-place va verificato **a schermo** (screendump), perché un
+  byte-stream corretto può disegnare una riga sbagliata — un check che
+  controlla solo "ci sono le cifre" non vede un saldo di cursore errato.

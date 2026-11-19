@@ -113,12 +113,17 @@ impl History {
 /// `2`/`22` (dim), quindi si usa un truecolor supportato.
 const HINT_COLOR: &[u8] = b"\x1b[38;2;141;150;168m";
 const HINT_RESET: &[u8] = b"\x1b[0m";
+/// Cifre dell'ora nel prompt: `"HH:MM:SS"`.
+const CLOCK_CELLS: usize = 8;
 /// Celle fra la fine dell'ora e il cursore: `" " + ✓/✗ + " " + ">" + " "`.
 /// Servono al repaint in-place dell'orologio (E1, ADR-0083): il prompt non
-/// si ridisegna (il gate conta i `" > "`), si spostano solo gli 8 caratteri
-/// dell'ora. Il console server muove di UNA cella per `ESC[D`/`ESC[C`
-/// (salta l'intero glifo se largo; qui il suffisso e' tutto da 1 cella).
+/// si ridisegna (il gate conta i `" > "`), si muove solo il cursore fin
+/// sull'ora. Il console server muove di UNA cella per `ESC[D`/`ESC[C`
+/// (salta l'intero glifo se largo; qui tutto il suffisso e' da 1 cella).
 const CLOCK_SUFFIX_CELLS: usize = 5;
+/// Celle da tornare indietro per mettersi sulla prima cifra: ora + suffisso
+/// (l'ora **resta** le sue 8 celle: il suffisso non va sovrascritto).
+const CLOCK_BACK_CELLS: usize = CLOCK_CELLS + CLOCK_SUFFIX_CELLS;
 const CLOCK_COLOR: &[u8] = HINT_COLOR;
 
 /// Line editor that supports arrow keys, backspace, and history navigation.
@@ -154,12 +159,15 @@ impl<'a> LineEditor<'a> {
     fn draw_prompt(&mut self) {
         if self.continuation {
             console_write(b"  ");
+            self.clock_valid = false;
         } else {
             console_write(build_prompt(self.last_exit));
             // Ricorda l'ora appena disegnata: il repaint in-place la
-            // confronta e non riscrive se il secondo non e' cambiato.
+            // confronta e non riscrive se il secondo non e' cambiato. Se il
+            // prompt e' stato disegnato senza ora (servizio Time assente)
+            // `clock_valid = false` e il repaint non tocca nulla.
             let t = get_time_str();
-            self.clock_valid = t.len() == 8;
+            self.clock_valid = t.len() == CLOCK_CELLS;
             if self.clock_valid {
                 self.clock.copy_from_slice(t.as_bytes());
             }
@@ -170,20 +178,29 @@ impl<'a> LineEditor<'a> {
     /// Ripulisce in-place le cifre dell'orologio nel prompt (E1, ADR-0083).
     ///
     /// Solo a buffer vuoto (nessun tasto digitato) e fuori continuazione:
-    /// il cursore e' subito dopo il prompt, quindi si torna indietro delle
-    /// celle del suffisso, si riscrive `HH:MM:SS` con lo stesso colore e si
-    /// torna avanti. Niente prompt ridisegnato: la riga e il suo `" > "`
-    /// restano gli stessi (il gate della shell conta i `" > "`).
+    /// il cursore e' subito dopo il prompt, quindi si torna indietro di
+    /// **ora + suffisso** (13 celle), si riscrive `HH:MM:SS` con lo stesso
+    /// colore e si torna avanti delle sole celle del suffisso (5): il
+    /// cursore finisce esattamente dove era, le cifre scritte restano 8 e
+    /// il suffisso `✓ > ` non viene toccato. Il saldo del repaint e' **zero**
+    /// (con un saldo positivo la riga crescerebbe di 8 celle al secondo).
+    /// Niente prompt ridisegnato: la riga e il suo `" > "` restano gli
+    /// stessi (il gate della shell conta i `" > "`).
     fn refresh_clock(&mut self) {
         if self.continuation || !self.buffer.is_empty() || self.hint_len != 0 {
             return;
         }
-        let t = get_time_str();
-        if t.len() != 8 || (self.clock_valid && &self.clock[..] == t.as_bytes()) {
+        // Prompt senza orologio disegnato (servizio Time assente): non c'e'
+        // nulla da aggiornare, e muoversi indietro corromperebbe il prompt.
+        if !self.clock_valid {
             return;
         }
-        let mut out = Vec::with_capacity(48);
-        for _ in 0..CLOCK_SUFFIX_CELLS {
+        let t = get_time_str();
+        if t.len() != CLOCK_CELLS || &self.clock[..] == t.as_bytes() {
+            return;
+        }
+        let mut out = Vec::with_capacity(64);
+        for _ in 0..CLOCK_BACK_CELLS {
             out.extend_from_slice(b"\x1b[D");
         }
         out.extend_from_slice(CLOCK_COLOR);

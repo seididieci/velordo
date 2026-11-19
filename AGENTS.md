@@ -368,15 +368,15 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   sulla deadline **minima** fra i task pending, `Join` propaga quella dei figli),
   `input::wait_until` (`Wait::{Event, Timeout, Dead}`; `wait()` =
   `matches!(wait_until(0), Wait::Event)`). Vittoria: l'orologio del prompt della
-  shell **avanza mentre dorme** — repaint **in-place** di 8 cifre (`ESC[D`×5 +
-  `HH:MM:SS` + `ESC[C`×5; il console server muove di UNA cella per sequenza,
+  shell **avanza mentre dorme** — repaint **in-place** di 8 cifre (`ESC[D`×13 +
+  `HH:MM:SS` + `ESC[C`×5, **saldo zero**; il console server muove di UNA cella per sequenza,
   ignora i parametri CSI), solo con buffer vuoto e fuori continuazione, e **mai**
   il prompt intero (il gate conta i `" > "`); `get_time_str` restituisce
   esattamente 8 byte (il `\0` di prima finiva in una cella del prompt).
   `useruptime` usa `block_on(Sleep)` al posto del futex-timer. Test: t71 (scade;
   messaggio in gara non perso; 1 tick) e t72 (`Sleep` in `run`/`block_on` con
   misure di tick) → `usertests 68/68`; 33° check della shell (l'ora avanza al
-  prompt fermo, forma `ESC[D`×5 + cifre). Guardia: `glyph_width_cells` di ✓ **e**
+  prompt fermo, forma esatta `ESC[D`×13 + ora + `ESC[C`×5). Guardia: `glyph_width_cells` di ✓ **e**
   ✗ = 1 cella (unit test host in `libs/term`).
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).

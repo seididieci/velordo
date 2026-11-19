@@ -74,11 +74,13 @@ def run_checks(sh, c):
 
     # E1 (ADR-0083): l'orologio del prompt si aggiorna in-place mentre la
     # shell e' ferma al prompt, senza ridisegnare il prompt: il repaint e'
-    # `ESC[D` x5 (le 5 celle fra ora e cursore: " ✓ > ") + l'ora + `ESC[C` x5.
-    # Il console server muove di UNA cella per sequenza (ignora i parametri
-    # CSI), quindi il repaint e' ripetuto, non `ESC[5D`. Si aspetta al prompt
-    # senza digitare e si verifica che l'ora compaia e avanzi fra due campioni.
-    clock_re = rb"(?:\x1b\[D){5}\x1b\[[0-9;]*m(\d\d:\d\d:\d\d)"
+    # `ESC[D` x13 (8 cifre dell'ora + 5 celle del suffisso " ✓ > ") + l'ora
+    # + `ESC[C` x5, con **saldo zero** delle celle (un saldo positivo farebbe
+    # crescere la riga di 8 celle al secondo). Il console server muove di UNA
+    # cella per sequenza (ignora i parametri CSI), quindi il repaint e'
+    # ripetuto, non `ESC[13D`. Si aspetta al prompt senza digitare e si
+    # verifica che l'ora compaia e avanzi fra due campioni.
+    clock_re = rb"(?:\x1b\[D){13}\x1b\[[0-9;]*m(\d\d:\d\d:\d\d)\x1b\[0m(?:\x1b\[C){5}"
     time.sleep(1.5)
     ticks1 = re.findall(clock_re, sh.read_log())
     first = ticks1[-1] if ticks1 else None
