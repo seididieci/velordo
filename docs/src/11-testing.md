@@ -46,7 +46,7 @@ embedded nel kernel via `include_bytes!` (`kernel/src/user_binary.rs`).
 ## Esecuzione
 
 ```bash
-./run-tests.sh           # gate di regressione: boot CON la suite + QEMU
+./run-tests.sh           # gate di regressione: suite + shell nativa (un boot)
 ./run.sh                 # produzione: boot SENZA test, shell subito usabile
 KVM=1 ./run-tests.sh     # idem, accelerato (richiede /dev/kvm accessibile)
 ```
@@ -81,9 +81,18 @@ con un disco FAT attaccato (feature `fat_tests` di init).
 
 Dopo la suite il boot finisce **al prompt del login** (D5/ADR-0062: il
 login e' il gate — la shell parte solo dopo l'autenticazione, e senza
-tastiera il prompt resta li'). Il gate si chiude quindi col **timeout** (il
-contratto sono le righe `PASS` sotto, non l'uscita di QEMU): il login
-gratis ci mette un prompt interattivo.
+tastiera il prompt resta li').
+
+Il gate e' **end-to-end in un solo boot** (ADR-0081): `run-tests.sh` mette il
+seriale su file e apre il monitor QEMU (`SERIAL=file:… MONITOR=unix:…`),
+aspetta `[login] Nome utente:` (segnale di fine suite, al posto del vecchio
+timeout esterno), fa il login via `sendkey` e si attacca alla **stessa** QEMU
+(`scripts/test-shell-native.py --attach-pid`) per i **31 check** della shell
+nativa. Il gate e' autoverificante: esce `!= 0` se manca una riga, se compare
+`FAIL|PANIC|#.* FAULT` o se la fase shell fallisce. Valvole: `GATE_SHELL=0`
+(solo suite), `GATE_TIMEOUT` (attesa del prompt, default 600 s),
+`SHELL_TIMEOUT` (default 900 s). Su KVM il gate completo e' ~4-5 min (suite
+~104 s + shell ~145 s di tempo guest).
 
 Righe di gate:
 
@@ -94,6 +103,7 @@ Righe di gate:
 [identistest] PASS 11/11
 [usertests] PASS 66/66
 [threadtest] PASS 12/12
+[shell-native] PASS 31/31
 ```
 
 Il build userland (servizi nativi, test suite, flavour POSIX) usa
@@ -207,7 +217,7 @@ espanderle inline, quindi i simboli sono nostri in `libs/civis/src/rt.rs`
 > sbordava verticalmente scriveva nei margini (shift e repaint divergevano);
 > fix: clip verticale del glifo alla cella.
 
-## Test shell interattivi (QEMU + sendkey, fuori dal gate kernel)
+## Test shell interattivi (QEMU + sendkey)
 
 Un boot QEMU per file di test: seriale su file + monitor su unix socket,
 comandi in script via `source` (1 riga digitata per gruppo, script in
@@ -219,7 +229,10 @@ l'output; `source` e' silenzioso: niente eco, gli assert di assenza restano
 validi). La fase `native` e' l'eccezione: guida la **shell nativa** (entry
 point del login, ADR-0062) digitando i comandi uno per uno, senza `source`
 (che e' un builtin POSIX) e senza il prompt `$ ` (`boot_native` si sincronizza
-sul banner `[shell] Velordo shell nativa`). Harness comune in
+sul banner `[shell] Velordo shell nativa`). La fase `native` e' **nel gate**
+(ADR-0081): nel gate l'harness non spawna QEMU, si attacca a quella della
+suite (`Shell.attached` + `--attach-pid`) e la stessa `run_checks()` gira in
+entrambi i modi. Harness comune in
 `scripts/shell_harness.py`; runner `scripts/test-shell-all.sh` (sequenziale o
 `--jobs N` con overlay qcow2 privati per istanza — due QEMU sullo stesso raw
 read-write si corromperebbero):
@@ -227,7 +240,7 @@ read-write si corromperebbero):
 ```bash
 ./scripts/test-shell-all.sh            # seq (le fasi POSIX sono storiche, vedi sotto)
 ./scripts/test-shell-all.sh --jobs 5   # parallelo, un overlay per fase
-./scripts/test-shell-all.sh native     # shell nativa + bucket binary (1 boot) — fase corrente
+./scripts/test-shell-all.sh native     # shell nativa + bucket binary (1 boot: anche nel gate)
 ./scripts/test-shell-all.sh source     # legacy (richiede il login POSIX)
 ```
 
@@ -246,7 +259,8 @@ read-write si corromperebbero):
 | `test-shell-44b.py` | 44b (Ctrl-C → 130 su fg non cooperante, selettivita', cleanup) | 5 |
 | `foreign.bin`     | t57: attore "ignoto" fuori tabella policy — default fail-closed   | — |
 
-La fase `native` e' **31/31 verde**. Le 10 fasi POSIX (179 check) restano la
+La fase `native` e' **31/31 verde e nel gate** (ADR-0081). Le 10 fasi POSIX
+(179 check) restano la
 specifica eseguibile del parser/redirect/pipe POSIX: non sono nel gate di boot
 (il login nativo non le lancia da solo), ma `test-shell-all.sh` le guida via
 `boot()` digitando `usershell` al prompt nativo. `base` e `native` includono
@@ -260,13 +274,18 @@ e aspetta `Nome utente:`: senza quel passo i test si fermano al gate di
 autenticazione. Se il kernel su disco e' l'ultimo build **con i test**
 (`run-tests.sh`), il boot esegue la suite e il login arriva dopo: ricompila in
 produzione (`./scripts/build-userland.sh && cargo build --release`) prima di
-`./scripts/test-shell-all.sh base native`.
+`./scripts/test-shell-all.sh base native` — il **gate** invece non ricompila:
+si attacca a quel boot quando il prompt compare (`--attach-pid`).
 
 > Timing adattivi (`shell_harness.py`): su KVM (`/dev/kvm`) gli sleep sono
 > corti (tasti 0.06s, drain 0.25s, run 0.4s), su TCG restano i valori storici
 > conservativi (0.18s/1.0s/1.0s) contro l'overrun PS/2. Gli sleep espliciti
 > passati dai test restano rispettati; il boot aggiunge `-cpu host` come
-> `bench.sh`.
+> `bench.sh`, mentre su TCG usa gli stessi flag di `run.sh`
+> (`qemu64,+fsgsbase,+rdrand,+rdseed`: `qemu64` liscio non li ha e lo
+> userland non partirebbe). `SHELL_KVM=auto|0|1` forza il modello di timing:
+> il gate passa `KVM` così la fase shell usa lo stesso acceleratore della
+> suite.
 
 ## Run dedicati (fuori dal gate)
 

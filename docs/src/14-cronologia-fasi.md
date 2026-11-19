@@ -4024,3 +4024,39 @@
       difetto e' rimasto latente (`spawn_shell` non ha **mai** verificato,
       dalla nascita in ADR-0058). Lezione: ogni spawner da disco deve
       verificare prima di `spawn_image`, non solo `init`.
+- [x] **Gate end-to-end — la shell nativa nello stesso boot** (2026-11-19,
+      ADR-0081): il gate copriva la suite ma **nessun percorso utente reale**
+      (login → shell → `obj_get` → `RIGHTS_EXECUTE` → `spawn_image`), e la
+      regressione della shell non verificata (ADR-0080 fase 6) è passata
+      inosservata proprio per questo: la fase `native` di
+      `test-shell-all.sh` esisteva ma era **fuori dal gate**. Due ostacoli:
+      il boot del gate non era pilotabile (`-serial stdio`, nessun monitor
+      QEMU → niente `sendkey`) e `RUN_TESTS` è **compile-time**, quindi un
+      secondo boot avrebbe rifatto la suite prima del login. **Decisione: un
+      solo boot.** `run.sh` guadagna `SERIAL` (default `stdio`) e `MONITOR`
+      (default nessuno); il gate li usa per mandare il seriale su file e
+      aprire il monitor su unix socket. `run-tests.sh` non chiude più con un
+      timeout esterno: aspetta `[login] Nome utente:` — che compare solo dopo
+      la suite — controlla le 6 righe, fa il login via `sendkey` (`root/root`)
+      e si **attacca** alla stessa QEMU (`Shell.attached` + `--attach-pid`)
+      per i **31 check** della shell. `run_checks()` è condiviso fra boot
+      autonomo e attach; nessun secondo seed (il volume è montato dal guest).
+      **Gate autoverificante**: 6 righe + `[shell-native] PASS 31/31` + zero
+      `FAIL|PANIC|#.* FAULT`, `[gate] PASS/FAIL` ed exit code reale (prima il
+      contratto erano le righe e il timeout chiudeva tutto, quindi un guasto
+      poteva passare). Valvole `GATE_SHELL=0`, `GATE_TIMEOUT` (600),
+      `SHELL_TIMEOUT` (900). **Timing coerente**: `SHELL_KVM=auto|0|1`
+      allinea gli sleep dell'harness all'acceleratore (il gate passa `KVM`);
+      il ramo TCG usa gli stessi flag di `run.sh`
+      (`qemu64,+fsgsbase,+rdrand,+rdseed`) — `qemu64` liscio non espone i tre
+      flag (verificato con `query-cpu-model-expansion`), quindi la fase
+      nativa su una macchina senza KVM non sarebbe partita: bug latente mai
+      visto perché l'harness usava KVM appena `/dev/kvm` esisteva.
+      **Vittoria**: `KVM=1 ./run-tests.sh` → `[gate] PASS`, 31/31, exit 0
+      (~290 s wall: suite 104 s guest + shell ~145 s); **prova negativa**
+      (verifica rimossa da `identis-login::spawn_shell`) → la fase shell
+      fallisce e il gate esce `!= 0`. **Costo dichiarato**: la shell gira sul
+      volume post-suite (`users` mostra anche `alice`); il kernel del gate
+      ha `sched_debug` (log più rumoroso). Il token `notests=1` (secondo
+      boot) è stato scartato: `--attach` resta riusabile se servisse un
+      volume pulito.

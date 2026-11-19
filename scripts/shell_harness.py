@@ -50,8 +50,26 @@ KEYMAP.update({chr(c): "shift-%s" % chr(c).lower() for c in range(ord("A"), ord(
 # Su KVM la latenza IRQ e' sub-tick (Fase 38.3): gli sleep conservativi
 # pensati per TCG/overrun PS/2 (buffer a 1 byte, drain ~40-60ms) si possono
 # stringere senza flaky. Su TCG restano i valori storici. Rilevato una volta
-# a import (coerente con Shell.boot che usa /dev/kvm per -accel kvm).
-FAST = os.path.exists("/dev/kvm")
+# a import.
+#
+# `SHELL_KVM` (ADR-0081): il gate end-to-end decide l'acceleratore e deve
+# usare lo STESSO modello di timing — `0` forza TCG, `1` KVM se /dev/kvm e'
+# scrivibile (stesso criterio di run.sh), `auto` (default) = /dev/kvm
+# scrivibile. Senza override, un gate TCG su una macchina con KVM userebbe
+# timing "fast" su QEMU emulato.
+_KVM_OK = os.access("/dev/kvm", os.W_OK)  # stesso criterio di `KVM=1` in run.sh
+_SHELL_KVM = os.environ.get("SHELL_KVM", "auto").strip().lower()
+if _SHELL_KVM in ("0", "no", "false", "tcg", "off"):
+    FAST = False
+elif _SHELL_KVM in ("1", "yes", "true", "kvm", "on"):
+    FAST = _KVM_OK
+else:
+    FAST = _KVM_OK
+# CPU del ramo TCG: `qemu64` liscio NON ha fsgsbase/rdrand/rdseed (verificato
+# con QMP) e lo userland li richiede (TLS + getrandom). run.sh li passa
+# sempre; l'harness deve fare lo stesso o su una macchina senza KVM il boot
+# fallisce loud. Su KVM si usa `-cpu host` come bench.sh.
+TCG_CPU = "qemu64,+fsgsbase,+rdrand,+rdseed"
 
 # Per-tasto sendkey + pausa di drain ogni 12 tasti (overrun PS/2).
 T_TYPE = 0.06 if FAST else 0.18
@@ -71,11 +89,14 @@ T_BOOT_POLL = 0.1 if FAST else 0.4
 T_DUMP = 0.3 if FAST else 0.6
 
 
-def parse_shell_args(mon_dflt, serial_dflt):
+def parse_shell_args(mon_dflt, serial_dflt, extra=None):
     """CLI minima dei file di fase: --mon/--serial/--arca/--kernel/
     --arca-format/--no-prep (il runner parallelo li passa per isolare le
     istanze; in locale valgono i default). ADR-0059: i dischi FAT sono
-    spariti (il boot e' solo ArcaFS)."""
+    spariti (il boot e' solo ArcaFS).
+
+    `extra(ap)` registra opzioni specifiche di una fase (es. l'attach del
+    gate end-to-end) senza allargare la CLI di tutte le altre."""
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--mon", default=mon_dflt)
@@ -86,6 +107,8 @@ def parse_shell_args(mon_dflt, serial_dflt):
                     help="raw (default) o qcow2 per gli overlay paralleli")
     ap.add_argument("--no-prep", action="store_true",
                     help="salta il seed ArcaFS (il runner lo fa una volta sola)")
+    if extra is not None:
+        extra(ap)
     return ap.parse_args()
 
 
@@ -100,14 +123,25 @@ def prep_images(arca=ARCA_DFLT):
 
 
 class Checker:
-    """Raccoglie PASS/FAIL con stampa immediata (come il vecchio main)."""
+    """Raccoglie PASS/FAIL con stampa immediata (come il vecchio main).
+    Conta anche i check (ADR-0081): il gate cerca una riga di riepilogo
+    `[shell-native] PASS n/n` come contratto grep-abile."""
     def __init__(self):
         self.ok = True
+        self.total = 0
+        self.passed = 0
 
     def check(self, name, cond):
+        self.total += 1
+        if cond:
+            self.passed += 1
         print(("PASS " if cond else "FAIL ") + name, flush=True)
         self.ok = self.ok and bool(cond)
         return bool(cond)
+
+    def summary(self, tag="shell-native"):
+        print("[%s] %s %d/%d" % (tag, "PASS" if self.ok else "FAIL",
+                                 self.passed, self.total), flush=True)
 
 
 def has_line(out: bytes, text: bytes) -> bool:
@@ -133,6 +167,34 @@ def count_lines(out: bytes, text: bytes) -> int:
     return n
 
 
+class _Attached:
+    """Handle minimo di un QEMU gia' avviato da un altro processo.
+
+    Il gate end-to-end (ADR-0081) fa bootare QEMU da `run-tests.sh` con
+    seriale su file e monitor su socket: il test si ATTACCA a quel processo
+    invece di spawnarne un secondo. Espone solo cio' che `Shell` usa
+    (`pid` per la guardia CPU, `terminate`/`kill`/`wait` per la pulizia)."""
+
+    def __init__(self, pid):
+        self.pid = pid
+        self.returncode = None
+
+    def terminate(self):
+        try:
+            os.kill(self.pid, 15)
+        except ProcessLookupError:
+            pass
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        try:
+            os.kill(self.pid, 9)
+        except ProcessLookupError:
+            pass
+
+
 class Shell:
     """Una istanza QEMU + shell Velordo. I path distinguono le istanze
     parallele (il runner li assegna per fase)."""
@@ -148,6 +210,14 @@ class Shell:
         # wait_prompt event-driven sul conteggio prompt CONSUMATO.
         self._prompt_seen = 0
         self._need_sync = False
+
+    @classmethod
+    def attached(cls, mon, serial, pid):
+        """Shell su un QEMU GIA' avviato (gate end-to-end): niente spawn,
+        niente seed — il volume e' montato dal guest."""
+        sh = cls(mon=mon, serial=serial)
+        sh.q = _Attached(pid)
+        return sh
 
     # ── Monitor / typing ──────────────────────────────────────────
 
@@ -393,16 +463,21 @@ class Shell:
             time.sleep(T_BOOT_POLL)
         raise RuntimeError("shell non pronta")
 
-    def boot_native(self, timeout=60):
-        """Avvia QEMU, fa il login e attende la **shell nativa** (default dal
-        login, ADR-0062): banner `[shell] Velordo shell nativa` + prompt
-        `> `. Ritorna il Popen (anche in self.q).
+    def wait_login_prompt(self, timeout=60):
+        """Attende il prompt del login (`[login] Nome utente:`) SENZA fare il
+        login. Nel gate end-to-end il prompt arriva solo DOPO la suite: e' il
+        segnale di fine boot (ADR-0081)."""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if b"Nome utente:" in self.read_log():
+                return
+            time.sleep(T_BOOT_POLL)
+        raise RuntimeError("prompt di login mai comparso")
 
-        Il prompt nativo contiene ANSI truecolor e glifi Nerd Font: si
-        sincronizza sul banner, non sul prompt (che non e' confrontabile
-        come stringa). Il `_prompt_seen` di `wait_prompt` riguarda `$ ` e
-        non si usa qui (i test nativi attendono pattern espliciti)."""
-        self._boot_start()
+    def wait_native_banner(self, timeout=60):
+        """Attende banner + prompt della shell nativa (ADR-0062). Il prompt
+        contiene ANSI truecolor e glifi Nerd Font: si sincronizza sul banner
+        + `> `, non su una stringa di prompt confrontabile."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             data = self.read_log()
@@ -412,6 +487,23 @@ class Shell:
                 return self.q
             time.sleep(T_BOOT_POLL)
         raise RuntimeError("shell nativa non pronta")
+
+    def boot_native(self, timeout=60):
+        """Avvia QEMU, fa il login e attende la **shell nativa** (default dal
+        login, ADR-0062): banner `[shell] Velordo shell nativa` + prompt
+        `> `. Ritorna il Popen (anche in self.q)."""
+        self._boot_start()
+        return self.wait_native_banner(timeout)
+
+    def attach_native(self, login_timeout=300, banner_timeout=60):
+        """Come `boot_native`, ma su un QEMU gia' avviato (gate end-to-end):
+        attende il prompt del login (che arriva dopo la suite `RUN_TESTS`),
+        fa il login e attende il banner della shell."""
+        if self.q is None:
+            raise RuntimeError("attach_native richiede Shell.attached(...)")
+        self.wait_login_prompt(login_timeout)
+        self.login()
+        return self.wait_native_banner(banner_timeout)
 
     def _boot_start(self):
         """Parte QEMU e fa il login (comune a `boot` e `boot_native`)."""
@@ -436,8 +528,12 @@ class Shell:
         # KVM se disponibile: abbatte la tassa di emulazione sui round-trip
         # tastiera (IRQ1→kbd→tty→shell→prompt). `-cpu host` come bench.sh
         # (TSC/round-trip a velocita' nativa invece che emulata).
+        # TCG: stessi flag CPU di run.sh (fsgsbase per la TLS, rdrand/rdseed
+        # per getrandom/TLS): `qemu64` liscio non li ha e il boot fallirebbe.
         if FAST:
             args[1:1] = ["-accel", "kvm", "-cpu", "host"]
+        else:
+            args[1:1] = ["-cpu", TCG_CPU]
         self.q = subprocess.Popen(args)
         time.sleep(T_BOOT_SLEEP)
         kvm_info = self.mon_query("info kvm").replace("\r", "").strip().split("\n")

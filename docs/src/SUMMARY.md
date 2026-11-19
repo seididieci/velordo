@@ -108,3 +108,4 @@
 - [ADR-0078: Identità crittografica dei binari (digest, manifest, firma)](./adr/0078-identita-crittografica-binari.md)
 - [ADR-0079: Classi di privilegio e spawn attestato](./adr/0079-classi-privilegio-spawn-attestato.md)
 - [ADR-0080: Policy per identità, ruoli e broker di rete](./adr/0080-policy-identita-ruoli-broker.md)
+- [ADR-0081: il gate end-to-end — la shell nativa nello stesso boot](./adr/0081-gate-shell-nativa.md)

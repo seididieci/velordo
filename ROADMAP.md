@@ -13,10 +13,12 @@ nulla da solo.
 
 ## Stato (completate 1-57)
 
-Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` +
-`[identistest] PASS 11/11` + `[usertests] PASS 65/65` + `[threadtest] PASS 12/12`,
-zero FAIL/PANIC/FAULT. La suite FAT32 e' **fuori dal gate** (ADR-0059:
-`scripts/run-fat-tests.sh`).
+Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` +
+`[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 66/66` +
+`[threadtest] PASS 12/12` + `[shell-native] PASS 31/31` (la shell nativa gira
+nella stessa QEMU: login via `sendkey`, `--attach-pid`), zero FAIL/PANIC/FAULT;
+`./run-tests.sh` stampa `[gate] PASS/FAIL` ed esce `!= 0`. La suite FAT32 e'
+**fuori dal gate** (ADR-0059: `scripts/run-fat-tests.sh`).
 
 | Fase | Descrizione | Stato |
 |------|-------------|-------|
@@ -1052,6 +1054,27 @@ Voci con scope e vittoria dichiarati (non date).
       `net` (t69/t70). Limiti: rate limit e audit in RAM (restart azzera i
       contatori), consenso senza scadenza, prompt `s/n` al lancio rinviato
       alla fase 7 (DE + S3.3(c)).
+- [x] **Gate end-to-end — la shell nativa nello stesso boot** (completata,
+      ADR-0081): il bug della shell non verificata (ADR-0080 fase 6) era
+      passato inosservato perché la fase `native` di `test-shell-all.sh`
+      esisteva ma era **fuori dal gate**. `run-tests.sh` ora avvia `run.sh`
+      con `SERIAL=file:…` + `MONITOR=unix:…` (due env nuove, default
+      invariato), aspetta `[login] Nome utente:` (fine suite, al posto del
+      timeout esterno), fa il login via `sendkey` e si attacca alla **stessa**
+      QEMU (`Shell.attached` + `--attach-pid`): stessi **31 check** del run
+      autonomo (`run_checks()` condiviso), niente secondo boot né secondo
+      seed. Gate autoverificante: 6 righe di suite + `[shell-native] PASS
+      31/31` + zero `FAIL|PANIC|#.* FAULT`, `[gate] PASS/FAIL` ed exit code
+      reale. Valvole `GATE_SHELL=0`, `GATE_TIMEOUT` (600), `SHELL_TIMEOUT`
+      (900). `SHELL_KVM=auto|0|1` allinea il timing dell'harness
+      all'acceleratore (il gate passa `KVM`); il ramo TCG usa
+      `-cpu qemu64,+fsgsbase,+rdrand,+rdseed` come `run.sh` (bug latente:
+      `qemu64` liscio non ha i tre flag e lo userland non partirebbe).
+      Vittoria: `KVM=1 ./run-tests.sh` → `[gate] PASS`, 31/31, exit 0
+      (~290 s wall: suite 104 s guest + shell ~145 s); prova negativa
+      (verifica rimossa da `identis-login`) → `[gate] FAIL`. Costo
+      dichiarato: la shell gira sul volume post-suite (`users` mostra anche
+      `alice`).
 - [ ] **Rete N6.4–N8** (pianificata, ADR-0068/0069/0070): DoH sulla stessa
       API di trasporto; VT-d/IOMMU.
       Config `sys:net` con policy di subtree in cardo (`sys:identis` rinomina

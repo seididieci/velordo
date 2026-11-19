@@ -60,6 +60,17 @@ fi
 
 KERNEL=target/x86_64-unknown-none/release/velord
 DISPLAY="${RUN_DISPLAY:-none}"   # RUN_DISPLAY=gtk per vedere la VGA in locale
+# Seriale e monitor. Default: stdio + nessun monitor (uso interattivo). Il gate
+# end-to-end (run-tests.sh, ADR-0081) mette il seriale su file e apre il
+# monitor su unix socket: la STESSA QEMU diventa pilotabile via `sendkey`
+# (dopo la suite la shell nativa e' provata nel boot del gate, senza secondo
+# boot).
+SERIAL="${SERIAL:-stdio}"
+MONITOR="${MONITOR:-}"
+MON_ARG=""
+if [ -n "$MONITOR" ]; then
+    MON_ARG="-monitor $MONITOR"
+fi
 
 # Accelerazione (opt-in): `KVM=1` usa -enable-kvm -cpu host. Il default resta
 # TCG (nessuna dipendenza da /dev/kvm): il gate deve girare identico su
@@ -198,7 +209,8 @@ exec qemu-system-x86_64 \
     $KVM_ARGS \
     $CPU_ARGS \
     -display "$DISPLAY" \
-    -serial stdio \
+    -serial "$SERIAL" \
+    $MON_ARG \
     -no-reboot \
     -kernel "$KERNEL" \
     $DRIVES \

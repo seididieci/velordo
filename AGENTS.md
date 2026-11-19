@@ -169,7 +169,7 @@ velordo/
 
 ## Stato corrente
 
-Gate: `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 66/66` + `[threadtest] PASS 12/12` + shell nativa (fase `native` di `test-shell-all.sh`; le fasi POSIX sono storiche dal login nativo, ADR-0062), zero FAIL/PANIC/FAULT (vedi `docs/src/11-testing.md`). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
+Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 66/66` + `[threadtest] PASS 12/12` + `[shell-native] PASS 31/31` (la shell nativa gira nella **stessa** QEMU del gate: login via `sendkey` e `--attach-pid`, `scripts/test-shell-native.py`), zero FAIL/PANIC/FAULT; il gate stampa `[gate] PASS/FAIL` ed **esce != 0** (vedi `docs/src/11-testing.md`). Le fasi POSIX restano storiche dal login nativo (ADR-0062). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
 - **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
   BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
@@ -671,7 +671,11 @@ timeout 60 ./run.sh > /tmp/boot.log
 ./scripts/bench.sh > /tmp/bench.log
 rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 
-# Suite di regressione (boot): 6 righe PASS attese e ZERO FAIL/PANIC
+# Gate di regressione (un solo boot, ADR-0081): 6 righe di suite + shell
+# nativa, ZERO FAIL/PANIC/FAULT. Il prompt del login e' il segnale di fine
+# suite; da li' il gate si attacca alla stessa QEMU e gira i 31 check della
+# shell (`[shell-native] PASS 31/31`). Il gate stampa `[gate] PASS/FAIL` ed
+# esce != 0: niente piu' timeout esterno che chiude il boot.
 # (ADR-0059: la suite FAT32 e' fuori dal gate -> scripts/run-fat-tests.sh)
 #   [testfs] PASS 5/5
 #   [testsarca] PASS 64/64
@@ -679,10 +683,11 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 #   [identistest] PASS 11/11
 #   [usertests] PASS 66/66
 #   [threadtest] PASS 12/12
+#   [shell-native] PASS 31/31
 # KVM=1 accelera (-enable-kvm -cpu host, opt-in; senza /dev/kvm resta TCG).
-# Il timeout chiude il boot al prompt del login: il contratto sono le PASS.
-timeout 300 ./run-tests.sh > /tmp/boot.log
-rg '\[testfs\] PASS 5/5|\[testsarca\] PASS 64/64|\[posixtests\] PASS 4/4|\[identistest\] PASS 11/11|\[usertests\] PASS 65/65|\[threadtest\] PASS 12/12' /tmp/boot.log
+# Valvole: GATE_SHELL=0 (solo suite), GATE_TIMEOUT (600), SHELL_TIMEOUT (900).
+timeout 1800 ./run-tests.sh > /tmp/boot.log 2>&1
+rg '\[gate\] PASS' /tmp/boot.log
 test "$(rg -c 'FAIL|PANIC|#.* FAULT' /tmp/boot.log)" = "0"
 ```
 
