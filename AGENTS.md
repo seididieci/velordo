@@ -364,7 +364,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   al `NET_ATTACH`) quando il ring RX condiviso passa da vuoto a non vuoto, e
   il servizio dorme su `recv_timeout(Net::next_deadline())` (retransmission
   TCP, TIME_WAIT, RS/echo, aging NDP; `None` → `0` = mai). Niente più
-  `NET_POLL` a tick (gate strutturale `rg NET_POLL userland/net/src` → 0),
+  `NET_POLL` a tick (tag **rimosso** dall'ABI: la guardia è il compilatore),
   kick `NET_TX` solo se `head != tail`, driver che drena il TX anche su IRQ.
   Corretto un bug latente: `Conn::rto_expired` chiudeva una connessione
   **inattiva** dopo `MAX_RETRIES` poll. CPU idle misurata **0,0%** (soglia

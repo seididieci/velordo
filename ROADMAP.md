@@ -81,7 +81,7 @@ nella stessa QEMU: login via `sendkey`, `--attach-pid`), zero FAIL/PANIC/FAULT;
 | E0 | **Eventi, non polling — input della tastiera** (ADR-0082): `/dev/input/keyboard` risponde subito, quindi l'evento e' un messaggio — `porta` registra i sottoscrittori (`INPUT_ATTACH`/`INPUT_DETACH`, 0x46/0x47) con focus **LIFO** e manda `INPUT_NOTIFY` (0x48, hint coalescente) al titolare; il client dorme in `recv()` (`civis::input::wait`) e drena il device fino a 0 (`civis::input::read`). **Kernel intatto**; `interpres`/`identis-login`/`create-user` non pollano piu' (via `wait_input_tick`, `INPUT_FUTEX` e lo `spin_loop()` nudo). Gate `[shell-native] PASS 32/32` con due guardie CPU `< 5%` (prompt principale 1,0%, `create-user` 2,0%) | ✅ Completata |
 | E1 | **`recv` con deadline — un messaggio *oppure* il tempo** (ADR-0083): `SYS_RECV` prende `arg1` = tick assoluto di scadenza (`0` = mai, compatibile: nessun chiamante cambia); timeout = `rax = -2` **senza consumare messaggi**, e **la coda vince** (un messaggio in gara si consegna sempre). La scadenza vive nel PCB (`recv_deadline`) e la scandisce `on_tick` accanto ai futex: nessuna tabella di timer, nessuno slot orfano. Meccanismo: `civis::ipc::recv_timeout`, `task::Sleep` + `Receivable::deadline()` (`block_on`/`run` armano la deadline minima, `Join` propaga quella dei figli), `input::wait_until`. Vittoria: la shell tiene l'**orologio del prompt vivo mentre dorme** (repaint in-place di 8 cifre, nessun prompt ridisegnato, un risveglio al secondo) e `useruptime` usa `block_on(Sleep)` al posto del futex-timer. Gate: t71/t72 (`usertests 68/68`) + 33° check della shell (l'ora avanza al prompt fermo) | ✅ Completata |
 | E2 | **Eventi di rete — il client dorme sull'hint di `net`** (ADR-0084): tag `NET_EP_EVENT` (0x8C, coalescente, fire-and-forget) dal servizio `net` al proprietario dell'endpoint quando scrive slot nuovi nel ring RX; `civis::net::{wait, pending}` + `Endpoint::{pending, wait}` sopra `recv_timeout` (E1) — **una sola** attesa, ring = verità, messaggi estranei nello stash di `civis::ipc` (mai persi). Migrati `netecho`, `dns` (loop + upstream), `siit`, `netbroker`, `Stream` (DoT/TLS) e `libr::sock::recvfrom`: **zero risvegli a tick** (`rg futex_wait libs/civis/src/net libs/tls-net` → 0, gate strutturale nello script di rete); restano solo i retry di boot e il tick del servizio `net` (timer TCP/NDP + poll del driver → N8). Vittoria: `run-net-tests.sh` PASS con la sola API a eventi + DoT invariato (`dot: PASS` ×2, `dotfail: PASS`) | ✅ Completata |
-| N8 | **RX a eventi — il driver sveglia `net`** (ADR-0085): tag `NET_RX_EVENT` (0x8D, fire-and-forget) dal driver `netdev` al servizio quando il ring RX condiviso passa da vuoto a non vuoto (canale appreso al `NET_ATTACH`); il servizio dorme su `recv_timeout(Net::next_deadline())` — retransmission TCP, TIME_WAIT, RS/echo, aging NDP — e non manda piu' `NET_POLL` a ogni tick. Fix latente: `Conn::rto_expired` contava anche una connessione **inattiva** (dopo `MAX_RETRIES` poll la chiudeva): ora solo spazio di sequenza non confermato. Il driver drena anche il ring TX su IRQ. Vittoria: `run-net-tests.sh` PASS + **CPU idle 0,0%** (boot dedicato, soglia 5%) + gate strutturale `rg NET_POLL userland/net/src` → 0 | ✅ Completata |
+| N8 | **RX a eventi — il driver sveglia `net`** (ADR-0085): tag `NET_RX_EVENT` (0x8D, fire-and-forget) dal driver `netdev` al servizio quando il ring RX condiviso passa da vuoto a non vuoto (canale appreso al `NET_ATTACH`); il servizio dorme su `recv_timeout(Net::next_deadline())` — retransmission TCP, TIME_WAIT, RS/echo, aging NDP — e non manda piu' `NET_POLL` a ogni tick. Fix latente: `Conn::rto_expired` contava anche una connessione **inattiva** (dopo `MAX_RETRIES` poll la chiudeva): ora solo spazio di sequenza non confermato. Il driver drena anche il ring TX su IRQ. Vittoria: `run-net-tests.sh` PASS + **CPU idle 0,0%** (boot dedicato, soglia 5%) + tag `NET_POLL` **rimosso** dall'ABI (E: la guardia e' il compilatore) | ✅ Completata |
 
 ## Lavoro recente (commit più recenti)
 
@@ -209,8 +209,8 @@ Voci con scope e vittoria dichiarati (non date).
       `recv_timeout(next_deadline().unwrap_or(0))`; niente `NET_POLL` a tick,
       kick `NET_TX` solo con frame in coda, driver che drena il TX su IRQ.
       Corretto `Conn::rto_expired` (chiudeva una connessione inattiva).
-      Vittoria: `run-net-tests.sh` PASS + CPU idle 0,0% + gate strutturale
-      `rg NET_POLL userland/net/src` → 0; 2 unit test host nuovi.
+      Vittoria: `run-net-tests.sh` PASS + CPU idle 0,0% + tag `NET_POLL`
+      rimosso dall'ABI (compilatore come guardia); 2 unit test host nuovi.
 - [x] **L0a — LAPIC minimale + convivenza PIC** (completata, ADR-0056;
       prerequisito video/MSI-X): enable LAPIC da MSR `0x1B` (xAPIC MMIO),
       pagina 2M UC, LINT0 ExtINT (PIC invariato per IRQ0/1/14/15), TPR 0,
@@ -974,19 +974,20 @@ Voci con scope e vittoria dichiarati (non date).
       `[posixsock] risultato: PASS` in `scripts/run-net-tests.sh`; seedato
       anche in `usr/bin/posixsock.bin` per l'uso manuale dalla shell. Gate
       invariato (6/6, zero FAIL/PANIC/FAULT).
-- [ ] **Sicurezza — bucket di fiducia protetti** (ADR-0077, fase 0): oggi
-      `DEFAULT_UNKNOWN_OPS` (0x19F) include `WRITE` e `disk_put` non controlla
-      il bucket: **qualunque** processo può riscrivere `sys:ca.der`,
-      `usr/*`, `tst/*`, il namespace `ns` e i path `bin/`, `usr/bin/`,
-      `identis:config`. Il guard nel choke point di cardo applica tre regole:
-      operazioni amministrative (snapshot/rollback) solo con `ceiling == ALL`;
-      target protetti (bucket `sys`/`usr`/`tst`/`ns`, prefissi `bin/`,
-      `usr/bin/`, `test/`) solo con `ceiling == ALL` o init (pid 1);
-      carve-out per owner di servizio (`identis:` → Identis, bucket `log` →
-      Vestigia, classificati all'handshake via `peer_pid`/`service_pid`).
-      Vittoria: un processo ignoto (`foreign`) riceve `ERR_DENIED` su
-      `obj_put(b"sys", …)` e su `open(bin/vestigia.bin, TRUNC)`; letture e
-      scritture lecite restano verdi; gate 6/6.
+- [x] **Sicurezza — bucket di fiducia protetti** (completata, ADR-0077, fase 0):
+      `policy::write_allowed` nel choke point di cardo applica tre regole
+      (prima `DEFAULT_UNKNOWN_OPS` 0x19F includeva `WRITE` e `disk_put` non
+      controllava il bucket: **qualunque** processo poteva riscrivere
+      `sys:ca.der`, `usr/*`, `tst/*`, il namespace `ns` e i path `bin/`,
+      `usr/bin/`, `identis:config`): operazioni amministrative
+      (snapshot/rollback) solo con `ceiling == ALL`; target protetti (bucket
+      `sys`/`usr`/`tst`/`ns`, prefissi `bin/`, `usr/bin/`, `test/`) solo con
+      `ceiling == ALL` o init (pid 1); carve-out per owner di servizio
+      (`identis:` → Identis, bucket `log` → Vestigia, classificati
+      all'handshake via `peer_pid`/`service_pid`). Vittoria conseguita: un
+      processo ignoto (`foreign`) riceve `ERR_DENIED` su `obj_put(b"sys", …)`
+      e su `open(bin/vestigia.bin, TRUNC)`; letture e scritture lecite
+      restano verdi; gate 6/6 (t57 esteso).
 - [x] **Identità — digest crittografico e manifest come dato** (completata,
       ADR-0078, fase 1): `ImageId` = BLAKE2s-256 troncato a 128 bit
       (`syscall-numbers::ImageId`, una sola misura in `elf::load`, riusata da

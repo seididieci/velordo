@@ -47,8 +47,9 @@ Il driver drena anche il ring **TX** su IRQ (`Device::tx()`): un frame rimasto
 in coda al device per una virtqueue piena non deve dipendere da un kick del
 servizio, altrimenti resterebbe fermo fino al traffico successivo.
 
-`NET_POLL` resta nell'ABI e nel driver (retrocompatibilità, e c'è chi può
-voler forzare un drenaggio), ma **il servizio non lo usa più**.
+`NET_POLL` (0x6C) è stato **rimosso** dall'ABI e dal driver nella pulizia E
+(era rimasto per retrocompatibilità ma non aveva più chiamanti): la guardia è
+il compilatore, non un grep.
 
 ### 2. `Net::next_deadline` — il servizio dorme sulla prossima scadenza
 
@@ -116,8 +117,9 @@ TIME_WAIT ha la sua scadenza in `on_tick` e non deve passare da `next_tx`
 - Il difetto di `rto_expired` è chiuso con due unit test host
   (`tcp_idle_established_non_muore_ai_tick`,
   `next_deadline_segue_i_lavori_in_sospeso`).
-- Gate strutturale in `run-net-tests.sh`: `rg NET_POLL userland/net/src` → 0
-  (il debito non può rientrare senza rompere lo script).
+- Il tag `NET_POLL` è **rimosso** dall'ABI (E): un riferimento non compila.
+  Al suo posto, il gate `[munmap]` (geometria non di pagina = leak shm
+  silenzioso) in `run-net-tests.sh` e nel gate principale.
 
 ### Negative
 
@@ -133,8 +135,8 @@ TIME_WAIT ha la sua scadenza in `on_tick` e non deve passare da `next_tx`
 
 ### Neutral
 
-- Un tag IPC nuovo (0x8D), nessuna syscall, nessuna modifica al kernel, ai
-  permessi o all'ABI. `NET_POLL` resta ma non è più nel percorso.
+- Un tag IPC nuovo (0x8D) e uno ritirato (`NET_POLL`, 0x6C), nessuna syscall,
+  nessuna modifica al kernel, ai permessi o all'ABI (solo rimozione).
 - `libs/net` guadagna due funzioni pubbliche (`next_deadline`,
   `has_unsent_data`) e `tcp_endpoints`; `Conn` guadagna
   `next_deadline`/`has_unsent_data` e perde l'RTO "a tempo".
@@ -165,8 +167,8 @@ TIME_WAIT ha la sua scadenza in `on_tick` e non deve passare da `next_tx`
   `next_deadline`), `libs/net/src/net.rs` (`next_deadline`, `tcp_endpoints`,
   `has_unsent_data`), `libs/net/src/tcp/conn.rs` (`retransmittable`,
   `rto_expired`, `next_deadline`).
-- Test: `scripts/run-net-tests.sh` (suite + gate strutturale `NET_POLL` + CPU
-  idle < 5%), unit test host in `libs/net` (`tcp_idle_established_non_muore_ai_tick`,
+- Test: `scripts/run-net-tests.sh` (suite + CPU idle < 5% + zero `[munmap]`
+  malformati), unit test host in `libs/net` (`tcp_idle_established_non_muore_ai_tick`,
   `next_deadline_segue_i_lavori_in_sospeso`).
 - ADR-0067 (attese senza busy-wait), ADR-0069 (driver e ring), ADR-0082 (E0),
   ADR-0083 (E1), ADR-0084 (E2).

@@ -135,11 +135,16 @@ fi
 
 # N8 (ADR-0085): il **servizio** `net` non polla piu' il driver a ogni tick.
 # Il debito era `NET_POLL` a ogni giro; ora il driver spinge `NET_RX_EVENT`
-# quando il ring RX passa da vuoto a non vuoto. Gate strutturale: nel servizio
-# non deve restare nessun riferimento a `NET_POLL`.
-if rg -q 'NET_POLL' userland/net/src 2>/dev/null; then
-    echo "[net-tests] FAIL: il servizio net polla ancora il driver (NET_POLL, N8)"
-    rg -n 'NET_POLL' userland/net/src || true
+# quando il ring RX passa da vuoto a non vuoto. Il tag e' stato **rimosso**
+# dall'ABI (E): non c'e' piu' un grep da fare, la guardia e' il compilatore
+# (un riferimento a `NET_POLL` non compila).
+
+# `munmap` con geometria non di pagina: il kernel lo logga loud (leak shm
+# silenzioso). La suite di rete e' il posto dove il leak e' nato (i ring
+# endpoint): zero righe.
+if rg -q '\[munmap\]' "$LOG" 2>/dev/null; then
+    echo "[net-tests] FAIL: munmap con geometria non di pagina (leak shm)"
+    rg -n '\[munmap\]' "$LOG" | head -5 || true
     fail=1
 fi
 

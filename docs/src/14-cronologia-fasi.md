@@ -4261,8 +4261,31 @@
   girare a vuoto il servizio.
   **Vittoria**: `run-net-tests.sh` PASS (echo reply, UDP/TCP via broker,
   SIIT, ciclo di vita endpoint, DNS statico+upstream, socket POSIX) + **CPU
-  idle 0,0%** su un boot dedicato senza suite (soglia 5%, come E0) + gate
-  strutturale `rg NET_POLL userland/net/src` → 0; DoT invariato (`dot: PASS`
+  idle 0,0%** su un boot dedicato senza suite (soglia 5%, come E0) + tag
+  `NET_POLL` rimosso dall'ABI (E; la guardia è il compilatore); DoT invariato (`dot: PASS`
   ×2, `dotfail: PASS`); gate principale verde; 2 unit test host nuovi
   (`tcp_idle_established_non_muore_ai_tick`,
   `next_deadline_segue_i_lavori_in_sospeso`, 129 test in tutto).
+
+- **E — pulizia: `NET_POLL` ritirato, `munmap` malformato loud** (chiude i
+  debiti di N8 e il leak shm di `tlsprobe`). Tre cose, nessuna nuova syscall.
+  (1) `NET_POLL` (0x6C) **rimosso** da `syscall-numbers`, dal driver e dalla
+  re-export di `civis`: era rimasto per retrocompatibilità ma non aveva più
+  chiamanti. La guardia contro il ritorno del poll a tick non è più un grep
+  nello script ma il **compilatore** (un riferimento non compila); il numero
+  resta ritirato con una nota, mai riusato.
+  (2) `sys_munmap` valida la **geometria di pagina** (indirizzo allineato,
+  lunghezza multipla) e logga `[munmap]` loud con rate limit (primo + uno ogni
+  256) quando non lo è. Il rifiuto resta `-1` come prima, ma non è più
+  silenzioso: era proprio il modo in cui il leak è passato inosservato (il
+  chiamante ignorava l'errore e il ref shm restava appeso). Le coperture
+  **parziali** (deliberate nei test t_basic) restano silenziose: il guard
+  riguarda solo le forme mai legittime.
+  (3) Il gate principale e quello di rete pretendono **zero righe**
+  `[munmap]`: la classe di bug che ha rotto `tlsprobe` non può rientrare senza
+  far fallire il gate. Documentato il contratto in `civis::munmap` (geometria
+  della regione, non degli slot). Voce stale di ROADMAP chiusa (ADR-0077
+  fase 0 era già implementata: `policy::write_allowed` in cardo).
+  **Vittoria**: gate principale `[gate] PASS` (6 suite + shell nativa, zero
+  FAIL/PANIC/FAULT, zero `[munmap]`), `run-net-tests.sh` PASS con la stessa
+  condizione, `run-tls-tests.sh` PASS.

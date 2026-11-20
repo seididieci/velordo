@@ -63,8 +63,8 @@ pub use syscall_numbers::{
 pub use syscall_numbers::{USER_NET_RING_SIZE, USER_NET_RING_VA};
 /// Protocollo rete driver↔servizio (ADR-0069).
 pub use syscall_numbers::{
-    NET_ATTACH, NET_INFO, NET_POLL, NET_RING_HDR, NET_RING_SLOTS, NET_RX_RING_OFF, NET_SLOT_SIZE,
-    NET_TX, NET_TX_RING_OFF,
+    NET_ATTACH, NET_INFO, NET_RING_HDR, NET_RING_SLOTS, NET_RX_RING_OFF, NET_SLOT_SIZE, NET_TX,
+    NET_TX_RING_OFF,
 };
 /// Protocollo endpoint cliente→servizio `net` (N2+N3+N4, ADR-0069).
 pub use syscall_numbers::{

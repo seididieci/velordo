@@ -113,6 +113,15 @@ if [ "$fail" -eq 0 ]; then
         rg -n 'FAIL|PANIC|#.* FAULT' "$LOG" | head -5 || true
         fail=1
     fi
+    # `munmap` con geometria non di pagina (addr disallineato o len non
+    # multiplo): il kernel lo logga loud perche' il chiamante di solito
+    # ignora il -1 e il ref shm resta appeso (il leak che ha rotto tlsprobe).
+    # La forma malformata non e' mai legittima: zero righe.
+    if rg -q '\[munmap\]' "$LOG"; then
+        echo "[gate] FAIL: munmap con geometria non di pagina (leak shm):" >&2
+        rg -n '\[munmap\]' "$LOG" | head -5 || true
+        fail=1
+    fi
 fi
 
 # Fase shell nativa: stessa QEMU, login gia' al prompt. Gli stessi 33 check
@@ -129,9 +138,9 @@ if [ "$fail" -eq 0 ] && [ "${GATE_SHELL:-1}" = "1" ]; then
         fail=1
     fi
     # Il log e' lo stesso: la shell non deve sporcarlo (panic o FAIL in coda).
-    if rg -q 'FAIL|PANIC|#.* FAULT' "$LOG"; then
-        echo "[gate] FAIL/PANIC/FAULT dopo la fase shell:" >&2
-        rg -n 'FAIL|PANIC|#.* FAULT' "$LOG" | head -5 || true
+    if rg -q 'FAIL|PANIC|#.* FAULT|\[munmap\]' "$LOG"; then
+        echo "[gate] FAIL/PANIC/FAULT/munmap dopo la fase shell:" >&2
+        rg -n 'FAIL|PANIC|#.* FAULT|\[munmap\]' "$LOG" | head -5 || true
         fail=1
     fi
 fi

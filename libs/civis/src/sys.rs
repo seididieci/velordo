@@ -88,6 +88,14 @@ pub fn mmap_fixed(addr: usize, len: usize) -> Result<usize, Error> {
 
 /// Fase 28 — `munmap(addr, len)`: smappa VMA intere (parziali = `Err` senza
 /// cambiare stato, niente split in 28).
+///
+/// **Contratto di geometria** (lo stesso di `mmap`): `addr` allineato a
+/// pagina e `len` multiplo di `PAGE_SIZE`. Una forma malformata e' rifiutata
+/// dal kernel con `Err(Invalid)` **e** una riga loud `[munmap]` sul seriale
+/// (rate-limited): il chiamante che ignora l'errore non deve poter lasciare
+/// un ref shm appeso in silenzio (era il leak che ha rotto `tlsprobe`).
+/// Chiamare con la geometria della regione creata, mai con quella degli slot
+/// (es. `NET_EP_RING_BYTES`, non `NET_EP_RING_SLOTS * NET_EP_SLOT_SIZE`).
 #[inline]
 pub fn munmap(addr: usize, len: usize) -> Result<(), Error> {
     let r = unsafe { syscall4(SYS_MUNMAP, addr as u64, len as u64, 0, 0) };

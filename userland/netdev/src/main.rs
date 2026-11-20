@@ -59,15 +59,6 @@ fn real_main(_sp: u64) -> ! {
                     }
                     let _ = civis::reply(msg.tag, mac, ring_id);
                 }
-                civis::NET_POLL => {
-                    // N8: `net` non piu' polla a ogni tick; il driver avvisa
-                    // con NET_RX_EVENT. Mantenuto per retrocompatibilita'.
-                    let (n, _hint) = match dev.as_mut() {
-                        Some(d) => d.poll_rx(),
-                        None => (0, false),
-                    };
-                    let _ = civis::reply(msg.tag, n as u64, 0);
-                }
                 civis::NET_TX => {
                     let n = match dev.as_mut() {
                         Some(d) => d.tx(),

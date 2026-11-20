@@ -155,11 +155,41 @@ pub(super) fn sys_munmap(addr: u64, len: usize) -> i64 {
     if cr3 == 0 {
         return -1; // cr3 non impostata
     }
+    // Il contratto e' quello di `mmap`: geometria di pagina (`addr` allineato,
+    // `len` multiplo di PAGE_SIZE). `vma_unmap` rifiuta le forme malformate
+    // senza cambiare stato, ma il chiamante di solito ignora il -1: il ref
+    // shm resta appeso per sempre (il leak che ha rotto `tlsprobe`: `munmap`
+    // con la geometria degli slot invece della regione). Il rifiuto resta -1,
+    // ma la forma sbagliata e' loggata loud (mai legittima: nessun test la
+    // usa di proposito). Le coperture parziali allineate restano silenziose:
+    // sono deliberate nei test (t_basic).
+    const PAGE_SIZE: u64 = 0x1000;
+    if len == 0 || addr & (PAGE_SIZE - 1) != 0 || len as u64 & (PAGE_SIZE - 1) != 0 {
+        munmap_bad_shape(addr, len as u64);
+        return -1;
+    }
     let cur = current_mm();
     if crate::arc::vmm_user::vma_unmap(cur, cr3, addr, len as u64) {
         0
     } else {
         -1
+    }
+}
+
+/// Log dei `munmap` con geometria non di pagina. Rate limit: i primi 4 e poi
+/// uno ogni 256, cosi' un chiamante in loop non affoga il seriale ma il primo
+/// giro si vede (e il gate lo intercetta: `rg '\[munmap\]'` deve essere zero).
+fn munmap_bad_shape(addr: u64, len: u64) {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    static BAD: AtomicU32 = AtomicU32::new(0);
+    let n = BAD.fetch_add(1, Ordering::Relaxed) + 1;
+    if n <= 4 || n % 256 == 0 {
+        crate::serial_println!(
+            "[munmap] geometria non di pagina: addr={:#x} len={} (n={}) - rifiutato",
+            addr,
+            len,
+            n
+        );
     }
 }
 

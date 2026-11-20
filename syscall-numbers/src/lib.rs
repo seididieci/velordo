@@ -572,9 +572,10 @@ pub const CONSOLE_ROW_CRC: u64 = 0x6A;
 /// Reply: `w0` = MAC (6 byte packed), `w1` = 0. Il driver mappa il ring
 /// condiviso nella VA `USER_NET_RING_VA` del servizio.
 pub const NET_ATTACH: u64 = 0x6B;
-/// Il servizio chiede al driver di drenare le RX: reply `w0` = pacchetti
-/// scritti nel ring RX (0 = nessuno).
-pub const NET_POLL: u64 = 0x6C;
+/// `0x6C` era `NET_POLL` (il servizio chiedeva al driver di drenare le RX a
+/// ogni tick): rimosso in N8 (ADR-0085), il driver spinge `NET_RX_EVENT`
+/// quando il ring RX passa da vuoto a non vuoto. Numero ritirato, non riusare.
+///
 /// Il servizio ha scritto pacchetti nel ring TX: il driver li posta.
 /// Reply `w0` = pacchetti consumati.
 pub const NET_TX: u64 = 0x6D;

@@ -343,10 +343,13 @@ log seriale.
   `NET_RX_EVENT` quando il ring RX passa da vuoto a non vuoto e il servizio
   dorme su `recv_timeout(Net::next_deadline())` (retransmission TCP,
   TIME_WAIT, RS/echo, aging NDP) senza risvegli a tick. Due gate in più:
-  `rg NET_POLL userland/net/src` → 0 (il poll a tick non può rientrare) e la
+  il tag `NET_POLL` è **rimosso** dall'ABI (un riferimento non compila) e la
   **CPU idle** misurata su un boot dedicato senza suite (`net=1`): deve stare
   sotto il 5% (misurato: 0,0%; un polling a 100 Hz sta a ~100%).
   `NET_IDLE_CPU=0` salta la misura (boot più corto).
+  Terzo gate: `munmap` con geometria non di pagina (lunghezza non multipla,
+  la forma del leak shm) — il kernel logga `[munmap]` loud e lo script
+  richiede zero righe; lo stesso controllo è nel gate principale.
   I probe di **policy** (`netudp`/`net3`/`net4`) sono in `tst`, quindi
   `Untrusted`: `net`/`siit` negano loro l'endpoint diretto e navigano solo
   via broker — se passano, il modello della fase 6 è verificato end-to-end.
