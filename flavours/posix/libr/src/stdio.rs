@@ -10,8 +10,9 @@ use civis::args::{redir_spec_arg, REDIR_MAGIC};
 // Separazione dei sink (decisione 40.2): `print_string`/`write_stdout`/
 // `sys::write(1,…)` restano SEMPRE seriale (sink debug: mirror shell, log
 // init/server). Solo il percorso line-buffer e' instradabile — e' quello che
-// usano i programmi reali. Con tabelle inattive (default) tutto e' seriale:
-// zero behavior change per i server esistenti.
+// usano i programmi reali. Con tabelle inattive (default) lo stdout va sul
+// **terminale**: `/dev/console` + mirror seriale (ADR-0086); i server nativi
+// (senza hook `persona`) restano invariati sul seriale.
 //
 // Slot 2 (`2>`/`2>&1`) e' memorizzato ma non hookato in 40.2: niente in
 // userland scrive fd 2 oggi; l'aggancio dei builtin viene con la shell 40.4
@@ -202,26 +203,72 @@ pub fn stdio_active() -> bool {
         || STDIO[2].load(Ordering::Relaxed) >= 0
 }
 
-/// Instrada `bytes` (stdout) sul file redirectato. Ritorna true se "gestito":
-/// tutto sul file, o prefisso sul file + coda sul seriale a write parziale
-/// (mai duplicazione). False = non attivo o fallito del tutto: il chiamante
-/// riversa tutto sul seriale (l'output debug non si perde mai).
-/// Mai ricorsivo: `write_fs` non stampa (solo IPC+ring), il fallback e'
+/// Percorso del device del terminale (console server, ADR-0060): e' il default
+/// stdout dei programmi POSIX (oltre al mirror seriale).
+const CONSOLE_PATH: &str = "/dev/console";
+
+/// fd di `/dev/console` risolto lazy: 0 = non risolto, > 0 = fd + 1. La
+/// console e' spawnata da init PRIMA di ogni programma POSIX; se non e' ancora
+/// registrata il primo `println!` cade sul seriale e il successivo riprova
+/// (si cacha solo il successo).
+static CONSOLE_FD: AtomicI64 = AtomicI64::new(0);
+
+/// fd di `/dev/console`, o `None` se non apribile (fallback seriale).
+fn console_fd() -> Option<i64> {
+    let v = CONSOLE_FD.load(Ordering::Relaxed);
+    if v > 0 {
+        return Some(v - 1);
+    }
+    let fd = match civis::open(CONSOLE_PATH, 0) {
+        Ok(f) if f >= 0 => f,
+        _ => return None,
+    };
+    match CONSOLE_FD.compare_exchange(0, fd + 1, Ordering::Relaxed, Ordering::Relaxed) {
+        Ok(_) => Some(fd),
+        Err(cur) => {
+            // Un altro thread ha vinto la corsa: chiudi il nostro, usa il suo.
+            let _ = civis::close(fd);
+            if cur > 0 { Some(cur - 1) } else { None }
+        }
+    }
+}
+
+/// Instrada `bytes` (stdout). Due casi:
+/// - **redirect attivo** (`STDIO[1] >= 0`): tutto sul file, o prefisso sul file
+///   + coda sul seriale a write parziale (mai duplicazione);
+/// - **default** (`STDIO[1] < 0`): il **terminale** — write su `/dev/console`
+///   **e** mirror seriale (come i writer nativi: `console_write` di
+///   login/interpres). Cosi' l'output dei programmi POSIX appare sulla console
+///   *e* resta nel log seriale (gate/test automatici): le due meta' sono
+///   inscindibili, mai device senza mirror.
+/// Ritorna true se "gestito" (mirror seriale incluso: il chiamante
+/// `print::flush` non riscrive). False = nessuna console e nessun redirect: il
+/// chiamante riversa tutto sul seriale (l'output non si perde mai).
+/// Mai ricorsivo: `write_fs` non stampa (solo IPC+ring), il mirror e'
 /// `sys::write` raw.
 pub(crate) fn route_out(bytes: &[u8]) -> bool {
     let fd = STDIO[1].load(Ordering::Relaxed);
-    if fd < 0 {
+    if fd >= 0 {
+        return match write_fs(fd, bytes, bytes.len()) {
+            Ok(n) if n == bytes.len() => true,
+            Ok(n) => {
+                // Parziale (errore dopo progressi): la coda va sul seriale.
+                let _ = sys::write(1, bytes.as_ptr().wrapping_add(n), bytes.len() - n);
+                true
+            }
+            Err(_) => false,
+        };
+    }
+    // Default: terminale (device) + mirror seriale.
+    let Some(cfd) = console_fd() else {
         return false;
+    };
+    if write_fs(cfd, bytes, bytes.len()).is_err() {
+        // fd stantio (console riavviata): invalida la cache, si riprovera'.
+        CONSOLE_FD.store(0, Ordering::Relaxed);
     }
-    match write_fs(fd, bytes, bytes.len()) {
-        Ok(n) if n == bytes.len() => true,
-        Ok(n) => {
-            // Parziale (errore dopo progressi): la coda va sul seriale.
-            let _ = sys::write(1, bytes.as_ptr().wrapping_add(n), bytes.len() - n);
-            true
-        }
-        Err(_) => false,
-    }
+    let _ = sys::write(1, bytes.as_ptr(), bytes.len());
+    true
 }
 
 /// Legge un byte da stdin redirectato. None = non attivo, vuoto o errore.

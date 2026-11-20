@@ -369,6 +369,33 @@ Voci con scope e vittoria dichiarati (non date).
       e scrive a blocchi da 4000 B, mirror seriale con budget 256 KiB,
       scrollback `VecDeque`. `hexdump /bg.bmp` (5,2 MB): da ~38 min a **31 s**.
       Gate 6 righe, zero FAIL; `[usertests] 60/60`; unit test 48/48.
+- [x] **Console — mirror seriale + routing stdout POSIX → `/dev/console`**
+      (completata): il default stdout dei programmi POSIX (`civis::println!`
+      → `print::flush` → hook `civis::persona` → `libr::stdio::route_out`)
+      non finiva piu' nel vuoto: `route_out` aveva il ramo default
+      (`STDIO[1] < 0`) a `false` e `print::flush` cadeva su
+      `sys::write(CONSOLE_OUT)`, che nel kernel (`kernel/src/syscall/misc.rs`)
+      scrive **solo sul seriale** — il terminale mostrava la shell (che
+      scrive esplicitamente sul device) ma non l'output dei programmi
+      (`runhello`). Fix in `flavours/posix/libr/src/stdio.rs`: il ramo default
+      apre lazy `/dev/console` (fd cachato, 0 = non risolto) e scrive
+      **device + mirror seriale** (stesso pattern dei writer nativi
+      `console_write` di login/interpres). Le due meta' sono inscindibili: un
+      `true` senza mirror fa perdere le righe PASS del gate (il gate legge il
+      seriale). Fail-open: console non apribile → `false` → `print::flush`
+      scrive il seriale come prima. Il redirect (`>`, `STDIO[1] >= 0`) resta
+      file-only. Console, kernel, `porta` e shell nativa **intatti**.
+      **Vittoria**: `runhello` dalla shell appare nel terminale **e** nel log
+      seriale (nessun output perso); gate invariato (6 suite + shell nativa,
+      `[posixtests] PASS 4/4` e `runhello: hello` ancora sul seriale);
+      `scripts/test-shell-redirect.py` invariato. Fuori scope dichiarato: il
+      sink PAL `std::io::stdout` (`write_console` → `SYS_WRITE`).
+      Due bug latenti del terminale corretti (ADR-0086): t63 confrontava
+      `non_empty` prima/dopo il modeset, ma crescendo la finestra riappare lo
+      scrollback (le celle **aumentano**): ora la prova e' la coda del flusso
+      (`Grid::text_crc_last`, `CONSOLE_STATE` con `w0` = limite); e
+      l'`EXIT_NOTIFY` della console re-registrava a **ogni** morte di peer,
+      deadlock con cardo quando moriva un client (ora solo per il peer FS).
 - [x] **S3.2a — Shell nativa REPL minima + gestione utenti** (completata, 2026-10): programma interattivo
       **nativo** (meccanismo, niente POSIX) su `/dev/input/keyboard` +
       `/dev/console`. Comandi: `help`, `users`, `create-user <nome>`,

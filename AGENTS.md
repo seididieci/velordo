@@ -231,8 +231,23 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   Bulk: feed > 256 B differisce render+flush ogni 8 write, `hexdump` a
   blocchi da 4000 B, mirror seriale con budget 256 KiB, scrollback
   `VecDeque` (`hexdump /bg.bmp` 5,2 MB: ~38 min → 31 s).
-  Prossimo: console server con mirror seriale e routing POSIX
-  stdout→device (l'hook `persona`), poi il DE.
+  **Mirror seriale + routing stdout POSIX → `/dev/console`** (fatto): il
+  default stdout dei programmi POSIX (`civis::println!` → `print::flush` →
+  hook `civis::persona` → `libr::stdio::route_out`) scrive sul device
+  `/dev/console` **e** specchia sul seriale (stesso pattern dei writer nativi
+  `console_write` di login/interpres): `runhello` dalla shell appare nel
+  terminale *e* nel log seriale, zero output perso; il redirect (`>`) resta
+  file-only. Console, kernel, `porta` e shell nativa intatti. Fuori scope
+  dichiarato: il sink PAL `std::io::stdout` (`write_console` → `SYS_WRITE`).
+  Due trappole emerse dal gate: (a) il terminale **pieno** cambia
+  l'invariante del re-adattamento — crescendo la finestra riappare lo
+  scrollback, quindi `non_empty` **cresce** (t63: 900 → 1221) e la prova
+  giusta e' la **coda** del flusso (`Grid::text_crc_last`; `CONSOLE_STATE`
+  prende `w0` = limite); (b) la console ha due classi di peer (chi la monta
+  e chi le scrive): `EXIT_NOTIFY` deve re-registrare **solo** per la morte
+  del peer FS (`fs_peer_pid()`), o un test che esce la fa entrare in
+  `fs_register` mentre cardo aspetta una write → deadlock (ADR-0086).
+  Prossimo: il DE.
 - **Rete (N1–N6.3, ADR-0068/0069/0072)**: stack nativo in userspace — `libs/net`
   core `no_std` 100% safe (Ethernet/IPv6/ICMPv6/NDP, SLAAC, RA guard,
   neighbor cache **STALE + NS di verifica** (non si butta la entry a 30 s:
@@ -709,7 +724,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
 
 ```bash
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term, net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, valloc, blake2s, sig, tls: 129 test
+./scripts/run-unit-tests.sh   # term, net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, blake2s, sig, tls: 131 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh

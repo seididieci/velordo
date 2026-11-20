@@ -458,9 +458,33 @@ impl Grid {
     /// CRC32 del testo (solo i codepoint, nell'ordine): serve da prova
     /// automatica che il testo e' sopravvissuto a un re-adattamento.
     pub fn text_crc(&self) -> u32 {
+        self.text_crc_last(usize::MAX)
+    }
+
+    /// CRC32 delle **ultime** `limit` celle non vuote (`0` o `usize::MAX` =
+    /// tutte).
+    ///
+    /// Il resize che **cresce** la griglia riporta a video righe di
+    /// scrollback che prima erano fuori dallo schermo: il flusso di testo non
+    /// cambia, **cresce in testa** (le righe vecchie riappaiono sopra). La
+    /// parte che il re-adattamento deve conservare e' la coda: confrontare il
+    /// CRC di prima con quello delle ultime `non_empty()` celle di dopo e'
+    /// l'invariante giusta ("nessun carattere perso"). Il conteggio delle
+    /// celle non lo e' (cresce con lo scrollback riportato a video).
+    pub fn text_crc_last(&self, limit: usize) -> u32 {
+        let skip = if limit == 0 || limit == usize::MAX {
+            0
+        } else {
+            self.non_empty().saturating_sub(limit)
+        };
         let mut crc = 0xFFFF_FFFFu32;
+        let mut skipped = 0usize;
         for c in self.cells.iter() {
             if c.is_blank() {
+                continue;
+            }
+            if skipped < skip {
+                skipped += 1;
                 continue;
             }
             let mut v = c.cp;
@@ -728,6 +752,67 @@ mod tests {
         assert_eq!(row_str(&g, 0), "abcde");
         assert_eq!(row_str(&g, 1), "fghij");
         assert_eq!(g.cursor, (4, 1), "il cursore resta su 'j'");
+    }
+
+    /// Crescendo la griglia riappare lo **scrollback**: le celle non vuote
+    /// aumentano (le righe vecchie tornano a video), ma il testo di prima
+    /// resta **in coda** al flusso. E' l'invariante del re-adattamento (D4,
+    /// t63): su un terminale pieno di output il conteggio delle celle non
+    /// regge, la coda del flusso si'.
+    #[test]
+    fn crescendo_riappare_lo_scrollback_ma_il_testo_e_in_coda() {
+        let mut g = Grid::new(128, 36);
+        let rows = g.rows();
+        // 50 righe di output in 36 righe di schermo: le prime 14 escono
+        // (scrollback). E' il caso reale del t63 (terminale pieno).
+        for r in 0..50 {
+            let s = alloc::format!("riga {} di output", r);
+            for (i, b) in s.bytes().enumerate() {
+                g.put(i, rows - 1, b as u32, color::WHITE, color::BLACK);
+            }
+            if r + 1 < 50 {
+                g.scroll_up();
+            }
+        }
+        g.cursor = (18, rows - 1);
+        let ne0 = g.non_empty();
+        let crc0 = g.text_crc();
+
+        // Finestra piu' grande: 192x49 (il modeset del t63).
+        g.resize(192, 49);
+
+        assert!(
+            g.non_empty() > ne0,
+            "lo scrollback riportato a video deve aggiungere celle ({} -> {})",
+            ne0,
+            g.non_empty()
+        );
+        assert_eq!(
+            g.text_crc_last(ne0),
+            crc0,
+            "le ultime {} celle devono essere il testo di prima, nello stesso ordine",
+            ne0
+        );
+        assert_eq!(row_str(&g, 48), "riga 49 di output");
+    }
+
+    /// `text_crc_last`: 0 = tutto (il protocollo di `CONSOLE_STATE`), N = le
+    /// ultime N. La trappola e' che `0` deve valere "tutte" e non "nessuna":
+    /// con la seconda lettura il CRC tornava `0xFFFFFFFF` e il test t63
+    /// confrontava la coda con il CRC del vuoto.
+    #[test]
+    fn text_crc_last_zero_significa_tutte() {
+        let mut g = Grid::new(10, 2);
+        put_str(&mut g, 0, "abc");
+        put_str(&mut g, 1, "def");
+        let all = g.text_crc();
+        assert_eq!(g.text_crc_last(0), all);
+        assert_eq!(g.text_crc_last(usize::MAX), all);
+        assert_eq!(g.text_crc_last(3), {
+            let mut h = Grid::new(10, 2);
+            put_str(&mut h, 0, "def");
+            h.text_crc()
+        });
     }
 
     /// Restringendo la griglia il cursore resta **visibile** (l'ultima

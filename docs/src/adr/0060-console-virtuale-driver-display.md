@@ -187,6 +187,10 @@ serve solo quando virtio-gpu non c'è.
   `/dev/console` sul seriale, e il routing POSIX stdout→device (l'hook
   `persona`), sono un lavoro a parte (rinviato): oggi ogni client che vuole
   il transcript seriale duplica a mano, come prima.
+  (**Aggiornamento 2026-11-20**: il routing POSIX stdout→device è stato
+  implementato in [ADR-0086](0086-stdout-posix-console-mirror.md), con il
+  **mirror nel writer**: `route_out` scrive `/dev/console` *e* il seriale,
+  come i writer nativi; il console server resta senza mirror.)
 - **La syscall 49 cambia ABI** (arg2 = slot): `block` continua a usare lo
   slot 0 e non cambia; i chiamanti nuovi usano `dma_alloc_slot`.
 - **Il grant del device buffer** è chiuso (owner `Service::Console`): un

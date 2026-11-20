@@ -310,7 +310,7 @@ log seriale.
   pieno/vuoto/wrap; N7.0), `libs/valloc`, `blake2s` e
   `libs/tls` (trasporto/adapter, DRBG ChaCha20, fail-closed della
   configurazione: SNI/CA mancanti e buffer record troppo piccoli danno
-  `Error::Config`) (**129 test** in tutto; `libs/net` ne ha 54, 23 dei quali
+  `Error::Config`) (**131 test** in tutto; `libs/net` ne ha 54, 23 dei quali
   sulla macchina a stati TCP e sul wiring, 2 sul framing RFC 7858). Girano da una
   **directory neutra**: il `.cargo/config.toml` del repo impone
   `build.target = x86_64-unknown-none` + `build-std` in base alla directory

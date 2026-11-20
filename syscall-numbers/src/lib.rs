@@ -548,7 +548,9 @@ pub const CONSOLE_QUERY: u64 = 0x79;
 /// altezza (0 = "segui l'host"). Risponde 0/-1.
 pub const CONSOLE_SET_MODE: u64 = 0x7A;
 /// Riepilogo del contenuto del terminale (D4, per i test): `w0` = celle non
-/// vuote, `w1` = CRC32 del testo.
+/// vuote, `w1` = CRC32 del testo. `w0` della **richiesta** = limite: `0`
+/// tutte le celle, `N` le ultime `N` non vuote (il resize che cresce riporta
+/// a video lo scrollback: il testo di prima resta in coda al flusso).
 pub const CONSOLE_STATE: u64 = 0x7B;
 /// Diagnostica (ADR-0066 T4, **solo test**): CRC32 del framebuffer BGRA
 /// visibile. `w0` = CRC, `w1` = byte hashati. Non e' una notifica: si

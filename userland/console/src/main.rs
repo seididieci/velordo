@@ -1173,6 +1173,17 @@ fn ensure_console_registered() {
     civis::ensure_fs_mount(|| civis::fs_register(b"/dev/console"));
 }
 
+/// pid del peer FS (cardo) **adesso**. Va misurato mentre il canale e' vivo:
+/// alla morte del peer il canale e' invalidato (Fase 39) e `peer_pid` non
+/// risponde piu'.
+fn fs_peer_pid() -> i64 {
+    let chan = civis::fs_chan();
+    if chan <= 0 {
+        return 0;
+    }
+    civis::peer_pid(chan as u64).unwrap_or(0)
+}
+
 /// Il cursore hardware del VGA (fallback): porta CRTC.
 unsafe fn move_hw_cursor(row: usize, col: usize) {
     let offset = (row * VGA_COLS + col) as u16;
@@ -1289,6 +1300,9 @@ fn real_main(_sp: u64) -> ! {
     // 7. Registra /dev/console con cardo.
     ensure_console_registered();
     let _ = civis::print_string(b"[console] registered /dev/console with cardo\n");
+    // Il pid del peer FS, misurato ora che il canale e' vivo: e' l'unico
+    // peer la cui morte (EXIT_NOTIFY) impone un rimontaggio.
+    let mut fs_peer = fs_peer_pid();
 
     // 8. Loop IPC: il device di testo.
     loop {
@@ -1381,11 +1395,15 @@ fn real_main(_sp: u64) -> ! {
                     civis::syscall_numbers::CONSOLE_STATE => {
                         // Il contenuto del terminale: celle non vuote + CRC
                         // del testo (la prova automatica che il testo ha
-                        // sopravvissuto a un re-adattamento).
+                        // sopravvissuto a un re-adattamento). `w0` nella
+                        // richiesta = limite: 0 = tutte le celle, N = le
+                        // **ultime** N (il resize che cresce riporta a video
+                        // lo scrollback: il testo di prima resta in coda, vedi
+                        // `Grid::text_crc_last`).
                         let _ = civis::reply(
                             msg.tag,
                             term.grid.non_empty() as u64,
-                            term.grid.text_crc() as u64,
+                            term.grid.text_crc_last(msg.w0 as usize) as u64,
                         );
                     }
 
@@ -1421,8 +1439,19 @@ fn real_main(_sp: u64) -> ! {
                     }
 
                     civis::EXIT_NOTIFY => {
-                        // cardo morto e rinato: re-registra il console.
-                        ensure_console_registered();
+                        // Solo la morte del **peer FS** (cardo) impone di
+                        // rimontare `/dev/console`: ogni processo che stampa e'
+                        // un peer della console (canale DEV_WRITE implicito di
+                        // `CONSOLE_OUT`), e la sua morte non tocca il mount.
+                        // Reagire anche a quella ri-registrerebbe mentre cardo
+                        // e' vivo ed e' in attesa di una write verso la
+                        // console: ciclo cardo -> console -> cardo (deadlock
+                        // osservato: EXIT_NOTIFY di un test, console dentro
+                        // `fs_register`, cardo in attesa della console).
+                        if fs_peer != 0 && msg.w1 as i64 == fs_peer {
+                            ensure_console_registered();
+                            fs_peer = fs_peer_pid();
+                        }
                     }
 
                     _ => {

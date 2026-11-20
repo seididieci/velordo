@@ -63,7 +63,7 @@ il guest può rientrare nel controllo con una nuova richiesta esplicita.
 | `GPU_DISPLAY_CHANGED` (0x78) | **driver → console** | `w1` = la nuova geometria del device (notifica) |
 | `CONSOLE_QUERY` (0x79) | client → console | `w0` = colonne, `w1` = righe della griglia |
 | `CONSOLE_SET_MODE` (0x7A) | client → console | `w0` = w, `w1` = h (0 = "segue l'host") |
-| `CONSOLE_STATE` (0x7B) | client → console | `w0` = celle non vuote, `w1` = CRC32 del testo |
+| `CONSOLE_STATE` (0x7B) | client → console | `w0` = celle non vuote, `w1` = CRC32 del testo (richiesta `w0` = limite: 0 = tutte, N = ultime N) |
 
 - `GPU_DISPLAY_CHANGED` è **fire-and-forget** (`send_async`): il driver non
   deve aspettare la console, che può essere occupata a servire un cliente.
@@ -250,7 +250,9 @@ tutto com'è — la surface non deve mai puntare a un buffer liberato.
   `vma.rs`: `unmap_user_range` `pub(crate)`.
 - `kernel/src/syscall/mem.rs`: `sys_dma_free` (grant + free + smonto).
 - `libs/civis`: `dma_free_slot`.
-- `libs/term/src/grid.rs`: scrollback, `resize` (reflow), `text_crc`;
+- `libs/term/src/grid.rs`: scrollback, `resize` (reflow), `text_crc` /
+  `text_crc_last` (la coda del flusso: l'invariante del re-adattamento che
+  cresce, perche' lo scrollback riportato a video allunga il contenuto);
   `surface.rs`: `Geom::origin_x/origin_y`, `Geom::for_surface` (celle intere,
   resto centrato).
 - `userland/gpu`: notifica del config change, `UNREF` prima di rifare la

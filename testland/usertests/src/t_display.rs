@@ -7,8 +7,10 @@
 //! 2. chiede un **modeset** (il guest sceglie la risoluzione: 1024×768);
 //! 3. verifica che la griglia si sia **ricalcolata** (celle intere, resto
 //!    centrato) e che il device abbia **seguito** il guest;
-//! 4. verifica che il **testo sia sopravvissuto** (lo CRC del contenuto e'
-//!    lo stesso: il reflow conserva l'ordine dei caratteri);
+//! 4. verifica che il **testo sia sopravvissuto**: la coda del flusso di
+//!    caratteri (le ultime celle del contenuto di prima) e' identica — la
+//!    finestra che cresce riporta a video lo scrollback, quindi le celle
+//!    aumentano, ma il testo di prima resta intatto e in ordine;
 //! 5. ripristina la risoluzione iniziale.
 //!
 //! Senza device pixel (fallback VGA) il modeset non e' applicabile: il test
@@ -61,6 +63,14 @@ pub(crate) fn driver_stats(chan: u64) -> Option<(u64, u64)> {
 /// Il contenuto del terminale: `(celle non vuote, CRC del testo)`.
 pub(crate) fn console_state(chan: u64) -> Option<(u64, u64)> {
     let r = civis::send(chan, civis::syscall_numbers::CONSOLE_STATE, 0, 0).ok()?;
+    Some((r.w0, r.w1))
+}
+
+/// Come [`console_state`], ma il CRC e' quello delle **ultime** `last` celle
+/// non vuote (il resize che cresce riporta a video lo scrollback: il flusso
+/// di testo cresce in testa, la coda resta quella di prima).
+pub(crate) fn console_state_last(chan: u64, last: u64) -> Option<(u64, u64)> {
+    let r = civis::send(chan, civis::syscall_numbers::CONSOLE_STATE, last, 0).ok()?;
     Some((r.w0, r.w1))
 }
 
@@ -175,15 +185,23 @@ pub fn t_display_modeset() -> bool {
         return false;
     }
 
-    // 4) il testo e' sopravvissuto (stesso CRC: il reflow conserva l'ordine).
+    // 4) il testo e' sopravvissuto. La finestra che cresce riporta a video
+    //    righe di scrollback: le celle **aumentano** (il flusso cresce in
+    //    testa), ma la coda — tutto il testo di prima — resta identica. Si
+    //    confronta il CRC delle ultime `ne0` celle: e' "nessun carattere
+    //    perso", il conteggio delle celle non lo e'.
     let (ne1, crc1) = match console_state(console) {
         Some(s) => s,
         None => return false,
     };
-    if ne1 != ne0 || crc1 != crc0 {
+    let (_, crc_tail) = match console_state_last(console, ne0) {
+        Some(s) => s,
+        None => return false,
+    };
+    if ne1 < ne0 || crc_tail != crc0 {
         println!(
-            "[t63] testo NON conservato: celle {}->{} crc {:#x}->{:#x}",
-            ne0, ne1, crc0, crc1
+            "[t63] testo NON conservato: celle {}->{} crc coda {:#x} (atteso {:#x})",
+            ne0, ne1, crc_tail, crc0
         );
         return false;
     }

@@ -4289,3 +4289,63 @@
   **Vittoria**: gate principale `[gate] PASS` (6 suite + shell nativa, zero
   FAIL/PANIC/FAULT, zero `[munmap]`), `run-net-tests.sh` PASS con la stessa
   condizione, `run-tls-tests.sh` PASS.
+
+- **Console — mirror seriale + routing stdout POSIX → `/dev/console`**
+  (completata). Il buco era preciso: il default stdout dei programmi POSIX
+  (`civis::println!` → `print::flush` → hook `civis::persona` →
+  `libr::stdio::route_out`) non finiva piu' da nessuna parte di visibile.
+  `route_out` instradava **solo** col redirect attivo; senza
+  (`STDIO[1] < 0`) ritornava `false` e `print::flush` cadeva su
+  `sys::write(CONSOLE_OUT)`, che nel kernel (`kernel/src/syscall/misc.rs`)
+  scrive **solo sul seriale**. Risultato: il terminale mostrava la shell (che
+  scrive esplicitamente sul device) ma non l'output dei programmi —
+  `runhello` era seriale-only (il suo stesso doc lo dichiarava: "non apre
+  alcun device").
+  **Decisione**: il pattern del repo e' "scrive il writer, non la console"
+  (`console_write` di login/interpres/logout fa `write_fs(/dev/console)` +
+  `print_str` seriale; il console server su `DEV_WRITE` fa **solo**
+  `term.feed`). Invece di far specchiare la console — che avrebbe costretto a
+  togliere i mirror espliciti dei nativi, a specchiare anche l'eco dei tasti
+  e a spostare il budget del mirror — si estende il pattern al percorso
+  POSIX, in un solo file.
+  **Fix** (`flavours/posix/libr/src/stdio.rs`): il ramo default di
+  `route_out` apre lazy `/dev/console` (fd cachato in un `AtomicI64`, 0 = non
+  risolto; cache del solo successo, cosi' una console non ancora registrata
+  al primo `println!` non avvelena) e scrive **device + mirror seriale**
+  (`sys::write(1, …)` raw, mai ricorsivo). Il ramo redirect
+  (`STDIO[1] >= 0`) resta **identico** (file-only, niente seriale). Le due
+  meta' sono inscindibili: ritornare `true` senza il mirror farebbe saltare
+  il seriale a `print::flush` e il gate perderebbe `[posixtests] PASS 4/4`
+  (suite) e `runhello: hello` (`scripts/test-shell-native.py`, che legge il
+  log seriale) — la trappola e' dentro la stessa funzione, quindi stesso
+  commit per costruzione. Fail-open: console non apribile → `false` →
+  `print::flush` scrive il seriale come prima (mai output perso).
+  **Scope**: copre il sink `civis::println!` (`runhello`, `posixtests`); il
+  sink PAL `std::io::stdout` (`pal/velordo/new/sys/stdio/velordo.rs` →
+  `write_console` → `SYS_WRITE`) resta seriale-only, follow-up dichiarato.
+  Console server, kernel, `porta`, shell nativa e login **intatti**.
+  **Due bug latenti emersi dal gate** (il sink funzionava: `[posixtests]
+  PASS 4/4`; il gate falliva per altro, piu' sotto). (1) **t63**: il test
+  pretendeva `non_empty` **identico** dopo il modeset. Ma la finestra che
+  cresce (128x36 → 192x49) **riporta a video lo scrollback**: le celle
+  aumentano (900 → 1221) perche' riappaiono righe vecchie *sopra* il testo;
+  il flusso non cambia, **cresce in testa**. L'invariante giusto e' "la coda
+  del flusso e' quella di prima": `Grid::text_crc_last(limit)` (CRC delle
+  ultime `limit` celle non vuote) e `CONSOLE_STATE.w0` = limite nella
+  richiesta (0 = tutto). Il vecchio test passava solo perche' prima del login
+  il terminale era quasi vuoto (banner, 22 celle, nessuno scrollback):
+  l'output POSIX ora lo riempie e il difetto e' diventato visibile. Unit
+  test host in `libs/term` (`crescendo_riappare_lo_scrollback_ma_il_testo_e_in_coda`).
+  (2) **Deadlock cardo ↔ console**: l'handler `EXIT_NOTIFY` della console
+  re-registrava `/dev/console` a **ogni** morte di peer. Ma ogni processo che
+  stampa e' un peer (canale implicito di `CONSOLE_OUT`) e la console e'
+  peer di cardo: alla morte del test (che non c'entra col mount) la console
+  entrava in `fs_register` **sincrono** mentre cardo era in attesa di una
+  write verso la console → ciclo `cardo wait=console`, `console wait=cardo`,
+  login mai al prompt (gate FAIL per timeout, 600 s). Fix: si reagisce solo
+  se il morto e' il **peer FS** (pid misurato a canale vivo, `fs_peer_pid()`;
+  alla morte il canale e' gia' invalidato) — stesso filtro per pid che
+  `porta` usa per i suoi sottoscrittori (E0/ADR-0082).
+  **Vittoria**: `runhello` dalla shell appare nel terminale **e** nel log
+  seriale; gate invariato (6 suite + shell nativa, zero FAIL/PANIC/FAULT);
+  `scripts/test-shell-redirect.py` invariato (ramo redirect non toccato).
