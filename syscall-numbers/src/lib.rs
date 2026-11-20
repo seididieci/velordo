@@ -631,10 +631,27 @@ pub const NET_EP_RING_SLOTS: usize = 16;
 pub const NET_EP_SLOT_SIZE: usize = 2048;
 /// Header del ring endpoint: `head:u32, tail:u32, slots:u32, slot_size:u32`.
 pub const NET_EP_RING_HDR: usize = 16;
+/// Byte di **un** ring (header + tutti gli slot), per direzione.
+pub const NET_EP_RING_ONE: usize = NET_EP_RING_HDR + NET_EP_RING_SLOTS * NET_EP_SLOT_SIZE;
 // Offset del ring RX (servizio → cliente) nel buffer shm dell'endpoint.
 pub const NET_EP_RX_RING_OFF: usize = 0;
-// Offset del ring TX (cliente → servizio) nel buffer shm dell'endpoint.
-pub const NET_EP_TX_RING_OFF: usize = 0x2000;
+// Offset del ring TX (cliente → servizio) nel buffer shm dell'endpoint: la
+// pagina dopo la fine del ring RX (`0x2000` stava **dentro** l'area RX:
+// TX slot 0..11 si sovrapponevano a RX slot 4..15).
+pub const NET_EP_TX_RING_OFF: usize = 0x9000;
+/// Dimensione della regione shm di un endpoint: `TX offset + un ring`,
+/// arrotondata a pagina. **Unico** valore da usare in `shm_create` e
+/// `munmap` (un `munmap` non multiplo di pagina fallisce in silenzio e la
+/// regione non viene mai liberata: il 17° endpoint di un boot non si apre).
+pub const NET_EP_RING_BYTES: usize = {
+    const PAGE: usize = 4096;
+    let end = NET_EP_TX_RING_OFF + NET_EP_RING_ONE;
+    (end + PAGE - 1) & !(PAGE - 1)
+};
+// Il layout e' un invariante, non una convenzione: i due ring non si
+// sovrappongono e la regione e' multipla di pagina (vedi sopra).
+const _: () = assert!(NET_EP_RX_RING_OFF + NET_EP_RING_ONE <= NET_EP_TX_RING_OFF);
+const _: () = assert!(NET_EP_RING_BYTES % 4096 == 0);
 
 // ── Costanti protocollo (N2+N3) ─────────────────────────────────────
 pub const NET_PROTO_UDP: u8 = 17;

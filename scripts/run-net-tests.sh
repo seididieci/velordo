@@ -118,6 +118,7 @@ rg -q '\[netbroker\] broker attivo' "$LOG" || { echo "[net-tests] manca: broker 
 rg -q '\[netudp\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: UDP echo via broker (N2)"; fail=1; }
 rg -q '\[net3\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: TCP loopback (N3/N6.1)"; fail=1; }
 rg -q '\[net4\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: SIIT (N4)"; fail=1; }
+rg -q '\[neteploop\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: ciclo di vita endpoint (regressione leak shm)"; fail=1; }
 rg -q '\[dns\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: DNS (N5)"; fail=1; }
 rg -q '\[dns\] upstream: PASS' "$LOG" || { echo "[net-tests] manca: upstream DNS (N6.0)"; fail=1; }
 rg -q '\[posixsock\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: socket POSIX (N7.1)"; fail=1; }
@@ -135,9 +136,9 @@ if [ -n "${NET_TCP_PEER:-}" ]; then
     rg -q '\[nettcp\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: TCP rete reale (N6.1d)"; fail=1; }
 fi
 
-LOGRE='\[net\]|\[netdev\]|\[netecho\]|\[netbroker\]|\[netudp\]|\[net3\]|\[net4\]|\[nettcp\]|\[siit\]|\[dns\]|\[dns-host\]|\[posixsock\]'
+LOGRE='\[net\]|\[netdev\]|\[netecho\]|\[netbroker\]|\[netudp\]|\[net3\]|\[net4\]|\[neteploop\]|\[nettcp\]|\[siit\]|\[dns\]|\[dns-host\]|\[posixsock\]'
 if [ "$fail" = "0" ]; then
-    echo "[net-tests] PASS: echo reply + UDP echo + TCP (handshake e echo reali) + IPv4 SIIT + DNS probe + upstream DNS + socket POSIX (probe di policy via broker)${NET_TCP_PEER:+ + TCP rete reale}"
+    echo "[net-tests] PASS: echo reply + UDP echo + TCP (handshake e echo reali) + IPv4 SIIT + ciclo di vita endpoint + DNS probe + upstream DNS + socket POSIX (probe di policy via broker)${NET_TCP_PEER:+ + TCP rete reale}"
     rg "$LOGRE" "$LOG" | tail -45
     exit 0
 fi

@@ -27,8 +27,8 @@ use net::eth::{self, ETHERTYPE_IPV6};
 use civis::{
     NET_ADDR, NET_ADDR_GLOBAL, NET_ADDR_LINK_LOCAL, NET_ADDR_ROUTER, NET_EP_CLOSE,
     NET_EP_FLAG_CONNECT, NET_EP_FLAG_EPHEMERAL, NET_EP_FLAG_LISTEN, NET_EP_OPEN,
-    NET_EP_RX_RING_OFF, NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE, NET_EP_STATS,
-    NET_EP_TX, NET_EP_TX_RING_OFF, NET_PROTO_TCP, NET_PROTO_UDP,
+    NET_EP_RX_RING_OFF, NET_EP_RING_BYTES, NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE,
+    NET_EP_STATS, NET_EP_TX, NET_EP_TX_RING_OFF, NET_PROTO_TCP, NET_PROTO_UDP,
 };
 
 /// Stato di un endpoint.
@@ -38,8 +38,10 @@ enum EpState {
     Bound,
 }
 
-/// Numero massimo di endpoint concorrenti.
-const MAX_ENDPOINTS: usize = 8;
+/// Numero massimo di endpoint concorrenti. Un client TCP normale ne occupa
+/// due (connect + figlio accettato dal listener), quindi serve margine oltre
+/// il picco della suite.
+const MAX_ENDPOINTS: usize = 16;
 
 /// Stati TCP semplificati (N3): non più usati, la connessione vive nel core.
 /// Restano solo come documentazione dei valori storici degli eventi.
@@ -133,7 +135,11 @@ pub struct BindCache {
 
 /// Stato del servizio.
 pub struct NetService {
-    pub net: Net,
+    /// Il core di rete sull'**heap**: `NetService` viene costruita sullo stack
+    /// prima di essere boxata e `Net` da solo pesa ~6 KiB (connessioni TCP
+    /// incluse). Inline, `NetService` sfondava lo stack user da 16 KiB al
+    /// `Box::new` in `real_main`.
+    pub net: alloc::boxed::Box<Net>,
     pub sink_ring: *mut u8,        // ring driver↔servizio (N1)
     pub driver_chan: u64,          // canale verso netdev
     pub endpoints: [Endpoint; MAX_ENDPOINTS],
@@ -157,14 +163,14 @@ pub struct NetService {
 impl NetService {
     pub fn new() -> Self {
         Self {
-            net: Net::new(Config {
+            net: alloc::boxed::Box::new(Net::new(Config {
                 mac: MacAddr::default(),
                 ra_accept: true,
                 ra_router: None,
                 ping: true,
                 ping_target: None,
                 seed: civis::rdtsc(),
-            }),
+            })),
             sink_ring: core::ptr::null_mut(),
             driver_chan: 0,
             endpoints: [Endpoint::free(); MAX_ENDPOINTS],
@@ -184,6 +190,7 @@ impl NetService {
             if n == 0 {
                 return;
             }
+
             let wrote = Self::ep_rx_write_full(
                 ep.ring_base,
                 &Ipv6Addr::LOOPBACK,
@@ -232,14 +239,49 @@ impl NetService {
         None
     }
 
+    /// Chiude la connessione `conn` propagando la morte all'**altro**
+    /// endpoint locale della stessa connessione (figlio del listener in
+    /// loopback, che condivide lo stesso `conn_id`). `tcp_abort` butta il
+    /// TCB senza mandare niente sul filo: senza questa propagazione il
+    /// figlio del listener non riceve mai `EV_FIN`/`EV_RST`, il suo
+    /// proprietario non lo chiude e l'endpoint (col suo ring) resta occupato
+    /// per sempre, col TCB del server che rimane in tabella fino a saturare
+    /// il backlog (`TCP_BACKLOG`) e far RST a ogni nuova SYN.
+    fn abort_conn(&mut self, conn: u8, except: usize) {
+        for i in 0..MAX_ENDPOINTS {
+            if i == except || self.endpoints[i].state == EpState::Free {
+                continue;
+            }
+            let ep = self.endpoints[i];
+            if ep.conn_id != conn {
+                continue;
+            }
+            // Il proprietario sa che la connessione e' morta (puo' chiudere
+            // il suo lato e smappare), poi l'endpoint si libera qui.
+            if NetService::ep_rx_write_full(
+                ep.ring_base,
+                &Ipv6Addr::LOOPBACK,
+                ep.remote_port,
+                ep.local_port,
+                EV_RST,
+                &[],
+            ) {
+                notify(ep.peer_chan, ep.ep_id);
+            }
+            self.free_endpoint(i);
+        }
+        self.net.tcp_abort(conn);
+    }
+
     /// Libera un endpoint.
     pub fn free_endpoint(&mut self, idx: usize) {
         let ep = self.endpoints[idx];
         if ep.ring_id != 0 {
-            let ring_len = NET_EP_RING_HDR * 2
-                + NET_EP_RING_SLOTS * NET_EP_SLOT_SIZE * 2;
             if !ep.ring_base.is_null() {
-                let _ = civis::munmap(ep.ring_base as usize, ring_len);
+                // La regione e' `NET_EP_RING_BYTES` (multipla di pagina):
+                // `munmap` con la sola geometria degli slot non copre la
+                // regione, fallisce e il ref shm resta appeso per sempre.
+                let _ = civis::munmap(ep.ring_base as usize, NET_EP_RING_BYTES);
             }
             // Fase 30.1: l'owner chiude il ring (i client che lo mappano
             // tengono il loro ref finche' non fanno `munmap`).
@@ -575,17 +617,18 @@ fn apply_accepted(svc: &mut NetService, conn: u8, port: u16) {
     };
     let listener = svc.endpoints[listener_idx];
     let Some(child_idx) = svc.alloc_endpoint(listener.peer_chan, listener.peer_id) else {
+        civis::println!("[net] connessione accettata rifiutata: tabella endpoint piena");
         svc.net.tcp_abort(conn);
         return;
     };
-    let ring_len = (NET_EP_RING_HDR * 2 + NET_EP_RING_SLOTS * NET_EP_SLOT_SIZE * 2)
-        .next_power_of_two();
-    let Ok(ring_id) = civis::shm_create(ring_len) else {
+    let Ok(ring_id) = civis::shm_create(NET_EP_RING_BYTES) else {
+        civis::println!("[net] connessione accettata rifiutata: regioni shm esaurite");
         svc.free_endpoint(child_idx);
         svc.net.tcp_abort(conn);
         return;
     };
     let Ok(base) = civis::shm_map(ring_id, 0, civis::PROT_READ | civis::PROT_WRITE) else {
+        civis::println!("[net] connessione accettata rifiutata: map del ring fallita");
         svc.free_endpoint(child_idx);
         svc.net.tcp_abort(conn);
         return;
@@ -656,7 +699,16 @@ fn apply_tcp_signal(svc: &mut NetService, conn: u8, signal: TcpSignal) {
     match signal {
         TcpSignal::Established => push(EV_SYNACK, &[]),
         TcpSignal::Data => svc.drain_tcp(&ep),
-        TcpSignal::Fin => push(EV_FIN, &[]),
+        TcpSignal::Fin => {
+            push(EV_FIN, &[]);
+            // Figlio del listener in attesa (remote_port mai stabilito): il
+            // peer ha chiuso la sua direzione, la connessione e' finita. Lo
+            // liberiamo subito cosi' il TCB del server non occupa per sempre
+            // uno slot del backlog del listener.
+            if ep.flags & NET_EP_FLAG_LISTEN == 0 && ep.remote_port == 0 {
+                svc.free_endpoint(idx);
+            }
+        }
         TcpSignal::Accepted(_) => {} // gestito da `apply_accepted`
         TcpSignal::Reset => {
             push(EV_RST, &[]);
@@ -741,14 +793,9 @@ fn real_main(_sp: u64) -> ! {
         }
     };
     svc.sink_ring = ring_base as *mut u8;
-    svc.net = Net::new(Config {
-        mac,
-        ra_accept: true,
-        ra_router: None,
-        ping: true,
-        ping_target: None,
-        seed: civis::rdtsc(),
-    });
+    // Il MAC si conosce solo dopo l'attach: si aggiorna, non si ricostruisce
+    // `Net` (un temporaneo di ~6 KiB sullo stack da 16 KiB sfonda la guardia).
+    svc.net.set_mac(mac);
 
     let link = match civis::send(driver, civis::NET_INFO, 0, 0) {
         Ok(r) => r.w0 != 0,
@@ -907,16 +954,15 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
                 return;
             }
             let Some(idx) = svc.alloc_endpoint(m.channel, peer_id) else {
+                civis::println!("[net] endpoint negato: tabella piena (MAX_ENDPOINTS)");
                 let _ = civis::reply(NET_EP_OPEN, !0u64, 0);
                 return;
             };
             // Crea shm per il ring dell'endpoint (RX + TX).
-            let ring_len = (NET_EP_RING_HDR * 2
-                + NET_EP_RING_SLOTS * NET_EP_SLOT_SIZE * 2)
-                .next_power_of_two();
-            let ring_id = match civis::shm_create(ring_len) {
+            let ring_id = match civis::shm_create(NET_EP_RING_BYTES) {
                 Ok(id) => id,
                 Err(_) => {
+                    civis::println!("[net] endpoint negato: regioni shm esaurite");
                     svc.free_endpoint(idx);
                     let _ = civis::reply(NET_EP_OPEN, !0u64, 0);
                     return;
@@ -929,6 +975,7 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
             ) {
                 Ok(b) => b,
                 Err(_) => {
+                    civis::println!("[net] endpoint negato: map del ring fallita");
                     svc.free_endpoint(idx);
                     let _ = civis::reply(NET_EP_OPEN, !0u64, 0);
                     return;
@@ -969,161 +1016,8 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
             );
         }
         NET_EP_TX => {
-            let ep_id = m.w0 as u16;
-            let slot_idx = m.w1 as usize;
-            let Some(idx) = svc.find_by_id(ep_id) else {
-                let _ = civis::reply(NET_EP_TX, !0u64, 0);
-                return;
-            };
-            let ep = svc.endpoints[idx]; // Copy
-            let ring = ep.ring_base;
-            let mut payload = [0u8; NET_EP_SLOT_SIZE - 2];
-            let (payload_len, dst, dst_port, event) =
-                match NetService::ep_tx_read_full(ring, slot_idx, &mut payload) {
-                    Some(v) => v,
-                    None => {
-                        let _ = civis::reply(NET_EP_TX, !0u64, 0);
-                        return;
-                    }
-                };
-            let is_tcp = ep.conn_id != NO_CONN
-                || (ep.proto == NET_PROTO_TCP as u16
-                    && ep.flags & (NET_EP_FLAG_CONNECT | NET_EP_FLAG_LISTEN) != 0);
-
-            // N6.1c: il TCP passa tutto dal core (`Net`). Un endpoint CONNECT
-            // apre la connessione alla prima scrittura; un listener non
-            // trasmette (risponde il core con SYN+ACK).
-            if is_tcp {
-                if event == EV_ABORT {
-                    // N6.3: chiude la connessione, tiene l'endpoint. Il
-                    // prossimo `NET_EP_TX` ne apre una nuova.
-                    if ep.conn_id != NO_CONN {
-                        svc.net.tcp_abort(ep.conn_id);
-                        if let Some(ep_mut) = svc.find_by_id_mut(ep_id) {
-                            ep_mut.conn_id = NO_CONN;
-                        }
-                    }
-                    NetService::ep_tx_consume_raw(ring);
-                    let _ = civis::reply(NET_EP_TX, 0, 0);
-                    return;
-                }
-                if ep.conn_id == NO_CONN {
-                    if ep.flags & NET_EP_FLAG_LISTEN != 0 {
-                        match svc.net.tcp_listen(ep.local_port) {
-                            Some(id) => {
-                                if let Some(ep_mut) = svc.find_by_id_mut(ep_id) {
-                                    ep_mut.conn_id = id;
-                                }
-                                let _ = civis::reply(NET_EP_TX, 0, 0);
-                            }
-                            None => {
-                                let _ = civis::reply(NET_EP_TX, !0u64, 0);
-                            }
-                        }
-                        NetService::ep_tx_consume_raw(ring);
-                        return;
-                    }
-                    match svc.net.tcp_connect(dst, dst_port, ep.local_port) {
-                        Some(id) => {
-                            if let Some(ep_mut) = svc.find_by_id_mut(ep_id) {
-                                ep_mut.conn_id = id;
-                                ep_mut.remote_addr = dst;
-                                ep_mut.remote_port = dst_port;
-                            }
-                        }
-                        None => {
-                            let _ = civis::reply(NET_EP_TX, !0u64, 0);
-                            return;
-                        }
-                    }
-                }
-                let conn = svc.endpoints[idx].conn_id;
-                if event == EV_FIN {
-                    // Convenzione N6.1c: uno slot TX con evento FIN chiede la
-                    // chiusura ordinata della connessione (nessun dato).
-                    svc.net.tcp_close(conn);
-                    NetService::ep_tx_consume_raw(ring);
-                    let _ = civis::reply(NET_EP_TX, 0, 0);
-                    return;
-                }
-                let n = svc
-                    .net
-                    .tcp_write(conn, &payload[..payload_len], civis::get_ticks() as u64);
-                NetService::ep_tx_consume_raw(ring);
-                if let Some(ep_mut) = svc.find_by_id_mut(ep_id) {
-                    ep_mut.tx_pkts = ep_mut.tx_pkts.saturating_add(1);
-                }
-                if n < payload_len {
-                    let _ = civis::reply(NET_EP_TX, !0u64, 0);
-                } else {
-                    let _ = civis::reply(NET_EP_TX, 0, 0);
-                }
-                return;
-            }
-
-            // Consegna locale (loopback o indirizzo proprio): scrivi direttamente
-            // nel ring RX del client destinatario, senza passare per il driver.
-            if dst.is_loopback() || svc.net.is_our_address(dst) {
-                let src_addr = if dst.is_loopback() {
-                    Ipv6Addr::LOOPBACK
-                } else {
-                    svc.net.link_local()
-                };
-                let delivered = if let Some(dst_idx) = svc.find_by_local_port(dst_port) {
-                    let dst_ep = svc.endpoints[dst_idx]; // Copy
-                    // Verifica che il sorgente corrisponda al peer atteso (se vincolato).
-                    if dst_ep.remote_port != 0 && dst_ep.remote_port != ep.local_port {
-                        false
-                    } else {
-                        // Per TCP, l'evento viene passato così com'è: spetta al
-                        // destinatario interpretarlo (es. SYN -> rispondi SYN+ACK).
-                        if NetService::ep_rx_write_full(
-                            dst_ep.ring_base,
-                            &src_addr,
-                            ep.local_port,
-                            dst_port,
-                            event,
-                            &payload[..payload_len],
-                        ) {
-                            notify(dst_ep.peer_chan, dst_ep.ep_id);
-                            true
-                        } else {
-                            false // ring RX pieno
-                        }
-                    }
-                } else {
-                    false // nessun endpoint in ascolto su dst_port
-                };
-                NetService::ep_tx_consume_raw(ring);
-                // Aggiorna contatori del mittente.
-                if let Some(ep_mut) = svc.find_by_id_mut(ep_id) {
-                    ep_mut.tx_pkts = ep_mut.tx_pkts.saturating_add(1);
-                }
-                let _ = civis::reply(
-                    NET_EP_TX,
-                    if delivered { 0 } else { !0u64 },
-                    0,
-                );
-                return;
-            }
-
-            // Consegna remota UDP: invia frame Ethernet via driver.
-            let sent = svc.net.send_udp(
-                dst,
-                ep.local_port,
-                dst_port,
-                &payload[..payload_len],
-                &mut DriverSink { ring: svc.sink_ring },
-            );
-            if sent {
-                NetService::ep_tx_consume_raw(ring);
-                if let Some(ep_mut) = svc.find_by_id_mut(ep_id) {
-                    ep_mut.tx_pkts = ep_mut.tx_pkts.saturating_add(1);
-                }
-                let _ = civis::reply(NET_EP_TX, 0, 0);
-            } else {
-                let _ = civis::reply(NET_EP_TX, !0u64, 0);
-            }
+            handle_ep_tx(svc, m.w0 as u16, m.w1 as usize);
+            return;
         }
         NET_EP_CLOSE => {
             let ep_id = m.w0 as u16;
@@ -1132,7 +1026,7 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
                 // chiuso l'endpoint senza handshake di chiusura).
                 let conn = svc.endpoints[idx].conn_id;
                 if conn != NO_CONN {
-                    svc.net.tcp_abort(conn);
+                    svc.abort_conn(conn, idx);
                 }
                 svc.free_endpoint(idx);
             }
@@ -1174,6 +1068,166 @@ fn handle_client(svc: &mut NetService, m: civis::IpcMsg) {
             }
         }
         _ => {}
+    }
+}
+
+/// Corpo di `NET_EP_TX`: il payload di uno slot sta in un buffer di ~2 KiB,
+/// che sul frame di `handle_client` (chiamato dal loop con `svc` vivo) riduceva
+/// lo stack residuo a poche centinaia di byte.
+#[inline(never)]
+fn handle_ep_tx(svc: &mut NetService, ep_id: u16, slot_idx: usize) {
+    let Some(idx) = svc.find_by_id(ep_id) else {
+        let _ = civis::reply(NET_EP_TX, !0u64, 0);
+        return;
+    };
+    let ep = svc.endpoints[idx]; // Copy
+    let ring = ep.ring_base;
+    let mut payload = [0u8; NET_EP_SLOT_SIZE - 2];
+    let (payload_len, dst, dst_port, event) =
+        match NetService::ep_tx_read_full(ring, slot_idx, &mut payload) {
+            Some(v) => v,
+            None => {
+                let _ = civis::reply(NET_EP_TX, !0u64, 0);
+                return;
+            }
+        };
+    let is_tcp = ep.conn_id != NO_CONN
+        || (ep.proto == NET_PROTO_TCP as u16
+            && ep.flags & (NET_EP_FLAG_CONNECT | NET_EP_FLAG_LISTEN) != 0);
+
+    // N6.1c: il TCP passa tutto dal core (`Net`). Un endpoint CONNECT
+    // apre la connessione alla prima scrittura; un listener non
+    // trasmette (risponde il core con SYN+ACK).
+    if is_tcp {
+        if event == EV_ABORT {
+            // N6.3: chiude la connessione, tiene l'endpoint. Il
+            // prossimo `NET_EP_TX` ne apre una nuova.
+            if ep.conn_id != NO_CONN {
+                svc.abort_conn(ep.conn_id, idx);
+                if let Some(ep_mut) = svc.find_by_id_mut(ep_id) {
+                    ep_mut.conn_id = NO_CONN;
+                }
+            }
+            NetService::ep_tx_consume_raw(ring);
+            let _ = civis::reply(NET_EP_TX, 0, 0);
+            return;
+        }
+        if ep.conn_id == NO_CONN {
+            if ep.flags & NET_EP_FLAG_LISTEN != 0 {
+                match svc.net.tcp_listen(ep.local_port) {
+                    Some(id) => {
+                        if let Some(ep_mut) = svc.find_by_id_mut(ep_id) {
+                            ep_mut.conn_id = id;
+                        }
+                        let _ = civis::reply(NET_EP_TX, 0, 0);
+                    }
+                    None => {
+                        let _ = civis::reply(NET_EP_TX, !0u64, 0);
+                    }
+                }
+                NetService::ep_tx_consume_raw(ring);
+                return;
+            }
+            match svc.net.tcp_connect(dst, dst_port, ep.local_port) {
+                Some(id) => {
+                    if let Some(ep_mut) = svc.find_by_id_mut(ep_id) {
+                        ep_mut.conn_id = id;
+                        ep_mut.remote_addr = dst;
+                        ep_mut.remote_port = dst_port;
+                    }
+                }
+                None => {
+                    let _ = civis::reply(NET_EP_TX, !0u64, 0);
+                    return;
+                }
+            }
+        }
+        let conn = svc.endpoints[idx].conn_id;
+        if event == EV_FIN {
+            // Convenzione N6.1c: uno slot TX con evento FIN chiede la
+            // chiusura ordinata della connessione (nessun dato).
+            svc.net.tcp_close(conn);
+            NetService::ep_tx_consume_raw(ring);
+            let _ = civis::reply(NET_EP_TX, 0, 0);
+            return;
+        }
+        let n = svc
+            .net
+            .tcp_write(conn, &payload[..payload_len], civis::get_ticks() as u64);
+        NetService::ep_tx_consume_raw(ring);
+        if let Some(ep_mut) = svc.find_by_id_mut(ep_id) {
+            ep_mut.tx_pkts = ep_mut.tx_pkts.saturating_add(1);
+        }
+        if n < payload_len {
+            let _ = civis::reply(NET_EP_TX, !0u64, 0);
+        } else {
+            let _ = civis::reply(NET_EP_TX, 0, 0);
+        }
+        return;
+    }
+
+    // Consegna locale (loopback o indirizzo proprio): scrivi direttamente
+    // nel ring RX del client destinatario, senza passare per il driver.
+    if dst.is_loopback() || svc.net.is_our_address(dst) {
+        let src_addr = if dst.is_loopback() {
+            Ipv6Addr::LOOPBACK
+        } else {
+            svc.net.link_local()
+        };
+        let delivered = if let Some(dst_idx) = svc.find_by_local_port(dst_port) {
+            let dst_ep = svc.endpoints[dst_idx]; // Copy
+            // Verifica che il sorgente corrisponda al peer atteso (se vincolato).
+            if dst_ep.remote_port != 0 && dst_ep.remote_port != ep.local_port {
+                false
+            } else {
+                // Per TCP, l'evento viene passato così com'è: spetta al
+                // destinatario interpretarlo (es. SYN -> rispondi SYN+ACK).
+                if NetService::ep_rx_write_full(
+                    dst_ep.ring_base,
+                    &src_addr,
+                    ep.local_port,
+                    dst_port,
+                    event,
+                    &payload[..payload_len],
+                ) {
+                    notify(dst_ep.peer_chan, dst_ep.ep_id);
+                    true
+                } else {
+                    false // ring RX pieno
+                }
+            }
+        } else {
+            false // nessun endpoint in ascolto su dst_port
+        };
+        NetService::ep_tx_consume_raw(ring);
+        // Aggiorna contatori del mittente.
+        if let Some(ep_mut) = svc.find_by_id_mut(ep_id) {
+            ep_mut.tx_pkts = ep_mut.tx_pkts.saturating_add(1);
+        }
+        let _ = civis::reply(
+            NET_EP_TX,
+            if delivered { 0 } else { !0u64 },
+            0,
+        );
+        return;
+    }
+
+    // Consegna remota UDP: invia frame Ethernet via driver.
+    let sent = svc.net.send_udp(
+        dst,
+        ep.local_port,
+        dst_port,
+        &payload[..payload_len],
+        &mut DriverSink { ring: svc.sink_ring },
+    );
+    if sent {
+        NetService::ep_tx_consume_raw(ring);
+        if let Some(ep_mut) = svc.find_by_id_mut(ep_id) {
+            ep_mut.tx_pkts = ep_mut.tx_pkts.saturating_add(1);
+        }
+        let _ = civis::reply(NET_EP_TX, 0, 0);
+    } else {
+        let _ = civis::reply(NET_EP_TX, !0u64, 0);
     }
 }
 

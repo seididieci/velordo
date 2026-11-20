@@ -25,8 +25,8 @@ use net::siit;
 // ── Costanti endpoint SIIT (da civis) ────────────────────────────────
 use civis::{
     NET_EP_CLOSE, NET_EP_FLAG_CONNECT, NET_EP_FLAG_EPHEMERAL, NET_EP_FLAG_LISTEN, NET_EP_OPEN,
-    NET_EP_RX_RING_OFF, NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE, NET_EP_STATS,
-    NET_EP_TX, NET_EP_TX_RING_OFF, NET_PROTO_IPV4, NET_PROTO_TCP, NET_PROTO_UDP,
+    NET_EP_RING_BYTES, NET_EP_RX_RING_OFF, NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE,
+    NET_EP_STATS, NET_EP_TX, NET_EP_TX_RING_OFF, NET_PROTO_IPV4, NET_PROTO_TCP, NET_PROTO_UDP,
     SIIT_EP_CLOSE, SIIT_EP_OPEN, SIIT_EP_TX,
 };
 
@@ -171,9 +171,8 @@ impl SiitService {
     fn free_endpoint(&mut self, idx: usize) {
         let ep = self.endpoints[idx];
         if ep.ring_id != 0 {
-            let ring_len = NET_EP_RING_HDR * 2 + NET_EP_RING_SLOTS * NET_EP_SLOT_SIZE * 2;
             if !ep.ring_base.is_null() {
-                let _ = civis::munmap(ep.ring_base as usize, ring_len);
+                let _ = civis::munmap(ep.ring_base as usize, NET_EP_RING_BYTES);
             }
             // Fase 30.1: l'owner chiude il ring (i client che lo mappano
             // tengono il loro ref finche' non fanno `munmap`).
@@ -601,10 +600,7 @@ fn handle_client(svc: &mut SiitService, m: civis::IpcMsg) {
                 let _ = civis::reply(SIIT_EP_OPEN, !0u64, 0);
                 return;
             };
-            let ring_len = (NET_EP_RING_HDR * 2
-                + NET_EP_RING_SLOTS * NET_EP_SLOT_SIZE * 2)
-                .next_power_of_two();
-            let ring_id = match civis::shm_create(ring_len) {
+            let ring_id = match civis::shm_create(NET_EP_RING_BYTES) {
                 Ok(id) => id,
                 Err(_) => {
                     svc.free_endpoint(idx);

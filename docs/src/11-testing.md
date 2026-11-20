@@ -329,7 +329,9 @@ log seriale.
   ping6 verso il router; PASS se il log contiene `[net] echo reply` (N1),
   `[netbroker] broker attivo` (ADR-0080 fase 6), `[netudp] risultato: PASS`
   (N2), `[net3] risultato: PASS` (N3), `[net4] risultato: PASS` (N4),
-  `[dns] risultato: PASS` (N5) e `[dns] upstream: PASS` (N6.0).
+  `[neteploop] risultato: PASS` (regressione: ciclo di vita endpoint, shm
+  sempre liberato), `[dns] risultato: PASS` (N5) e `[dns] upstream: PASS`
+  (N6.0).
   **E2 (ADR-0084)**: lo script include anche un **gate strutturale** — i
   client di rete del meccanismo non fanno polling a tick
   (`rg futex_wait libs/civis/src/net libs/tls-net/src` → 0) — e l'intera

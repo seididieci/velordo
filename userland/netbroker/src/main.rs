@@ -36,9 +36,9 @@ use civis;
 use custos_proto;
 use civis::{
     BROKER_CLOSE, BROKER_OPEN, BROKER_STATS, BROKER_TX, NET_EP_CLOSE, NET_EP_FLAG_EPHEMERAL,
-    NET_EP_OPEN, NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_RX_RING_OFF, NET_EP_SLOT_SIZE,
-    NET_EP_TX, NET_EP_TX_RING_OFF, NET_PROTO_IPV4, NET_PROTO_TCP, NET_PROTO_UDP, SIIT_EP_CLOSE,
-    SIIT_EP_OPEN, SIIT_EP_TX,
+    NET_EP_OPEN, NET_EP_RING_BYTES, NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_RX_RING_OFF,
+    NET_EP_SLOT_SIZE, NET_EP_TX, NET_EP_TX_RING_OFF, NET_PROTO_IPV4, NET_PROTO_TCP, NET_PROTO_UDP,
+    SIIT_EP_CLOSE, SIIT_EP_OPEN, SIIT_EP_TX,
 };
 
 static FUTEX: u32 = 0;
@@ -53,8 +53,8 @@ const RATE_MAX: u64 = 200;
 /// Finestra del rate limit (tick PIT, 10 ms): 0,5 s.
 const RATE_WINDOW: u64 = 50;
 
-/// Lunghezza del ring di un endpoint (RX + TX), la stessa che crea `net`.
-const RING_LEN: usize = NET_EP_RING_HDR * 2 + NET_EP_RING_SLOTS * NET_EP_SLOT_SIZE * 2;
+/// Lunghezza della regione ring di un endpoint (la stessa che crea `net`).
+const RING_LEN: usize = NET_EP_RING_BYTES;
 
 /// STATO DI UN CLIENTE: un ring broker verso il cliente, un endpoint `net`
 /// verso la rete.
@@ -652,8 +652,7 @@ fn open(broker: &mut Broker, m: civis::IpcMsg, now: u64) {
 
 /// Crea il ring broker e l'endpoint `net` dietro, poi risponde al cliente.
 fn open_ring(broker: &mut Broker, idx: usize, proto_no: u16, local_port: u16, flags: u64, _now: u64) {
-    let ring_len = RING_LEN.next_power_of_two();
-    let ring_id = match civis::shm_create(ring_len) {
+    let ring_id = match civis::shm_create(RING_LEN) {
         Ok(id) => id,
         Err(_) => {
             broker.free(idx);

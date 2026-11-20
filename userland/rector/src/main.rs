@@ -839,6 +839,11 @@ const TEST_NET3: SvcMeta = SvcMeta { bin: b"net3", obj: Some((b"tst", b"test/net
 // Probe IPv4/SIIT (N4, ADR-0069): eseguito solo con `net=1`, dopo net3.
 #[cfg(not(feature = "skip_tests"))]
 const TEST_NET4: SvcMeta = SvcMeta { bin: b"net4", obj: Some((b"tst", b"test/net4.bin")), prio: 16 };
+// Ciclo di vita endpoint: open/close ripetuti (TCP ordinato e brusco + UDP)
+// via broker. Prova che endpoint e regioni shm tornino liberi: senza, il 17°
+// endpoint di un boot non si apre più (era il `tlsprobe` che falliva).
+#[cfg(not(feature = "skip_tests"))]
+const TEST_NETEPLOOP: SvcMeta = SvcMeta { bin: b"neteploop", obj: Some((b"tst", b"test/neteploop.bin")), prio: 16 };
 // Probe TCP su rete reale (N6.1d): solo con `net=1`, dopo net4; si salta da
 // solo se manca `sys:nettcp.conf` (echo server sull'host).
 // N6.1d: il probe TCP di rete reale parla con `net` in diretta (`civis::net`
@@ -1123,6 +1128,7 @@ fn real_main(_sp: u64) -> ! {
             run_test(&TEST_NETUDP, &mut supervised);
             run_test(&TEST_NET3, &mut supervised);
             run_test(&TEST_NET4, &mut supervised);
+            run_test(&TEST_NETEPLOOP, &mut supervised);
             run_test(&TEST_NETTCP, &mut supervised);
             run_test(&TEST_DNS, &mut supervised);
             // Socket POSIX (N7.1): personalità `libr` sopra `civis::net`.

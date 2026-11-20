@@ -18,8 +18,10 @@
 
 use super::layout::PAGE_SIZE;
 
-/// Regioni condivise massime (slot statici).
-const SHM_MAX: usize = 16;
+/// Regioni condivise massime (slot statici). Un endpoint di rete occupa una
+/// regione (piu' `netdev` e i servizi): con 16 il boot di rete si esauriva
+/// prima del probe TLS.
+const SHM_MAX: usize = 32;
 /// Pagine massime per regione (256 KiB): bound strutturale sui frame contigui.
 const SHM_MAX_FRAMES: usize = 64;
 

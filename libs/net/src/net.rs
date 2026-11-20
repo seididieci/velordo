@@ -149,6 +149,17 @@ impl Net {
         self.mac
     }
 
+    /// Imposta il MAC del device, noto solo dopo l'attach al driver.
+    ///
+    /// Esiste per non **ricostruire** `Net` (che contiene le connessioni TCP e
+    /// costa ~6 KiB di stack per temporaneo) quando il MAC arriva: lo stack
+    /// user dei servizi e' 16 KiB e la ricostruzione sfondava la guardia.
+    /// Va chiamato prima di qualunque traffico.
+    pub fn set_mac(&mut self, mac: MacAddr) {
+        self.mac = mac;
+        self.cfg.mac = mac;
+    }
+
     pub fn link_local(&self) -> Ipv6Addr {
         self.link_local
     }

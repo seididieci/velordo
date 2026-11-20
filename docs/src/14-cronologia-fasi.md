@@ -4202,3 +4202,32 @@
   libs/tls-net` → 0. **Lezione**: un hint non è un messaggio come gli altri —
   chi lo legge non deve avere una reply aperta; e "c'è un evento" deve sempre
   significare "torna al lavoro", mai "continua a dormire".
+
+- **Rete: i ring si liberano davvero** (fix leak regioni shm, commit 1 del
+  lavoro N8). Root cause: `munmap` veniva chiamata con la sola geometria
+  degli slot (`NET_EP_RING_HDR*2 + SLOTS*SLOT_SIZE*2` = 65568 byte, non
+  multiplo di pagina) mentre la regione creata è `next_power_of_two()` =
+  131072 byte; `vma_unmap` (kernel/src/arc/vmm_user/vma.rs:143) rifiutava il
+  `munmap` non multiplo di pagina e il ref shm restava appeso per sempre. Al
+  17° endpoint di un boot `shm_create` falliva silenziosamente e `tlsprobe`
+  non apriva più l'endpoint TCP ("endpoint TCP non aperto").
+  Fix: un'unica costante `NET_EP_RING_BYTES` (syscall-numbers, page-rounded,
+  con `const assert!` di non-sovrapposizione tra RX e TX) usata sia in
+  `shm_create` sia in `munmap` da `civis::net::Endpoint::close`,
+  `civis::broker`, `net`, `siit`, `dns`, `netbroker`; rimossi tutti i
+  `.next_power_of_two()` residui. Secondo bug latente intercettato dagli
+  assert: i ring RX `[0, 0x8010)` e TX `[0x2000, 0xa010)` si sovrapponevano
+  di 24.592 byte dal primo commit di rete → `NET_EP_TX_RING_OFF` spostato da
+  `0x2000` a `0x9000`. Contorni: `SHM_MAX` 16→32, `MAX_ENDPOINTS` 8→16
+  (headroom), fail-loud in `net` (tabella piena / shm esaurite / map
+  fallita, su open e accept), `netecho` chiude i figli accettati su
+  Fin/Rst e rifiuta quando non c'è slot o il map fallisce, `net` propaga la
+  morte della connessione al fratello loopback (`abort_conn` per `conn_id`,
+  trova il figlio del listener che condivide lo stesso TCB). Nuovo probe di
+  regressione `testland/neteploop` (24 cicli TCP metà FIN metà bruschi +
+  5 UDP, via broker) aggiunto a `build-tests.sh`, `arca-tool.sh`, `rector`
+  (`TEST_NETEPLOOP`) e `run-net-tests.sh`. Stack di `net` riportato sotto
+  i 16 KiB: `Net` boxato dentro `NetService` e `NET_EP_TX` spostato in un
+  helper `#[inline(never)]` (`real_main`: 9176 → 4648 byte di frame).
+  Verifica: `run-net-tests.sh` PASS (`[neteploop] risultato: PASS`), gate
+  principale verde (7/7 righe, zero FAIL/PANIC/FAULT).

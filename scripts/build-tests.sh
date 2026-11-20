@@ -50,6 +50,9 @@ build_one testland/netudp testland/netudp/src/netudp.ld netudp.bin netudp
 build_one testland/net3 testland/net3/src/net3.ld net3.bin net3
 # Probe IPv4/SIIT (N4, ADR-0069): test fuori gate, eseguito solo con `net=1`.
 build_one testland/net4 testland/net4/src/net4.ld net4.bin net4
+# Ciclo di vita endpoint (regressione): open/close ripetuti via broker, prova
+# che endpoint e regioni shm tornino liberi (test fuori gate, `net=1`).
+build_one testland/neteploop testland/neteploop/src/neteploop.ld neteploop.bin neteploop
 build_one testland/nettcp testland/nettcp/src/nettcp.ld nettcp.bin nettcp
 # Probe DNS (N5, ADR-0069): test fuori gate, eseguito solo con `net=1`.
 build_one testland/dns testland/dns/src/dns.ld dnsprobe.bin dnsprobe

@@ -14,9 +14,8 @@ use broker_proto as proto;
 use net_ep;
 use syscall_numbers as sys;
 
-/// Lunghezza del ring di un endpoint broker (stesso di `net`).
-const RING_LEN: usize = sys::NET_EP_RING_HDR * 2
-    + sys::NET_EP_RING_SLOTS * sys::NET_EP_SLOT_SIZE * 2;
+/// Lunghezza della regione ring di un endpoint (stessa di `net`).
+const RING_LEN: usize = sys::NET_EP_RING_BYTES;
 
 /// Protocollo (e uscita) dell'endpoint broker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

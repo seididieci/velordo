@@ -214,6 +214,8 @@ seed_bin testland/build/identistest.bin test/idtest.bin tst test/idtest.bin
 seed_bin testland/build/netudp.bin test/netudp.bin tst test/netudp.bin
 seed_bin testland/build/net3.bin test/net3.bin tst test/net3.bin
 seed_bin testland/build/net4.bin test/net4.bin tst test/net4.bin
+# Ciclo di vita endpoint (regressione del leak di regioni shm).
+seed_bin testland/build/neteploop.bin test/neteploop.bin tst test/neteploop.bin
 # N6.1d: il probe TCP di rete reale parla con `net` in diretta -> `usr`
 # (ThirdParty, firmato); in `tst` resta la copia non firmata per ispezione.
 seed_bin testland/build/nettcp.bin test/nettcp.bin tst test/nettcp.bin

@@ -29,8 +29,9 @@ use core::sync::atomic::{fence, Ordering};
 use net::{dns, Ipv6Addr};
 
 use civis::{
-    DNS_CLOSE, DNS_OPEN, DNS_PORT, DNS_STATS, DNS_TX, NET_ADDR_ROUTER, NET_EP_RX_RING_OFF,
-    NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE, NET_EP_TX_RING_OFF, NET_PROTO_UDP,
+    DNS_CLOSE, DNS_OPEN, DNS_PORT, DNS_STATS, DNS_TX, NET_ADDR_ROUTER, NET_EP_RING_BYTES,
+    NET_EP_RX_RING_OFF, NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_SLOT_SIZE,
+    NET_EP_TX_RING_OFF, NET_PROTO_UDP,
 };
 
 use net::{CLASS_IN, DNS_HEADER_LEN, FLAG_QR, FLAG_RD, TYPE_A, TYPE_AAAA};
@@ -222,9 +223,8 @@ impl DnsService {
     fn free_endpoint(&mut self, idx: usize) {
         let ep = self.endpoints[idx];
         if ep.ring_id != 0 {
-            let ring_len = NET_EP_RING_HDR * 2 + NET_EP_RING_SLOTS * NET_EP_SLOT_SIZE * 2;
             if !ep.ring_base.is_null() {
-                let _ = civis::munmap(ep.ring_base as usize, ring_len);
+                let _ = civis::munmap(ep.ring_base as usize, NET_EP_RING_BYTES);
             }
             // Fase 30.1: l'owner chiude il ring (i client che lo mappano
             // tengono il loro ref finche' non fanno `munmap`).
@@ -799,9 +799,7 @@ fn handle_client(svc: &mut DnsService, m: civis::IpcMsg) {
                 let _ = civis::reply(DNS_OPEN, !0u64, 0);
                 return;
             };
-            let ring_len =
-                (NET_EP_RING_HDR * 2 + NET_EP_RING_SLOTS * NET_EP_SLOT_SIZE * 2).next_power_of_two();
-            let ring_id = match civis::shm_create(ring_len) {
+            let ring_id = match civis::shm_create(NET_EP_RING_BYTES) {
                 Ok(id) => id,
                 Err(_) => {
                     svc.free_endpoint(idx);

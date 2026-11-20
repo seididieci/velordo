@@ -91,8 +91,14 @@ fn real_main(_sp: u64) -> ! {
             let Some(mut child) = children[i].take() else {
                 continue;
             };
-            poll(&mut child, Role::Child, &mut children, &mut buf);
-            children[i] = Some(child);
+            if poll(&mut child, Role::Child, &mut children, &mut buf) {
+                // Connessione terminata: chiude l'endpoint (e il ring) in
+                // `net`. Senza, ogni connessione TCP lascia un endpoint e
+                // una regione shm occupati per sempre.
+                child.close();
+            } else {
+                children[i] = Some(child);
+            }
         }
         // Dati arrivati durante il drenaggio (o un hint perso mentre la coda
         // era piena): si continua a leggere senza dormire.
@@ -117,12 +123,19 @@ fn real_main(_sp: u64) -> ! {
 }
 
 /// Consuma gli slot ricevuti e rispecchia (echo) quello che arriva.
+///
+/// Ritorna `true` se l'endpoint e' **terminato**: il peer ha chiuso o
+/// resettato una connessione accettata (`Role::Child`), quindi il chiamante
+/// deve chiuderla — l'endpoint e il suo ring vivono in `net` finche' qualcuno
+/// non li libera. Il listener e l'endpoint UDP restano vivi per il prossimo
+/// client.
 fn poll(
     ep: &mut Endpoint,
     role: Role,
     children: &mut [Option<Endpoint>; MAX_CHILDREN],
     buf: &mut [u8],
-) {
+) -> bool {
+    let mut finished = false;
     while let Some(r) = ep.recv(buf) {
         match role {
             Role::Udp => echo(ep, &r, buf),
@@ -138,11 +151,15 @@ fn poll(
                 // uno slot TX vuoto marcato FIN (convenzione N6.1c).
                 Event::Fin | Event::Rst => {
                     let _ = ep.send(r.addr, r.port, Event::Fin, &[]);
+                    if matches!(role, Role::Child) {
+                        finished = true;
+                    }
                 }
                 _ => {}
             },
         }
     }
+    finished
 }
 
 /// Adotta il ring della connessione accettata (`[ep_id:2][ring_id:4]`).
@@ -158,11 +175,21 @@ fn attach(
     let id = u16::from_le_bytes([buf[0], buf[1]]);
     let ring_id = u32::from_le_bytes([buf[2], buf[3], buf[4], buf[5]]);
     let Some(slot) = children.iter().position(|c| c.is_none()) else {
-        return; // niente posto: la connessione resta al core
+        // Nessun posto: rifiuta la connessione. Lasciarla "al core" senza
+        // proprietario terrebbe occupati un endpoint e una regione shm in
+        // `net` per sempre.
+        let _ = civis::send(listener.chan(), civis::NET_EP_CLOSE, id as u64, 0);
+        return;
     };
-    if let Ok(ep) = Endpoint::attach(listener.chan(), id, ring_id, listener.local_port()) {
-        civis::println!("[netecho] connessione accettata ep={}", ep.id());
-        children[slot] = Some(ep);
+    match Endpoint::attach(listener.chan(), id, ring_id, listener.local_port()) {
+        Ok(ep) => {
+            civis::println!("[netecho] connessione accettata ep={}", ep.id());
+            children[slot] = Some(ep);
+        }
+        Err(_) => {
+            // Il ring non si mappa: l'endpoint in `net` va chiuso subito.
+            let _ = civis::send(listener.chan(), civis::NET_EP_CLOSE, id as u64, 0);
+        }
     }
 }
 

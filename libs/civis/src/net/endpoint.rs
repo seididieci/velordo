@@ -5,15 +5,12 @@ use core::sync::atomic::{fence, Ordering};
 
 use crate::{
     Error, NET_EP_CLOSE, NET_EP_FLAG_CONNECT, NET_EP_FLAG_EPHEMERAL, NET_EP_FLAG_LISTEN,
-    NET_EP_OPEN, NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_RX_RING_OFF, NET_EP_SLOT_SIZE,
-    NET_EP_STATS, NET_EP_TX, NET_EP_TX_RING_OFF, NET_PROTO_TCP, NET_PROTO_UDP,
+    NET_EP_OPEN, NET_EP_RING_BYTES, NET_EP_RING_HDR, NET_EP_RING_SLOTS, NET_EP_RX_RING_OFF,
+    NET_EP_SLOT_SIZE, NET_EP_STATS, NET_EP_TX, NET_EP_TX_RING_OFF, NET_PROTO_TCP, NET_PROTO_UDP,
 };
 
 /// Layout degli slot del servizio `net` (IPv6, 23 byte di metadati).
 const LAYOUT: net_ep::Layout = net_ep::Layout::IPV6;
-
-/// Lunghezza del ring di un endpoint (RX + TX), la stessa che crea `net`.
-const RING_LEN: usize = NET_EP_RING_HDR * 2 + NET_EP_RING_SLOTS * NET_EP_SLOT_SIZE * 2;
 
 /// Trasporto dell'endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -326,7 +323,7 @@ impl Endpoint {
             return;
         }
         let _ = crate::send(self.chan, NET_EP_CLOSE, self.id as u64, 0);
-        let _ = crate::munmap(self.ring as usize, RING_LEN);
+        let _ = crate::munmap(self.ring as usize, NET_EP_RING_BYTES);
         self.ring = core::ptr::null_mut();
     }
 
