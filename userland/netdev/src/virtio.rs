@@ -123,10 +123,12 @@ impl Device {
         bits & 1 != 0
     }
 
-    /// Drena il used ring RX nel ring condiviso; ritorna i pacchetti copiati.
-    pub fn poll_rx(&mut self) -> usize {
+    /// Drena il used ring RX nel ring condiviso; ritorna (pacchetti copiati,
+    /// vero se il ring e' passato da vuoto a non vuoto: hint per `net`).
+    pub fn poll_rx(&mut self) -> (usize, bool) {
         let used = self.dma as usize + RX_USED_OFF;
         let mut n = 0usize;
+        let was_empty = self.ring_rx_head() == self.ring_rx_tail();
         loop {
             let idx = unsafe { read_volatile((used + 2) as *const u16) };
             if idx == self.rx_used_idx {
@@ -151,7 +153,7 @@ impl Device {
         if n > 0 {
             self.notify(QUEUE_RX);
         }
-        n
+        (n, was_empty && n > 0)
     }
 
     /// Consuma il ring TX condiviso e posta i frame al device.

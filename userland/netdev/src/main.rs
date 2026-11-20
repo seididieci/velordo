@@ -31,6 +31,9 @@ fn real_main(_sp: u64) -> ! {
             None
         }
     };
+    // Canale del servizio `net`, impostato al primo NET_ATTACH. Il driver lo
+    // usa per mandare NET_RX_EVENT quando il ring RX si riempie (N8).
+    let mut net_chan: u64 = 0;
 
     civis::signal_ready(1);
 
@@ -38,6 +41,8 @@ fn real_main(_sp: u64) -> ! {
         match civis::recv() {
             Ok(msg) => match msg.tag {
                 civis::NET_ATTACH => {
+                    // Ricorda il canale di `net` per gli hint di RX (N8).
+                    net_chan = msg.channel;
                     let (mac, ring_id) = match dev.as_ref() {
                         Some(d) => {
                             let m = d.mac();
@@ -55,9 +60,11 @@ fn real_main(_sp: u64) -> ! {
                     let _ = civis::reply(msg.tag, mac, ring_id);
                 }
                 civis::NET_POLL => {
-                    let n = match dev.as_mut() {
+                    // N8: `net` non piu' polla a ogni tick; il driver avvisa
+                    // con NET_RX_EVENT. Mantenuto per retrocompatibilita'.
+                    let (n, _hint) = match dev.as_mut() {
                         Some(d) => d.poll_rx(),
-                        None => 0,
+                        None => (0, false),
                     };
                     let _ = civis::reply(msg.tag, n as u64, 0);
                 }
@@ -78,7 +85,18 @@ fn real_main(_sp: u64) -> ! {
                 civis::IRQ_NOTIFY_NET => {
                     if let Some(d) = dev.as_mut() {
                         d.handle_irq();
-                        d.poll_rx();
+                        let (_n, hint) = d.poll_rx();
+                        // Un IRQ puo' essere anche la **completamento** di un TX
+                        // (o il momento buono per riprovare un frame rimasto in
+                        // coda al device): il ring TX condiviso si drena qui,
+                        // cosi' il progresso non dipende da un kick di `net`.
+                        d.tx();
+                        // N8: se il ring RX e' passato da vuoto a non vuoto,
+                        // avvisa `net` (fire-and-forget, mai reply: il dato
+                        // resta nel ring, l'evento e' solo un campanello).
+                        if hint && net_chan != 0 {
+                            let _ = civis::send_async(net_chan, civis::NET_RX_EVENT, 0, 0);
+                        }
                     }
                 }
                 civis::EXIT_NOTIFY => {}

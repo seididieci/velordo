@@ -239,10 +239,10 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   il MAC resta usabile, si scarta dopo 3 NS senza risposta), IID
   randomizzato, no DAD; **TCP reale** (N6.1: `tcp/conn.rs`, macchina a stati
   pura con 10 stati, finestra 2–4 segmenti, go-back-N RTO 1/2/4 s, solo
-  in-order, FIN/RST/TIME_WAIT, listener + backlog 4); 51 unit test host
+  in-order, FIN/RST/TIME_WAIT, listener + backlog 4); 54 unit test host
   IPv6/NDP/TCP/SIIT/DNS/parse), `userland/netdev` driver virtio-net (1 RX + 1 TX,
   64 descrittori, 2048 B, no offload, MSI-X, ring condiviso via shm),
-  `userland/net` servizio (attach, poll, SLAAC, ping6 + endpoint a
+  `userland/net` servizio (attach, RX a eventi N8, SLAAC, ping6 + endpoint a
   capability: `NET_EP_OPEN/TX/CLOSE/STATS`, tag `0x6F`/`0x73`/`0x81`/`0x82`,
   shm ring SPSC per endpoint; TCP: connessioni **nel core**, id di
   connessione, `EV_ACCEPT`/`EV_SYNACK`/`EV_FIN`/`EV_RST`, `NET_EP_TX` TCP = 0
@@ -351,8 +351,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   `siit`, `netbroker`, `Stream` (DoT/TLS) e `libr::sock::recvfrom`: **zero
   risvegli a tick** (`rg futex_wait libs/civis/src/net libs/tls-net` → 0,
   gate strutturale in `run-net-tests.sh`); nei servizi restano solo i retry
-  di boot `service_lookup` (ADR-0067) e il servizio `net` resta periodico per
-  timer TCP/NDP + poll del driver. **Trappola trovata a runtime**: la reply è
+  di boot `service_lookup` (ADR-0067). **Trappola trovata a runtime**: la reply è
   implicita al messaggio corrente — leggere un hint con una reply in sospeso
   ne sposta il target (client appeso, reply spaiata): **si conferma prima
   (ack) e si pubblica dopo nel ring** (in `dns`), mai dormire con una reply
@@ -360,8 +359,19 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   estraneo e **resta** addormentato = deadlock del broker servito ai client →
   `Event` significa "c'è qualcosa da fare" e i messaggi estranei vanno nello
   stash di `civis::ipc` (letti da `recv`/`recv_poll`, mai persi).
-  Prossimo: evento di RX dal driver a `net` (N8, oggi è un poll a tick), DoH
-  (N6.4), poi VT-d.
+  **N8 (ADR-0085, completato)**: anche il **servizio** `net` è a eventi — il
+  driver `netdev` manda `NET_RX_EVENT` (0x8D, fire-and-forget, canale appreso
+  al `NET_ATTACH`) quando il ring RX condiviso passa da vuoto a non vuoto, e
+  il servizio dorme su `recv_timeout(Net::next_deadline())` (retransmission
+  TCP, TIME_WAIT, RS/echo, aging NDP; `None` → `0` = mai). Niente più
+  `NET_POLL` a tick (gate strutturale `rg NET_POLL userland/net/src` → 0),
+  kick `NET_TX` solo se `head != tail`, driver che drena il TX anche su IRQ.
+  Corretto un bug latente: `Conn::rto_expired` chiudeva una connessione
+  **inattiva** dopo `MAX_RETRIES` poll. CPU idle misurata **0,0%** (soglia
+  5%, boot dedicato nello script). Trappole: il primo RS ha bisogno del suo
+  kick; il confronto per il kick è head-vs-tail (non "ho scritto io"); le
+  deadline devono coprire anche i byte bufferizzati e mai partiti.
+  Prossimo: DoH (N6.4), poi VT-d.
 - **Input a eventi (E0, ADR-0082)**: il device `/dev/input/keyboard` risponde
   subito (`0` = vuoto), quindi l'evento arriva per IPC: `porta` tiene i
   sottoscrittori (`INPUT_ATTACH`/`INPUT_DETACH`, tag 0x46/0x47) con focus
@@ -699,7 +709,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
 
 ```bash
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term, net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, valloc, blake2s, sig, tls: 125 test
+./scripts/run-unit-tests.sh   # term, net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, valloc, blake2s, sig, tls: 129 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh

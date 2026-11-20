@@ -132,6 +132,63 @@ if rg -q 'futex_wait' libs/civis/src/net libs/tls-net/src 2>/dev/null; then
     rg -n 'futex_wait' libs/civis/src/net libs/tls-net/src || true
     fail=1
 fi
+
+# N8 (ADR-0085): il **servizio** `net` non polla piu' il driver a ogni tick.
+# Il debito era `NET_POLL` a ogni giro; ora il driver spinge `NET_RX_EVENT`
+# quando il ring RX passa da vuoto a non vuoto. Gate strutturale: nel servizio
+# non deve restare nessun riferimento a `NET_POLL`.
+if rg -q 'NET_POLL' userland/net/src 2>/dev/null; then
+    echo "[net-tests] FAIL: il servizio net polla ancora il driver (NET_POLL, N8)"
+    rg -n 'NET_POLL' userland/net/src || true
+    fail=1
+fi
+
+# N8: guardia di CPU in **idle**. Un servizio che si sveglia a ogni tick
+# (10 ms) tiene QEMU occupato anche senza traffico; con l'attesa sulla
+# prossima scadenza del core il boot fermo deve stare sotto il 5%.
+# Boot dedicato senza suite (init arriva al login, `net` dorme): si campiona
+# la CPU di QEMU su /proc come fa la shell nativa (E0/ADR-0082).
+if [ "${NET_IDLE_CPU:-1}" = "1" ]; then
+    LOG_IDLE="${LOG%.log}-idle.log"
+    NET=1 RUN_TESTS=0 RUN_DISPLAY=none ./run.sh >"$LOG_IDLE" 2>&1 &
+    QPID=$!
+    # Si misura solo a **regime**: si aspetta il prompt del login (il boot e'
+    # finito e i servizi sono in attesa) invece di un tempo fisso, che su un
+    # host senza KVM misurerebbe il boot. Tetto: NET_IDLE_SETTLE (secondi).
+    settle="${NET_IDLE_SETTLE:-60}"
+    for _ in $(seq 1 "$settle"); do
+        rg -q '\[login\] Nome utente' "$LOG_IDLE" 2>/dev/null && break
+        sleep 1
+    done
+    sleep 2   # un attimo perche' il login si blocchi sull'evento
+    if ! kill -0 "$QPID" 2>/dev/null; then
+        echo "[net-tests] FAIL: boot idle terminato prima della misura di CPU"
+        fail=1
+    else
+        CPU=$(python3 - "$QPID" <<'PY'
+import os, sys, time
+pid = int(sys.argv[1])
+def ticks():
+    with open("/proc/%d/stat" % pid) as f:
+        p = f.read().split()
+    return int(p[13]) + int(p[14])   # utime + stime
+a = ticks(); t0 = time.time(); time.sleep(1.0); b = ticks()
+print("%.1f" % (100.0 * ((b - a) / os.sysconf("SC_CLK_TCK")) / (time.time() - t0)))
+PY
+        )
+        kill "$QPID" 2>/dev/null || true
+        wait "$QPID" 2>/dev/null || true
+        echo "[net-tests] CPU idle (net a eventi, N8): ${CPU}%"
+        # 5% e' la stessa soglia della shell nativa (E0/ADR-0082): un
+        # busy-wait a tick sta a ~100%.
+        if ! awk -v c="$CPU" 'BEGIN { exit !(c < 5.0) }'; then
+            echo "[net-tests] FAIL: net si sveglia a tick (CPU ${CPU}% >= 5%)"
+            fail=1
+        fi
+        rg -q '\[net\] registered as service Net' "$LOG_IDLE" \
+            || { echo "[net-tests] FAIL: nel boot idle il servizio net non e' partito"; fail=1; }
+    fi
+fi
 if [ -n "${NET_TCP_PEER:-}" ]; then
     rg -q '\[nettcp\] risultato: PASS' "$LOG" || { echo "[net-tests] manca: TCP rete reale (N6.1d)"; fail=1; }
 fi

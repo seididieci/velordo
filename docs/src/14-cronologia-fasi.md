@@ -4231,3 +4231,38 @@
   helper `#[inline(never)]` (`real_main`: 9176 → 4648 byte di frame).
   Verifica: `run-net-tests.sh` PASS (`[neteploop] risultato: PASS`), gate
   principale verde (7/7 righe, zero FAIL/PANIC/FAULT).
+
+- **N8 — RX a eventi: il driver sveglia `net`** (ADR-0085, commit 2 del
+  lavoro). Con E2 tutti i **client** dormono su un hint; il servizio `net`
+  no: chiudeva il giro con `recv_timeout(get_ticks() + 1)` e a ogni tick
+  faceva `NET_POLL` + `NET_TX` (due IPC sincroni col driver ogni 10 ms, per
+  sempre) più `on_tick`/`tcp_poll` che quasi sempre non avevano nulla da fare.
+  **Decisione**: `NET_RX_EVENT` (0x8D) — il driver, quando l'IRQ fa passare il
+  ring RX condiviso da vuoto a non vuoto, manda un hint al canale appreso al
+  `NET_ATTACH` (fire-and-forget; il ring resta la verità). Il servizio dorme
+  su `recv_timeout(Net::next_deadline())`: minimo fra retransmission TCP,
+  TIME_WAIT, retry RS/echo e aging NDP; `None` → `0` = mai (solo eventi). Il
+  kick `NET_TX` parte solo se `head != tail`, e il driver drena il TX anche
+  su IRQ (il progresso non dipende dal servizio).
+  **Bug latente trovato dal cambio**: `Conn::rto_expired` era
+  `!closed && now >= rto_deadline`, quindi una connessione **inattiva**
+  accumulava `retries` a ogni poll e dopo `MAX_RETRIES` veniva chiusa. Con il
+  tick era invisibile (serviva restare fermi ~4 s), senza tick sarebbe stato
+  un timeout silenzioso: ora conta solo lo spazio di sequenza non confermato
+  (`retransmittable`), con `next_deadline` separato per TIME_WAIT.
+  **Trappole**: (1) il primo RS emesso da `link_up` **prima** del loop aveva
+  bisogno del suo kick esplicito, altrimenti restava nel ring TX fino alla
+  scrittura successiva; (2) un kick condizionato su "ho scritto in questo
+  giro" perde i frame scritti mentre si serve una richiesta arrivata
+  nell'attesa in coda al loop — il confronto giusto è **head (consumatore) vs
+  tail (produttore)**, non una variabile di stato; (3) `next_deadline` deve
+  coprire anche i byte **bufferizzati e mai partiti** (handshake non concluso
+  o finestra del peer a zero), con un retry a RTO minimo: a zero farebbe
+  girare a vuoto il servizio.
+  **Vittoria**: `run-net-tests.sh` PASS (echo reply, UDP/TCP via broker,
+  SIIT, ciclo di vita endpoint, DNS statico+upstream, socket POSIX) + **CPU
+  idle 0,0%** su un boot dedicato senza suite (soglia 5%, come E0) + gate
+  strutturale `rg NET_POLL userland/net/src` → 0; DoT invariato (`dot: PASS`
+  ×2, `dotfail: PASS`); gate principale verde; 2 unit test host nuovi
+  (`tcp_idle_established_non_muore_ai_tick`,
+  `next_deadline_segue_i_lavori_in_sospeso`, 129 test in tutto).

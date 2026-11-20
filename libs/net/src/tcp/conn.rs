@@ -291,9 +291,45 @@ impl Conn {
         }
     }
 
+    /// Ritorna true se c'e' **spazio di sequenza non confermato**: SYN o
+    /// SYN+ACK inviato, dati in volo, FIN non ancora acked. Una connessione
+    /// inattiva (`snd_nxt == snd_una`) non ha niente da ritrasmettere: senza
+    /// questo controllo l'RTO scadeva anche su una connessione ferma e dopo
+    /// `MAX_RETRIES` la chiudeva — con N8 (`tcp_poll` non piu' a ogni tick,
+    /// ma solo quando c'e' lavoro o una deadline) sarebbe stato un timeout
+    /// silenzioso su ogni connessione idle.
+    fn retransmittable(&self) -> bool {
+        if self.closed || self.state == State::TimeWait {
+            return false;
+        }
+        self.snd_nxt != self.snd_una
+    }
+
     /// Ritorna true se una retransmission è in scadenza (da gestire in `next_tx`).
     fn rto_expired(&self, now: u64) -> bool {
-        !self.closed && now >= self.rto_deadline
+        self.retransmittable() && now >= self.rto_deadline
+    }
+
+    /// Ritorna true se ci sono byte **bufferizzati e non ancora spediti**
+    /// (handshake non concluso o finestra del peer chiusa): il servizio deve
+    /// ripassare a spedirli, ma non subito-subito (una finestra a zero
+    /// farebbe girare a vuoto il loop).
+    pub fn has_unsent_data(&self) -> bool {
+        !self.closed && !self.send_buf.is_empty() && self.snd_nxt == self.snd_una
+    }
+
+    /// Tick assoluto in cui questa connessione ha bisogno di lavoro, se ne ha
+    /// uno (retransmission in scadenza o scadenza di TIME_WAIT). `None` =
+    /// niente da fare: il servizio puo' dormire senza svegliarsi a tick.
+    pub fn next_deadline(&self) -> Option<u64> {
+        if self.closed {
+            return None;
+        }
+        if self.state == State::TimeWait || self.retransmittable() {
+            Some(self.rto_deadline)
+        } else {
+            None
+        }
     }
 
     /// Sequenza `a` è dopo `b` nello spazio circolare a 32 bit.

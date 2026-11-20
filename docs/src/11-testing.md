@@ -310,7 +310,7 @@ log seriale.
   pieno/vuoto/wrap; N7.0), `libs/valloc`, `blake2s` e
   `libs/tls` (trasporto/adapter, DRBG ChaCha20, fail-closed della
   configurazione: SNI/CA mancanti e buffer record troppo piccoli danno
-  `Error::Config`) (**118 test** in tutto; `libs/net` ne ha 52, 21 dei quali
+  `Error::Config`) (**129 test** in tutto; `libs/net` ne ha 54, 23 dei quali
   sulla macchina a stati TCP e sul wiring, 2 sul framing RFC 7858). Girano da una
   **directory neutra**: il `.cargo/config.toml` del repo impone
   `build.target = x86_64-unknown-none` + `build-std` in base alla directory
@@ -339,6 +339,14 @@ log seriale.
   `civis::net::wait`): `netecho`, `dns`, `siit`, `netbroker`, `Stream` e le
   socket POSIX dormono sull'hint del servizio. I `futex_wait` che restano
   nei servizi sono solo i retry di boot `service_lookup` (ADR-0067).
+  **N8 (ADR-0085)**: anche il **servizio** `net` è a eventi — il driver manda
+  `NET_RX_EVENT` quando il ring RX passa da vuoto a non vuoto e il servizio
+  dorme su `recv_timeout(Net::next_deadline())` (retransmission TCP,
+  TIME_WAIT, RS/echo, aging NDP) senza risvegli a tick. Due gate in più:
+  `rg NET_POLL userland/net/src` → 0 (il poll a tick non può rientrare) e la
+  **CPU idle** misurata su un boot dedicato senza suite (`net=1`): deve stare
+  sotto il 5% (misurato: 0,0%; un polling a 100 Hz sta a ~100%).
+  `NET_IDLE_CPU=0` salta la misura (boot più corto).
   I probe di **policy** (`netudp`/`net3`/`net4`) sono in `tst`, quindi
   `Untrusted`: `net`/`siit` negano loro l'endpoint diretto e navigano solo
   via broker — se passano, il modello della fase 6 è verificato end-to-end.

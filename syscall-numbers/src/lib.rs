@@ -623,6 +623,13 @@ pub const NET_ADDR_ROUTER: u64 = 2;
 /// resta la verita' (E2, ADR-0084) — un hint perso non perde dati, il client
 /// ricontrolla il ring a ogni risveglio.
 pub const NET_EP_EVENT: u64 = 0x8C;
+/// `NET_RX_EVENT` → hint dal driver `netdev` al servizio `net`: il ring RX
+/// del driver e' passato da vuoto a non vuoto (pacchetti nuovi arrivati dal
+/// device). Fire-and-forget, MAI reply. `w0`/`w1` inutilizzati.
+/// (N8, ADR-0085: il servizio `net` non piu' polla il driver a ogni tick;
+/// dorme su `recv_timeout(next_deadline)` e si sveglia sull'evento RX o sul
+/// timer.)
+pub const NET_RX_EVENT: u64 = 0x8D;
 
 // ── Ring per endpoint (SPSC, shm) ──────────────────────────────────
 /// Slot del ring per endpoint (per direzione).

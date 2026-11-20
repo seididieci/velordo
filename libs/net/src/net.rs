@@ -17,6 +17,9 @@ const NEIGHBORS: usize = 8;
 const TCP_CONNS: usize = 16;
 /// Figli simultanei per un listener (N6.1c).
 const TCP_BACKLOG: usize = 4;
+/// Attesa prima di riprovare a spedire byte rimasti in coda senza essere mai
+/// partiti (handshake non concluso o finestra del peer a zero): 1 s a 100 Hz.
+const TCP_UNSENT_RETRY: u64 = 100;
 /// 1 s a 100 Hz.
 const RS_INTERVAL: u64 = 100;
 const ECHO_INTERVAL: u64 = 100;
@@ -374,6 +377,61 @@ impl Net {
         self.link_up = true;
         events(Event::LinkUp);
         self.send_rs(now, sink);
+    }
+
+    /// Tick assoluto del prossimo lavoro **senza input esterno**: retry di
+    /// RS/echo, aging della cache dei vicini, retransmission TCP e TIME_WAIT.
+    ///
+    /// `None` = non c'e' niente in scadenza: chi chiama puo' dormire senza
+    /// scadenza (il risveglio arriva da un evento: un frame dal driver, una
+    /// richiesta di un client). È il pezzo che rende `net` a eventi (N8):
+    /// senza, il servizio doveva svegliarsi a ogni tick per far avanzare
+    /// timer che quasi sempre non avevano nulla da fare.
+    pub fn next_deadline(&self, now: u64) -> Option<u64> {
+        let mut next: Option<u64> = None;
+        let mut push = |d: u64| {
+            next = Some(match next {
+                Some(n) => n.min(d),
+                None => d,
+            });
+        };
+        // Solo con il link su hanno senso i timer NDP/RS/echo (`on_tick`
+        // esce subito senza link). Il TCP invece vive anche su loopback.
+        if self.link_up {
+            if self.router.is_none() && self.rs_sent < MAX_TRIES {
+                push(self.last_rs + RS_INTERVAL);
+            }
+            if self.router.is_some()
+                && self.cfg.ping
+                && !self.echo_done
+                && self.echo_sent < MAX_TRIES
+            {
+                push(self.last_echo + ECHO_INTERVAL);
+            }
+            for nb in &self.neighbors {
+                if !nb.valid || nb.probes >= NEIGHBOR_MAX_PROBES {
+                    continue;
+                }
+                // Aging: si tocca la entry quando `now > last + TTL`; il probe
+                // parte quando `now >= probed + PROBE`. Il piu' tardi dei due.
+                push((nb.last + NEIGHBOR_TTL + 1).max(nb.probed + NEIGHBOR_PROBE));
+            }
+        }
+        for c in self.tcp.iter().flatten() {
+            if c.state() == tcp::State::Listen {
+                continue;
+            }
+            if let Some(d) = c.next_deadline() {
+                push(d);
+            } else if c.has_unsent_data() {
+                // Byte in coda che non sono ancora partiti (handshake non
+                // concluso o finestra del peer a zero): si riprova fra un
+                // RTO minimo. Non "subito", o una finestra a zero farebbe
+                // girare il servizio a vuoto.
+                push(now.saturating_add(TCP_UNSENT_RETRY));
+            }
+        }
+        next
     }
 
     /// Timer periodico (1 tick = 10 ms): RS/echo retry, aging cache.
@@ -831,6 +889,15 @@ impl Net {
         self.tcp_conn(id).map(|c| c.state())
     }
 
+    /// Quadrupla della connessione `id`: `(local_port, remote_addr,
+    /// remote_port)`. Serve al servizio per risalire all'**altro** endpoint
+    /// locale della stessa connessione in loopback (client e listener hanno
+    /// due TCB distinti: il legame e' la quadrupla, non l'id).
+    pub fn tcp_endpoints(&self, id: u8) -> Option<(u16, Ipv6Addr, u16)> {
+        self.tcp_conn(id)
+            .map(|c| (c.local_port, c.remote_addr, c.remote_port))
+    }
+
     /// Byte leggibili sulla connessione `id`.
     pub fn tcp_ready(&self, id: u8) -> usize {
         self.tcp_conn(id).map(|c| c.readable()).unwrap_or(0)
@@ -940,6 +1007,7 @@ impl Net {
             Some(i) => Some(i),
             None => {
                 let Some(l) = self.tcp_listener(hdr.dst_port) else {
+                    events(Event::Dropped("tcp nessun listener"));
                     // Nessuno in ascolto: RST (mai in risposta a un RST).
                     if hdr.flags & tcp::FLAG_RST == 0 {
                         let mut seg = [0u8; 20];
@@ -968,6 +1036,7 @@ impl Net {
                     c.local_port == hdr.dst_port && c.state() != tcp::State::Listen
                 }).count();
                 if children >= TCP_BACKLOG {
+                    events(Event::Dropped("tcp backlog pieno"));
                     if hdr.flags & tcp::FLAG_RST == 0 {
                         let mut seg = [0u8; 20];
                         let len = tcp::write_checked(
@@ -1558,5 +1627,59 @@ mod tests {
         sink.frames.clear();
         n.tcp_poll(101, &mut sink, &mut |_| {});
         assert_eq!(sink.frames.len(), 1, "SYN ritrasmesso");
+    }
+
+    #[test]
+    fn tcp_idle_established_non_muore_ai_tick() {
+        // N8/ADR-0085: con `tcp_poll` chiamata solo quando c'e' lavoro (non
+        // piu' a ogni tick), un `rto_expired` che scattava anche su una
+        // connessione ferma la chiudeva dopo MAX_RETRIES poll. Una
+        // connessione Established senza dati in volo non ha niente da
+        // ritrasmettere: molti poll a orari arbitrari devono lasciarla viva.
+        let mut n = tcp_net();
+        let mut sink = new_sink();
+        n.tcp_listen(9400).expect("listener");
+        poll_n(&mut n, &mut sink, 0, 2);
+        let cli = n.tcp_connect(Ipv6Addr::LOOPBACK, 9400, 9401).expect("connect");
+        poll_n(&mut n, &mut sink, 0, 6);
+        assert_eq!(n.tcp_state(cli), Some(tcp::State::Established));
+        // Molti secondi dopo, senza dati: resta Established.
+        for t in [1_000u64, 5_000, 50_000, 500_000] {
+            n.tcp_poll(t, &mut sink, &mut |_| {});
+            assert_eq!(
+                n.tcp_state(cli),
+                Some(tcp::State::Established),
+                "una connessione inattiva non deve scadere per RTO (t={})",
+                t
+            );
+        }
+    }
+
+    #[test]
+    fn next_deadline_segue_i_lavori_in_sospeso() {
+        // Deadline = prossima cosa da fare: dati in volo (RTO) oppure niente.
+        // `Net` **senza** `link_up`: niente RS in attesa e nessun vicino da
+        // invecchiare, quindi l'unica sorgente di scadenza e' il TCP.
+        let mut c = cfg();
+        c.ping = false;
+        let mut n = Net::new(c);
+        let mut sink = new_sink();
+        n.tcp_listen(9500).expect("listener");
+        poll_n(&mut n, &mut sink, 0, 2);
+        let cli = n.tcp_connect(Ipv6Addr::LOOPBACK, 9500, 9501).expect("connect");
+        // SYN in volo: la deadline e' l'RTO del SYN.
+        assert!(
+            n.next_deadline(0).is_some(),
+            "con un SYN in volo c'e' una scadenza"
+        );
+        poll_n(&mut n, &mut sink, 0, 6);
+        assert_eq!(n.tcp_state(cli), Some(tcp::State::Established));
+        assert_eq!(n.next_deadline(0), None, "handshake chiuso: nessuna scadenza");
+        // Dati in volo verso il peer: si riapre una scadenza.
+        n.tcp_write(cli, b"x", 0);
+        assert!(
+            n.next_deadline(0).is_some(),
+            "dati in volo: la deadline torna a esistere"
+        );
     }
 }

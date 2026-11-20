@@ -240,24 +240,21 @@ impl NetService {
     }
 
     /// Chiude la connessione `conn` propagando la morte all'**altro**
-    /// endpoint locale della stessa connessione (figlio del listener in
-    /// loopback, che condivide lo stesso `conn_id`). `tcp_abort` butta il
-    /// TCB senza mandare niente sul filo: senza questa propagazione il
-    /// figlio del listener non riceve mai `EV_FIN`/`EV_RST`, il suo
-    /// proprietario non lo chiude e l'endpoint (col suo ring) resta occupato
-    /// per sempre, col TCB del server che rimane in tabella fino a saturare
-    /// il backlog (`TCP_BACKLOG`) e far RST a ogni nuova SYN.
+    /// endpoint locale della stessa connessione (loopback) e al suo TCB.
+    ///
+    /// In loopback una connessione TCP ha **due** TCB nel core (il CONNECT
+    /// del client e il figlio creato dal listener) e `tcp_abort` ne butta
+    /// via uno solo, senza mandare niente sul filo: senza questa propagazione
+    /// il TCB del server resta in tabella per sempre, il backlog del listener
+    /// (`TCP_BACKLOG` = 4) si satura e ogni SYN nuova prende RST — e il
+    /// proprietario dell'altro endpoint non riceve mai `EV_FIN`/`EV_RST`,
+    /// quindi non lo chiude.
     fn abort_conn(&mut self, conn: u8, except: usize) {
-        for i in 0..MAX_ENDPOINTS {
-            if i == except || self.endpoints[i].state == EpState::Free {
-                continue;
-            }
-            let ep = self.endpoints[i];
-            if ep.conn_id != conn {
-                continue;
-            }
-            // Il proprietario sa che la connessione e' morta (puo' chiudere
-            // il suo lato e smappare), poi l'endpoint si libera qui.
+        if let Some(peer) = self.peer_endpoint(except) {
+            let ep = self.endpoints[peer];
+            // Il proprietario sa che la connessione e' morta: puo' chiudere
+            // il suo lato (e smappare). L'endpoint non si libera qui: chi lo
+            // possiede decide (un CONNECT persistente sopravvive, N6.3).
             if NetService::ep_rx_write_full(
                 ep.ring_base,
                 &Ipv6Addr::LOOPBACK,
@@ -268,9 +265,31 @@ impl NetService {
             ) {
                 notify(ep.peer_chan, ep.ep_id);
             }
-            self.free_endpoint(i);
+            if ep.conn_id != NO_CONN {
+                self.net.tcp_abort(ep.conn_id);
+            }
         }
         self.net.tcp_abort(conn);
+    }
+
+    /// Endpoint locale che sta dall'altra parte della stessa connessione, se
+    /// e' nello stesso servizio (loopback). La connessione si identifica con
+    /// la quadrupla, come fa il core in `tcp_match`: `(local, remote)` di un
+    /// lato e' `(remote, local)` dell'altro.
+    fn peer_endpoint(&self, idx: usize) -> Option<usize> {
+        let ep = self.endpoints[idx];
+        if ep.proto != NET_PROTO_TCP as u16 || ep.remote_port == 0 || ep.local_port == 0 {
+            return None;
+        }
+        self.endpoints.iter().enumerate().position(|(i, e)| {
+            i != idx
+                && e.state != EpState::Free
+                && e.proto == NET_PROTO_TCP as u16
+                && e.flags & NET_EP_FLAG_LISTEN == 0
+                && e.conn_id != NO_CONN
+                && e.local_port == ep.remote_port
+                && e.remote_port == ep.local_port
+        })
     }
 
     /// Libera un endpoint.
@@ -649,6 +668,15 @@ fn apply_accepted(svc: &mut NetService, conn: u8, port: u16) {
         child.conn_id = conn;
         child.proto = NET_PROTO_TCP as u16;
         child.flags = 0;
+        // Il peer va registrato: e' il legame con l'endpoint del client in
+        // loopback (client e listener hanno TCB distinti, si riconoscono per
+        // quadrupla). Senza, quando il client chiude non si trova il figlio e
+        // il TCB del server resta in tabella finche' il backlog (4) e' pieno
+        // e ogni SYN nuova prende RST.
+        if let Some((_, remote_addr, remote_port)) = svc.net.tcp_endpoints(conn) {
+            child.remote_addr = remote_addr;
+            child.remote_port = remote_port;
+        }
         child_ep_id = child.ep_id;
     }
     // Annuncio al listener: [ep_id:2][ring_id:4].
@@ -699,16 +727,7 @@ fn apply_tcp_signal(svc: &mut NetService, conn: u8, signal: TcpSignal) {
     match signal {
         TcpSignal::Established => push(EV_SYNACK, &[]),
         TcpSignal::Data => svc.drain_tcp(&ep),
-        TcpSignal::Fin => {
-            push(EV_FIN, &[]);
-            // Figlio del listener in attesa (remote_port mai stabilito): il
-            // peer ha chiuso la sua direzione, la connessione e' finita. Lo
-            // liberiamo subito cosi' il TCB del server non occupa per sempre
-            // uno slot del backlog del listener.
-            if ep.flags & NET_EP_FLAG_LISTEN == 0 && ep.remote_port == 0 {
-                svc.free_endpoint(idx);
-            }
-        }
+        TcpSignal::Fin => push(EV_FIN, &[]),
         TcpSignal::Accepted(_) => {} // gestito da `apply_accepted`
         TcpSignal::Reset => {
             push(EV_RST, &[]);
@@ -806,108 +825,152 @@ fn real_main(_sp: u64) -> ! {
     if link {
         let mut sink = DriverSink { ring: svc.sink_ring };
         svc.net.link_up(now, &mut sink, &mut |e| log_event(e));
+        // Il Router Solicitation e' gia' nel ring TX: senza kick resterebbe
+        // li' (il loop fa il kick solo quando trova head != tail, e qui
+        // nessuno ha ancora consumato).
+        let _ = civis::send(driver, civis::NET_TX, 0, 0);
     }
     civis::signal_ready(1);
 
     loop {
-        // Attesa: fino al prossimo tick (timer TCP/NDP + poll del ring del
-        // driver) **oppure** una richiesta di un client, che sveglia il
-        // servizio subito invece di aspettare il tick (E2, ADR-0084). Il
-        // servizio resta periodico perche' il driver non gli manda ancora un
-        // evento di RX: risvegliarlo sull'IRQ del device e' il passo
-        // dichiarato (N8).
-        match civis::recv_timeout(civis::get_ticks() as u64 + 1) {
-            Ok(m) => {
-                // Hint di rete: non e' una richiesta (il servizio non ne
-                // manda a se stesso), lo si scarta come nel resto del loop.
-                if m.tag != civis::NET_EP_EVENT {
-                    handle_client(&mut svc, m);
-                }
-            }
-            Err(_) => {}
-        }
         let now = civis::get_ticks() as u64;
 
-        // Client: richieste endpoint (NET_EP_*).
+        // 1. RX dal driver: il ring condiviso e' la verita', l'evento e' solo
+        //    il campanello. Si drena SEMPRE prima di dormire (N8, ADR-0085).
+        drain_driver_rx(&mut svc, now);
+
+        // 2. Richieste dei client (`NET_EP_*`).
         while let Some(m) = civis::recv_poll() {
-            if m.tag == civis::NET_EP_EVENT {
+            // Hint (di rete o verso gli endpoint): non sono richieste, e i
+            // dati che annunciano stanno nei ring gia' drenati.
+            if m.tag == civis::NET_RX_EVENT || m.tag == civis::NET_EP_EVENT {
                 continue;
             }
             handle_client(&mut svc, m);
         }
 
-        // Poll del driver.
-        let _ = civis::send(driver, civis::NET_POLL, 0, 0);
+        // 3. Timer del core + code TCP.
+        run_timers(&mut svc, now);
 
-        // Drena il ring RX del driver.
-        let head = unsafe {
-            read_volatile(svc.sink_ring.add(civis::NET_RX_RING_OFF) as *const u32)
-        };
-        let tail = unsafe {
-            read_volatile(svc.sink_ring.add(civis::NET_RX_RING_OFF + 4) as *const u32)
-        };
-        let mut h = head;
-        let mut sigs: [Option<(u8, TcpSignal)>; MAX_ENDPOINTS] = [None; MAX_ENDPOINTS];
-        let mut nsig = 0usize;
-        while h != tail {
-            let slot = (h % civis::NET_RING_SLOTS as u32) as usize;
-            let p = unsafe {
-                svc.sink_ring.add(
-                    civis::NET_RX_RING_OFF + civis::NET_RING_HDR + slot * civis::NET_SLOT_SIZE,
-                )
-            };
-            let len = unsafe { read_volatile(p as *const u16) } as usize;
-            if len > 0 && len <= civis::NET_SLOT_SIZE - 2 {
-                let frame = unsafe { core::slice::from_raw_parts(p.add(2), len) };
-                let mut epsink = EpSink {
-                    driver_ring: svc.sink_ring,
-                    endpoints: &mut svc.endpoints,
-                    signals: &mut sigs,
-                    n: &mut nsig,
-                };
-                svc.net.on_frame(frame, now, &mut epsink, &mut |e| log_event(e));
+        // 4. Kick del driver se restano frame TX non consumati. Il confronto
+        //    e' fra la posizione del **consumatore** (head, scritta dal
+        //    driver) e quella del **produttore** (tail, scritta da noi): un
+        //    frame scritto in coda al giro precedente non resta fermo, e non
+        //    serve ricordare "ho scritto" fra le iterazioni.
+        if tx_head(svc.sink_ring) != tx_tail(svc.sink_ring) {
+            let _ = civis::send(driver, civis::NET_TX, 0, 0);
+        }
+
+        // 5. Frame arrivati durante il drenaggio (o hint perso a coda piena):
+        //    si continua senza dormire, il ring non mente.
+        if rx_pending(svc.sink_ring) {
+            continue;
+        }
+
+        // 6. Attesa: fino alla **prossima scadenza del core** (retransmission
+        //    TCP, TIME_WAIT, RS/echo, aging NDP) oppure per sempre se non ce
+        //    n'e' nessuna. Il risveglio arriva da un evento: `NET_RX_EVENT`
+        //    dal driver o una richiesta di un client. Niente risvegli a tick
+        //    (era il debito N8: prima era `get_ticks() + 1`).
+        let deadline = svc
+            .net
+            .next_deadline(civis::get_ticks() as u64)
+            .unwrap_or(0);
+        match civis::recv_timeout(deadline) {
+            Ok(m) => {
+                if m.tag != civis::NET_RX_EVENT && m.tag != civis::NET_EP_EVENT {
+                    handle_client(&mut svc, m);
+                }
             }
-            h = h.wrapping_add(1);
+            Err(_) => {}
         }
-        for s in sigs[..nsig].iter().flatten() {
-            apply_tcp_signal(&mut svc, s.0, s.1);
-        }
-        unsafe {
-            write_volatile(
-                svc.sink_ring.add(civis::NET_RX_RING_OFF) as *mut u32,
-                h,
-            )
-        }
+    }
+}
 
-        // Timer.
+/// Head del ring TX (posizione del consumatore, scritta dal driver).
+fn tx_head(ring: *mut u8) -> u32 {
+    unsafe { read_volatile(ring.add(civis::NET_TX_RING_OFF) as *const u32) }
+}
+
+/// Tail del ring TX (posizione del produttore, scritta da `net`).
+fn tx_tail(ring: *mut u8) -> u32 {
+    unsafe { read_volatile(ring.add(civis::NET_TX_RING_OFF + 4) as *const u32) }
+}
+
+/// `true` se il driver ha scritto frame che `net` non ha ancora consumato.
+fn rx_pending(ring: *mut u8) -> bool {
+    unsafe {
+        read_volatile(ring.add(civis::NET_RX_RING_OFF) as *const u32)
+            != read_volatile(ring.add(civis::NET_RX_RING_OFF + 4) as *const u32)
+    }
+}
+
+/// Drena il ring RX del driver e applica i segnali TCP raccolti.
+fn drain_driver_rx(svc: &mut NetService, now: u64) {
+    let head = unsafe {
+        read_volatile(svc.sink_ring.add(civis::NET_RX_RING_OFF) as *const u32)
+    };
+    let tail = unsafe {
+        read_volatile(svc.sink_ring.add(civis::NET_RX_RING_OFF + 4) as *const u32)
+    };
+    let mut h = head;
+    let mut sigs: [Option<(u8, TcpSignal)>; MAX_ENDPOINTS] = [None; MAX_ENDPOINTS];
+    let mut nsig = 0usize;
+    while h != tail {
+        let slot = (h % civis::NET_RING_SLOTS as u32) as usize;
+        let p = unsafe {
+            svc.sink_ring.add(
+                civis::NET_RX_RING_OFF + civis::NET_RING_HDR + slot * civis::NET_SLOT_SIZE,
+            )
+        };
+        let len = unsafe { read_volatile(p as *const u16) } as usize;
+        if len > 0 && len <= civis::NET_SLOT_SIZE - 2 {
+            let frame = unsafe { core::slice::from_raw_parts(p.add(2), len) };
+            let mut epsink = EpSink {
+                driver_ring: svc.sink_ring,
+                endpoints: &mut svc.endpoints,
+                signals: &mut sigs,
+                n: &mut nsig,
+            };
+            svc.net.on_frame(frame, now, &mut epsink, &mut |e| log_event(e));
+        }
+        h = h.wrapping_add(1);
+    }
+    for s in sigs[..nsig].iter().flatten() {
+        apply_tcp_signal(svc, s.0, s.1);
+    }
+    // Solo ora il driver puo' riusare gli slot.
+    unsafe {
+        write_volatile(
+            svc.sink_ring.add(civis::NET_RX_RING_OFF) as *mut u32,
+            h,
+        )
+    }
+}
+
+/// Timer del core (RS/echo/aging) e code TCP (N6.1b). I segnali raccolti
+/// vengono applicati subito, quando `svc.net` non e' piu' in prestito.
+fn run_timers(svc: &mut NetService, now: u64) {
+    {
         let mut sink = DriverSink { ring: svc.sink_ring };
         svc.net.on_tick(now, &mut sink, &mut |e| log_event(e));
-
-        // TCP (N6.1b): drena le code di trasmissione del core. I segnali
-        // raccolti vengono applicati dopo, quando `svc.net` non è più in
-        // prestito.
+    }
+    let mut sigs: [Option<(u8, TcpSignal)>; MAX_ENDPOINTS] = [None; MAX_ENDPOINTS];
+    let mut nsig = 0usize;
+    for _ in 0..2 {
+        nsig = 0;
         {
-            let mut sigs: [Option<(u8, TcpSignal)>; MAX_ENDPOINTS] = [None; MAX_ENDPOINTS];
-            let mut nsig = 0usize;
-            for _ in 0..2 {
-                nsig = 0;
-                {
-                    let mut epsink = EpSink {
-                        driver_ring: svc.sink_ring,
-                        endpoints: &mut svc.endpoints,
-                        signals: &mut sigs,
-                        n: &mut nsig,
-                    };
-                    svc.net.tcp_poll(now, &mut epsink, &mut |e| log_event(e));
-                }
-                for s in sigs[..nsig].iter().flatten() {
-                    apply_tcp_signal(&mut svc, s.0, s.1);
-                }
-            }
+            let mut epsink = EpSink {
+                driver_ring: svc.sink_ring,
+                endpoints: &mut svc.endpoints,
+                signals: &mut sigs,
+                n: &mut nsig,
+            };
+            svc.net.tcp_poll(now, &mut epsink, &mut |e| log_event(e));
         }
-
-        // TX: il driver consuma il ring.
-        let _ = civis::send(driver, civis::NET_TX, 0, 0);
+        for s in sigs[..nsig].iter().flatten() {
+            apply_tcp_signal(svc, s.0, s.1);
+        }
     }
 }
 
