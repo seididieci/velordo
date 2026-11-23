@@ -254,7 +254,6 @@ Lettura per A2 (decisione rinviata ai numeri — eccoli):
 
 Gate invariato (5/5 + 7/7 + 57/57 + shell verde); bench mai nel gate.
 
-<<<<<<< HEAD
 ## A/B ArcaFS vs FAT + nativo vs POSIX (estensione Fase 23/53)
 
 Contesto: da ADR-0043 la root `/` e' ArcaFS; `/tmp` e' la ramfs vera e
