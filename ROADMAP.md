@@ -11,7 +11,7 @@ ricompilare se stesso. Ordina le priorita' (storage veloce prima, servizi
 fuori dal kernel poi, personalita' per software reale dopo) senza pianificare
 nulla da solo.
 
-## Stato (completate 1-57 + E0 + E1 + E2 + N8)
+## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a)
 
 Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` +
 `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 68/68` +
@@ -604,6 +604,28 @@ Voci con scope e vittoria dichiarati (non date).
       append+latest own-bucket, 1024B, rifiuti, seal+delete, stats con
       flush-proof, bounce+rewarm).
       Vittoria conseguita: log persistenti nativi con retention via snapshot+GC.
+- [x] **D8a Compositore del DE — crate `musivum`** (ADR-0087, completata 2026-11-23):
+      crate `no_std` puro, zero dipendenze, testabile sull'host: `Rect` half-open,
+      `Damage` (unione/bounding box), `Surface` BGRA, `Wallpaper` (fondo del DE,
+      fetta in coordinate locali), `Window` (id/owner/rect/clip/backing/layer/z/
+      visibile) e `Compositor` (composizione per livelli, `Backing::Direct` =
+      pixel già nel buffer destinazione, `Owned` = blit con clip, degradazione
+      sicura oltre `MAX_REMAINING`). Innesto in `userland/console`: una sola
+      tile (`Layer::Tiles`, `Backing::Direct`, grande quanto lo schermo) che
+      scrive direttamente nel device buffer; `Term.bg_layer` e `Term.damage`
+      spariscono a favore del `wallpaper` e del danno del compositor.
+      Pixel-identica: `build_bg_layer` ricostruisce il wallpaper una volta,
+      T4 shift invariato, `test_uniform_bg` conservato. Host unit test
+      (z-order, clipping ai bordi, unione del danno, finestra fuori schermo,
+      `Direct` preserva i pixel) in `scripts/run-unit-tests.sh` (129 → 151 test).
+      Zero nuove syscall, zero kernel change, zero driver change (grant DMA già
+      chiuso a `Service::Console`). Verifica: gate `[gate] PASS` (6 suite +
+      shell nativa 33/33, zero FAIL/PANIC/FAULT, zero `[munmap]`), t64
+      (scroll vs repaint) verde, login frame identico.
+      Vittoria conseguita: meccanismo di composizione isolato e testabile;
+      `console` pixel-identica con una tile sola; pronto per D8b (protocollo
+      `WIN_*` + `civis::win`).
+
 - [x] **58 Personalità POSIX separata** (58.1–58.6, ADR-0041): meccanismo
       neutro in `libs/civis` (ex `libs/libr`), personalità in
       `flavours/posix/{libr,server,shell,cli,tests}`. 58.1 (docs/ADR), 58.2
@@ -1170,10 +1192,11 @@ Idee senza trigger (non date, solo su pressione reale).
 
 - [ ] **Consenso con prompt utente** (ADR-0080, fase 7): dialogo al primo
       avvio di un processo che chiede risorse (rete, hardware), legato alla
-      sessione e al ruolo. Prerequisiti dichiarati: **DE** (voce pendente,
-      oggi c'è il terminale a celle) e **S3.3(c)** token → capability
-      per-canale (senza, il consenso sarebbe rubabile col bearer). Fino ad
-      allora la decisione resta statica per ruolo (fase 6).
+      sessione e al ruolo. Prerequisiti: **DE** (meccanismo `musivum` pronto in
+      D8a, zero finestre; il consenso interattivo richiede D8d/D8f) e
+      **S3.3(c)** token → capability per-canale (senza, il consenso sarebbe
+      rubabile col bearer). Fino ad allora la decisione resta statica per ruolo
+      (fase 6).
 - [ ] audio AC97+CBS (primo client servizio PCI, chiude ADR-0007 davvero)
 - [ ] server-run async block (quando l'overlap DMA lo richiede)
 - [ ] Strato 3 credenziali

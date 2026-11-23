@@ -4349,3 +4349,30 @@
   **Vittoria**: `runhello` dalla shell appare nel terminale **e** nel log
   seriale; gate invariato (6 suite + shell nativa, zero FAIL/PANIC/FAULT);
   `scripts/test-shell-redirect.py` invariato (ramo redirect non toccato).
+- **D8a — compositore del DE, crate `musivum` (ADR-0087)** (2026-11-23).
+  `libs/musivum`: crate `no_std` puro, zero dipendenze, testabile sull'host.
+  Modello: `Rect` (half-open), `Damage` (unione/bounding box), `Surface` BGRA,
+  `Wallpaper` (fondo del DE, fetta in coordinate locali via `view`),
+  `Window` (id/owner/rect/clip/backing/layer/z/visibile), `Compositor`
+  (composizione per livelli `Background`→`Cursor`; `Backing::Direct` = pixel
+  già nel buffer destinazione, `Owned` = blit con clip; degradazione sicura oltre
+  `MAX_REMAINING` rettangoli scoperti). Host unit tests: z-order, clipping ai
+  bordi, unione del danno, finestra fuori schermo, `Direct` preserva i pixel
+  già disegnati.
+  Innesto in `userland/console` (D8a = zero finestre, pixel-identica): una sola
+  tile (`Layer::Tiles`, `Backing::Direct`, grande quanto lo schermo) scrive
+  direttamente nel device buffer; `Term.bg_layer` e `Term.damage` spariscono a
+  favore del `wallpaper` e del danno del compositor; `build_bg_layer`
+  ricostruisce il wallpaper una volta (colore di pagina + `bg.bmp` centrato,
+  `blend_row_bgra`); T4 shift invariato, `test_uniform_bg` conservato;
+  `cells_rect` calcola il bbox pixel di uno span di celle con sbordo di 1 cella
+  (I3) e clip alla superficie; `flush_display` trasferisce il rect di danno
+  restituito da `compose`, `flush_display_full` mantiene il full transfer
+  all'avvio/al resize (I4). Fallback VGA testuale: il compositor esiste ma non
+  si usa. Zero nuove syscall, zero kernel change, zero driver change (grant DMA
+  già chiuso a `Service::Console`). `musivum` aggiunta a `CRATES` in
+  `run-unit-tests.sh` (129 → 151 test host, tutti verdi).
+  **Vittoria**: gate `[gate] PASS` (6 suite + shell nativa 33/33, zero
+  FAIL/PANIC/FAULT, zero `[munmap]`), t64 (scroll vs repaint, D7/T4) verde,
+  login frame identico, meccanismo di composizione isolato e pronto per D8b
+  (protocollo `WIN_*` + `civis::win`).

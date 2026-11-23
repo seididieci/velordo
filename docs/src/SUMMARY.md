@@ -114,3 +114,4 @@
 - [ADR-0084: Eventi di rete — il client dorme sull'hint di `net`](./adr/0084-eventi-rete.md)
 - [ADR-0085: RX a eventi — il driver sveglia `net`](./adr/0085-rx-a-eventi.md)
 - [ADR-0086: Output dei programmi POSIX sulla console — il mirror seriale sta nel writer](./adr/0086-stdout-posix-console-mirror.md)
+- [ADR-0087: Compositore del DE — crate `musivum` (D8a)](./adr/0087-compositor-musivum.md)

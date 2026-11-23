@@ -28,6 +28,8 @@ use term::grid::{color, Grid};
 use term::surface::{self, Geom, Pixel, Surface, VgaText};
 use term::utf8::Decoder;
 
+use musivum;
+
 // ── Ring I/O (Fase 10.2) ─────────────────────────────────────────
 // Le finestre CLI_* sono mappate da cardo (map_in) con i ring del client
 // a ogni relay DEV (zero-copy); i ring propri del server non cambiano mai.
@@ -58,25 +60,6 @@ const FONT_PX: u32 = 16;
 const CRTC_INDEX: u16 = 0x3D4;
 const CRTC_DATA: u16 = 0x3D5;
 
-/// `true` se tutte le righe del buffer (stride in byte) sono byte-identiche
-/// alla riga 0. E' la condizione in cui lo scroll puo' spostare i pixel
-/// invece di ricomporre la banda (T4, ADR-0066).
-fn rows_all_equal(buf: &[u8], stride: u32) -> bool {
-    let stride = stride as usize;
-    if stride == 0 || buf.len() < stride {
-        return true;
-    }
-    let first = &buf[..stride];
-    let mut off = stride;
-    while off + stride <= buf.len() {
-        if &buf[off..off + stride] != first {
-            return false;
-        }
-        off += stride;
-    }
-    true
-}
-
 /// T4 (ADR-0066): valvola di sicurezza. `true` = non si fa MAI lo shift dei
 /// pixel (si ricompone sempre): e' il comportamento pre-D7.
 const NO_SHIFT: bool = false;
@@ -98,59 +81,32 @@ const BULK_FLUSH_EVERY: u32 = 8;
 
 // ── Il terminale ───────────────────────────────────────────────────
 
-/// Rettangolo di pixel toccati (half-open): il danno da trasferire al driver
-/// (D7, ADR-0066). Unico punto di dichiarazione del danno: ogni cella disegnata
-/// aggiunge il proprio bbox.
-#[derive(Clone, Copy)]
-struct Damage { x0: u32, y0: u32, x1: u32, y1: u32 }
-
-impl Damage {
-    /// Il sentinella di "nessun danno": x0/y0 al massimo cosi' il primo
-    /// `add_rect` li abbassa al valore vero (con 0 l'`min` terrebbe l'origine
-    /// e ogni rect partirebbe da (0,0)).
-    fn none() -> Self { Self { x0: u32::MAX, y0: u32::MAX, x1: 0, y1: 0 } }
-    fn is_empty(&self) -> bool { self.x0 >= self.x1 || self.y0 >= self.y1 }
-    fn add_rect(&mut self, x: u32, y: u32, w: u32, h: u32) {
-        if w == 0 || h == 0 { return; }
-        let x1 = x.saturating_add(w);
-        let y1 = y.saturating_add(h);
-        self.x0 = self.x0.min(x);
-        self.y0 = self.y0.min(y);
-        self.x1 = self.x1.max(x1);
-        self.y1 = self.y1.max(y1);
-    }
-    /// Espande il danno di 1 cella in tutte le direzioni (I3: sbordo glifo).
-    /// `c0..=c1` / `r0..=r1` sono indici di cella inclusivi; il rettangolo
-    /// risultante e' in pixel, half-open, clipped a `(surf_w, surf_h)`.
-    fn add_cells(
-        &mut self,
-        geom: term::surface::Geom,
-        surf_w: u32,
-        surf_h: u32,
-        c0: usize,
-        r0: u32,
-        c1: usize,
-        r1: u32,
-    ) {
-        let cw = geom.cell_w as u32;
-        let ch = geom.cell_h as u32;
-        let ox = geom.origin_x;
-        let oy = geom.origin_y;
-        let last_col = (geom.cols.saturating_sub(1)) as u32;
-        let last_row = (geom.rows.saturating_sub(1)) as u32;
-        let x0 = ox + (c0.saturating_sub(1)) as u32 * cw;
-        let y0 = oy + r0.saturating_sub(1) * ch;
-        let x1 = (ox + ((c1 as u32 + 1).min(last_col) + 1) * cw).min(surf_w);
-        let y1 = (oy + ((r1 + 1).min(last_row) + 1) * ch).min(surf_h);
-        self.add_rect(x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0));
-    }
-    /// Restituisce `(x,y,w,h)` se non vuoto, `None` altrimenti.
-    fn take(&mut self) -> Option<(u32, u32, u32, u32)> {
-        if self.is_empty() { return None; }
-        let r = (self.x0, self.y0, self.x1 - self.x0, self.y1 - self.y0);
-        *self = Self::none();
-        Some(r)
-    }
+/// Il rettangolo di pixel di un blocco di celle, con lo sbordo di 1 cella
+/// (I3: il glifo puo' uscire dalla cella) e il clip alla superficie.
+/// `c0..=c1` / `r0..=r1` sono indici di cella inclusivi.
+///
+/// Il danno accumulato e' del compositor (`musivum::Damage`): qui si calcola
+/// solo la geometria, che dipende dal font e dalla griglia.
+fn cells_rect(
+    geom: term::surface::Geom,
+    surf_w: u32,
+    surf_h: u32,
+    c0: usize,
+    r0: u32,
+    c1: usize,
+    r1: u32,
+) -> musivum::Rect {
+    let cw = geom.cell_w as u32;
+    let ch = geom.cell_h as u32;
+    let ox = geom.origin_x;
+    let oy = geom.origin_y;
+    let last_col = (geom.cols.saturating_sub(1)) as u32;
+    let last_row = (geom.rows.saturating_sub(1)) as u32;
+    let x0 = ox + (c0.saturating_sub(1)) as u32 * cw;
+    let y0 = oy + r0.saturating_sub(1) * ch;
+    let x1 = (ox + ((c1 as u32 + 1).min(last_col) + 1) * cw).min(surf_w);
+    let y1 = (oy + ((r1 + 1).min(last_row) + 1) * ch).min(surf_h);
+    musivum::Rect::new(x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
 }
 
 /// Lo stato del terminale: modello, decoder, surface.
@@ -193,10 +149,13 @@ struct Term {
     layer0_offset_x: u32,
     /// Offset Y del layer 0 centrato nel framebuffer (D4).
     layer0_offset_y: u32,
-    /// Background precomposto (T3, ADR-0066): fondo di pagina + layer 0 in
-    /// BGRA, dimensione framebuffer, stride = `width * 4`. Il render copia
-    /// una banda da qui invece di rifare fill+blend per ogni cella.
-    bg_layer: Option<alloc::vec::Vec<u8>>,
+    /// Il compositor del DE (D8a): possiede il fondo (wallpaper) e il danno.
+    /// Con una tile sola non compone nulla: la tile scrive direttamente nella
+    /// surface del device (`Backing::Direct`) e il compositor si limita a
+    /// sottrarne l'area al fondo.
+    comp: musivum::Compositor,
+    /// L'id della tile del terminale nel compositor (registrata all'avvio).
+    tile: u32,
     /// `true` se tutte le righe della bg layer sono byte-identiche alla riga
     /// 0: e' la condizione in cui lo scroll puo' spostare i pixel (T4).
     bg_rows_equal: bool,
@@ -215,8 +174,6 @@ struct Term {
     /// un riadattamento fallito non deve lasciare la surface su un buffer
     /// liberato).
     fb_slot: u64,
-    /// Danno accumulato (D7, ADR-0066): rettangolo di pixel da trasferire.
-    damage: Damage,
     // Statistiche (T0, ADR-0066): diagnostica su seriale.
     stat_renders: u64,
     stat_cells: u64,
@@ -411,8 +368,17 @@ impl Term {
         let f = if FULL_FLUSH_ONLY {
             term::disp::Flush::Full
         } else {
-            match self.damage.take() {
-                Some((x, y, w, h)) => term::disp::Flush::Rect { x, y, w, h },
+            // D8a: il compositor compone il danno — con una tile `Direct` e'
+            // una sottrazione (i pixel della tile sono gia' nella surface) —
+            // e restituisce il rettangolo da trasferire.
+            let dst = match &self.surface {
+                Surface::Pixel(p) => {
+                    musivum::Surface::new(p.ptr, p.width, p.height, p.stride)
+                }
+                Surface::VgaText(_) => return,
+            };
+            match self.comp.compose(&dst) {
+                Some(r) => term::disp::Flush::Rect { x: r.x, y: r.y, w: r.w, h: r.h },
                 None => return, // niente da trasferire
             }
         };
@@ -456,7 +422,7 @@ impl Term {
         let (w0, w1) = term::disp::pack_flush(f);
         let _ = civis::send(self.driver_chan, civis::syscall_numbers::GPU_DISPLAY_FLUSH, w0, w1);
         // Azzera il danno: un full transfer copre tutto.
-        self.damage = Damage::none();
+        self.comp.clear_damage();
         self.stat_flushes += 1; // T0 (ADR-0066)
         if let Surface::Pixel(p) = &self.surface {
             self.stat_bytes += p.width as u64 * p.height as u64 * 4; // ADR-0066
@@ -667,7 +633,7 @@ impl Term {
         let can_shift = !self.no_shift
             && !self.bulk_feed
             && self.bg_rows_equal
-            && self.bg_layer.is_some()
+            && self.comp.wallpaper().is_some()
             && matches!(self.surface, Surface::Pixel(_));
         if !can_shift {
             self.grid.scroll_up();
@@ -691,7 +657,7 @@ impl Term {
             p.shift_rows_up(gx, gy, gw, gh, cell_h);
         }
         self.grid.scroll_up_after_shift();
-        self.damage.add_rect(gx, gy, gw, gh);
+        self.comp.add_damage(musivum::Rect::new(gx, gy, gw, gh));
     }
 
     /// Ridisegna la zona sporca e il cursore.
@@ -718,8 +684,10 @@ impl Term {
         // T3 (ADR-0066): con la bg layer pronta il render copia una banda di
         // background (memcpy) e disegna solo l'inchiostro. Puntatore+len+stride
         // estratti prima del mut-borrow della surface (come per `l0_data`).
-        let bg_data: Option<(*const u8, usize, u32)> = match (&self.bg_layer, &self.surface) {
-            (Some(v), Surface::Pixel(p)) => Some((v.as_ptr(), v.len(), p.width * 4)),
+        let bg_data: Option<(*const u8, usize, u32)> = match (self.comp.wallpaper(), &self.surface) {
+            (Some(wp), Surface::Pixel(_)) => {
+                Some((wp.data().as_ptr(), wp.data().len(), wp.stride()))
+            }
             _ => None,
         };
 
@@ -752,7 +720,7 @@ impl Term {
                     if let Surface::Pixel(p) = &mut self.surface {
                         p.copy_from(bg, bg_stride, x0, y0, bw, geom.cell_h);
                     }
-                    self.damage.add_rect(x0, y0, bw, geom.cell_h);
+                    self.comp.add_damage(musivum::Rect::new(x0, y0, bw, geom.cell_h));
                     for col in bc0..=bc1 {
                         // Le continuazioni le disegna la testa dello span.
                         if self.grid.cell(col, row).width == 0 {
@@ -888,7 +856,15 @@ impl Term {
         // e il clip alla superficie.
         let geom = self.surface.geom();
         let (sw, sh) = self.surface.pixel_size();
-        self.damage.add_cells(geom, sw, sh, start, row as u32, start + span - 1, row as u32);
+        self.comp.add_damage(cells_rect(
+            geom,
+            sw,
+            sh,
+            start,
+            row as u32,
+            start + span - 1,
+            row as u32,
+        ));
         // T3: background gia' corretto dalla banda -> solo inchiostro.
         // Copre anche `cp == 0` (la banda ha gia' messo il fondo giusto).
         if bg_ready && cell.bg == color::BLACK {
@@ -1068,16 +1044,45 @@ impl Term {
                 }
             }
         }
-        self.bg_rows_equal = self.test_uniform_bg || rows_all_equal(&v, bg_stride);
+        // D8a: il fondo e' del compositor — una copia sola per tutto il DE, e
+        // le tile ne leggono la fetta (`Wallpaper::view`). Il buffer resta la
+        // sorgente pristina per il render (T3).
+        let wp = musivum::Wallpaper::new(v, w_fb, h_fb);
+        self.bg_rows_equal = self.test_uniform_bg || wp.rows_equal();
         let _ = civis::println!(
             "[console] layer 0: fb={}x{} img={}x{} offset=({},{}) stride={} bg_rows_equal={}",
             w_fb, h_fb, w_img, h_img, ox, oy, stride, self.bg_rows_equal
         );
-        // Copia nella surface (il buffer resta come bg layer per il render).
+        // Copia nella surface: la superficie mostra il fondo dal primo frame.
+        let (bg_ptr, bg_len, bg_stride) = (wp.data().as_ptr(), wp.data().len(), wp.stride());
         if let Surface::Pixel(p) = &mut self.surface {
-            p.copy_from(&v, bg_stride, 0, 0, w_fb, h_fb);
+            let bg = unsafe { core::slice::from_raw_parts(bg_ptr, bg_len) };
+            p.copy_from(bg, bg_stride, 0, 0, w_fb, h_fb);
         }
-        self.bg_layer = Some(v);
+        self.comp.set_wallpaper(wp);
+        // D8a: una sola tile, grande quanto lo schermo, che scrive
+        // **direttamente** nel buffer del device (`Backing::Direct`). Il
+        // compositor non copia nulla: sottrae la sua area al fondo, che qui
+        // coincide con tutto lo schermo — il wallpaper resta la sorgente che
+        // la tile legge per comporre le proprie bande (T3), non un layer
+        // ridipinto a ogni frame.
+        let screen = musivum::Rect::new(0, 0, w_fb, h_fb);
+        self.comp.set_screen(screen);
+        if self.tile == 0 {
+            self.tile = self.comp.open(musivum::Window {
+                id: 0,
+                owner: 0,
+                rect: screen,
+                clip: screen,
+                backing: musivum::Backing::Direct,
+                layer: musivum::Layer::Tiles,
+                z: 0,
+                visible: true,
+            });
+        } else {
+            self.comp.set_rect(self.tile, screen);
+            self.comp.set_clip(self.tile, screen);
+        }
     }
 
     /// Ripristina una cella (o uno span di celle) dal layer 0: prima il colore
@@ -1238,6 +1243,10 @@ fn real_main(_sp: u64) -> ! {
     // Nessuna modifica: Grid::new pone il cursore a (0, 0) —
     // il testo scorre dall'alto verso il basso (nuove righe in fondo).
 
+    // D8a: la superficie del compositor (0x0 nel fallback VGA: il compositor
+    // non si usa li').
+    let (w_surf, h_surf) = surface.pixel_size();
+
     let mut term = Term {
         grid,
         decoder: Decoder::new(),
@@ -1256,15 +1265,15 @@ fn real_main(_sp: u64) -> ! {
         layer0_width: 0,
         layer0_offset_x: 0,
         layer0_offset_y: 0,
-        bg_layer: None,
+        // D8a: il compositor del DE. La tile si registra in `build_bg_layer`.
+        comp: musivum::Compositor::new(musivum::Rect::new(0, 0, w_surf, h_surf)),
+        tile: 0,
         bg_rows_equal: false,
         bulk_feed: false,
         bulk_writes: 0,
         no_shift: NO_SHIFT,
         test_uniform_bg: false,
         fb_slot: civis::DMA_SLOT_DEVICE,
-        // D7 (ADR-0066): nessun danno iniziale.
-        damage: Damage::none(),
         // T0: statistica (ADR-0066).
         stat_renders: 0, stat_cells: 0, stat_flushes: 0,
         stat_bytes: 0, stat_cyc_render: 0, stat_cyc_flush: 0,

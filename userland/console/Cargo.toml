@@ -9,6 +9,8 @@ edition = "2024"
 [dependencies]
 civis = { path = "../../libs/civis" }
 term = { path = "../../libs/term" }
+# D8a: il compositor del DE (wallpaper, finestre, clip, danno).
+musivum = { path = "../../libs/musivum" }
 # BLAKE2s-256: il marker deterministico del rendering (stesso hash del repo).
 blake2s = { path = "../../blake2s" }
 
