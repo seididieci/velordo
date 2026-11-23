@@ -433,6 +433,24 @@ impl Grid {
         self.dirty.mark_all(self.cols, self.rows);
     }
 
+    /// Segna come sporche le celle del rettangolo **inclusivo**
+    /// `c0..=c1` × `r0..=r1` (clip alla griglia). Serve al compositor del DE
+    /// (D8b): quando una finestra si apre o si chiude, la tile `Direct` deve
+    /// ridisegnare solo le celle che stanno sotto il suo rect.
+    pub fn mark_rect(&mut self, c0: usize, r0: usize, c1: usize, r1: usize) {
+        if self.cols == 0 || self.rows == 0 {
+            return;
+        }
+        let c0 = c0.min(self.cols - 1);
+        let c1 = c1.min(self.cols - 1);
+        let r0 = r0.min(self.rows - 1);
+        let r1 = r1.min(self.rows - 1);
+        for row in r0..=r1 {
+            self.dirty.mark(c0, row);
+            self.dirty.mark(c1, row);
+        }
+    }
+
     /// La zona sporca e la azzera (la surface la consuma).
     pub fn take_dirty(&mut self) -> Dirty {
         let d = self.dirty;
@@ -963,5 +981,29 @@ mod tests {
         let d = g.take_dirty();
         assert_eq!((d.min_row, d.max_row), (0, 2));
         assert_eq!((d.min_col, d.max_col), (0, 3));
+    }
+
+    /// `mark_rect` (D8b) marca esattamente il rettangolo di celle richiesto
+    /// (clip alla griglia), lasciando pulito il resto.
+    #[test]
+    fn mark_rect_solo_il_rettangolo() {
+        let mut g = Grid::new(8, 6);
+        let _ = g.take_dirty();
+        g.mark_rect(2, 1, 5, 3);
+        let d = g.take_dirty();
+        assert_eq!((d.min_col, d.min_row), (2, 1));
+        assert_eq!((d.max_col, d.max_row), (5, 3));
+        // una riga fuori non e' sporca: draw_cell_at ridisegna solo il bbox
+        assert!(d.any);
+        // clip oltre i bordi non panica e resta dentro la griglia
+        g.mark_rect(6, 5, 100, 100);
+        let d = g.take_dirty();
+        assert_eq!((d.min_col, d.min_row), (6, 5));
+        assert_eq!((d.max_col, d.max_row), (7, 5));
+        // griglia minima (1x1): il clip porta tutto in (0,0)
+        let mut e = Grid::new(0, 0);
+        e.mark_rect(3, 3, 9, 9);
+        let d = e.take_dirty();
+        assert_eq!((d.min_col, d.min_row, d.max_col, d.max_row), (0, 0, 0, 0));
     }
 }

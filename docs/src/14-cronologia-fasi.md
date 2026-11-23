@@ -4371,8 +4371,41 @@
   all'avvio/al resize (I4). Fallback VGA testuale: il compositor esiste ma non
   si usa. Zero nuove syscall, zero kernel change, zero driver change (grant DMA
   già chiuso a `Service::Console`). `musivum` aggiunta a `CRATES` in
-  `run-unit-tests.sh` (129 → 151 test host, tutti verdi).
+  `run-unit-tests.sh` (131 → 153 test host, tutti verdi).
   **Vittoria**: gate `[gate] PASS` (6 suite + shell nativa 33/33, zero
   FAIL/PANIC/FAULT, zero `[munmap]`), t64 (scroll vs repaint, D7/T4) verde,
   login frame identico, meccanismo di composizione isolato e pronto per D8b
   (protocollo `WIN_*` + `civis::win`).
+
+- **D8b — finestre del compositor: `WIN_*` + `civis::win` (ADR-0088)**
+  (2026-11-23). Tag `WIN_*` in `syscall-numbers` (0x94–0x9A, nessuna syscall
+  nuova; 0x90–0x93 restano `BROKER_*`) e client nel meccanismo
+  `libs/civis/src/win/mod.rs` (`open`/`commit`/`set_rect`/`set_surface`/
+  `raise`/`close`/`stats`, `surface_create`, errori `WinError::{ServiceDead,
+  Denied, Ipc}`; la reply è quella implicita di `send`, `!0` in `w0` = rifiuto).
+  Il **server** (console) crea lo shm della superficie e la mappa RO; il
+  cliente la mappa RW: le pagine sono le stesse, il compositor legge i pixel
+  vivi. `WIN_OPEN` con un handle di tile crea la finestra in
+  `Layer::TileGuests`, clippata alla tile; un handle inesistente è **negato**
+  (la tile è una capability). La finestra nasce `visible: false`: il primo
+  `WIN_COMMIT` la mostra (aprire non dipinge un rect nero).
+  **La tile `Direct` va ridisegnata**: il compositor non sa ricostruire i pixel
+  del terminale sotto una finestra, quindi su open/close `console` marca le
+  celle sotto il rect (`Grid::mark_rect`, nuovo) e ri-renderizza la tile
+  (`repaint_tile_area`), poi ricompone le finestre `Owned` sopra
+  (`flush_display`). Così chiudere una finestra restituisce il frame
+  **byte-identico** a prima. `EXIT_NOTIFY` (con `w1` = pid) chiude tutte le
+  finestre del processo morto: il leak shm è impossibile per costruzione
+  (owner = server). Limite superficie = 64 frame shm (256 KiB), rifiutato
+  **prima** della syscall. In D8b una sola tile (id `1`, schermo intero) e
+  floating non implementato: 0x96–0x98 rispondono `!0` (la policy — classe ≥
+  `ThirdParty` + consenso per il floating, `System` per l'overlay — arriva in
+  D8f/D8g).
+  **Trappola chiarita**: `WIN_COMMIT` non deve riblittare a mano la superficie
+  del cliente — lo fa già `compose` (`Backing::Owned`) durante `flush_display`;
+  un blit anche in `WIN_COMMIT` era lavoro doppio (e con la tile `Direct`
+  l'ordine sbagliato).
+  **Vittoria**: gate `[gate] PASS` (6 suite + shell nativa 33/33, **usertests
+  69/69** con t73, zero FAIL/PANIC/FAULT, zero `[munmap]`); t73 prova
+  open→commit→close con il CRC del frame che torna identico; unit host 154
+  (term 39 con `mark_rect`, musivum 22, …).

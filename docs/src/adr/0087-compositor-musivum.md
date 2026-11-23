@@ -69,7 +69,7 @@ frame al login identico, zero `[munmap]`, zero FAIL/PANIC/FAULT.
 
 ### 3. Wiring
 
-- `libs/musivum` aggiunta a `CRATES` in `scripts/run-unit-tests.sh` (129 → 151
+- `libs/musivum` aggiunta a `CRATES` in `scripts/run-unit-tests.sh` (131 → 153
   test host, tutti verdi).
 - `userland/console/Cargo.toml`: dipende da `musivum`.
 - Nessuna nuova syscall, nessun cambio al kernel, nessun cambio al driver

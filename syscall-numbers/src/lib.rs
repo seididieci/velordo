@@ -717,6 +717,34 @@ pub const BROKER_CLOSE: u64 = 0x92;
 /// `w0` = endpoint_id. Reply: `w0` = rx_pkts, `w1` = tx_pkts.
 pub const BROKER_STATS: u64 = 0x93;
 
+// ── Finestre del DE (D8b, ADR-0088) ─────────────────────────────────
+/// `WIN_OPEN {tile, hint}` → apri una finestra.
+/// `w0` = tile handle (0 = floating), `w1` = size hint (w<<16|h).
+/// Reply: `w0` = win id, `w1` = shm_id della superficie (o 0 se Direct).
+pub const WIN_OPEN: u64 = 0x94;
+/// `WIN_COMMIT {id, rect}` → il cliente ha ridisegnato; trasferisci il rect.
+/// `w0` = win id, `w1` = rect (0,0 = tutta la finestra).
+pub const WIN_COMMIT: u64 = 0x95;
+/// `WIN_SET_RECT {id, rect}` → sposta/ridimensiona (solo floating).
+/// `w0` = win id, `w1` = rect.
+pub const WIN_SET_RECT: u64 = 0x96;
+/// `WIN_SET_SURFACE {id, shm_id}` → cambia la superficie della finestra.
+/// `w0` = win id, `w1` = shm_id.
+pub const WIN_SET_SURFACE: u64 = 0x97;
+/// `WIN_RAISE {id}` → porta in cima al proprio livello (mai fuori).
+/// `w0` = win id.
+pub const WIN_RAISE: u64 = 0x98;
+/// `WIN_CLOSE {id}` → chiudi la finestra e libera la superficie.
+/// `w0` = win id. Reply (0,0).
+pub const WIN_CLOSE: u64 = 0x99;
+/// `WIN_STATS` → solo test: finestre per layer, handle vivi.
+/// Reply: `w0` = visibili, `w1` = totali.
+pub const WIN_STATS: u64 = 0x9A;
+
+// Alias brevi per comodità d'uso nei clienti.
+pub const WIN_OPN: u64 = WIN_OPEN;
+pub const WIN_CLS: u64 = WIN_CLOSE;
+
 // Alias brevi per comodità d'uso nei clienti DNS.
 pub const DNS_OPEN: u64 = DNS_EP_OPEN;
 pub const DNS_TX: u64 = DNS_EP_TX;

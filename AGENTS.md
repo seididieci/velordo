@@ -169,7 +169,7 @@ velordo/
 
 ## Stato corrente
 
-Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 68/68` + `[threadtest] PASS 12/12` + `[shell-native] PASS 33/33` (la shell nativa gira nella **stessa** QEMU del gate: login via `sendkey` e `--attach-pid`, `scripts/test-shell-native.py`), zero FAIL/PANIC/FAULT; il gate stampa `[gate] PASS/FAIL` ed **esce != 0** (vedi `docs/src/11-testing.md`). Le fasi POSIX restano storiche dal login nativo (ADR-0062). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
+Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 69/69` + `[threadtest] PASS 12/12` + `[shell-native] PASS 33/33` (la shell nativa gira nella **stessa** QEMU del gate: login via `sendkey` e `--attach-pid`, `scripts/test-shell-native.py`), zero FAIL/PANIC/FAULT; il gate stampa `[gate] PASS/FAIL` ed **esce != 0** (vedi `docs/src/11-testing.md`). Le fasi POSIX restano storiche dal login nativo (ADR-0062). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
 - **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
   BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
@@ -724,7 +724,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
 
 ```bash
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term, net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, blake2s, sig, tls: 131 test
+./scripts/run-unit-tests.sh   # term, musivum (D8a), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, blake2s, sig, tls: 154 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh
@@ -760,7 +760,7 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 68/68
+#   [usertests] PASS 69/69
 #   [threadtest] PASS 12/12
 #   [shell-native] PASS 33/33
 # KVM=1 accelera (-enable-kvm -cpu host, opt-in; senza /dev/kvm resta TCG).

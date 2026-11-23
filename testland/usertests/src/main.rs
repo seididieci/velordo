@@ -41,6 +41,7 @@ mod t_scroll;
 mod t_time;
 mod t_sig;
 mod t_stable;
+mod t_win;
 // ── main ─────────────────────────────────────────────────────────────
 
 civis::entry!(real_main);
@@ -120,6 +121,7 @@ fn real_main(_sp: u64) -> ! {
     helpers::report(&mut total, &mut ok, "t70 consenso per immagine + broker", t_consent::t_consent());
     helpers::report(&mut total, &mut ok, "t71 recv con deadline (timeout, messaggio vince, 1 tick)", t_time::t_recv_deadline());
     helpers::report(&mut total, &mut ok, "t72 Sleep + join/run con misure di tick", t_time::t_sleep_join());
+    helpers::report(&mut total, &mut ok, "t73 finestre del compositor (D8b)", t_win::t_window_lifecycle());
     // t34 per ULTIMO: i drop sono irrevocabili sul canale di usertests.
     helpers::report(&mut total, &mut ok, "t34 diritti per-canale lato server", t_fs::t_rights());
 

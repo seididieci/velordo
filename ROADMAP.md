@@ -11,10 +11,10 @@ ricompilare se stesso. Ordina le priorita' (storage veloce prima, servizi
 fuori dal kernel poi, personalita' per software reale dopo) senza pianificare
 nulla da solo.
 
-## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a)
+## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b)
 
 Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` +
-`[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 68/68` +
+`[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 69/69` +
 `[threadtest] PASS 12/12` + `[shell-native] PASS 33/33` (la shell nativa gira
 nella stessa QEMU: login via `sendkey`, `--attach-pid`), zero FAIL/PANIC/FAULT;
 `./run-tests.sh` stampa `[gate] PASS/FAIL` ed esce `!= 0`. La suite FAT32 e'
@@ -617,7 +617,7 @@ Voci con scope e vittoria dichiarati (non date).
       Pixel-identica: `build_bg_layer` ricostruisce il wallpaper una volta,
       T4 shift invariato, `test_uniform_bg` conservato. Host unit test
       (z-order, clipping ai bordi, unione del danno, finestra fuori schermo,
-      `Direct` preserva i pixel) in `scripts/run-unit-tests.sh` (129 → 151 test).
+      `Direct` preserva i pixel) in `scripts/run-unit-tests.sh` (131 → 153 test).
       Zero nuove syscall, zero kernel change, zero driver change (grant DMA già
       chiuso a `Service::Console`). Verifica: gate `[gate] PASS` (6 suite +
       shell nativa 33/33, zero FAIL/PANIC/FAULT, zero `[munmap]`), t64
@@ -625,6 +625,28 @@ Voci con scope e vittoria dichiarati (non date).
       Vittoria conseguita: meccanismo di composizione isolato e testabile;
       `console` pixel-identica con una tile sola; pronto per D8b (protocollo
       `WIN_*` + `civis::win`).
+
+- [x] **D8b Finestre del compositor — protocollo `WIN_*` e `civis::win`**
+      (ADR-0088, completata 2026-11-23): tag `WIN_*` (0x94–0x9A, nessuna
+      syscall nuova) e client nel meccanismo `civis::win`
+      (`open`/`commit`/`set_rect`/`set_surface`/`raise`/`close`/`stats`,
+      errori `WinError`). Il **server** (console) crea lo shm della superficie
+      e lo mappa RO; il cliente lo mappa RW: le pagine sono le stesse, il
+      compositor legge i pixel vivi. `WIN_OPEN` con un handle di tile → finestra
+      in `Layer::TileGuests` clippata alla tile (handle inesistente = negato:
+      la tile è una capability); apertura **non visibile** finché il primo
+      `WIN_COMMIT` non mostra. La tile `Direct` viene **ridisegnata** su
+      open/close (`Grid::mark_rect` + `repaint_tile_area`), quindi chiudere una
+      finestra restituisce il frame **byte-identico** (verificato da t73).
+      `EXIT_NOTIFY` chiude tutte le finestre del processo morto (leak shm
+      impossibile per costruzione). Limite superficie = 64 frame shm (256 KiB),
+      rifiutato prima della syscall. In D8b una sola tile (id `1`) e floating
+      non implementato (0x96–0x98 rispondono `!0`; policy in D8f/D8g).
+      Verifica: gate `[gate] PASS` (6 suite + shell nativa, **usertests 69/69**
+      con t73, zero FAIL/PANIC/FAULT, zero `[munmap]`), unit host 154 (term 41,
+      musivum 22, …). Vittoria conseguita: un processo disegna in una finestra
+      senza syscall nuove e senza leak; t73 prova open→commit→close con CRC
+      identico.
 
 - [x] **58 Personalità POSIX separata** (58.1–58.6, ADR-0041): meccanismo
       neutro in `libs/civis` (ex `libs/libr`), personalità in

@@ -40,6 +40,9 @@ use civis::{req_frame_read, resp_frame_write};
 
 // ── Tag IPC del device (DocsD: single source in `syscall-numbers`) ───
 use civis::{DEV_CLOSE, DEV_OPEN, DEV_READ, DEV_WRITE};
+// Tag delle finestre del DE (D8b, ADR-0088): il servizio console le gestisce
+// direttamente; i clienti le usano tramite `civis::win`.
+use civis::{WIN_CLOSE, WIN_COMMIT, WIN_OPEN, WIN_RAISE, WIN_SET_RECT, WIN_SET_SURFACE, WIN_STATS};
 
 /// Valore di errore IPC.
 const ERR: u64 = !0u64;
@@ -78,6 +81,10 @@ const BULK_FEED_BYTES: usize = 256;
 /// finale lo flusha la prima write interattiva successiva (il prompt), che
 /// rende subito. Un output lungo passa da N flush dell'intera griglia a N/8.
 const BULK_FLUSH_EVERY: u32 = 8;
+
+/// D8b — dimensione massima della superficie di una finestra ospite. Lo shm
+/// del kernel ha un tetto di 64 frame (256 KiB); oltre, `shm_create` fallisce.
+const WIN_SURFACE_MAX: usize = 64 * 4096;
 
 // ── Il terminale ───────────────────────────────────────────────────
 
@@ -156,6 +163,13 @@ struct Term {
     comp: musivum::Compositor,
     /// L'id della tile del terminale nel compositor (registrata all'avvio).
     tile: u32,
+    /// Finestre ospite aperte dai clienti (D8b): (win_id, canale richiedente, pid owner).
+    /// Serve per chiudere tutte le finestre di un processo alla sua morte (EXIT_NOTIFY).
+    win_owner: alloc::vec::Vec<(u32, u64, i64)>,
+    /// Superfici delle finestre ospite (shm create dal server, mappate RO):
+    /// (win_id, shm_id, ptr, map_len, w, h). `map_len` e' la lunghezza
+    /// mappata **a pagine** (per `munmap` alla chiusura).
+    win_surfaces: alloc::vec::Vec<(u32, u32, *mut u8, usize, u32, u32)>,
     /// `true` se tutte le righe della bg layer sono byte-identiche alla riga
     /// 0: e' la condizione in cui lo scroll puo' spostare i pixel (T4).
     bg_rows_equal: bool,
@@ -438,6 +452,107 @@ impl Term {
                 self.stat_cyc_render / self.stat_renders.max(1),
                 self.stat_cyc_flush / self.stat_flushes.max(1)
             );
+        }
+    }
+
+    /// D8b — ripristina il fondo e ridisegna le celle del terminale sotto un
+    /// rect **in pixel** (`screen`). La tile e' `Backing::Direct`: il
+    /// compositor non sa ricostruire i pixel del terminale, quindi quando una
+    /// finestra si chiude (o cambia area) l'area va riscritta dal wallpaper e
+    /// dal modello a celle. Il guest viene poi ricomposto sopra da
+    /// `flush_display`.
+    ///
+    /// Il ripristino del fondo e' per **pixel** (non per celle): la griglia e'
+    /// centrata (`origin_y` puo' essere 4), quindi i margini del rect non
+    /// cadono su nessuna cella e la sola banda di celle lascerebbe li' i pixel
+    /// del guest.
+    fn repaint_tile_area(&mut self, screen: musivum::Rect) {
+        let (sw, sh) = self.surface.pixel_size();
+        if sw == 0 || sh == 0 || screen.is_empty() {
+            return;
+        }
+        let r = screen.intersect(musivum::Rect::new(0, 0, sw, sh));
+        if r.is_empty() {
+            return;
+        }
+
+        // 1. il fondo (wallpaper) sull'intero rect in pixel, margini inclusi.
+        let wp = self.comp.wallpaper().map(|w| {
+            (w.data().as_ptr(), w.data().len(), w.stride())
+        });
+        let page = surface::rgba_to_bgra(color::BLACK);
+        if let Surface::Pixel(p) = &mut self.surface {
+            match wp {
+                Some((ptr, len, stride)) => {
+                    let bg = unsafe { core::slice::from_raw_parts(ptr, len) };
+                    p.copy_from(bg, stride, r.x, r.y, r.w, r.h);
+                }
+                None => p.fill_rect(r.x, r.y, r.w, r.h, page),
+            }
+        }
+
+        // 2. le celle sotto il rect (inchiostro + bg espliciti).
+        let geom = self.surface.geom();
+        let (cw, ch) = (geom.cell_w as u32, geom.cell_h as u32);
+        if cw == 0 || ch == 0 {
+            return;
+        }
+        let (ox, oy) = (geom.origin_x, geom.origin_y);
+        let x1 = r.right().saturating_sub(1);
+        let y1 = r.bottom().saturating_sub(1);
+        let c0 = r.x.saturating_sub(ox) / cw;
+        let c1 = x1.saturating_sub(ox) / cw;
+        let r0 = r.y.saturating_sub(oy) / ch;
+        let r1 = y1.saturating_sub(oy) / ch;
+        self.grid.mark_rect(c0 as usize, r0 as usize, c1 as usize, r1 as usize);
+        self.render();
+
+        // 3. il danno copre il rect ripristinato (il compositor poi ricompone
+        //    le finestre sopra).
+        self.comp.add_damage(r);
+    }
+
+    /// D8b — ricompone la tile sotto una finestra e trasferisce.
+    fn refresh_windows(&mut self, screen: musivum::Rect) {
+        self.repaint_tile_area(screen);
+        self.flush_display();
+    }
+
+    /// D8b — chiude una finestra: libera la superficie (shm) e la toglie dal
+    /// compositor, poi ridisegna il terminale sotto il suo vecchio rect.
+    fn close_window(&mut self, win: u32) {
+        let old = self.comp.get(win).map(|w| w.visible_rect());
+        if let Some(pos) = self.win_owner.iter().position(|(id, _, _)| *id == win) {
+            self.win_owner.remove(pos);
+        }
+        // Prima si smappa (il compositor non deve piu' leggere quei frame),
+        // poi si distrugge: senza il `munmap` il riferimento della mappatura
+        // resterebbe appeso e i frame non verrebbero mai liberati.
+        if let Some(spos) = self.win_surfaces.iter().position(|(id, _, _, _, _, _)| *id == win) {
+            let (_id, shm_id, ptr, map_len, _w, _h) = self.win_surfaces.remove(spos);
+            let _ = civis::munmap(ptr as usize, map_len);
+            let _ = civis::shm_destroy(shm_id);
+        }
+        let _ = self.comp.close(win);
+        if let Some(r) = old {
+            self.refresh_windows(r);
+        }
+    }
+
+    /// D8b — chiude tutte le finestre del processo `pid` (morte dell'owner).
+    fn close_windows_of(&mut self, pid: i64) {
+        // Al massimo `MAX_WINDOWS` finestre: il ciclo non puo' girare a vuoto.
+        for _ in 0..musivum::MAX_WINDOWS {
+            let win = match self
+                .win_owner
+                .iter()
+                .find(|(_, _, p)| *p == pid)
+                .map(|(id, _, _)| *id)
+            {
+                Some(w) => w,
+                None => break,
+            };
+            self.close_window(win);
         }
     }
 
@@ -1268,6 +1383,8 @@ fn real_main(_sp: u64) -> ! {
         // D8a: il compositor del DE. La tile si registra in `build_bg_layer`.
         comp: musivum::Compositor::new(musivum::Rect::new(0, 0, w_surf, h_surf)),
         tile: 0,
+        win_owner: alloc::vec::Vec::new(),
+        win_surfaces: alloc::vec::Vec::new(),
         bg_rows_equal: false,
         bulk_feed: false,
         bulk_writes: 0,
@@ -1447,6 +1564,127 @@ fn real_main(_sp: u64) -> ! {
                         let _ = civis::reply(msg.tag, 0, 0);
                     }
 
+                    // ── Finestre del DE (D8b, ADR-0088) ─────────────────
+                    WIN_OPEN => {
+                        // w0 = tile handle (0 = floating), w1 = size hint w<<16|h.
+                        // D8b: esiste una sola tile (lo schermo intero); ogni altra
+                        // — o il floating — e' negata (la policy arriva in D8f/D8g).
+                        let tile = msg.w0 as u32;
+                        let hint = msg.w1 as u32;
+                        let w = (hint >> 16) as u32;
+                        let h = (hint & 0xFFFF) as u32;
+                        let (sw, sh) = term.surface.pixel_size();
+                        let ok = tile != 0
+                            && tile == term.tile
+                            && sw > 0
+                            && sh > 0
+                            && w > 0
+                            && h > 0
+                            && w <= sw
+                            && h <= sh;
+                        if !ok {
+                            let _ = civis::reply(WIN_OPEN, !0, 0);
+                            continue;
+                        }
+                        let bytes = w as usize * h as usize * 4;
+                        if bytes > WIN_SURFACE_MAX {
+                            let _ = civis::println!(
+                                "[console] win: superficie {}x{} ({} B) oltre il limite {}",
+                                w, h, bytes, WIN_SURFACE_MAX
+                            );
+                            let _ = civis::reply(WIN_OPEN, !0, 0);
+                            continue;
+                        }
+                        let owner_pid = civis::peer_pid(msg.channel).unwrap_or(-1);
+                        // Il server (console) crea la superficie ed e' l'owner dello
+                        // shm; il client la mappa RW, il server la tiene RO per il
+                        // blit (i frame sono gli stessi: il client scrive, il
+                        // compositor legge).
+                        let shm_id = match civis::shm_create(bytes) {
+                            Ok(id) => id,
+                            Err(_) => {
+                                let _ = civis::reply(WIN_OPEN, !0, 0);
+                                continue;
+                            }
+                        };
+                        let va = match civis::shm_map(shm_id, 0, civis::PROT_READ) {
+                            Ok(v) => v,
+                            Err(_) => {
+                                let _ = civis::shm_destroy(shm_id);
+                                let _ = civis::reply(WIN_OPEN, !0, 0);
+                                continue;
+                            }
+                        };
+                        let ptr = va as *mut u8;
+                        let map_len = ((bytes + 4095) / 4096) * 4096;
+                        let rect = musivum::Rect::new(0, 0, w, h);
+                        let clip = musivum::Rect::new(0, 0, sw, sh);
+                        // `visible: false` finche' il cliente non fa il primo
+                        // COMMIT: aprire non deve dipingere un rect nero.
+                        let id = term.comp.open(musivum::Window {
+                            id: 0,
+                            owner: owner_pid as u32,
+                            rect,
+                            clip,
+                            backing: musivum::Backing::Owned(musivum::Surface::new(
+                                ptr, w, h, w * 4,
+                            )),
+                            layer: musivum::Layer::TileGuests,
+                            z: 0,
+                            visible: false,
+                        });
+                        if id == 0 {
+                            let _ = civis::shm_destroy(shm_id);
+                            let _ = civis::reply(WIN_OPEN, !0, 0);
+                            continue;
+                        }
+                        term.win_owner.push((id, msg.channel, owner_pid));
+                        term.win_surfaces.push((id, shm_id, ptr, map_len, w, h));
+                        // Il danno dell'apertura e' inutile (non visibile): il
+                        // primo COMMIT lo dichiara.
+                        term.comp.clear_damage();
+                        let _ = civis::reply(WIN_OPEN, id as u64, shm_id as u64);
+                    }
+
+                    WIN_COMMIT => {
+                        // w0 = win id, w1 = rect danneggiato (0 = tutta la finestra).
+                        // Il client ha riempito la sua superficie (shm condivisa in
+                        // RW): il compositor la blitta nel device buffer e flusha.
+                        let win = msg.w0 as u32;
+                        if term.comp.get(win).is_none() {
+                            let _ = civis::reply(WIN_COMMIT, !0, 0);
+                            continue;
+                        }
+                        // Primo commit: la finestra diventa visibile.
+                        let _ = term.comp.set_visible(win, true);
+                        if let Some(w) = term.comp.get(win) {
+                            term.comp.add_damage(w.visible_rect());
+                        }
+                        term.flush_display();
+                        let _ = civis::reply(WIN_COMMIT, 0, 0);
+                    }
+
+                    WIN_CLOSE => {
+                        // w0 = win id.
+                        let win = msg.w0 as u32;
+                        if term.comp.get(win).is_some() {
+                            term.close_window(win);
+                            let _ = civis::reply(WIN_CLOSE, 0, 0);
+                        } else {
+                            let _ = civis::reply(WIN_CLOSE, !0, 0);
+                        }
+                    }
+
+                    WIN_STATS => {
+                        let (vis, tot) = term.comp.stats();
+                        let _ = civis::reply(WIN_STATS, vis as u64, tot as u64);
+                    }
+
+                    WIN_SET_RECT | WIN_SET_SURFACE | WIN_RAISE => {
+                        // Non implementati in D8b (arrivano con floating/D8f).
+                        let _ = civis::reply(msg.tag, !0, 0);
+                    }
+
                     civis::EXIT_NOTIFY => {
                         // Solo la morte del **peer FS** (cardo) impone di
                         // rimontare `/dev/console`: ogni processo che stampa e'
@@ -1460,6 +1698,13 @@ fn real_main(_sp: u64) -> ! {
                         if fs_peer != 0 && msg.w1 as i64 == fs_peer {
                             ensure_console_registered();
                             fs_peer = fs_peer_pid();
+                        }
+                        // Chiude tutte le finestre del processo morto (w1 = pid):
+                        // il leak shm e' impossibile per costruzione (l'owner e'
+                        // il server, che le distrugge qui).
+                        let dead = msg.w1 as i64;
+                        if dead >= 0 {
+                            term.close_windows_of(dead);
                         }
                     }
 

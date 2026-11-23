@@ -394,6 +394,30 @@ negano ogni endpoint alle immagini `Untrusted` (classe misurata dal kernel,
 `SYS_PEER_INFO` + trust table), quindi per il codice non firmato il broker è
 l'unica strada. `proto = NET_PROTO_IPV4` sceglie l'uscita IPv4 (`siit`).
 
+**Finestre del DE (D8b, ADR-0088)**: il compositor `musivum` vive dentro
+`Service::Console`; i clienti aprono finestre con il protocollo `WIN_*`
+(client nel meccanismo: `civis::win`). Nessuna syscall nuova.
+
+| Tag | Nome | Semantica |
+|-----|------|-----------|
+| 0x94 | `WIN_OPEN` | `w0` = tile handle (0 = floating), `w1` = `w<<16\|h` → `w0` = win id, `w1` = shm_id (superficie, mappata RW dal cliente) |
+| 0x95 | `WIN_COMMIT` | `w0` = win id, `w1` = rect locale (0 = tutta; D8b danneggia l'intera finestra) → il server blitta nel device buffer e flusha |
+| 0x96 | `WIN_SET_RECT` | `w0` = win id, `w1` = rect (solo floating; D8f) |
+| 0x97 | `WIN_SET_SURFACE` | `w0` = win id, `w1` = shm_id (solo floating; D8f) |
+| 0x98 | `WIN_RAISE` | `w0` = win id (mai fuori dal proprio livello; D8f) |
+| 0x99 | `WIN_CLOSE` | `w0` = win id → libera shm e ridisegna il terminale sotto |
+| 0x9A | `WIN_STATS` | solo test → `(visibili, totali)` |
+
+Il **layer e il clip decidono dall'handle** (torsione 1, §10.1 del piano DE):
+con un handle di tile la finestra nasce in `Layer::TileGuests`, clippata a
+quella tile; senza (floating/overlay) servono classe ≥ `ThirdParty` e
+consenso — policy che arriva in D8f/D8g. In D8b esiste una sola tile (id `1`,
+schermo intero) e i tag 0x96–0x98 rispondono `!0` (non implementati). La
+superficie la crea il server (owner dello shm); il cliente la mappa RW, il
+server la tiene RO per il blit. `WIN_CLOSE` e `EXIT_NOTIFY` (con `w1` = pid)
+fanno `munmap` della mappatura del server e distruggono lo shm: il leak è
+impossibile per costruzione.
+
 ### I/O
 
 | Syscall | Numero | Descrizione |

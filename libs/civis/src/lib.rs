@@ -99,6 +99,8 @@ pub use syscall_numbers::{CUSTOS_AUTHORIZE, CUSTOS_CONSENT, CUSTOS_GRANT, CUSTOS
 /// Tag IPC del broker di rete (ADR-0080, fase 6): proxy a ring per il
 /// codice non firmato.
 pub use syscall_numbers::{BROKER_CLOSE, BROKER_OPEN, BROKER_STATS, BROKER_TX};
+/// Tag delle finestre del DE (D8b, ADR-0088).
+pub use syscall_numbers::{WIN_CLOSE, WIN_OPEN, WIN_RAISE, WIN_SET_RECT, WIN_SET_SURFACE, WIN_STATS, WIN_COMMIT};
 /// Tag del cancel cooperativo parent→figlio (Fase 44b, job control: Ctrl-C).
 pub use syscall_numbers::JOB_CANCEL;
 /// Tag della notify kernel→kbd su IRQ1 (Fase 15, bridge interrupt→IPC).
@@ -292,6 +294,7 @@ pub mod input;
 /// invio/ricezione sugli slot (formato in `net-ep`) e stream TCP blocking.
 /// Meccanismo neutro: nessun verbo POSIX, nessun tipo di socket.
 pub mod net;
+pub mod win;
 pub mod broker;
 pub mod print;
 pub mod spawn;
