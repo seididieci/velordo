@@ -65,9 +65,10 @@ libr::entry!(real_main);
 fn real_main(_sp: u64) -> ! {
     let _ = civis::print_string(b"[shell] starting\n");
 
-    // Apri il terminale (tastiera + output VGA via console server).
+    // Aggancia il terminale: la **sessione** del processo (input + output,
+    // D8d: niente device da aprire).
     if !term::term_init() {
-        let _ = civis::print_string(b"[shell] cannot open /dev/input/keyboard\n");
+        let _ = civis::print_string(b"[shell] no session to attach\n");
         civis::exit(1);
     }
 

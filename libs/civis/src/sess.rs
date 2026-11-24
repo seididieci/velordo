@@ -192,6 +192,14 @@ impl Session {
         if r.w0 == !0u64 {
             return Err(SessError::Denied);
         }
+        // Se era la sessione in cache (`current`), la cache e' stantia: senza
+        // questo, chi chiude la propria sessione continuerebbe a parlarle (e
+        // ogni operazione tornerebbe `Denied`) finche' un errore di write non
+        // la butta — l'ha trovato t75, che dopo la `close` di t74 si ritrovava
+        // il Session di una sessione chiusa.
+        if unsafe { (*core::ptr::addr_of!(CURRENT)).as_ref() }.map(|c| c.id) == Some(self.id) {
+            forget_current();
+        }
         Ok(())
     }
 
@@ -281,13 +289,54 @@ pub fn stats() -> Result<(usize, usize), SessError> {
     Ok((r.w0 as usize, r.w1 as usize))
 }
 
-// ── Il sink di default (D8c2) ────────────────────────────────────────
+// ── La sessione del processo (D8c2/D8d) ──────────────────────────────
 
 /// Sessione corrente del processo, risolta **una volta** e riusata: la
-/// risoluzione costa due IPC (attestazione + eventuale default), il feed una
-/// sola. Una cache stantia (la `console` e' ripartita: la mailbox e' morta e
-/// l'attachment non esiste piu') si butta al primo errore.
-static mut DEFAULT: Option<Session> = None;
+/// risoluzione costa due IPC (attestazione + eventuale default), le
+/// operazioni una sola. Una cache stantia (la `console` e' ripartita: la
+/// mailbox e' morta e l'attachment non esiste piu') si butta al primo errore
+/// con [`forget_current`].
+static mut CURRENT: Option<Session> = None;
+
+/// Canale del servizio `console` al momento della risoluzione: serve a
+/// riconoscere la sua morte in [`crate::input::wait_until`] (dopo un restart
+/// il canale e' un altro, e la cache va rifatta).
+static mut CURRENT_CHAN: u64 = 0;
+
+/// La **sessione del processo**: prima l'attestazione (`whoami`: in D8e il DE
+/// lega il figlio alla sua tile), poi l'unico ingresso nominato
+/// (`attach_default`: lo schermo). `None` = nessuna sessione raggiungibile.
+///
+/// E' la cache condivisa da stdout ([`out`]) e input ([`crate::input`]): un
+/// processo parla con **una** sessione, sempre la stessa.
+pub fn current() -> Option<&'static Session> {
+    unsafe {
+        if let Some(s) = &*core::ptr::addr_of!(CURRENT) {
+            return Some(s);
+        }
+    }
+    let chan = service_chan().ok()?;
+    let s = whoami().or_else(|_| attach_default()).ok()?;
+    unsafe {
+        *core::ptr::addr_of_mut!(CURRENT_CHAN) = chan;
+        *core::ptr::addr_of_mut!(CURRENT) = Some(s);
+        (*core::ptr::addr_of!(CURRENT)).as_ref()
+    }
+}
+
+/// Butta la cache (la `console` e' morta o ha rifiutato): la prossima
+/// operazione risolve di nuovo. Idempotente.
+pub fn forget_current() {
+    unsafe {
+        *core::ptr::addr_of_mut!(CURRENT) = None;
+        *core::ptr::addr_of_mut!(CURRENT_CHAN) = 0;
+    }
+}
+
+/// Il canale su cui parla la sessione in cache (0 = nessuna).
+pub(crate) fn current_chan() -> u64 {
+    unsafe { *core::ptr::addr_of!(CURRENT_CHAN) }
+}
 
 /// Scrive `bytes` sulla **sessione del processo** (attestata dal kernel) o, se
 /// non ne ha una, sulla sessione di default (lo schermo). Ritorna `true` se il
@@ -310,30 +359,22 @@ fn out_impl(bytes: &[u8], screen_only: bool) -> bool {
     if bytes.is_empty() {
         return true;
     }
-    // 1. la cache: se la sessione c'e' ancora, un solo IPC.
-    unsafe {
-        if let Some(s) = &*core::ptr::addr_of!(DEFAULT) {
-            if s.write_with(bytes, screen_only).is_ok() {
-                return true;
-            }
-            *core::ptr::addr_of_mut!(DEFAULT) = None;
-        }
-    }
-    // 2. risoluzione: prima l'attestazione (in D8e il DE lega il figlio alla
-    //    sua tile), poi l'unico ingresso nominato (lo schermo).
-    let s = match whoami().or_else(|_| attach_default()) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    if s.write_with(bytes, screen_only).is_err() {
+    let Some(s) = current() else {
         return false;
+    };
+    if s.write_with(bytes, screen_only).is_ok() {
+        return true;
     }
-    unsafe { *core::ptr::addr_of_mut!(DEFAULT) = Some(s) };
-    true
+    // Cache stantia (console ripartita): una risoluzione, un tentativo.
+    forget_current();
+    let Some(s) = current() else {
+        return false;
+    };
+    s.write_with(bytes, screen_only).is_ok()
 }
 
 /// Risolve il canale del servizio `console`.
-fn service_chan() -> Result<u64, SessError> {
+pub(crate) fn service_chan() -> Result<u64, SessError> {
     crate::service_lookup(Service::Console)
         .map(|c| c as u64)
         .map_err(|_| SessError::ServiceDead)

@@ -81,12 +81,25 @@ pub enum WaitReplyError {
 /// server e' morto: ritorna `Err(ServerDied)` subito invece di attendere
 /// per sempre una reply che non arrivera' mai.
 #[inline]
+/// `true` se `tag` e' un **hint** (fire-and-forget: `INPUT_NOTIFY`,
+/// `SESS_INPUT_EVENT`, `NET_EP_EVENT`). Un hint non e' una risposta: chi
+/// aspetta una reply lo incontra e lo mette **da parte** (E2, ADR-0084) —
+/// senza, un tasto premuto mentre si parla con un altro servizio farebbe
+/// fallire quella richiesta con `UnexpectedMsg`.
+fn is_hint(tag: u64) -> bool {
+    tag == crate::INPUT_NOTIFY || tag == crate::SESS_INPUT_EVENT || tag == crate::NET_EP_EVENT
+}
+
 pub fn wait_reply(req_id: i64) -> Result<IpcMsg, WaitReplyError> {
     loop {
         match recv() {
             Ok(m) => {
                 if m.req_id == req_id {
                     return Ok(m);
+                }
+                if is_hint(m.tag) {
+                    stash_push(m);
+                    continue;
                 }
                 if sys::is_exit_notify(&m) {
                     return Err(WaitReplyError::ServerDied {
@@ -115,6 +128,10 @@ pub fn wait_reply_chan(req_id: i64, chan: u64) -> Result<IpcMsg, WaitReplyError>
             Ok(m) => {
                 if m.req_id == req_id {
                     return Ok(m);
+                }
+                if is_hint(m.tag) {
+                    stash_push(m);
+                    continue;
                 }
                 if sys::is_exit_notify(&m) {
                     if m.channel != chan {

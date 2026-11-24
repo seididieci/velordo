@@ -360,14 +360,18 @@ nei test).
 
 La tastiera non si interroga a tick: `porta` manda `INPUT_NOTIFY` al
 sottoscrittore che ha il **focus** (LIFO: l'ultimo `INPUT_ATTACH`, potato su
-`INPUT_DETACH` o `EXIT_NOTIFY`). Il notify è un **hint coalescente**, non il
-dato: il client si blocca in `recv()`, poi drena `/dev/input/keyboard` finché
-`read` non ritorna 0. Un notify perso o ridondante non perde tasti, e la coda
-async (8 slot) non è nel percorso dati. `civis::input` incapsula attach
-(idempotente, con retry durante il boot/riavvio di porta), `read` e `wait`
-(su morte di porta: una riattaccata, poi uscita loud). Il meccanismo è neutro
-(byte, non tipi di terminale): la shell nativa, `identis-login` e
-`create-user` lo usano; la shell POSIX resta sul path a polling (personalità).
+`INPUT_DETACH` o `EXIT_NOTIFY`; la capability richiede classe ≥ `ThirdParty`).
+Il notify è un **hint coalescente**, non il dato: il client si blocca in
+`recv()`, poi drena con `INPUT_READ` finché non torna 0 (dal D8d: payload nei
+registri, niente device e niente cardo — ADR-0091). Un notify perso o
+ridondante non perde tasti, e la coda async (8 slot) non è nel percorso dati.
+`civis::input` è il client dei **lettori**: non parla con `porta`, legge i
+tasti dalla **sessione** (`SESS_READ`) e dorme sull'hint `SESS_INPUT_EVENT`;
+`civis::input::device` è il lato del focus owner (la console, poi il DE) che
+si sottoscrive a `porta` e inietta. Il meccanismo è neutro (byte, non tipi di
+terminale): la shell nativa, `identis-login`, `create-user` e la shell POSIX
+lo usano; l'eco la fa il lettore (il modello la offre solo a chi non ha un
+editor, `SESS_ECHO`).
 
 ### Trappola: un tag di richiesta non può valere `EXIT_NOTIFY`
 

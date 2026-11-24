@@ -6,7 +6,7 @@
 //! buco: finiva in chiaro nel log seriale).
 //!
 //! Output sulla **sessione di terminale** (`civis::sess::out`, D8c2: il
-//! mirror seriale lo fa il server), input da `/dev/input/keyboard`.
+//! mirror seriale lo fa il server), input dalla sessione (D8d).
 //!
 //! Il framing del protocollo e' condiviso (`libs/identis-proto`): qui c'e'
 //! solo il lato client.

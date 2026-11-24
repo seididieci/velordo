@@ -16,7 +16,7 @@
 //!   **in locale** — nel payload IPC c'e' solo l'hash.
 //!
 //! Output sulla **sessione di terminale** (`civis::sess::out`, D8c2: il
-//! mirror seriale lo fa il server), input da `/dev/input/keyboard`.
+//! mirror seriale lo fa il server), input dalla sessione (D8d).
 
 #![no_std]
 #![no_main]

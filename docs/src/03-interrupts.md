@@ -110,9 +110,10 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
 
 **Fase 15 completata**: tastiera interamente in userspace. Il driver PS/2
 `kbd` (ring 3, porte 0x60-0x64) drena l'i8042, pubblica gli scancode su
-`/dev/kbd` e `porta` li decodifica (layout US) su
-`/dev/input/keyboard` (v. ADR-0011). Se i servizi non sono pronti, lo scancode
-va perso (fire-and-forget a coda piena: il drain successivo recupera).
+`/dev/kbd` e `porta` li decodifica (layout US) e li serve al focus owner con
+`INPUT_READ` (v. ADR-0011; dal D8d l'input decodificato **non e' un file**,
+ADR-0091). Se i servizi non sono pronti, lo scancode va perso
+(fire-and-forget a coda piena: il drain successivo recupera).
 
 ## LAPIC e MSI-X (L0a/L0b)
 

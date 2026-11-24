@@ -21,8 +21,8 @@
 //!    sessione) mentre `focus(0)` riesce senza cambiare un pixel;
 //! 8. `close` libera la sessione (torna a 1, `whoami` torna a fallire); la
 //!    sessione 0 e una inesistente non si chiudono;
-//! 9. D8c2: `/dev/console` non e' piu' apribile e la tastiera non accetta
-//!    write — il ritiro e' loud.
+//! 9. D8c2/D8d: ne' `/dev/console` ne' `/dev/input/keyboard` sono apribili —
+//!    il ritiro e' loud (il testo e' una sessione, i tasti una capability).
 //!
 //! La sessione **0 e' lo schermo**: il test non ci scrive mai, quindi il gate
 //! (login e shell) non viene toccato. Uscita a punto unico: qualunque
@@ -181,19 +181,14 @@ fn run(console: u64) -> Result<(), &'static str> {
     }
     drop(d);
 
-    // 13. D8c2 — il device di testo non esiste piu', e la tastiera non e' un
-    //     terminale: il ritiro e' **loud**, non un alias silenzioso. Un
-    //     vecchio client che continua a scrivere per abitudine lo scopre.
+    // 13. D8c2/D8d — i device del terminale non esistono piu': il testo e' una
+    //     sessione, i tasti una capability. Il ritiro e' **loud**, non un
+    //     alias silenzioso: un vecchio client lo scopre subito.
     if civis::open("/dev/console", 0).is_ok() {
         return Err("/dev/console e' ancora apribile (D8c2 lo ha ritirato)");
     }
-    let Ok(kb) = civis::open("/dev/input/keyboard", 0) else {
-        return Err("/dev/input/keyboard non apribile (porta?)");
-    };
-    let refused = civis::write_fs(kb, b"x", 1).is_err();
-    let _ = civis::close(kb);
-    if !refused {
-        return Err("write su /dev/input/keyboard accettata (porta inoltra ancora testo)");
+    if civis::open("/dev/input/keyboard", 0).is_ok() {
+        return Err("/dev/input/keyboard e' ancora apribile (D8d lo ha ritirato)");
     }
     Ok(())
 }

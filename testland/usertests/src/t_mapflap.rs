@@ -210,10 +210,14 @@ pub fn t_neighbor() -> bool {
     n >= helpers::HELLO.len() && hb[..helpers::HELLO.len()] == *helpers::HELLO
 }
 
-/// t31 — presenza keyboard stack in userspace (Fase 15, gate leggero).
-/// Verifica che i servizi Kbd/Tty siano registrati e i device apribili:
-/// /dev/kbd (scancode raw da kbd) e /dev/input/keyboard (byte cotti da
-/// porta, stesso path di prima). Niente digitazione reale (serve QMP).
+/// t31 — keyboard stack in userspace (Fase 15; D8d: niente device di input).
+///
+/// Verifica che `kbd`/`porta` siano registrati e che il device **raw** del
+/// driver (`/dev/kbd`) sia apribile — quello e' l'ingresso scancode, e resta un
+/// device perche' lo legge solo `porta`. L'input decodificato invece **non e'
+/// piu' un file** (D8d, ADR-0091): `porta` lo serve con `INPUT_*` a chi ha la
+/// capability, e un `Untrusted` come questa suite deve essere **rifiutato**.
+/// Niente digitazione reale (serve QMP).
 pub fn t_kbd_presence() -> bool {
     helpers::drain_stray();
     if civis::service_pid(civis::Service::Kbd).is_err() {
@@ -229,11 +233,17 @@ pub fn t_kbd_presence() -> bool {
         return false;
     };
     let _ = civis::close(fk);
-    let Ok(ft) = civis::open_wait("/dev/input/keyboard", 0, 1000, civis::POLL_PERIOD_TICKS) else {
-        println!("[usertests] t31: open /dev/input/keyboard FAILED");
+    // D8d: la tastiera decodificata non e' piu' un device apribile...
+    if civis::open("/dev/input/keyboard", 0).is_ok() {
+        println!("[usertests] t31: /dev/input/keyboard esiste ancora");
         return false;
-    };
-    let _ = civis::close(ft);
+    }
+    // ...e la capability si nega a un `Untrusted`: i tasti non sono di
+    // chiunque (isolamento fra le tile).
+    if civis::input::device::attach_once().is_ok() {
+        println!("[usertests] t31: INPUT_ATTACH accettato da Untrusted");
+        return false;
+    }
     true
 }
 

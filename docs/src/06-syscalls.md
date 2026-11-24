@@ -418,7 +418,7 @@ server la tiene RO per il blit. `WIN_CLOSE` e `EXIT_NOTIFY` (con `w1` = pid)
 fanno `munmap` della mappatura del server e distruggono lo shm: il leak è
 impossibile per costruzione.
 
-**Sessioni di terminale (D8c1/D8c2, ADR-0089/ADR-0090)**: le sessioni di
+**Sessioni di terminale (D8c1/D8c2/D8d, ADR-0089/ADR-0090/ADR-0091)**: le sessioni di
 `littera` vivono nel servizio `console` (che già possiede i pixel). La
 capability è una **mailbox**: una pagina shm (`libs/sess-proto`: OUT
 cliente→sessione `0..2048`, IN sessione→cliente `2048..4096`, `MAX_CHUNK`
@@ -437,7 +437,7 @@ stdout: sessione attestata → default → seriale).
 | 0x9D | `SESS_ATTACH_DEFAULT` | → `(0, shm)`: l'unico ingresso **nominato** (la sessione 0, lo schermo); la mailbox è creata per il canale che chiede |
 | 0x9E | `SESS_BIND` | `w0` = sess, `w1` = pid: il DE lega un figlio appena nato (≥ `ThirdParty`) |
 | 0x9F | `SESS_WRITE` | `w0` = len (byte in OUT), `w1` = `0` entra nel mirror seriale / `1` solo schermo → feed della sessione attaccata |
-| 0xA0 | `SESS_READ` | `w0` = max → copia fino a `max` byte di input in IN |
+| 0xA0 | `SESS_READ` | `w0` = max → copia fino a `max` byte di input in IN; **dichiara il canale come lettore** (è lui che riceve l'hint) |
 | 0xA1 | `SESS_RESIZE` | `w0` = `cols<<16\|rows` → reflow; in D8c1 la sessione in focus (lo schermo) è negata |
 | 0xA2 | `SESS_ECHO` | `w0` = on: eco dell'input sul modello (flag di **sessione**) |
 | 0xA3 | `SESS_FOCUS` | `w0` = sess: la sessione **disegnata** (in D8c1 solo la 0) |
@@ -446,7 +446,8 @@ stdout: sessione attestata → default → seriale).
 | 0xA6 | `SESS_STATE` | `w0` = sess, `w1` = limite → `(celle non vuote, CRC del testo)` |
 | 0xA7 | `SESS_DUMP` | `w0` = sess, `w1` = max → coda del testo visibile nella meta' IN |
 | 0xA8 | `SESS_STATS` | → `(sessioni vive, focus)` |
-| 0xA9 | `SESS_TEST_INPUT` | `w0` = len (byte in OUT) — **solo test**: inietta input come la tastiera |
+| 0xA9 | `SESS_TEST_INPUT` | `w0` = len (byte in OUT) — **solo test**: inietta input come la tastiera (stesso percorso + hint) |
+| 0xAA | `SESS_INPUT_EVENT` | console → **lettore dichiarato**, fire-and-forget: c'è input nella coda. Hint coalescente (E2): la coda è la verità |
 
 Nessuna syscall nuova e nessun `Service` nuovo (`SERVICE_COUNT` resta 20). La
 sessione di un processo si trova per **attestazione del pid**, mai con un
@@ -456,11 +457,25 @@ attachment**. Il **mirror seriale** della sessione in focus è del server
 (formato nudo, `MIRROR_SESSION_MAX` 1 MiB per sessione come rete di sicurezza;
 il budget per comando resta del client che sa cos'è un comando).
 
+**Input (D8d, ADR-0091)**: i tasti **non sono un device**. `porta` (il servizio
+tastiera) li serve a chi ha la **capability** (`INPUT_ATTACH`, ≥ `ThirdParty`)
+con `INPUT_READ`, e il focus owner (la console; il DE in D8e) li inietta nella
+coda della sessione in focus. Il lettore li legge con `SESS_READ` e si sveglia
+sull'hint `SESS_INPUT_EVENT`. `/dev/input/keyboard` è **ritirato** (e
+`DEV_KEYBOARD`, il tipo 2, con lui: il numero non si riusa); resta `/dev/kbd`
+(scancode raw), che è l'ingresso del driver e lo legge solo `porta`.
+`civis::input` è il client (`attach`/`read`/`wait`/`wait_until`/`detach`);
+`civis::input::device` è il lato del focus owner (`attach` + drain).
+
 ### I/O
 
 | Syscall | Numero | Descrizione |
 |---------|--------|-------------|
 | `write` | 2 | Scrive su seriale (`CONSOLE_OUT`/`CONSOLE_ERR`); altre maniglie → `-1` |
+
+> Input e output del terminale **non sono syscall né device**: il testo è una
+> sessione (`SESS_*`), i tasti una capability (`INPUT_*`). `write` resta solo il
+> sink seriale di debug.
 
 > Le classiche `read`/`open`/`close`/`readdir` non sono syscall kernel:
 > sono wrapper IPC diretti in `civis` (client → cardo, v. [File System](./09-filesystem.md)).

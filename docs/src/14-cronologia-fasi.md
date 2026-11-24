@@ -4547,3 +4547,72 @@ device (eccezione: il test che ne prova il ritiro), niente `DEV_CONSOLE`, e
 modo silenzioso in cui questo ritiro fallisce). Zero kernel, zero syscall,
 zero servizi: l'unica modifica d'ABI è il `w1` di `SESS_WRITE` e la rimozione
 di `DEV_CONSOLE`.
+
+## D8d — I tasti sono della sessione: input come capability (ADR-0091)
+
+In D8c2 il **testo** aveva smesso di essere un file. L'input era rimasto
+l'ultimo device del terminale, con tre conseguenze: ogni programma che voleva i
+tasti apriva un path (`/dev/input/keyboard`), `INPUT_ATTACH` non aveva policy
+(chiunque leggeva i tasti di tutti), e il percorso tornava attraverso cardo —
+il filesystem che il testo aveva appena lasciato.
+
+**Decisioni**:
+
+1. **`INPUT_READ`** (0x49): `porta` serve i byte in modo diretto e sincrono con
+   il payload nei **registri** (8 byte in `w0`, `w1` = quanti). Niente ring,
+   niente cardo. La sottoscrizione (`INPUT_ATTACH`) è la **capability** e
+   richiede classe ≥ `ThirdParty`. `/dev/input/keyboard` si **ritira**
+   (`DEV_KEYBOARD` fuori dall'ABI, il numero non si riusa); resta `/dev/kbd`
+   (scancode raw), che è l'ingresso del driver.
+2. **Il focus owner inietta**: la console in D8d (possiede `Sessions::focus`),
+   il DE in D8e (con `SESS_INPUT`). Si sottoscrive (E0), a ogni hint drena e
+   spinge i byte nella coda della sessione in focus.
+3. **`SESS_INPUT_EVENT`** (0xAA): hint coalescente al **lettore dichiarato**
+   (`SESS_READ` lo registra). Un hint perso non perde un tasto; uno in più fa un
+   drain a vuoto.
+4. **L'eco resta al lettore**: `input::attach` spegne l'eco del modello (chi
+   legge ha il suo editor di linea) e `SESS_ECHO` resta l'opt-in per un
+   consumatore senza editor. Dichiarato rispetto al piano (§6.4 diceva
+   "l'eco la fa littera"): il modello il backspace lo conosce solo come
+   "cursore a sinistra", quindi un'eco di servizio non saprebbe nemmeno
+   cancellare, e ogni lettore reale è un editor.
+5. **`civis::input` non cambia forma** (`attach`/`read`/`wait`/`wait_until`/
+   `detach`): cambia dentro. Login, `interpres` e `create-user` non cambiano di
+   una riga; la shell POSIX migra le tre funzioni di lettura e perde `TERM_FD`.
+   `civis::input::device` è il lato del focus owner (attach + drain).
+
+**Trappole pagate** — quattro, tutte istruttive:
+
+(a) **`send` è `Ok` anche quando il server rifiuta** (`w0 = !0`): `attach_once`
+considerava accettato un `INPUT_ATTACH` negato. Lo ha detto t31 ("INPUT_ATTACH
+accettato da Untrusted"); il gate della capability va guardato sul *payload*
+della reply, non sul `Result` dell'IPC.
+
+(b) **la reply va prima dell'hint**: chi inietta (`SESS_TEST_INPUT`) è spesso
+anche il lettore dichiarato, e un hint accodato davanti alla reply fa fallire
+la sua `send` sincrona con `UnexpectedMsg`. Per la stessa ragione
+`ipc::wait_reply` ora mette gli hint nello stash invece di fallire: un tasto
+premuto mentre si parla con un altro servizio non deve rompere quella
+richiesta (lezione E2 applicata al percorso sincrono).
+
+(c) **la cache di sessione va invalidata dalla `close`**: t74 usa `sess::out`
+(che risolve e cacha la sessione *appena creata*), poi la chiude; t75 si
+ritrovava il `Session` di una sessione chiusa e ogni `SESS_INFO` tornava
+`Denied` ("info fallita"). Ora `Session::close` dimentica la cache se era la
+sua, e `input::attach` la butta se `SESS_ECHO` viene negata (cache stantia
+dopo un restart).
+
+(d) **la console parte prima di `porta`**: l'attach è bounded a boot (100
+tick) e, dopo la morte di `porta`, il riattacco è un tentativo per volta nel
+loop, con `recv_timeout` sulla scadenza del retry — mai un'attesa bloccante
+dentro un server. E l'`EXIT_NOTIFY` **della console** va riconosciuto in
+`wait_until` (riattaccata una volta): consumato e ignorato, il lettore
+dormirebbe per sempre su una console morta.
+
+**Vittoria**: gate `[gate] PASS` (6 suite + shell nativa 33/33, **usertests
+71/71** con t75, unit host 173 — `littera` 16 con registro lettori e overflow,
+zero FAIL/PANIC/FAULT, zero `[munmap]`), più due asserzioni strutturali: nessun
+sorgente cita `/dev/input` (eccezione: i test che ne provano il ritiro) e
+`DEV_KEYBOARD` non è più nell'ABI. I tasti arrivano alla **sessione**, non al
+testo; cardo è fuori anche dal percorso dell'input; il DE (D8e) ha già il ruolo
+che gli serve — è il focus owner.

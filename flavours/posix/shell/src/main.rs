@@ -1,9 +1,10 @@
 //! usershell — Shell interattiva per Velordo (Fase 9.4, utility Fase 18).
 //!
-//! Client del terminale: NON mappa il VGA. Apre `/dev/input/keyboard` e usa lo
-//! stesso fd per leggere i tasti (read) e per scrivere l'output (write): il
-//! console server possiede la VGA, disegna l'output e fa l'echo dei tasti
-//! (Opzione B). La shell gestisce solo la linea logica dei comandi.
+//! Client del terminale: NON mappa il VGA. Legge i tasti dalla **sessione**
+//! del processo (`civis::input`, D8d) e scrive l'output sulla stessa sessione
+//! (`civis::sess`): il console server possiede i pixel, il modello a celle e il
+//! mirror seriale. L'editor di linea e l'eco sono della shell. La shell
+//! gestisce solo la linea logica dei comandi.
 //! Comandi: ls, cat, touch, mkdir, mount, umount, echo, clear, wc, hexdump,
 //! kill, cd, pwd, cp, mv, rm, rmdir, source, run, jobs, wait, fg, bg, exit,
 //! help (+ redirect/pipe/env/PATH in 12-utilities). Tutti i path passano per

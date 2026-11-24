@@ -1,7 +1,7 @@
 //! Shell nativa Velordo (Fase 3.2, S3.2a + S3.2b): REPL minima post-login.
 //!
 //! Programma interattivo **nativo** (meccanismo, niente POSIX) che gira su
-//! `/dev/input/keyboard` (input) e la **sessione di terminale** (output,
+//! `civis::input` (input, dalla sessione — D8d) e la **sessione di terminale** (output,
 //! `civis::sess`, D8c2). Non usa `cd`, `stdin`, `stdout`,
 //! `fork`, pipe Unix, `$VAR` come primitive speciali: e' un dispatcher di
 //! comandi su risorse/capability.
@@ -24,7 +24,7 @@
 //! (futuro, S3.2b+) viene stampato serializzato.
 //!
 //! Output sulla sessione di terminale (`civis::sess::out`/`out_screen`,
-//! D8c2: il mirror seriale lo fa il server), input da `/dev/input/keyboard`.
+//! D8c2: il mirror seriale lo fa il server), input dalla sessione (D8d).
 //! La password non transita mai in chiaro: hash BLAKE2s-256 in locale.
 //!
 //! **Refresh del token**: quando un comando autenticato riceve `R_TOKEN_INVALID`

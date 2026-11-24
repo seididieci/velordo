@@ -160,7 +160,8 @@ tramite `FS_REGISTER`. Mount table dinamica con prefix-based resolution.
 La shell (`usershell`) usa `civis` wrappers per leggere/scrivere file:
 ls, cat, touch, mkdir, help, exit. Il server gpu gestiva la VGA e
 (all'epoca) la tastiera; la shell opera sullo stesso fd del device
-`/dev/input`. (Dalla Fase 15: gpu solo rendering; dal D8c2 il testo e' una
+`/dev/input` (ritirato in D8d: i tasti sono una capability, ADR-0091). (Dalla
+Fase 15: gpu solo rendering; dal D8c2 il testo e' una
 sessione, non un device — ADR-0090,
 tastiera in `kbd`/`porta`; comandi estesi in Fase 18.)
 

@@ -229,14 +229,14 @@ pub fn resolve_local(mounts_fat: &[mount::FsMount], path: &str) -> Option<FsKind
     }
 }
 
-/// Converte device name in tipo vela (w0 di DEV_OPEN). `console` non c'e'
-/// piu' (D8c2): il testo viaggia sull'endpoint di sessione, non su un device —
-/// un `open` del vecchio nome device fallisce loud con `ERR_NOTFOUND`.
+/// Converte device name in tipo vela (w0 di DEV_OPEN). `console` e `keyboard`
+/// non ci sono piu' (D8c2/D8d): il testo viaggia sull'endpoint di sessione e i
+/// tasti su `INPUT_*`, non su device — un `open` dei vecchi nomi fallisce loud
+/// con `ERR_NOTFOUND`.
 pub fn dev_type(name: &str) -> Option<u64> {
     match name {
         "null" => Some(DEV_NULL),
         "zero" => Some(DEV_ZERO),
-        "keyboard" => Some(DEV_KEYBOARD),
         "kbd" => Some(DEV_KBD),
         _ => None,
     }

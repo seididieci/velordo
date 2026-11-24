@@ -491,11 +491,17 @@ pub const JOB_CANCEL: u64 = 0x43;
 //   precedente (primo mattone del DE: chi ha il focus riceve i tasti).
 // - INPUT_DETACH (0x47): client → porta, rinuncia esplicita al focus.
 // - INPUT_NOTIFY (0x48): porta → sottoscrittore, fire-and-forget. `w0` = byte
-//   in coda. E' un HINT coalescente, non il dato: la verita' sono i byte letti
-//   da `/dev/input/keyboard`, quindi un notify perso non perde tasti.
+//   in coda. E' un HINT coalescente, non il dato: la verita' sono i byte in
+//   porta, quindi un notify perso non perde tasti.
+// - INPUT_READ (0x49, D8d): client → porta, `w1` = quanti byte vuole (<= 8) →
+//   `w0` = byte impacchettati little-endian, `w1` = quanti. Il payload sta nei
+//   **registri**: la tastiera non e' un file, non c'e' ring ne' cardo nel
+//   percorso (il testo ne e' uscito in D8c2, i tasti non ci rientrano).
+//   Richiede un `INPUT_ATTACH` vivo: la tastiera e' una **capability**.
 pub const INPUT_ATTACH: u64 = 0x46;
 pub const INPUT_DETACH: u64 = 0x47;
 pub const INPUT_NOTIFY: u64 = 0x48;
+pub const INPUT_READ: u64 = 0x49;
 pub const SVC_READY: u64 = 0x7D;
 pub const TEST_DONE: u64 = 0x7E;
 pub const INIT_BOUNCE: u64 = 0x7F;
@@ -513,9 +519,9 @@ pub const DEV_CLOSE: u64 = 0x23;
 pub const DEV_READDIR: u64 = 0x24;
 pub const DEV_NULL: u64 = 0;
 pub const DEV_ZERO: u64 = 1;
-pub const DEV_KEYBOARD: u64 = 2;
-// 3 era `DEV_CONSOLE`: ritirato in D8c2 (ADR-0090) — il testo viaggia
-// sull'endpoint di sessione, non su un device. Il numero non si riusa.
+// 2 era il tipo della tastiera e 3 quello della console: ritirati in D8c2
+// (testo) e D8d (tasti) — non sono file, sono capability (l'endpoint di
+// sessione e `INPUT_ATTACH`). I numeri non si riusano.
 pub const DEV_KBD: u64 = 4;
 /// Libera uno slot DMA del chiamante (D4): `dma_free(slot)`. Gli slot >= 1
 /// (device buffer) sono dell'owner di `Service::Console`; lo slot 0 (staging)
@@ -792,9 +798,14 @@ pub const SESS_DUMP: u64 = 0xA7;
 /// `SESS_STATS` → `w0` = sessioni vive, `w1` = focus.
 pub const SESS_STATS: u64 = 0xA8;
 /// `SESS_TEST_INPUT {len}` → 0 / `!0` — **solo test**: inietta `len` byte di
-/// input nella sessione attaccata (come farebbe la tastiera, D8d), provando
-/// `read` ed eco adesso.
+/// input nella sessione attaccata (come farebbe la tastiera), provando `read`
+/// ed eco.
 pub const SESS_TEST_INPUT: u64 = 0xA9;
+/// `SESS_INPUT_EVENT {queued}` — console → **lettore dichiarato**, fire-and-
+/// forget (D8d): c'e' input nella coda della sua sessione. Hint coalescente
+/// (E2): la verita' e' la coda, un hint perso non perde un tasto. Il lettore
+/// si dichiara leggendo (`SESS_READ`).
+pub const SESS_INPUT_EVENT: u64 = 0xAA;
 
 // Alias brevi per comodità d'uso nei clienti.
 pub const WIN_OPN: u64 = WIN_OPEN;

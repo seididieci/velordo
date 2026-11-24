@@ -17,8 +17,9 @@ i builtin usano nomi POSIX ma il protocollo cardo sottostante e' interno.
 
 ### usershell
 
-Shell interattiva con comandi built-in. Legge input da `/dev/input/keyboard`
-e scrive output sullo stesso fd (il console server disegna sulla VGA). Tiene
+Shell interattiva con comandi built-in. Legge i tasti dalla **sessione** del
+processo (`civis::input`, D8d) e scrive l'output sulla stessa sessione (il
+console server disegna e mirrora). Tiene
 una cwd client-side: i path relativi si risolvono contro di essa, il prompt
 la mostra (`/prova$ `, `$ ` a root).
 
@@ -243,9 +244,9 @@ editabili (wrap VGA).
 - **Read oltre EOF torna `0`** (contratto 18.2-bis); `open` senza `OPEN_CREATE`
   non crea (POSIX, 18.2).
 
-La shell NON mappa la VGA: l'input arriva dal device `/dev/input/keyboard`
-(servito da `porta`), l'output va sulla **sessione di terminale** (D8c2:
-`civis::sess::out` — il testo non passa piu' da un device).
+La shell NON mappa la VGA: l'input arriva dalla **sessione** (`civis::input`,
+D8d) e l'output va sulla stessa sessione (`civis::sess::out`, D8c2) — né il
+testo né i tasti passano più da un device.
 
 ### init
 
@@ -277,10 +278,13 @@ il driver e' separato (`gpu`); dal D8c1/D8c2 il **testo e' una sessione**:
 - **nessun device di testo**: `/dev/console` non esiste piu', e `open` su quel
   nome fallisce loud.
 
-La tastiera e' gestita da `kbd`/`porta` (Fase 15): input da
-`/dev/input/keyboard`; l'echo lo fa il **lettore** (login, shell), che scrive
-sulla sessione con l'hint "solo schermo". In D8d i tasti entreranno nelle
-sessioni e l'eco passera' a `littera`.
+La tastiera e' gestita da `kbd`/`porta` (Fase 15; dal D8d senza device): il
+**focus owner** (la console, il DE in D8e) si sottoscrive, drena con
+`INPUT_READ` e inietta nella coda della sessione in focus; il lettore la legge
+con `SESS_READ` e dorme sull'hint `SESS_INPUT_EVENT`. L'echo lo fa il
+**lettore** (login, shell), che scrive sulla sessione in "solo schermo"; il
+modello echeggia solo se il flag di sessione e' acceso (consumatore senza
+editor).
 
 ### File system server (cardo)
 

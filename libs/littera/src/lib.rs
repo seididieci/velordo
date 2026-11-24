@@ -346,15 +346,18 @@ impl Session {
         }
     }
 
-    /// Accoda input (tastiera o iniezione di test). Ritorna `true` se va
+    /// Accoda input (tastiera o iniezione). Ritorna `true` se va
     /// **echeggiato** sul modello (`echo` acceso): l'eco e' un feed normale,
     /// quindi passa da scroll e render come qualunque altro testo.
+    ///
+    /// A coda piena si scarta il byte **nuovo**, non il piu' vecchio: il
+    /// lettore sta per leggere la testa, e i tasti gia' arrivati sono quelli
+    /// che l'utente ha battuto prima (D8d).
     pub fn push_input(&mut self, bytes: &[u8]) -> bool {
         for &b in bytes {
-            if self.input.len() >= INPUT_MAX {
-                self.input.pop_front();
+            if self.input.len() < INPUT_MAX {
+                self.input.push_back(b);
             }
-            self.input.push_back(b);
         }
         self.echo
     }
@@ -453,6 +456,11 @@ pub struct Sessions {
     bindings: Vec<(i64, usize)>,
     /// `canale IPC -> sessione` (la capability e' la mailbox consegnata).
     attachments: Vec<(u64, usize)>,
+    /// `sessione -> canale del **lettore dichiarato**`: chi ha letto per
+    /// ultimo (`SESS_READ`). E' lui che riceve l'hint `SESS_INPUT_EVENT`
+    /// quando arriva input — un hint perso non perde tasti (la coda e' la
+    /// verita'), uno in piu' fa solo un drain a vuoto.
+    readers: Vec<(usize, u64)>,
     /// Geometria con cui nascono le sessioni nuove (quella del display).
     pub cols: usize,
     pub rows: usize,
@@ -474,6 +482,7 @@ impl Sessions {
             focus: 0,
             bindings: Vec::new(),
             attachments: Vec::new(),
+            readers: Vec::new(),
             cols,
             rows,
         }
@@ -533,6 +542,7 @@ impl Sessions {
         let s = self.slots[id].take()?;
         self.attachments.retain(|&(_, sid)| sid != id);
         self.bindings.retain(|&(_, sid)| sid != id);
+        self.readers.retain(|&(sid, _)| sid != id);
         if self.focus == id {
             self.focus = 0;
         }
@@ -591,9 +601,31 @@ impl Sessions {
             .filter(|&sid| self.get(sid).is_some())
     }
 
-    /// Toglie l'attachment di un canale (chiusura esplicita o morte).
+    /// Toglie l'attachment di un canale (chiusura esplicita o morte) e il suo
+    /// ruolo di lettore.
     pub fn detach(&mut self, chan: u64) {
         self.attachments.retain(|&(c, _)| c != chan);
+        self.readers.retain(|&(_, c)| c != chan);
+    }
+
+    /// Registra il **lettore dichiarato** di una sessione (`SESS_READ`): e'
+    /// l'unico che riceve l'hint dell'input.
+    pub fn set_reader(&mut self, chan: u64, id: usize) {
+        self.readers.retain(|&(s, _)| s != id);
+        self.readers.push((id, chan));
+    }
+
+    /// Il canale che legge la sessione `id`, se qualcuno l'ha dichiarato.
+    pub fn reader_of(&self, id: usize) -> Option<u64> {
+        self.readers
+            .iter()
+            .find(|&&(s, _)| s == id)
+            .map(|&(_, c)| c)
+    }
+
+    /// Toglie il lettore di un canale (morte, hint fallito, detach).
+    pub fn clear_reader(&mut self, chan: u64) {
+        self.readers.retain(|&(_, c)| c != chan);
     }
 
     /// Purga le tracce di un processo morto: bindings e le sessioni di cui
@@ -790,6 +822,41 @@ mod tests {
         assert!(t.get(a).is_none() && t.get(b).is_none());
         assert!(t.get(c).is_some(), "le sessioni degli altri restano");
         assert!(t.get(0).is_some(), "la sessione 0 non si tocca mai");
+    }
+
+    #[test]
+    fn lettore_dichiarato() {
+        let mut t = Sessions::new(20, 4);
+        let id = t.create(None).unwrap();
+        assert_eq!(t.reader_of(id), None, "nessuno legge ancora");
+        t.set_reader(5, id);
+        assert_eq!(t.reader_of(id), Some(5));
+        // Un secondo lettore sostituisce il primo (una sessione, un lettore).
+        t.set_reader(6, id);
+        assert_eq!(t.reader_of(id), Some(6));
+        // Il detach del canale toglie anche il ruolo.
+        t.attach(6, id);
+        t.detach(6);
+        assert_eq!(t.reader_of(id), None);
+        // Chiusura della sessione: via il lettore.
+        t.set_reader(7, id);
+        let _ = t.close(id);
+        assert_eq!(t.reader_of(id), None);
+    }
+
+    #[test]
+    fn input_pieno_scarta_il_nuovo() {
+        let mut s = Session::new(20, 3, 8, None);
+        let mut bytes = alloc::vec::Vec::new();
+        for i in 0..(INPUT_MAX + 5) {
+            bytes.push(b'a' + (i % 26) as u8);
+        }
+        s.push_input(&bytes);
+        let mut out = alloc::vec![0u8; INPUT_MAX + 8];
+        let n = s.read_input(&mut out);
+        assert_eq!(n, INPUT_MAX, "la coda si ferma al tetto");
+        assert_eq!(out[0], b'a', "la testa e' il primo tasto battuto");
+        assert_eq!(out[n - 1], bytes[INPUT_MAX - 1], "la coda e' il tetto");
     }
 
     #[test]

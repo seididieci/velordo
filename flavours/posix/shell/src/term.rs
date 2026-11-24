@@ -2,13 +2,9 @@ use super::*;
 
 // ── Terminale (sessione di terminale) ───────────────────────────────
 
-/// Device di **input** (tastiera): la porta in `/dev/input`. In D8c2 il testo
-/// non passa piu' di qui — la tastiera resta un device, il display e' una
-/// sessione.
-const KEYBOARD_PATH: &str = "/dev/input/keyboard";
-
-/// fd della tastiera (solo lettura).
-static mut TERM_FD: i64 = -1;
+// D8d: nessun fd. L'input si legge dalla **sessione** del processo
+// (`civis::input`), il testo vi si scrive: la tastiera non e' piu' un file e
+// non c'e' un device da aprire.
 
 /// Budget del **mirror seriale** per comando (T4/bulk): un output enorme
 /// (es. `hexdump` di un file da MB) non deve passare tutto sul filo seriale
@@ -28,29 +24,10 @@ pub(crate) fn reset_mirror_budget() {
     }
 }
 
-/// Breve attesa in SOLO spin (nessuna syscall): serve ai bound di boot (retry
-/// dell'`open`) e non all'attesa dell'utente. Per il prompt si usa
-/// `wait_input_tick` (futex): uno spin illimitato tiene la CPU al 100%.
-fn spin_brief() {
-    for _ in 0..1_000_000 {
-        core::hint::spin_loop();
-    }
-}
-
-/// Word futex dell'attesa input: mai scritta (resta 0), l'indirizzo e' solo la
-/// chiave del waiter per `(mm, addr)`. Unica per processo (la shell e'
-/// single-threaded, i due campi non si attendono mai insieme).
-static INPUT_FUTEX: u32 = 0;
-
-/// Dorme fino al prossimo tick quando la tastiera e' vuota. Il processo va in
-/// `Blocked`: il PIT continua a girare e il futex lo risveglia alla deadline
-/// (stesso meccanismo di `useruptime`/login/native shell). 1 tick = latenza
-/// massima 10 ms; nessuna diluizione per gli altri processi, niente CPU
-/// bruciata al prompt (lo spin qui la teneva al 100%).
-fn wait_input_tick() {
-    let deadline = civis::get_ticks() + 1;
-    let _ = civis::futex_wait(core::ptr::addr_of!(INPUT_FUTEX) as usize, 0, deadline as u64);
-}
+/// Attese bounded in **solo spin** (nessuna syscall): servono alle
+/// continuazioni ESC, dove i byte sono gia' in coda e bastano microsecondi.
+/// Mai per l'attesa dell'utente (quella dorme su `civis::input::wait`: uno
+/// spin illimitato tiene la CPU al 100%, ADR-0067).
 
 /// Attesa brevissima per le continuazioni ESC (Fase 43b-fix): i byte della
 /// sequenza sono gia' in coda (il tty li spinge insieme per scancode), quindi
@@ -66,18 +43,10 @@ fn spin_esc() {
 }
 
 pub(crate) fn term_init() -> bool {
-    // Il mount /dev/input viene registrato da porta al suo avvio:
-    // ritenta se l'open iniziale fallisce (race di boot).
-    for _ in 0..100 {
-        if let Ok(fd) = civis::open(KEYBOARD_PATH, 0) {
-            unsafe {
-                TERM_FD = fd;
-            }
-            return true;
-        }
-        spin_brief();
-    }
-    false
+    // D8d: mi dichiaro **lettore** della mia sessione (`civis::input::attach`
+    // fa il retry bounded di boot e spegne l'eco del modello: l'editor di
+    // linea e' nostro).
+    civis::input::attach().is_ok()
 }
 /// Scrive byte sul terminale: la **sessione** del processo (`civis::sess`,
 /// D8c2). Il mirror seriale lo fa il server: qui resta solo la politica del
@@ -155,16 +124,18 @@ pub(crate) fn term_read_stdin() -> Vec<u8> {
     out
 }
 
-/// Legge un byte di input dal terminale. Quando il buffer e' vuoto dorme un
-/// tick (`wait_input_tick`): il futex blocca il processo, non la CPU.
+/// Legge un byte di input dalla sessione. Quando la coda e' vuota dorme
+/// sull'evento (`civis::input::wait`, recv): `None` = sorgente persa (la
+/// console e' morta e non si e' riattaccata) — il chiamante esce loud.
 fn kbd_read_byte() -> Option<u8> {
     let mut buf = [0u8; 1];
     loop {
-        let n = unsafe { civis::read_fs(TERM_FD, &mut buf, 1).unwrap_or(0) };
-        if n > 0 {
+        if civis::input::read(&mut buf) > 0 {
             return Some(buf[0]);
         }
-        wait_input_tick();
+        if !civis::input::wait() {
+            return None;
+        }
     }
 }
 
@@ -173,20 +144,20 @@ fn kbd_read_byte() -> Option<u8> {
 /// (`wait_fg` alterna poll e budget di spin puri).
 pub(crate) fn kbd_try_read() -> Option<u8> {
     let mut buf = [0u8; 1];
-    let n = unsafe { civis::read_fs(TERM_FD, &mut buf, 1).unwrap_or(0) };
-    if n > 0 {
+    if civis::input::read(&mut buf) > 0 {
         Some(buf[0])
     } else {
         None
     }
 }
 // ── Line editing (Fase 43b, readline nella shell) ────────────────────
-// Il tty e' raw: decodifica i tasti (frecce→ESC[D/C/A/B, Home/End→ESC[H/F,
-// Delete→ESC[3~, Esc→ESC) e NON fa echo. L'editor qui possiede buffer,
-// cursore ed echo (console-only, mai seriale: il log seriale dei test non
-// deve vedere i digitati). History a livello shell (comandi, non righe
-// terminale). Solo ASCII (0x20..=0x7e) come prima; righe oltre 80 colonne
-// (wrap VGA) non editabili: documentato in 12-utilities.
+// L'input arriva gia' decodificato dalla sessione (frecce→ESC[D/C/A/B,
+// Home/End→ESC[H/F, Delete→ESC[3~, Esc→ESC) e NON e' ecoato dal modello:
+// l'editor qui possiede buffer, cursore ed echo (console-only, mai seriale:
+// il log seriale dei test non deve vedere i digitati). History a livello
+// shell (comandi, non righe terminale). Solo ASCII (0x20..=0x7e) come prima;
+// righe oltre 80 colonne (wrap VGA) non editabili: documentato in
+// 12-utilities.
 
 /// History comandi (persistente per sessione shell, mai su disco).
 static mut HISTORY: Vec<String> = Vec::new();
@@ -211,8 +182,7 @@ fn term_echo(data: &[u8]) {
 fn read_byte_bounded() -> Option<u8> {
     let mut buf = [0u8; 1];
     for _ in 0..50 {
-        let n = unsafe { civis::read_fs(TERM_FD, &mut buf, 1).unwrap_or(0) };
-        if n > 0 {
+        if civis::input::read(&mut buf) > 0 {
             return Some(buf[0]);
         }
         spin_esc();

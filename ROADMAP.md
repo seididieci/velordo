@@ -11,7 +11,7 @@ ricompilare se stesso. Ordina le priorita' (storage veloce prima, servizi
 fuori dal kernel poi, personalita' per software reale dopo) senza pianificare
 nulla da solo.
 
-## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b + D8c1 + D8c2)
+## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b + D8c1 + D8c2 + D8d)
 
 Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` +
 `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 70/70` +
@@ -708,6 +708,33 @@ Voci con scope e vittoria dichiarati (non date).
       asserzioni strutturali nuove (nessun sorgente cita il device, niente
       `DEV_CONSOLE`, `t64` ha girato davvero). Zero kernel, zero syscall,
       zero servizi.
+
+- [x] **D8d I tasti sono della sessione — input come capability** (ADR-0091,
+      completata 2026-11-24): la tastiera smette di essere un device.
+      `porta` serve i byte con **`INPUT_READ`** (0x49: diretto, sincrono,
+      payload nei **registri**, niente ring e niente cardo) a chi ha la
+      **capability** — `INPUT_ATTACH` ora richiede classe ≥ `ThirdParty`, quindi
+      `Untrusted` non legge i tasti di nessuno. `/dev/input/keyboard` si
+      **ritira** (mount via, `DEV_KEYBOARD` fuori dall'ABI — il numero non si
+      riusa, `dev_type("keyboard")` via); resta `/dev/kbd` (scancode raw), che
+      è l'ingresso del driver. Il **focus owner** (la console in D8d, il DE in
+      D8e) si sottoscrive, a ogni hint drena e spinge i byte nella coda della
+      sessione in focus; il lettore si dichiara leggendo (`SESS_READ`) e viene
+      svegliato dall'hint **`SESS_INPUT_EVENT`** (0xAA, coalescente: la coda è
+      la verità). L'**eco** resta del lettore (login, `interpres`, shell POSIX
+      sono editor di linea): `input::attach` spegne l'eco del modello e
+      `SESS_ECHO` resta l'opt-in per un consumatore **senza** editor.
+      `civis::input` non cambia forma (`attach`/`read`/`wait`/`wait_until`/
+      `detach`): cambia dentro — sessione invece del device — e la shell POSIX
+      perde `TERM_FD` (l'ultimo fd del vecchio percorso). Gli **hint non sono
+      risposte**: `ipc::wait_reply` li mette nello stash invece di fallire con
+      `UnexpectedMsg` (lezione E2, applicata al percorso sincrono).
+      Verifica: gate `[gate] PASS` (6 suite + shell nativa 33/33, **usertests
+      71/71** con t75, unit host 173, zero FAIL/PANIC/FAULT, zero `[munmap]`)
+      + due asserzioni strutturali nuove (nessun sorgente cita il device,
+      niente `DEV_KEYBOARD`). Vittoria conseguita: i tasti arrivano alla
+      **sessione**, non al testo, e cardo è fuori anche dal percorso
+      dell'input; il DE (D8e) ha già il ruolo che gli serve — è il focus owner.
 
 - [x] **58 Personalità POSIX separata** (58.1–58.6, ADR-0041): meccanismo
       neutro in `libs/civis` (ex `libs/libr`), personalità in

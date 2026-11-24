@@ -105,7 +105,7 @@ if [ "$fail" -eq 0 ]; then
         '[testsarca] PASS 64/64' \
         '[posixtests] PASS 4/4' \
         '[identistest] PASS 11/11' \
-        '[usertests] PASS 70/70' \
+        '[usertests] PASS 71/71' \
         '[threadtest] PASS 12/12'
     do
         if ! rg -qF -- "$want" "$LOG"; then
@@ -144,6 +144,18 @@ if [ "$fail" -eq 0 ]; then
     fi
     if ! rg -qF '[t64] scroll vs repaint:' "$LOG"; then
         echo "[gate] FAIL: t64 non ha girato (SKIP?) — il ritiro ha spento il test" >&2
+        fail=1
+    fi
+    # D8d (ADR-0091) — la tastiera non e' piu' un device: nessun sorgente cita
+    # `/dev/input` (eccezione: i test che ne provano il ritiro) ne' il tipo
+    # `DEV_KEYBOARD`.
+    if rg -n '"/dev/input' --glob '*.rs' --glob '!testland/usertests/src/t_*.rs' \
+            kernel libs flavours userland testland pal 2>/dev/null; then
+        echo "[gate] FAIL: /dev/input e' ancora citato nei sorgenti (D8d)" >&2
+        fail=1
+    fi
+    if rg -n 'DEV_KEYBOARD' --glob '*.rs' kernel libs flavours userland testland 2>/dev/null; then
+        echo "[gate] FAIL: DEV_KEYBOARD e' ancora nell'ABI (D8d)" >&2
         fail=1
     fi
 fi

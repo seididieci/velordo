@@ -141,8 +141,10 @@ velordo/
 │   └── putc16.inc
 ├── run.sh              # build userland + testland + kernel + QEMU (PVH)
 ├── userland/           # servizi NATIVI: init, block, cardo, gpu, kbd, vela,
-│   │                   #   porta, vestigia, time, uptime, console (console
-│   │                   #   server D3), custos (policy per identita', ADR-0080);
+│   │                   #   porta (servizio tastiera, D8d: niente device),
+│   │                   #   vestigia, time, uptime, console (console server
+│   │                   #   D3 + sessioni), custos (policy per identita',
+│   │                   #   ADR-0080);
 │   │                   #   tools/arca (nativo, linka `libr` solo per
 │   │                   #   l'entry/redirect)
 │   └── build/          # output .bin dei servizi nativi
@@ -173,7 +175,7 @@ velordo/
 
 ## Stato corrente
 
-Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 70/70` + `[threadtest] PASS 12/12` + `[shell-native] PASS 33/33` (la shell nativa gira nella **stessa** QEMU del gate: login via `sendkey` e `--attach-pid`, `scripts/test-shell-native.py`), zero FAIL/PANIC/FAULT; il gate stampa `[gate] PASS/FAIL` ed **esce != 0** (vedi `docs/src/11-testing.md`). Le fasi POSIX restano storiche dal login nativo (ADR-0062). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
+Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 71/71` + `[threadtest] PASS 12/12` + `[shell-native] PASS 33/33` (la shell nativa gira nella **stessa** QEMU del gate: login via `sendkey` e `--attach-pid`, `scripts/test-shell-native.py`), zero FAIL/PANIC/FAULT; il gate stampa `[gate] PASS/FAIL` ed **esce != 0** (vedi `docs/src/11-testing.md`). Le fasi POSIX restano storiche dal login nativo (ADR-0062). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
 - **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
   BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
@@ -479,6 +481,30 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   stesso passo; l'eco non entra nel mirror; due punti di `run-tests.sh` piu'
   `wait_login_prompt` da cambiare insieme, e **mai** mentre il gate gira (bash
   rilegge il file per offset: modifica a meta' corsa = errore di sintassi).
+- **I tasti sono della sessione (D8d, ADR-0091)**: la tastiera non e' piu' un
+  device. `porta` serve i byte con **`INPUT_READ`** (0x49: diretto, sincrono,
+  payload nei **registri** — niente ring e niente cardo) a chi ha la
+  **capability** (`INPUT_ATTACH` ≥ `ThirdParty`: un `Untrusted` non legge i
+  tasti di nessuno); `/dev/input/keyboard` e' **ritirato** (`DEV_KEYBOARD`
+  fuori dall'ABI, il numero non si riusa) e resta solo `/dev/kbd` (scancode
+  raw, lo legge `porta`). Il **focus owner** — la console in D8d, il DE in D8e
+  — si sottoscrive (E0), a ogni hint **drena** e spinge i byte nella coda
+  della sessione in focus; il lettore si dichiara con `SESS_READ` e viene
+  svegliato dall'hint `SESS_INPUT_EVENT` (0xAA, coalescente: la coda e' la
+  verita'). L'**eco resta al lettore** (login/`interpres`/shell POSIX hanno i
+  loro editor: `input::attach` spegne l'eco del modello, `SESS_ECHO` e'
+  l'opt-in per un consumatore senza editor). `civis::input` non cambia forma
+  (`attach`/`read`/`wait`/`wait_until`/`detach`) — cambia dentro, e la shell
+  POSIX perde `TERM_FD`. `civis::input::device` e' il lato del focus owner.
+  **Trappole**: la **reply va prima dell'hint** (chi inietta e' spesso anche il
+  lettore e un hint davanti alla reply fa fallire la sua `send` con
+  `UnexpectedMsg` — per questo `ipc::wait_reply` mette gli hint nello stash,
+  lezione E2); l'`EXIT_NOTIFY` della console va riconosciuto in `wait_until`
+  (riattaccata una volta, o si dorme su una console morta); la console parte
+  **prima** di `porta` (attach bounded a boot, poi un tentativo per volta nel
+  loop con `recv_timeout` — mai un'attesa bloccante in un server); `t31`/`t74`
+  citavano il device e vanno riscritti (o il ritiro passa con i test spenti).
+  Test: t75 (`usertests 71/71`), unit host `littera` 16 + `sess-proto` 3 = 173.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
@@ -781,7 +807,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
 
 ```bash
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, blake2s, sig, tls: 171 test
+./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, blake2s, sig, tls: 173 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh
@@ -817,7 +843,7 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 70/70
+#   [usertests] PASS 71/71
 #   [threadtest] PASS 12/12
 #   [shell-native] PASS 33/33
 # KVM=1 accelera (-enable-kvm -cpu host, opt-in; senza /dev/kvm resta TCG).

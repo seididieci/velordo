@@ -298,8 +298,8 @@ servizi non-TCB partono da disco via `spawn_image` (38) da manifest
 (path/prio/porte). L'ordine di boot resta importante (Fase 57/R1-R9): `vestigia`+`block` in parallelo (+ `wait_any` sui READY), poi `cardo` embedded (+ attesa READY), poi `time`, FLUSH a vestigia, `gpu` da disco (+ attesa READY), `console` da disco (+ attesa READY, D3), uptime, `vela` (+ attesa READY), `kbd` (+ attesa READY, Fase 15), `porta` (+ attesa READY), i test in sequenza e la shell
 per ultima. I READY sono fire-and-forget via `send_async` (consumati senza
 reply): una `send` sync resterebbe bloccata perché a boot init non aspetta
-gpu/vela (e porta registra `/dev/input` solo dopo cardo: attendere
-dopo sarebbe deadlock).
+gpu/vela (e il driver che serve un device non deve bloccare chi lo aspetta:
+attendere dopo sarebbe deadlock).
 
 Dalla **Fase 14 (init-restart)** init è anche **supervisore**: gpu, block,
 cardo, vela, kbd e porta vengono riavviati alla morte (tabella bin/servizio/chan/pid + loop su
@@ -351,17 +351,19 @@ esteso cosi' (dettagli in `AGENTS.md` e ADR):
 - **Fase 15 — Keyboard + Terminal server in userspace** (implementata,
   [ADR-0011](./adr/0011-userspace-keyboard-terminal.md)): `kbd` (driver PS/2
   in ring 3, `io_ranges 0x60-0x64`, `/dev/kbd`, servizio `Kbd` svegliato da
-  IRQ1) + `porta` (decode raw in 43b — frecce→ESC, niente echo —,
-  `/dev/input/keyboard`, servizio `Porta`, client FS puramente async ed
-  event-driven); console ridotto a rendering + `ESC[D/C/K` (43b), dal D8c2
+  IRQ1) + `porta` (decode raw in 43b — frecce→ESC, niente echo —, servizio
+  `Porta`, client FS puramente async ed event-driven; dal D8d espone i tasti
+  come capability `INPUT_*`, senza device); console ridotto a rendering +
+  `ESC[D/C/K` (43b), dal D8c2
   display delle **sessioni** (il testo non passa piu' da un device);
   echo ed editing nella readline della shell. Regole: mai IPC
   sincrone servendo, mai spinner, boot async senza attese di wake,
   handshake per canale. **E0 (ADR-0082)**: i lettori della tastiera non
   pollano più — `INPUT_ATTACH`/`INPUT_DETACH` (focus LIFO in `porta`) e
-  `INPUT_NOTIFY` come hint, poi drain di `/dev/input/keyboard` (client
-  `civis::input`); la shell nativa, `identis-login` e `create-user` dormono
-  in `recv()` (CPU al prompt 1-2%). **E1 (ADR-0083)**: l'attesa ha anche una
+  `INPUT_NOTIFY` come hint; dal D8d il focus owner drena con `INPUT_READ` e
+  inietta nella **sessione**, e i lettori leggono da lì (`civis::input`); la
+  shell nativa, `identis-login` e `create-user` dormono in `recv()` (CPU al
+  prompt 1-2%). **E1 (ADR-0083)**: l'attesa ha anche una
   scadenza (`recv_timeout`, timeout `-2`, la coda vince) — la shell la usa per
   tenere vivo l'orologio del prompt con un repaint **in-place** delle 8 cifre
   (un risveglio al secondo, prompt mai ridisegnato), e `useruptime` dorme su

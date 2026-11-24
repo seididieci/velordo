@@ -968,9 +968,9 @@ fn real_main(_sp: u64) -> ! {
     };
     let _ = gpu_chan;
     let _ = civis::vestigia::log(b"init", b"gpu ready");
-    // Console server (D3): registra `Console` + ack subito dopo la
-    // registrazione (prima del mount /dev/input che richiede cardo, gia'
-    // pronto qui). kbd la risolve per nome al passo 4.
+    // Console server (D3/D8d): registra `Console` + ack subito; la sua
+    // sottoscrizione alla tastiera (`INPUT_ATTACH` a `porta`) e' bounded e
+    // riprova nel loop, quindi l'ordine con porta non conta piu'.
     let Some(console_chan) = boot_svc(&SVC_CONSOLE, true) else {
         println!("[init] boot FAILED (console), panic");
         civis::exit(1);
@@ -992,8 +992,8 @@ fn real_main(_sp: u64) -> ! {
         civis::exit(1);
     }
     let _ = civis::vestigia::log(b"init", b"kbd ready");
-    // 5. porta + attesa READY (Fase 15: registra /dev/input; /dev/kbd
-    //    garantito dai passi precedenti, riesce subito a boot).
+    // 5. porta + attesa READY (Fase 15: servizio tastiera; `/dev/kbd`
+    //    garantito dal passo 4, quindi riesce subito a boot).
     if boot_svc(&SVC_PORTA, true).is_none() {
         println!("[init] boot FAILED (tty), panic");
         civis::exit(1);

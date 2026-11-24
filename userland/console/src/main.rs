@@ -157,6 +157,9 @@ struct Term {
     /// focus: e' il canale live del gate e del debug headless.
     mirror_left: [usize; littera::MAX_SESSIONS],
     mirror_truncated: [bool; littera::MAX_SESSIONS],
+    /// D8d — tick della prossima **riattaccata** della tastiera dopo la morte
+    /// di `porta` (0 = attaccata: il loop dorme senza scadenza).
+    kb_retry_at: i64,
     surface: Surface,
     font: Option<Font>,
     /// Canale del driver `gpu` (0 = nessun driver raggiungibile).
@@ -302,6 +305,91 @@ impl Term {
             // Il path non-virgl di QEMU copia la risorsa nella superficie del
             // display **solo al flush**: senza, lo schermo resta nero.
             self.flush_display();
+        }
+    }
+
+    // ── Input: i tasti sono della sessione (D8d) ─────────────────────
+
+    /// **Inietta i tasti nella sessione in focus** (D8d): il focus owner —
+    /// qui la console, in D8e il DE — drena la tastiera e li mette nella coda
+    /// della sessione, poi sveglia il **lettore dichiarato** con un hint
+    /// coalescente (la coda e' la verita': un hint perso non perde tasti).
+    ///
+    /// L'eco lo fa il modello **solo se il flag e' acceso**: i lettori reali
+    /// (login, shell) hanno il loro editor di linea e lo spengono; un
+    /// consumatore senza editor (D8e) lo lascia acceso e vede i caratteri.
+    /// L'eco non entra mai nel mirror seriale.
+    fn inject_input(&mut self) {
+        if !civis::input::device::attached() {
+            return;
+        }
+        const DRAIN_MAX: usize = 4096;
+        let mut buf = [0u8; 64];
+        let mut total = 0usize;
+        while total < DRAIN_MAX {
+            let n = civis::input::device::read(&mut buf);
+            if n == 0 {
+                break;
+            }
+            if !self.queue_input(self.sessions.focus, &buf[..n]) {
+                break;
+            }
+            total += n;
+        }
+        if total > 0 {
+            self.hint_reader(self.sessions.focus, total);
+        }
+    }
+
+    /// Accoda `bytes` nella coda di input della sessione `sid` (tasti veri o
+    /// iniezione di test) e, se l'eco e' accesa, li mostra sul modello: un feed
+    /// normale (scroll e render) che **non** entra nel mirror seriale.
+    ///
+    /// `false` = la sessione non c'e' piu'.
+    fn queue_input(&mut self, sid: usize, bytes: &[u8]) -> bool {
+        let echo = match self.sessions.get_mut(sid) {
+            Some(s) => s.push_input(bytes),
+            None => return false,
+        };
+        if echo {
+            self.feed_session(sid, bytes, false);
+        }
+        true
+    }
+
+    /// Sveglia il **lettore dichiarato** della sessione: hint coalescente, la
+    /// coda e' la verita' (un hint perso non perde un tasto). Fire-and-forget;
+    /// se il canale e' morto il ruolo si libera e il prossimo che legge si
+    /// ridichiara.
+    fn hint_reader(&mut self, sid: usize, queued: usize) {
+        if let Some(chan) = self.sessions.reader_of(sid) {
+            if civis::send_async(chan, civis::SESS_INPUT_EVENT, queued as u64, 0).is_err() {
+                self.sessions.clear_reader(chan);
+            }
+        }
+    }
+
+    /// Quando svegliarsi per riattaccare la tastiera (0 = mai: e' attaccata).
+    fn kb_deadline(&self) -> u64 {
+        if self.kb_retry_at <= 0 {
+            0
+        } else {
+            self.kb_retry_at as u64
+        }
+    }
+
+    /// Un tentativo di riattacco per volta, **mai bloccante**: il server ha
+    /// clienti (una scrittura della shell non deve aspettare `porta`).
+    fn kb_retry(&mut self) {
+        if self.kb_retry_at <= 0 || civis::get_ticks() < self.kb_retry_at {
+            return;
+        }
+        match civis::input::device::attach_once() {
+            Ok(()) => {
+                self.kb_retry_at = 0;
+                let _ = civis::print_string(b"[console] tastiera riattaccata\n");
+            }
+            Err(_) => self.kb_retry_at = civis::get_ticks() + 10,
         }
     }
 
@@ -1377,6 +1465,7 @@ fn real_main(_sp: u64) -> ! {
         sess_mailboxes: alloc::vec::Vec::new(),
         mirror_left: [MIRROR_SESSION_MAX; littera::MAX_SESSIONS],
         mirror_truncated: [false; littera::MAX_SESSIONS],
+        kb_retry_at: 0,
         surface,
         font,
         driver_chan,
@@ -1435,12 +1524,32 @@ fn real_main(_sp: u64) -> ! {
 
     // 7. Nessun device da registrare (D8c2): `/dev/console` non esiste piu'.
     //    Il testo viaggia sull'endpoint di sessione, per capability.
+    //
+    //    La **tastiera** invece si sottoscrive (D8d): `porta` parte dopo di
+    //    noi (init), quindi l'attach e' bounded; se fallisce si riprova nel
+    //    loop senza fermare i clienti.
+    if civis::input::device::attach().is_err() {
+        let _ = civis::print_string(b"[console] tastiera non ancora pronta, riprovo\n");
+        term.kb_retry_at = civis::get_ticks() + 10;
+    } else {
+        let _ = civis::print_string(b"[console] tastiera sottoscritta (INPUT_ATTACH)\n");
+    }
 
-    // 8. Loop IPC: sessioni di terminale, finestre, display.
+    // 8. Loop IPC: sessioni di terminale, finestre, display, tasti.
     loop {
-        match civis::recv() {
+        // Riattacco della tastiera (morte di `porta`): un tentativo quando
+        // scade, mai una attesa bloccante.
+        term.kb_retry();
+        match civis::recv_timeout(term.kb_deadline()) {
             Ok(msg) => {
                 match msg.tag {
+                    civis::INPUT_NOTIFY => {
+                        // Hint da `porta` (E0): ci sono tasti. Fire-and-forget
+                        // (nessuna reply) e si **drena**: la coda e' la verita',
+                        // il notify e' coalescente.
+                        term.inject_input();
+                    }
+
                     civis::syscall_numbers::GPU_DISPLAY_CHANGED => {
                         // L'host ha cambiato la finestra (config change MSI-X):
                         // la console cede (policy D1) e si riadatta — testo
@@ -1813,6 +1922,9 @@ fn real_main(_sp: u64) -> ! {
                                 );
                             }
                         }
+                        // Chi legge si **dichiara**: e' lui che riceve l'hint
+                        // quando arriva input (una sessione, un lettore).
+                        term.sessions.set_reader(msg.channel, sid);
                         let _ = civis::reply(SESS_READ, n as u64, 0);
                     }
 
@@ -2000,15 +2112,14 @@ fn real_main(_sp: u64) -> ! {
                                 len,
                             );
                         }
-                        let echo = match term.sessions.get_mut(sid) {
-                            Some(s) => s.push_input(&data),
-                            None => false,
-                        };
-                        if echo {
-                            // Eco di test: solo schermo, mai nel mirror.
-                            term.feed_session(sid, &data, false);
-                        }
+                        let queued = term.queue_input(sid, &data);
+                        // La reply **prima** dell'hint: chi inietta e' spesso
+                        // anche il lettore, e un hint in coda davanti alla
+                        // reply farebbe fallire la sua `send` sincrona.
                         let _ = civis::reply(SESS_TEST_INPUT, 0, 0);
+                        if queued {
+                            term.hint_reader(sid, data.len());
+                        }
                     }
 
                     civis::EXIT_NOTIFY => {
@@ -2017,6 +2128,13 @@ fn real_main(_sp: u64) -> ! {
                         // il server, che le distrugge qui).
                         let dead = msg.w1 as i64;
                         if dead >= 0 {
+                            // Morte di `porta`: la tastiera si riattacca dal
+                            // loop (mai un'attesa qui dentro). Il riattacco
+                            // azzera anche il peer memorizzato.
+                            if civis::input::device::peer_pid() == dead {
+                                civis::input::device::detach();
+                                term.kb_retry_at = civis::get_ticks() + 10;
+                            }
                             term.close_windows_of(dead);
                             // Sessioni del morto: binding, attachment e le
                             // sessioni di cui era owner (mai la 0), con la

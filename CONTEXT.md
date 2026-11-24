@@ -161,7 +161,7 @@ velordo/
 │   ├── time/                # Time service (CMOS RTC + uptime counter)
 │   ├── vela/                # Hardware abstraction server
 │   ├── vestigia/            # Legacy hardware server
-│   ├── porta/               # I/O port management
+│   ├── porta/               # Servizio tastiera (D8d): decode scancode, INPUT_* (niente device)
 │   ├── uptime/              # Uptime reporting (Low priority process)
 │   ├── identis/             # User identity service — Service::Identis = 11
 │   ├── identis-login/       # Login gate (3 attempts, shell only on success)
@@ -284,6 +284,7 @@ Ogni processo ha il proprio TSS con I/O bitmap. Driver userspace dichiarano
 | **console** | 12 | gpu | sessioni (`SESS_*`) | Modello a celle, UTF-8, font TTF; mirror seriale della sessione in focus |
 | **gpu** | — | — | /dev/display | virtio-gpu driver (BAR/MSI-X) |
 | **kbd** | — | — | keyboard input | IRQ-based, wake processi |
+| **porta** | — | kbd | `INPUT_*` (tasti) | Decodifica; capability ≥ ThirdParty; niente device |
 | **block** | — | — | DISK_READ/WRITE | DMA + PIO cache |
 | **time** | — | — | get_ticks | CMOS RTC + uptime counter |
 | **identis** | 11 | — | user auth | Token bearer TTL 300s, BLAKE2s-256 |

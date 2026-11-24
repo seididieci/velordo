@@ -1,29 +1,28 @@
-//! porta — Terminale in userspace (Fase 15, raw in 43b, R9: ex-tty).
+//! porta — il **servizio tastiera** (Fase 15, raw in 43b; D8d: niente device).
 //!
-//! Legge scancode raw (Set 1) da `/dev/kbd` (driver `kbd`), li decodifica
-//! con `pc_keyboard` (layout US) e serve i byte ai client sul device
-//! `/dev/input/keyboard` SENZA echo (Fase 43b: l'echo lo fa il lettore, la
-//! shell con la sua readline — tty resta un trasporto raw). **Nessun testo**
-//! (D8c2, ADR-0090): la coda output verso `/dev/console` e' sparita, il testo
-//! viaggia sull'endpoint di sessione e `/dev/input` non e' scrivibile.
-//! Mappa tasti:
-//! char-by-char, `Enter→\n`, `Backspace→0x08`, frecce→`ESC[A/B/C/D`,
+//! Legge scancode raw (Set 1) da `/dev/kbd` (driver `kbd`), li decodifica con
+//! `pc_keyboard` (layout US) e li serve al **focus owner** con tre tag:
+//! `INPUT_ATTACH` (sottoscrizione: la capability e' >= `ThirdParty`),
+//! `INPUT_NOTIFY` (hint coalescente) e `INPUT_READ` (i byte, nei registri).
+//!
+//! **Nessun testo e nessun device** (D8c2/D8d, ADR-0090/0091): la tastiera non
+//! e' un file — chi la vuole la riceve, non la apre — e il testo non passa piu'
+//! da qui. La console (D8d) e il DE (D8e) sono i lettori: decodifica e basta.
+//! Mappa tasti: char-by-char, `Enter→\n`, `Backspace→0x08`, frecce→`ESC[A/B/C/D`,
 //! `Home/End→ESC[H/F`, `Delete→ESC[3~`, `Esc→ESC`, resto filtrato.
 //!
-//! REGOLA ANTI-DEADLOCK (Fase 15, ciclo cardo<->tty): un driver che SERVE
-//! richieste sincrone non deve MAI emettere IPC FS sincrone. cardo gli
-//! inoltra relay DEV e resta bloccato finche' non risponde; se nel mentre il
-//! driver resta bloccato su cardo (pump read, open del device), nessuno dei due
-//! avanza piu' (osservato: wedge t30/t31). Per questo tty e' un client FS
-//! PURAMENTE async (`read_async`/`open_async`/`fs_register_async` + collect
-//! via poll): non si blocca mai e risponde alle relay all'istante.
+//! REGOLA ANTI-DEADLOCK (Fase 15, ciclo cardo<->driver): un driver che SERVE
+//! richieste sincrone non deve MAI emettere IPC FS sincrone. Qui il servizio e'
+//! `INPUT_READ` (sincrono, dal focus owner) e l'unico I/O e' **async**
+//! (`read_async` di `/dev/kbd` + collect): porta non si blocca mai, quindi il
+//! ciclo cardo -> porta -> cardo non puo' formarsi (osservato in Fase 15 come
+//! wedge t30/t31).
 //!
-//! EVENT-DRIVEN (anti-dilution): tty dorme in `recv()` bloccante e si sveglia
-//! solo su reply async / EXIT_NOTIFY / KBD_NOTIFY (kbd lo avvisa quando ci
-//! sono scancode) / relay DEV. Niente pump in polling: un server che gira a
-//! vuoto ruba quanta a tutti (osservato: flooder t30 rallentato 25x da UN
-//! solo spinner a pari priorita'). L'unico codice sincrono e' pre-
-//! registrazione (nessuno puo' instradargli relay: il mount non esiste ancora).
+//! EVENT-DRIVEN (anti-dilution): porta dorme in `recv()` bloccante e si
+//! sveglia solo su reply async / EXIT_NOTIFY / KBD_NOTIFY (kbd lo avvisa
+//! quando ci sono scancode) / richieste dei lettori. Niente pump in polling:
+//! un server che gira a vuoto ruba quanta a tutti (osservato: flooder t30
+//! rallentato 25x da UN solo spinner a pari priorita').
 
 #![no_std]
 #![no_main]
@@ -34,11 +33,9 @@ use pc_keyboard::{DecodedKey, HandleControl, KeyCode, Keyboard, KeyboardLayout, 
 
 use civis::println;
 
-// ── IPC tags (DocsD: single source in `syscall-numbers`, via `civis`) ──
-use civis::{DEV_CLOSE, DEV_KEYBOARD, DEV_OPEN, DEV_READ, DEV_WRITE};
 
 /// Notify da kbd (fire-and-forget, NESSUNA reply): scancode in attesa.
-/// tty dorme in recv() e si sveglia solo qui (o su relay DEV / reply async).
+/// porta dorme in recv() e si sveglia solo qui (o su reply async / richiesta).
 /// Senza notify servirebbe pump in polling (sempre Ready → dilution scheduler).
 /// Single source in `syscall-numbers` (DocsB), via `civis`.
 use civis::KBD_NOTIFY;
@@ -46,16 +43,8 @@ use civis::KBD_NOTIFY;
 /// uscita verso chi ha il focus.
 use civis::{INPUT_ATTACH, INPUT_DETACH, INPUT_NOTIFY};
 
-/// Device type per DEV_OPEN (stesso di prima: il path non cambia; valore in
-/// `syscall-numbers`, importato sopra).
-
-// ── Ring I/O (Fase 10.2, pattern console/devfs: servire i client) ───
-
-const CLI_REQ: u64 = civis::CLI_REQ_VA;
-const CLI_RESP: u64 = civis::CLI_RESP_VA;
-// Geometria ring + errore IPC (A1) + frame helpers (A2): single source in `civis`.
+/// Errore IPC (rifiuto di `INPUT_ATTACH`/`INPUT_READ`).
 use civis::ERR;
-use civis::resp_frame_write;
 
 // ── Stato ───────────────────────────────────────────────────────────
 
@@ -96,7 +85,6 @@ const INPUT_CAPACITY: usize = 256;
 enum OpKind {
     BufReg,
     OpenKbd,
-    Register,
     PumpRead,
 }
 
@@ -120,7 +108,6 @@ enum Phase {
     LookupFs,
     BufReg,
     OpenKbd,
-    Register,
     Steady,
 }
 
@@ -240,16 +227,6 @@ impl Tty {
                 }
                 return;
             }
-            Phase::Register => {
-                if let Ok(req) = civis::fs_register_async(b"/dev/input") {
-                    self.pending = Some(Pending { req, kind: OpKind::Register });
-                } else {
-                    for _ in 0..100_000 {
-                        core::hint::spin_loop();
-                    }
-                }
-                return;
-            }
             Phase::Steady => {
                 // Peer mai aperti (boot sfortunato): riparti dal lookup.
                 if self.kbd_fd < 0 {
@@ -292,25 +269,12 @@ impl Tty {
                     Ok(fd) => {
                         self.kbd_fd = fd;
                         self.err_streak = 0;
-                        self.phase = Phase::Register;
+                        self.phase = Phase::Steady;
                     }
                     Err(_) => {
                         self.note_error();
                         self.reset_to_lookup();
                         return true;
-                    }
-                }
-            }
-            OpKind::Register => {
-                match civis::fs_collect_msg(m, &mut tmp, 64, false) {
-                    Ok(0) => {
-                        self.err_streak = 0;
-                        self.phase = Phase::Steady;
-                        println!("[porta] registered /dev/input with cardo");
-                    }
-                    _ => {
-                        self.note_error();
-                        self.reset_to_lookup();
                     }
                 }
             }
@@ -324,8 +288,8 @@ impl Tty {
                     // Errore (es. resync cardo che ha scartato il frame):
                     // riprova al prossimo giro invece di aspettare una nuova
                     // notify (che potrebbe non arrivare mai: la notify e' andata
-                    // persa col frame scartato e kbd dorme). Il relay DEV_READ
-                    // della riprova sveglia kbd da solo: se ha dati li consegna,
+                    // persa col frame scartato e kbd dorme). La riprova della
+                    // read sveglia kbd da solo: se ha dati li consegna,
                     // se e' vuoto torna 0 e ci si ferma. Solo su ERR, mai su 0
                     // (0 = vuoto legittimo, nessun retry). Throttle via
                     // pump_wait_until (come flush); dopo 50 fallimenti
@@ -381,9 +345,9 @@ impl Tty {
     }
 
     /// Sveglia il sottoscrittore con focus (LIFO). Fire-and-forget: non
-    /// aspettiamo reply e non blocchiamo il path del relay DEV (regola
-    /// anti-deadlock). Un canale morto (client uscito senza EXIT recapitato)
-    /// si pota qui, e il prossimo evento va al sottoscrittore precedente.
+    /// aspettiamo reply, cosi' il servizio di `INPUT_READ` non si blocca mai
+    /// (regola anti-deadlock). Un canale morto (client uscito senza EXIT
+    /// recapitato) si pota qui, e il prossimo evento va al precedente.
     fn notify_input(&mut self) {
         let Some(sub) = self.subs.last().copied() else {
             return;
@@ -393,9 +357,9 @@ impl Tty {
         }
     }
 
-    /// Accoda byte in input (client). L'eco NON passa di qui (43b): lo fa il
-    /// lettore scrivendo sulla sessione. Il device e' di sola lettura (D8c2):
-    /// una `DEV_WRITE` viene consumata e rifiutata.
+    /// Accoda byte in input. L'eco NON passa di qui (43b/D8d): la fa il lettore
+    /// scrivendo sulla sessione (o il modello, se il flag di sessione e'
+    /// acceso).
     fn emit(&mut self, bytes: &[u8]) {
         for &b in bytes {
             if self.input.len() < INPUT_CAPACITY {
@@ -464,10 +428,10 @@ fn real_main(_sp: u64) -> ! {
 
         // 3. Attesa messaggi. REGOLA FONDAMENTALE (osservato: sleep-forever):
         //    si dorme in recv() bloccante SOLO se c'e' un wake garantito
-        //    (pending settata → arrivera' reply o EXIT; Steady → relay DEV /
-        //    notify / reply reali, o giusto idle). In boot SENZA pending
-        //    (LookupFs, retry dopo send fallita) NESSUNO puo' svegliarci
-        //    (mount assente, reply inesistente): li' si POLLA con spin
+        //    (pending settata → arrivera' reply o EXIT; Steady → richieste dei
+        //    lettori / notify / reply reali, o giusto idle). In boot SENZA
+        //    pending (LookupFs, retry dopo send fallita) NESSUNO puo'
+        //    svegliarci (reply inesistente): li' si POLLA con spin
         //    (come gli ensure loop degli altri driver), mai block.
         let can_sleep = tty.pending.is_some() || tty.phase == Phase::Steady;
         if !can_sleep {
@@ -496,8 +460,8 @@ fn real_main(_sp: u64) -> ! {
 
 /// Gestione di un singolo messaggio ricevuto (poll o blocking): reply async
 /// (collect/stale), EXIT_NOTIFY (reset), KBD_NOTIFY (pump, mai reply),
-/// relay DEV (serve e rispondi subito). Estratta perche' usata sia dal ramo
-/// poll (boot senza pending) che da quello bloccante.
+/// `INPUT_*` (attach/detach/read dei lettori), altro → `ERR`. Estratta perche'
+/// usata sia dal ramo poll (boot senza pending) che da quello bloccante.
 impl Tty {
     fn handle_msg(&mut self, m: civis::IpcMsg) {
         if m.req_id > 0 {
@@ -520,6 +484,19 @@ impl Tty {
             return;
         }
         if m.tag == INPUT_ATTACH {
+            // D8d: la tastiera e' una **capability**, non un file apribile da
+            // chiunque. Il focus owner e' un'immagine >= ThirdParty (la
+            // console, poi il DE); `Untrusted` non legge i tasti di nessuno.
+            let class = civis::peer_info_class(m.channel)
+                .map(|(_, c)| c)
+                .unwrap_or(civis::ImageClass::Untrusted);
+            if !matches!(
+                class,
+                civis::ImageClass::ThirdParty | civis::ImageClass::System
+            ) {
+                let _ = civis::reply(INPUT_ATTACH, ERR, 0);
+                return;
+            }
             // Focus LIFO: la stessa connessione si riposiziona in cima (un
             // processo che ri-attacca non accumula voci ne' perde il focus).
             self.subs.retain(|s| s.chan != m.channel);
@@ -539,48 +516,34 @@ impl Tty {
                     self.pump_now = true;
                     return;
                 }
-        let result: Option<u64> = match m.tag {
-            DEV_OPEN => {
-                if m.w0 == DEV_KEYBOARD {
-                    Some(0)
-                } else {
-                    None
-                }
+        if m.tag == civis::INPUT_READ {
+            // D8d: i tasti arrivano da qui, in **registri** (8 byte per
+            // chiamata): il lettore drena a loop finche' `w1` non torna 0.
+            // Niente cardo e niente device nel percorso; l'attachment e' la
+            // capability che autorizza.
+            if !self.subs.iter().any(|s| s.chan == m.channel) {
+                let _ = civis::reply(civis::INPUT_READ, ERR, 0);
+                return;
             }
-            DEV_READ => {
-                let count = (m.w1 as usize).min(256);
-                let mut buf = [0u8; 256];
-                let mut i = 0;
-                while i < count {
-                    match self.input.pop_front() {
-                        Some(c) => {
-                            buf[i] = c;
-                            i += 1;
-                        }
-                        None => break,
+            let want = (m.w1 as usize).min(8);
+            let mut n = 0usize;
+            let mut packed = 0u64;
+            while n < want {
+                match self.input.pop_front() {
+                    Some(c) => {
+                        packed |= (c as u64) << (8 * n);
+                        n += 1;
                     }
+                    None => break,
                 }
-                // Frame SEMPRE (anche vuoto con i==0, come kbd/devfs): il
-                // client distingue "0 byte" da "ring vuoto" solo dal frame.
-                // Senza, un async-reader confonde vuoto e risposta persa.
-                unsafe { resp_frame_write(CLI_RESP, &buf[..i]); }
-                Some(i as u64)
             }
-            DEV_WRITE => {
-                // La tastiera non e' un terminale (D8c2): chi scriveva qui (la
-                // shell POSIX) ora scrive sulla sessione. Il frame va comunque
-                // **consumato** — cardo non lo consuma per le write remote — e
-                // la write e' rifiutata: meglio un errore che un byte sparito.
-                let count = m.w1 as usize;
-                if count > 0 {
-                    unsafe { civis::req_frame_consume(CLI_REQ, count) };
-                }
-                Some(ERR)
-            }
-            DEV_CLOSE => Some(0),
-            _ => None,
-        };
-        let _ = civis::reply(0, result.unwrap_or(ERR), 0);
+            let _ = civis::reply(civis::INPUT_READ, packed, n as u64);
+            return;
+        }
+
+        // Nessun `DEV_*` (D8d): la tastiera non e' un device. Le richieste che
+        // non conosciamo si rifiutano (il chiamante ha sbagliato canale).
+        let _ = civis::reply(0, ERR, 0);
     }
 }
 

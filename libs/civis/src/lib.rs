@@ -103,8 +103,8 @@ pub use syscall_numbers::{BROKER_CLOSE, BROKER_OPEN, BROKER_STATS, BROKER_TX};
 pub use syscall_numbers::{WIN_CLOSE, WIN_OPEN, WIN_RAISE, WIN_SET_RECT, WIN_SET_SURFACE, WIN_STATS, WIN_COMMIT};
 pub use syscall_numbers::{
     SESS_ATTACH_DEFAULT, SESS_BIND, SESS_CLOSE, SESS_CREATE, SESS_DUMP, SESS_ECHO,
-    SESS_FOCUS, SESS_INFO, SESS_READ, SESS_RESIZE, SESS_STATE, SESS_STATS, SESS_TEST_INPUT,
-    SESS_WHOAMI, SESS_WRITE,
+    SESS_FOCUS, SESS_INFO, SESS_INPUT_EVENT, SESS_READ, SESS_RESIZE, SESS_STATE, SESS_STATS,
+    SESS_TEST_INPUT, SESS_WHOAMI, SESS_WRITE,
 };
 /// Tag del cancel cooperativo parent→figlio (Fase 44b, job control: Ctrl-C).
 pub use syscall_numbers::JOB_CANCEL;
@@ -206,12 +206,12 @@ pub use syscall_numbers::{
 };
 /// Tag degli eventi di input (E0, ADR-0082): `INPUT_ATTACH`/`INPUT_DETACH`
 /// (client → porta) e `INPUT_NOTIFY` (porta → sottoscrittore con focus).
-pub use syscall_numbers::{INPUT_ATTACH, INPUT_DETACH, INPUT_NOTIFY};
+pub use syscall_numbers::{INPUT_ATTACH, INPUT_DETACH, INPUT_NOTIFY, INPUT_READ};
 /// Tag DEV_* op + device type (DocsD): stesso pattern, prima duplicati in
 /// cardo/block/vela/gpu/kbd/tty.
 pub use syscall_numbers::{
-    DEV_CLOSE, DEV_KBD, DEV_KEYBOARD, DEV_NULL, DEV_OPEN, DEV_READ, DEV_READDIR,
-    DEV_WRITE, DEV_ZERO,
+    DEV_CLOSE, DEV_KBD, DEV_NULL, DEV_OPEN, DEV_READ, DEV_READDIR, DEV_WRITE,
+    DEV_ZERO,
 };
 /// Tag TIME_* (Fase 50, P1 orologio): client→usertime, data/ora di sistema.
 /// Reply `TIME_NOW`: `w0` = secondi epoch (UTC), `w1` = centesimi di secondo.
