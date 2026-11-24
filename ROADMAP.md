@@ -11,7 +11,7 @@ ricompilare se stesso. Ordina le priorita' (storage veloce prima, servizi
 fuori dal kernel poi, personalita' per software reale dopo) senza pianificare
 nulla da solo.
 
-## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b + D8c1)
+## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b + D8c1 + D8c2)
 
 Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` +
 `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 70/70` +
@@ -680,6 +680,34 @@ Voci con scope e vittoria dichiarati (non date).
       (littera 14, sess-proto 3). Vittoria conseguita: N sessioni di terminale
       esistono e si servono per capability, il testo non passa più da cardo,
       zero modifiche al kernel e al resto del sistema.
+
+- [x] **D8c2 Ritiro di `/dev/console` — il testo è una sessione** (ADR-0090,
+      completata 2026-11-24): il device di testo **non esiste più**.
+      Login, shell nativa, comandi, personalità POSIX e `t64` scrivono sulla
+      **sessione**; cardo e `porta` escono dal percorso del testo.
+      Decisioni nuove: la mailbox è dell'**attachment** (una per canale, non
+      per sessione: con un buffer condiviso la write di un cliente può essere
+      sovrascritta fra il suo "copia" e il "copia" del server — il percorso FS
+      non aveva mai avuto il problema perché il ring è per processo); il
+      **mirror seriale** è del server (la sessione in focus, formato nudo,
+      1 MiB per sessione come rete di sicurezza — il budget *per comando* da
+      256 KiB resta della shell, che è l'unica a sapere cos'è un comando); le
+      write "solo schermo" non entrano nel mirror (`SESS_WRITE.w1`).
+      `civis::sess::{out, out_screen}` sono il sink di stdout: sessione
+      attestata (`SESS_WHOAMI`) → sessione 0 (`SESS_ATTACH_DEFAULT`) →
+      seriale, con cache invalidata su restart della console.
+      Ritiro **loud**: `DEV_CONSOLE` fuori dall'ABI (il numero non si riusa),
+      `dev_type` senza `"console"`, niente `fs_register`, niente gestori
+      `DEV_*`; `open("/dev/console")` → `ERR_NOTFOUND`, `write` sulla tastiera
+      → `ERR` (frame comunque consumato). Il marker `[gate] boot: login-ready`
+      sostituisce la stringa di UX nel contratto del gate (`run-tests.sh` +
+      `shell_harness.py`). Sparisce la trappola ADR-0086 (ri-registrare il
+      mount su `EXIT_NOTIFY` del peer FS).
+      Verifica: gate `[gate] PASS` (6 suite + shell nativa 33/33, usertests
+      70/70, unit host 171, zero FAIL/PANIC/FAULT, zero `[munmap]`) + tre
+      asserzioni strutturali nuove (nessun sorgente cita il device, niente
+      `DEV_CONSOLE`, `t64` ha girato davvero). Zero kernel, zero syscall,
+      zero servizi.
 
 - [x] **58 Personalità POSIX separata** (58.1–58.6, ADR-0041): meccanismo
       neutro in `libs/civis` (ex `libs/libr`), personalità in

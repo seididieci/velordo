@@ -1,15 +1,21 @@
 use super::*;
 
-// ── Terminale (device console) ──────────────────────────────────────
+// ── Terminale (sessione di terminale) ───────────────────────────────
 
+/// Device di **input** (tastiera): la porta in `/dev/input`. In D8c2 il testo
+/// non passa piu' di qui — la tastiera resta un device, il display e' una
+/// sessione.
 const KEYBOARD_PATH: &str = "/dev/input/keyboard";
 
+/// fd della tastiera (solo lettura).
 static mut TERM_FD: i64 = -1;
 
 /// Budget del **mirror seriale** per comando (T4/bulk): un output enorme
 /// (es. `hexdump` di un file da MB) non deve passare tutto sul filo seriale
 /// byte-per-byte (la UART costa ~µs/byte: minuti). Oltre il budget il mirror
 /// si ferma e lo si segnala una volta; il terminale riceve comunque tutto.
+/// I byte li mirrora il server (D8c2): qui resta la **politica**, che e' per
+/// comando — l'unico che sa cosa e' un comando e' la shell.
 const MIRROR_BUDGET: usize = 256 * 1024; // 256 KiB
 static mut MIRROR_LEFT: usize = MIRROR_BUDGET;
 static mut MIRROR_TRUNCATED: bool = false;
@@ -73,42 +79,44 @@ pub(crate) fn term_init() -> bool {
     }
     false
 }
-/// Scrive byte sul terminale: cardo li inoltra al console server che li
-/// disegna sulla VGA (DEV_WRITE). Echo dei tasti gestito dal console.
-/// Mirror su seriale per debugging e per test automatici.
+/// Scrive byte sul terminale: la **sessione** del processo (`civis::sess`,
+/// D8c2). Il mirror seriale lo fa il server: qui resta solo la politica del
+/// budget per comando (sopra) e il redirect.
 /// Hook B1 (Fase 40.4b): con stdout redirectato (`set_stdio`) i builtin
 /// scrivono sul file invece che sul terminale — e' l'unico punto d'aggancio
-/// (i builtin usano tutti `term_print`, non `println!`). Il mirror seriale
-/// resta sempre (l'output debug non si perde mai).
+/// (i builtin usano tutti `term_print`, non `println!`).
 pub(crate) fn term_write_bytes(data: &[u8]) {
-    // Mirror seriale con budget (T4/bulk): oltre 1 MiB per comando il
-    // seriale non e' piu' un mirror utile (e costa minuti sulla UART).
+    let out = libr::stdout_fd();
+    if out >= 0 {
+        let _ = civis::write_fs(out, data, data.len());
+        return;
+    }
+    // Budget del mirror per comando: la testa entra nel mirror (la scrive il
+    // server), la coda e' **solo schermo**. Il budget e' della shell perche'
+    // il confine e' il comando, non la sessione.
     unsafe {
         if MIRROR_LEFT > 0 {
             let n = data.len().min(MIRROR_LEFT);
-            let _ = civis::print_string(&data[..n]);
+            let _ = civis::sess::out(&data[..n]);
             MIRROR_LEFT -= n;
-            if n < data.len() && !MIRROR_TRUNCATED {
+            if n == data.len() {
+                return;
+            }
+            if !MIRROR_TRUNCATED {
                 MIRROR_TRUNCATED = true;
                 let _ = civis::print_string(
                     b"\n[mirror seriale troncato: output troppo grande]\n",
                 );
             }
-        } else if !MIRROR_TRUNCATED {
+            let _ = civis::sess::out_screen(&data[n..]);
+            return;
+        }
+        if !MIRROR_TRUNCATED {
             MIRROR_TRUNCATED = true;
-            let _ = civis::print_string(
-                b"\n[mirror seriale troncato: output troppo grande]\n",
-            );
+            let _ = civis::print_string(b"\n[mirror seriale troncato: output troppo grande]\n");
         }
     }
-    let out = libr::stdout_fd();
-    if out >= 0 {
-        let _ = civis::write_fs(out, data, data.len());
-    } else {
-        unsafe {
-            let _ = civis::write_fs(TERM_FD, data, data.len());
-        }
-    }
+    let _ = civis::sess::out_screen(data);
 }
 
 pub(crate) fn term_print(s: &str) {
@@ -117,16 +125,13 @@ pub(crate) fn term_print(s: &str) {
 
 /// Scrive un messaggio d'errore: stderr redirectato (`2>`, Fase 40.4d) o
 /// terminale — MAI lo stdout redirectato (gli errori non devono inquinare il
-/// file di `>`). Mirror su seriale come l'output normale.
+/// file di `>`). Va sulla sessione (quindi anche nel mirror del server).
 pub(crate) fn term_err_bytes(data: &[u8]) {
-    let _ = civis::print_string(data);
     let err = libr::stderr_fd();
     if err >= 0 {
         let _ = civis::write_fs(err, data, data.len());
     } else {
-        unsafe {
-            let _ = civis::write_fs(TERM_FD, data, data.len());
-        }
+        let _ = civis::sess::out(data);
     }
 }
 
@@ -191,13 +196,11 @@ fn history() -> &'static mut Vec<String> {
     unsafe { &mut *core::ptr::addr_of_mut!(HISTORY) }
 }
 
-/// Scrive byte sul terminale SENZA mirror seriale (eco dei digitati):
-/// va solo sulla VGA via tty→console. Separato da `term_write_bytes`
-/// (che specchia su seriale per debug/test) apposta.
+/// Scrive byte sul terminale SENZA mirror seriale (eco dei digitati): vanno
+/// solo sulla sessione, che il server non mirrora (`write_screen`, D8c2).
+/// Separato da `term_write_bytes` (che entra nel mirror) apposta.
 fn term_echo(data: &[u8]) {
-    unsafe {
-        let _ = civis::write_fs(TERM_FD, data, data.len());
-    }
+    let _ = civis::sess::out_screen(data);
 }
 
 /// Legge un byte con attesa bounded (continuazioni ESC): i byte della

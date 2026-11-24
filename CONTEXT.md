@@ -152,7 +152,7 @@ velordo/
 │   │       ├── rings.rs     # Ring registration/handling
 │   │       ├── volume.rs    # Volume abstraction
 │   │       └── fat32/       # FAT32 driver (mount/read/write/dir)
-│   ├── console/             # Console server (D3, ADR-0060) — /dev/console
+│   ├── console/             # Console server + sessioni (D3/D8c2, ADR-0060/0090)
 │   ├── gpu/                 # GPU driver (virtio-gpu, BAR/MSI-X/2D/scanout) — /dev/display
 │   ├── netdev/              # Driver virtio-net (N1, ADR-0069): RX/TX, shm ring
 │   ├── net/                 # Servizio rete (N1): IPv6/NDP, SLAAC, ping6
@@ -281,7 +281,7 @@ Ogni processo ha il proprio TSS con I/O bitmap. Driver userspace dichiarano
 |----------|----------|------------|----------|------|
 | **init** | root | kernel | tutto | Spawn sequenziale, supervisione |
 | **cardo** | 9 (Fs) | block, time | FS (/ + /fat + /dev/*) | Single-threaded, no deadlock |
-| **console** | 12 | gpu | /dev/console | Modello a celle, UTF-8, font TTF |
+| **console** | 12 | gpu | sessioni (`SESS_*`) | Modello a celle, UTF-8, font TTF; mirror seriale della sessione in focus |
 | **gpu** | — | — | /dev/display | virtio-gpu driver (BAR/MSI-X) |
 | **kbd** | — | — | keyboard input | IRQ-based, wake processi |
 | **block** | — | — | DISK_READ/WRITE | DMA + PIO cache |

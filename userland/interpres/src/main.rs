@@ -1,7 +1,8 @@
 //! Shell nativa Velordo (Fase 3.2, S3.2a + S3.2b): REPL minima post-login.
 //!
 //! Programma interattivo **nativo** (meccanismo, niente POSIX) che gira su
-//! `/dev/input/keyboard` + `/dev/console`. Non usa `cd`, `stdin`, `stdout`,
+//! `/dev/input/keyboard` (input) e la **sessione di terminale** (output,
+//! `civis::sess`, D8c2). Non usa `cd`, `stdin`, `stdout`,
 //! `fork`, pipe Unix, `$VAR` come primitive speciali: e' un dispatcher di
 //! comandi su risorse/capability.
 //!
@@ -22,7 +23,8 @@
 //! Se l'output di un comando non viene catturato in una variabile, il valore
 //! (futuro, S3.2b+) viene stampato serializzato.
 //!
-//! Output su /dev/console (VGA + serial), input da /dev/input/keyboard.
+//! Output sulla sessione di terminale (`civis::sess::out`/`out_screen`,
+//! D8c2: il mirror seriale lo fa il server), input da `/dev/input/keyboard`.
 //! La password non transita mai in chiaro: hash BLAKE2s-256 in locale.
 //!
 //! **Refresh del token**: quando un comando autenticato riceve `R_TOKEN_INVALID`
@@ -376,7 +378,6 @@ impl<'a> LineEditor<'a> {
 
 use blake2s::blake2s;
 use civis;
-use civis::println;
 use identis_proto as proto;
 
 // Moduli interprete (ADR-0065).
@@ -385,8 +386,6 @@ mod parser;
 mod env;
 
 civis::entry!(real_main);
-
-const CONSOLE_PATH: &str = "/dev/console";
 
 /// Variabile d'ambiente con il token di sessione (hex).
 const ENV_SESSION: &str = "VELORDO_SESSION";
@@ -400,9 +399,6 @@ const RETRIES: u32 = 20;
 /// Tentativi di risoluzione del servizio Identis.
 const IDENTIS_RESOLVE_RETRIES: u32 = 50;
 
-/// Scrive su console (VGA + serial).
-static mut CONSOLE_FD: i64 = -1;
-
 /// Stack pointer iniziale (per leggere VELORDO_USER dall'env).
 static mut SHELL_SP: u64 = 0;
 
@@ -411,12 +407,9 @@ static mut SESSION_TOKEN_HEX: [u8; 17] = [0u8; 17];
 static mut SESSION_TOKEN_LEN: usize = 0;
 
 fn console_write(data: &[u8]) {
-    unsafe {
-        let _ = civis::write_fs(CONSOLE_FD, data, data.len());
+    if !civis::sess::out(data) {
+        let _ = civis::print_string(data);
     }
-    let s = core::str::from_utf8(data).unwrap_or("");
-    civis::print_str(s);
-    civis::flush();
 }
 
 fn console_write_str(s: &str) {
@@ -425,15 +418,6 @@ fn console_write_str(s: &str) {
 
 /// Entry: apre console, legge il token di sessione, entra nel loop REPL.
 fn real_main(_sp: u64) -> ! {
-    let console_fd = match civis::open(CONSOLE_PATH, 0) {
-        Ok(f) => f,
-        Err(_) => {
-            println!("[shell] ERRORE: impossibile aprire console");
-            civis::exit(1);
-        }
-    };
-    unsafe { CONSOLE_FD = console_fd; }
-
     // Salva lo stack pointer per la lettura dell'env (VELORDO_USER).
     unsafe { SHELL_SP = _sp; }
 

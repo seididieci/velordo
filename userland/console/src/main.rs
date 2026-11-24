@@ -4,8 +4,10 @@
 //! - **il terminale**: modello a celle (UTF-8), font TrueType rasterizzato a
 //!   runtime, e le surface che mettono i caratteri sullo schermo (framebuffer
 //!   pixel o VGA testuale);
-//! - **il device di testo** `/dev/console`: ci scrivono il login, l'eco della
-//!   tastiera (`porta`) e i programmi.
+//! - **le sessioni di terminale** (`littera`, D8c1/D8c2): il testo arriva
+//!   dall'endpoint di sessione (`SESS_*`), il **seriale** ne e' il mirror (il
+//!   canale live del gate e del debug headless). Nessun device di testo:
+//!   `/dev/console` non esiste piu'.
 //!
 //! I **pixel sono della console**: alloca il buffer device (slot DMA), lo
 //! renderizza e chiede al driver `gpu` di presentarlo (`/dev/display`).
@@ -30,16 +32,6 @@ use term::surface::{self, Geom, Pixel, Surface, VgaText};
 use littera::{Sessions, Step};
 use musivum;
 
-// ── Ring I/O (Fase 10.2) ─────────────────────────────────────────
-// Le finestre CLI_* sono mappate da cardo (map_in) con i ring del client
-// a ogni relay DEV (zero-copy); i ring propri del server non cambiano mai.
-
-const REQ_RING_VA: u64 = civis::CLI_REQ_VA;
-const RESP_RING_VA: u64 = civis::CLI_RESP_VA;
-use civis::{req_frame_read, resp_frame_write};
-
-// ── Tag IPC del device (DocsD: single source in `syscall-numbers`) ───
-use civis::{DEV_CLOSE, DEV_OPEN, DEV_READ, DEV_WRITE};
 // Tag delle finestre del DE (D8b, ADR-0088): il servizio console le gestisce
 // direttamente; i clienti le usano tramite `civis::win`.
 use civis::{WIN_CLOSE, WIN_COMMIT, WIN_OPEN, WIN_RAISE, WIN_SET_RECT, WIN_SET_SURFACE, WIN_STATS};
@@ -56,6 +48,15 @@ const ERR: u64 = !0u64;
 /// D8c1 — il numero di byte della mailbox di sessione (una pagina, vedi
 /// `sess-proto`): identico al `MAILBOX_BYTES` che il client mappa/smappa.
 const SESS_MAILBOX_BYTES: usize = sess_proto::MAILBOX_BYTES;
+
+/// D8c2 — tetto del mirror seriale **per sessione** (rete di sicurezza: una
+/// write mirrorata da un client senza budget, es. la personalita' POSIX, non
+/// deve poter sommergere la UART). Il budget *per comando* (256 KiB) resta
+/// della shell — e' lei che sa cosa e' un comando.
+const MIRROR_SESSION_MAX: usize = 1024 * 1024;
+
+/// D8c2 — avviso di tetto raggiunto (una volta per sessione).
+const MIRROR_TRUNCATED_MSG: &[u8] = b"\n[mirror seriale: tetto di sessione raggiunto]\n";
 
 /// Indirizzo fisico del buffer testo VGA (mappato dalla console).
 const VGA_TEXT_PHYS: u64 = 0xB8000;
@@ -143,10 +144,19 @@ struct Term {
     /// Le sessioni (1:1 con le tile del DE): la 0 e' lo schermo. In D8c1 si
     /// disegna solo quella in focus.
     sessions: Sessions,
-    /// Mailbox di sessione create dal server (owner): `(sess_id, shm_id, ptr,
-    /// map_len)`. La mappatura **RW** serve a leggere la meta' OUT e scrivere
-    /// la IN; va smappata (a pagina) prima di `shm_destroy`.
-    sess_mailboxes: alloc::vec::Vec<(u32, u32, *mut u8, usize)>,
+    /// Mailbox **per attachment** create dal server (owner): `(canale, pid,
+    /// shm_id, ptr, map_len)`. La chiave e' il **canale**, non la sessione
+    /// (D8c2): due clienti della stessa sessione hanno buffer distinti, come
+    /// il ring FS e' per processo. Con un buffer condiviso la write di uno
+    /// puo' essere sovrascritta fra il suo "copia" e il "copia" del server.
+    /// La mappatura **RW** serve a leggere la OUT e scrivere la IN; va
+    /// smappata (a pagina) prima di `shm_destroy`.
+    sess_mailboxes: alloc::vec::Vec<(u64, i64, u32, *mut u8, usize)>,
+    /// D8c2 — mirror seriale: budget residuo **per sessione** (T4/bulk) e
+    /// "gia' troncato" (l'avviso una volta sola). Lo consuma la sessione in
+    /// focus: e' il canale live del gate e del debug headless.
+    mirror_left: [usize; littera::MAX_SESSIONS],
+    mirror_truncated: [bool; littera::MAX_SESSIONS],
     surface: Surface,
     font: Option<Font>,
     /// Canale del driver `gpu` (0 = nessun driver raggiungibile).
@@ -211,9 +221,38 @@ impl Term {
         }
     }
 
+    /// D8c2 (ADR-0090) — **mirror seriale** del server: la sessione in focus
+    /// e' il canale live nudo su cui il gate fa regex byte-exact. Stessa
+    /// chiamata che facevano i client (`print_string` = `SYS_WRITE` raw),
+    /// quindi gli stessi byte; ora pero' da un posto solo (niente doppie
+    /// scritture). `MIRROR_SESSION_MAX` e' una rete di sicurezza per sessione:
+    /// il budget *per comando* resta del client che sa cosa e' un comando.
+    fn mirror_serial(&mut self, idx: usize, bytes: &[u8]) {
+        if idx != self.sessions.focus || idx >= self.mirror_left.len() {
+            return;
+        }
+        if self.mirror_left[idx] > 0 {
+            let n = bytes.len().min(self.mirror_left[idx]);
+            let _ = civis::print_string(&bytes[..n]);
+            self.mirror_left[idx] -= n;
+            if n == bytes.len() {
+                return;
+            }
+        }
+        if !self.mirror_truncated[idx] {
+            self.mirror_truncated[idx] = true;
+            let _ = civis::print_string(MIRROR_TRUNCATED_MSG);
+        }
+    }
+
     /// Manda i byte alla sessione `idx`: decode -> modello (con scroll) ->
-    /// render+flush **solo se la sessione e' quella disegnata**.
-    fn feed_session(&mut self, idx: usize, bytes: &[u8]) {
+    /// render+flush **solo se la sessione e' quella disegnata**. `mirror` =
+    /// la write entra nel canale seriale (D8c2): eco, ridisegni e test no
+    /// (`SESS_WRITE.w1 = 1`).
+    fn feed_session(&mut self, idx: usize, bytes: &[u8], mirror: bool) {
+        if mirror {
+            self.mirror_serial(idx, bytes);
+        }
         // T4: un feed lungo e' output di un comando (blocco): lo scroll
         // ricompone invece di spostare i pixel (vedi `scroll_session`).
         let bulk = bytes.len() > BULK_FEED_BYTES;
@@ -416,7 +455,7 @@ impl Term {
     /// Chiede al driver il refresh della superficie (solo nel path pixel).
     ///
     /// IPC **diretto** col driver: il cardo e' single-threaded e la console
-    /// lo sta bloccando mentre serve `/dev/console` (una scrittura FS qui
+    /// lo sta bloccando mentre serve una sessione (una scrittura FS qui
     /// dentro si deadlockerebbe). Inoltre i ring client e server condividono
     /// la stessa finestra `CLI_*`: il canale diretto evita anche la
     /// sovrapposizione.
@@ -616,44 +655,64 @@ impl Term {
         }
     }
 
-    // ── Sessioni di terminale (D8c1, ADR-0089) ───────────────────────
+    // ── Sessioni di terminale (D8c1) e mailbox per attachment (D8c2) ──
 
-    /// La shm della mailbox di una sessione.
-    fn sess_shm(&self, sess: u32) -> Option<u32> {
+    /// Il puntatore (RW) alla mailbox del **canale** `chan`: un attachment,
+    /// un buffer. Mai condiviso con un altro cliente della stessa sessione.
+    fn sess_mb(&self, chan: u64) -> Option<*mut u8> {
         self.sess_mailboxes
             .iter()
-            .find(|(id, _, _, _)| *id == sess)
-            .map(|(_, shm, _, _)| *shm)
+            .find(|(c, _, _, _, _)| *c == chan)
+            .map(|(_, _, _, ptr, _)| *ptr)
     }
 
-    /// Il puntatore (RW) alla mailbox di una sessione.
-    fn sess_mb(&self, sess: u32) -> Option<*mut u8> {
+    /// La mailbox del canale, creandola al primo attach. Ritorna lo `shm` da
+    /// consegnare al client, o `None` — fail-loud: il chiamante risponde `!0`,
+    /// mai un id che il client non puo' mappare.
+    fn ensure_mailbox(&mut self, chan: u64, pid: i64) -> Option<u32> {
+        if let Some((_, _, shm, _, _)) = self.sess_mailboxes.iter().find(|(c, ..)| *c == chan) {
+            return Some(*shm);
+        }
+        let shm = civis::shm_create(SESS_MAILBOX_BYTES).ok()?;
+        let va = match civis::shm_map(shm, 0, civis::PROT_READ | civis::PROT_WRITE) {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = civis::shm_destroy(shm);
+                return None;
+            }
+        };
         self.sess_mailboxes
-            .iter()
-            .find(|(id, _, _, _)| *id == sess)
-            .map(|(_, _, ptr, _)| *ptr)
+            .push((chan, pid, shm, va as *mut u8, SESS_MAILBOX_BYTES));
+        Some(shm)
     }
 
-    /// Smonta e distrugge la mailbox di una sessione. Si smappa **a pagina**
+    /// Smonta e distrugge la mailbox di un canale. Si smappa **a pagina**
     /// prima di `shm_destroy`: senza, il riferimento della mappatura resta
     /// appeso e i frame non tornano mai (lezione D8b: `[munmap]` nel gate).
-    fn drop_mailbox(&mut self, sess: u32) {
+    fn drop_mailbox(&mut self, chan: u64) {
         if let Some(pos) = self
             .sess_mailboxes
             .iter()
-            .position(|(id, _, _, _)| *id == sess)
+            .position(|(c, _, _, _, _)| *c == chan)
         {
-            let (_, shm, ptr, len) = self.sess_mailboxes.remove(pos);
+            let (_, _, shm, ptr, len) = self.sess_mailboxes.remove(pos);
             let _ = civis::munmap(ptr as usize, len);
             let _ = civis::shm_destroy(shm);
         }
     }
 
-    /// Chiude le sessioni di un processo morto (mai la 0), liberandone la
-    /// mailbox.
+    /// Morte di un processo: chiude le sessioni di cui era owner (mai la 0) e
+    /// libera le mailbox dei suoi attachment. Le sessioni si chiudono per id
+    /// (`purge_pid` le elenca), le mailbox per **pid**: alla notifica il
+    /// canale e' gia' invalidato e non si puo' piu' risalire al peer.
     fn purge_sessions_of(&mut self, pid: i64) {
         for id in self.sessions.purge_pid(pid) {
-            self.drop_mailbox(id as u32);
+            let _ = self.sessions.close(id);
+        }
+        while let Some(pos) = self.sess_mailboxes.iter().position(|(_, p, ..)| *p == pid) {
+            let (_, _, shm, ptr, len) = self.sess_mailboxes.remove(pos);
+            let _ = civis::munmap(ptr as usize, len);
+            let _ = civis::shm_destroy(shm);
         }
     }
 
@@ -1233,8 +1292,8 @@ impl Term {
 /// Fonte di byte per il file del font: **la RAM**.
 ///
 /// Il font e' letto tutto (2.4 MiB) all'avvio, non a pezzi durante il
-/// servizio: la console non puo' fare I/O sul FS mentre serve `/dev/console`
-/// (il cardo e' single-threaded e la aspetta: un letture FS li' dentro
+/// servizio: la console non puo' fare I/O sul FS mentre serve i clienti
+/// (il cardo e' single-threaded e la aspetta: una lettura FS li' dentro
 /// deadlockerebbe — console e cardo si bloccherebbero a vicenda). Con il
 /// font in RAM il rasterizer non tocca piu' il FS, e le icone Nerd (che
 /// stanno fuori dal range ASCII) restano disponibili.
@@ -1255,23 +1314,6 @@ impl term::font::Source for MemSource {
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
-
-/// Assicura il mount "/dev/console" presso cardo (stessa via del vecchio
-/// console server): un tentativo, idempotente (replace-on-register).
-fn ensure_console_registered() {
-    civis::ensure_fs_mount(|| civis::fs_register(b"/dev/console"));
-}
-
-/// pid del peer FS (cardo) **adesso**. Va misurato mentre il canale e' vivo:
-/// alla morte del peer il canale e' invalidato (Fase 39) e `peer_pid` non
-/// risponde piu'.
-fn fs_peer_pid() -> i64 {
-    let chan = civis::fs_chan();
-    if chan <= 0 {
-        return 0;
-    }
-    civis::peer_pid(chan as u64).unwrap_or(0)
-}
 
 /// Il cursore hardware del VGA (fallback): porta CRTC.
 unsafe fn move_hw_cursor(row: usize, col: usize) {
@@ -1333,6 +1375,8 @@ fn real_main(_sp: u64) -> ! {
     let mut term = Term {
         sessions: Sessions::new(geom.cols, geom.rows),
         sess_mailboxes: alloc::vec::Vec::new(),
+        mirror_left: [MIRROR_SESSION_MAX; littera::MAX_SESSIONS],
+        mirror_truncated: [false; littera::MAX_SESSIONS],
         surface,
         font,
         driver_chan,
@@ -1369,24 +1413,10 @@ fn real_main(_sp: u64) -> ! {
             );
         }
     }
-    // 4b. La sessione 0 ha la sua mailbox **da subito**: e' l'ancora del DE
-    //     (chi si attacca con `SESS_ATTACH_DEFAULT` deve poterla mappare, e il
-    //     terminale di boot e' gia' li'). Come per le altre, la crea il server
-    //     e la mappa RW: legge la meta' OUT, scrive la IN.
-    match civis::shm_create(SESS_MAILBOX_BYTES) {
-        Ok(shm) => match civis::shm_map(shm, 0, civis::PROT_READ | civis::PROT_WRITE) {
-            Ok(va) => term
-                .sess_mailboxes
-                .push((0, shm, va as *mut u8, SESS_MAILBOX_BYTES)),
-            Err(_) => {
-                let _ = civis::shm_destroy(shm);
-                let _ = civis::print_string(b"[console] mailbox sessione 0: map fallita\n");
-            }
-        },
-        Err(_) => {
-            let _ = civis::print_string(b"[console] mailbox sessione 0: shm_create fallita\n");
-        }
-    }
+    // 4b. La mailbox non si crea qui: e' **dell'attachment** (D8c2), nasce
+    //     alla prima `SESS_*` che la chiede e il server la distrugge alla
+    //     chiusura o alla morte del peer. La sessione 0 esiste da subito (e'
+    //     il terminale di boot) ma non ha un buffer condiviso.
 
     // Fondo: colore di pagina + immagine centrata (se c'e').
     term.build_bg_layer();
@@ -1394,73 +1424,23 @@ fn real_main(_sp: u64) -> ! {
 
     // 5. Banner sul terminale (il framebuffer o la VGA) + il seriale (sink
     //    di debug): la console si annuncia come il vecchio console server.
-    term.feed_session(0, b"Velordo console server\n");
+    //    Il banner **non** entra nel mirror (`false`): il log resta quello di
+    //    sempre (`[console] server up`).
+    term.feed_session(0, b"Velordo console server\n", false);
     let _ = civis::print_string(b"[console] server up\n");
     log_render_marker(&term);
 
     // 6. Avvisa il parent (init): il supervisore lo usa (Fase 14).
     civis::signal_ready(1);
 
-    // 7. Registra /dev/console con cardo.
-    ensure_console_registered();
-    let _ = civis::print_string(b"[console] registered /dev/console with cardo\n");
-    // Il pid del peer FS, misurato ora che il canale e' vivo: e' l'unico
-    // peer la cui morte (EXIT_NOTIFY) impone un rimontaggio.
-    let mut fs_peer = fs_peer_pid();
+    // 7. Nessun device da registrare (D8c2): `/dev/console` non esiste piu'.
+    //    Il testo viaggia sull'endpoint di sessione, per capability.
 
-    // 8. Loop IPC: il device di testo.
+    // 8. Loop IPC: sessioni di terminale, finestre, display.
     loop {
         match civis::recv() {
             Ok(msg) => {
                 match msg.tag {
-                    DEV_OPEN => {
-                        if msg.w0 == civis::DEV_CONSOLE {
-                            let _ = civis::reply(msg.tag, 0, 0);
-                        } else {
-                            let _ = civis::reply(msg.tag, ERR, 0);
-                        }
-                    }
-
-                    DEV_READ => {
-                        // Output-only: EOF immediato (frame vuoto + 0).
-                        unsafe { resp_frame_write(RESP_RING_VA, &[]); }
-                        let _ = civis::reply(msg.tag, 0, 0);
-                    }
-
-                    DEV_WRITE => {
-                        let count = msg.w1 as usize;
-                        if count > 0 {
-                            let mut data = alloc::vec::Vec::with_capacity(count);
-                            data.resize(count, 0);
-                            unsafe { req_frame_read(REQ_RING_VA, &mut data, count); }
-                            // `/dev/console` e' un **adattatore sulla sessione 0**
-                            // (D8c1): il device non e' un secondo canale di testo,
-                            // e' la sessione dello schermo vista da chi non parla
-                            // ancora il protocollo di sessione.
-                            term.feed_session(0, &data);
-                        }
-                        let _ = civis::reply(msg.tag, msg.w1, 0);
-                    }
-
-                    DEV_CLOSE => {
-                        // T4/bulk: se restava un batch non ancora reso (lo
-                        // scrittore chiude senza una write interattiva), lo
-                        // si rende ora.
-                        let pending = term
-                            .sessions
-                            .focus_mut()
-                            .map(|s| s.bulk_writes)
-                            .unwrap_or(0);
-                        if pending > 0 {
-                            if let Some(s) = term.sessions.focus_mut() {
-                                s.bulk_writes = 0;
-                            }
-                            term.render();
-                            term.flush_display();
-                        }
-                        let _ = civis::reply(msg.tag, 0, 0);
-                    }
-
                     civis::syscall_numbers::GPU_DISPLAY_CHANGED => {
                         // L'host ha cambiato la finestra (config change MSI-X):
                         // la console cede (policy D1) e si riadatta — testo
@@ -1715,25 +1695,14 @@ fn real_main(_sp: u64) -> ! {
                                 continue;
                             }
                         };
-                        let shm = match civis::shm_create(SESS_MAILBOX_BYTES) {
-                            Ok(v) => v,
-                            Err(_) => {
+                        let shm = match term.ensure_mailbox(msg.channel, owner.unwrap_or(-1)) {
+                            Some(s) => s,
+                            None => {
                                 let _ = term.sessions.close(id);
                                 let _ = civis::reply(SESS_CREATE, !0, 0);
                                 continue;
                             }
                         };
-                        let va = match civis::shm_map(shm, 0, civis::PROT_READ | civis::PROT_WRITE) {
-                            Ok(v) => v,
-                            Err(_) => {
-                                let _ = civis::shm_destroy(shm);
-                                let _ = term.sessions.close(id);
-                                let _ = civis::reply(SESS_CREATE, !0, 0);
-                                continue;
-                            }
-                        };
-                        term.sess_mailboxes
-                            .push((id as u32, shm, va as *mut u8, SESS_MAILBOX_BYTES));
                         term.sessions.attach(msg.channel, id);
                         let _ = civis::reply(SESS_CREATE, id as u64, shm as u64);
                     }
@@ -1742,7 +1711,7 @@ fn real_main(_sp: u64) -> ! {
                         // Attestazione: nessun argomento, il kernel dice il pid.
                         let pid = civis::peer_pid(msg.channel).unwrap_or(-1);
                         match term.sessions.session_of_pid(pid) {
-                            Some(id) => match term.sess_shm(id as u32) {
+                            Some(id) => match term.ensure_mailbox(msg.channel, pid) {
                                 Some(shm) => {
                                     term.sessions.attach(msg.channel, id);
                                     let _ = civis::reply(SESS_WHOAMI, id as u64, shm as u64);
@@ -1759,7 +1728,12 @@ fn real_main(_sp: u64) -> ! {
 
                     SESS_ATTACH_DEFAULT => {
                         // L'unico ingresso **nominato**: la sessione 0.
-                        match term.sess_shm(0) {
+                        let pid = civis::peer_pid(msg.channel).unwrap_or(-1);
+                        if term.sessions.get(0).is_none() {
+                            let _ = civis::reply(SESS_ATTACH_DEFAULT, !0, 0);
+                            continue;
+                        }
+                        match term.ensure_mailbox(msg.channel, pid) {
                             Some(shm) => {
                                 term.sessions.attach(msg.channel, 0);
                                 let _ = civis::reply(SESS_ATTACH_DEFAULT, 0, shm as u64);
@@ -1781,7 +1755,9 @@ fn real_main(_sp: u64) -> ! {
                     }
 
                     SESS_WRITE => {
-                        // w0 = len (byte gia' nella meta' OUT della mailbox).
+                        // w0 = len (byte gia' nella meta' OUT della mailbox),
+                        // w1 = 0 entra nel mirror seriale, 1 = solo schermo
+                        // (eco, ridisegni, test).
                         let class = term.peer_class(msg.channel);
                         let sid = match term.sessions.attached(msg.channel) {
                             Some(id) => id,
@@ -1795,7 +1771,7 @@ fn real_main(_sp: u64) -> ! {
                             let _ = civis::reply(SESS_WRITE, !0, 0);
                             continue;
                         }
-                        let Some(mb) = term.sess_mb(sid as u32) else {
+                        let Some(mb) = term.sess_mb(msg.channel) else {
                             let _ = civis::reply(SESS_WRITE, !0, 0);
                             continue;
                         };
@@ -1807,7 +1783,7 @@ fn real_main(_sp: u64) -> ! {
                                 len,
                             );
                         }
-                        term.feed_session(sid, &data);
+                        term.feed_session(sid, &data, msg.w1 == 0);
                         let _ = civis::reply(SESS_WRITE, len as u64, 0);
                     }
 
@@ -1828,7 +1804,7 @@ fn real_main(_sp: u64) -> ! {
                                 continue;
                             }
                         };
-                        if let Some(mb) = term.sess_mb(sid as u32) {
+                        if let Some(mb) = term.sess_mb(msg.channel) {
                             unsafe {
                                 core::ptr::copy_nonoverlapping(
                                     buf.as_ptr(),
@@ -1909,8 +1885,14 @@ fn real_main(_sp: u64) -> ! {
                             let _ = civis::reply(SESS_CLOSE, !0, 0);
                             continue;
                         }
+                        // La mailbox e' del canale: si libera solo se il
+                        // chiamante era attaccato a questa sessione (chi ne
+                        // chiude un'altra da privilegiato non perde la sua).
+                        if term.sessions.attached(msg.channel) == Some(sid) {
+                            term.drop_mailbox(msg.channel);
+                            term.sessions.detach(msg.channel);
+                        }
                         let _ = term.sessions.close(sid);
-                        term.drop_mailbox(sid as u32);
                         let _ = civis::reply(SESS_CLOSE, 0, 0);
                     }
 
@@ -1970,7 +1952,7 @@ fn real_main(_sp: u64) -> ! {
                                 continue;
                             }
                         };
-                        if let Some(mb) = term.sess_mb(sid as u32) {
+                        if let Some(mb) = term.sess_mb(msg.channel) {
                             unsafe {
                                 core::ptr::copy_nonoverlapping(
                                     buf.as_ptr(),
@@ -2006,7 +1988,7 @@ fn real_main(_sp: u64) -> ! {
                             let _ = civis::reply(SESS_TEST_INPUT, !0, 0);
                             continue;
                         }
-                        let Some(mb) = term.sess_mb(sid as u32) else {
+                        let Some(mb) = term.sess_mb(msg.channel) else {
                             let _ = civis::reply(SESS_TEST_INPUT, !0, 0);
                             continue;
                         };
@@ -2023,25 +2005,13 @@ fn real_main(_sp: u64) -> ! {
                             None => false,
                         };
                         if echo {
-                            term.feed_session(sid, &data);
+                            // Eco di test: solo schermo, mai nel mirror.
+                            term.feed_session(sid, &data, false);
                         }
                         let _ = civis::reply(SESS_TEST_INPUT, 0, 0);
                     }
 
                     civis::EXIT_NOTIFY => {
-                        // Solo la morte del **peer FS** (cardo) impone di
-                        // rimontare `/dev/console`: ogni processo che stampa e'
-                        // un peer della console (canale DEV_WRITE implicito di
-                        // `CONSOLE_OUT`), e la sua morte non tocca il mount.
-                        // Reagire anche a quella ri-registrerebbe mentre cardo
-                        // e' vivo ed e' in attesa di una write verso la
-                        // console: ciclo cardo -> console -> cardo (deadlock
-                        // osservato: EXIT_NOTIFY di un test, console dentro
-                        // `fs_register`, cardo in attesa della console).
-                        if fs_peer != 0 && msg.w1 as i64 == fs_peer {
-                            ensure_console_registered();
-                            fs_peer = fs_peer_pid();
-                        }
                         // Chiude tutte le finestre del processo morto (w1 = pid):
                         // il leak shm e' impossibile per costruzione (l'owner e'
                         // il server, che le distrugge qui).

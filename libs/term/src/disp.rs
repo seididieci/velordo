@@ -4,7 +4,7 @@
 //! Il canale e' un **IPC diretto** col servizio `Gpu` (per nome), non un
 //! device FS: il cardo e' single-threaded, e un driver che lo blocca (per
 //! fare una scrittura) mentre serve un cliente si deadlocka — la console
-//! serve `/dev/console` *e* parla col driver.
+//! serve le sessioni *e* parla col driver.
 //!
 //! I tag vivono in `syscall-numbers` (single source); qui solo l'impacchettamento
 //! della geometria (che deve stare in un registro).

@@ -514,7 +514,8 @@ pub const DEV_READDIR: u64 = 0x24;
 pub const DEV_NULL: u64 = 0;
 pub const DEV_ZERO: u64 = 1;
 pub const DEV_KEYBOARD: u64 = 2;
-pub const DEV_CONSOLE: u64 = 3;
+// 3 era `DEV_CONSOLE`: ritirato in D8c2 (ADR-0090) — il testo viaggia
+// sull'endpoint di sessione, non su un device. Il numero non si riusa.
 pub const DEV_KBD: u64 = 4;
 /// Libera uno slot DMA del chiamante (D4): `dma_free(slot)`. Gli slot >= 1
 /// (device buffer) sono dell'owner di `Service::Console`; lo slot 0 (staging)

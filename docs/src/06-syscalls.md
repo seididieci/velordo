@@ -418,20 +418,25 @@ server la tiene RO per il blit. `WIN_CLOSE` e `EXIT_NOTIFY` (con `w1` = pid)
 fanno `munmap` della mappatura del server e distruggono lo shm: il leak è
 impossibile per costruzione.
 
-**Sessioni di terminale (D8c1, ADR-0089)**: le sessioni di `littera` vivono
-nel servizio `console` (che già possiede i pixel). La capability è una
-**mailbox**: una pagina shm (`libs/sess-proto`: OUT cliente→sessione `0..2048`,
-IN sessione→cliente `2048..4096`, `MAX_CHUNK` 2048) che il server crea, mappa
-RW e consegna alla creazione. Il testo passa **solo** da qui: `/dev/console`
-resta un adattatore sulla sessione 0. Client nel meccanismo: `civis::sess`.
+**Sessioni di terminale (D8c1/D8c2, ADR-0089/ADR-0090)**: le sessioni di
+`littera` vivono nel servizio `console` (che già possiede i pixel). La
+capability è una **mailbox**: una pagina shm (`libs/sess-proto`: OUT
+cliente→sessione `0..2048`, IN sessione→cliente `2048..4096`, `MAX_CHUNK`
+2048) che il server crea, mappa RW e consegna. Dal D8c2 la mailbox è
+**dell'attachment** (una per canale, non per sessione): due clienti della
+stessa sessione non si sovrascrivono i byte, come il ring FS è per processo.
+Il testo passa **solo** da qui — nessun device di testo: `/dev/console` non
+esiste più (e `DEV_CONSOLE`, il tipo 3, è ritirato: il numero non si riusa).
+Client nel meccanismo: `civis::sess` (`out`/`out_screen` sono il sink di
+stdout: sessione attestata → default → seriale).
 
 | Tag | Nome | Semantica |
 |-----|------|-----------|
 | 0x9B | `SESS_CREATE` | `w0` = flag (0 = legata al chiamante, 1 = non legata, ≥ `ThirdParty`) → `w0` = sess, `w1` = shm della mailbox |
 | 0x9C | `SESS_WHOAMI` | nessun argomento → la sessione **del pid chiamante** (owner o binding): l'attestazione la fa il kernel |
-| 0x9D | `SESS_ATTACH_DEFAULT` | → `(0, shm0)`: l'unico ingresso **nominato** (la sessione 0, lo schermo) |
+| 0x9D | `SESS_ATTACH_DEFAULT` | → `(0, shm)`: l'unico ingresso **nominato** (la sessione 0, lo schermo); la mailbox è creata per il canale che chiede |
 | 0x9E | `SESS_BIND` | `w0` = sess, `w1` = pid: il DE lega un figlio appena nato (≥ `ThirdParty`) |
-| 0x9F | `SESS_WRITE` | `w0` = len (byte in OUT) → feed della sessione attaccata |
+| 0x9F | `SESS_WRITE` | `w0` = len (byte in OUT), `w1` = `0` entra nel mirror seriale / `1` solo schermo → feed della sessione attaccata |
 | 0xA0 | `SESS_READ` | `w0` = max → copia fino a `max` byte di input in IN |
 | 0xA1 | `SESS_RESIZE` | `w0` = `cols<<16\|rows` → reflow; in D8c1 la sessione in focus (lo schermo) è negata |
 | 0xA2 | `SESS_ECHO` | `w0` = on: eco dell'input sul modello (flag di **sessione**) |
@@ -446,7 +451,10 @@ resta un adattatore sulla sessione 0. Client nel meccanismo: `civis::sess`.
 Nessuna syscall nuova e nessun `Service` nuovo (`SERVICE_COUNT` resta 20). La
 sessione di un processo si trova per **attestazione del pid**, mai con un
 handle passato allo spawn o un'ambiente da fidarsi; `EXIT_NOTIFY` purga
-binding e sessioni di cui il morto era owner (mai la 0).
+binding, sessioni di cui il morto era owner (mai la 0) **e le mailbox dei suoi
+attachment**. Il **mirror seriale** della sessione in focus è del server
+(formato nudo, `MIRROR_SESSION_MAX` 1 MiB per sessione come rete di sicurezza;
+il budget per comando resta del client che sa cos'è un comando).
 
 ### I/O
 

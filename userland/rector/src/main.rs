@@ -710,7 +710,8 @@ const SVC_GPU: SvcMeta = SvcMeta {
     prio: 16,
     // spazio di configurazione PCI per enumerare/programmare virtio-gpu-pci
 };
-/// Console server (D3): modello a celle, font, surface; serve `/dev/console`.
+/// Console server (D3): modello a celle, font, surface; sessioni di terminale
+/// (D8c2: nessun device di testo).
 const SVC_CONSOLE: SvcMeta = SvcMeta {
     bin: b"console",
     obj: Some((b"sys", b"bin/console.bin")),
@@ -991,8 +992,8 @@ fn real_main(_sp: u64) -> ! {
         civis::exit(1);
     }
     let _ = civis::vestigia::log(b"init", b"kbd ready");
-    // 5. porta + attesa READY (Fase 15: registra /dev/input; /dev/kbd e
-    //    /dev/console garantiti dai passi precedenti, riesce subito a boot).
+    // 5. porta + attesa READY (Fase 15: registra /dev/input; /dev/kbd
+    //    garantito dai passi precedenti, riesce subito a boot).
     if boot_svc(&SVC_PORTA, true).is_none() {
         println!("[init] boot FAILED (tty), panic");
         civis::exit(1);

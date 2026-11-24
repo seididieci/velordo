@@ -1,4 +1,4 @@
-//! t_sess — D8c1 (ADR-0089): sessioni di terminale del DE.
+//! t_sess — D8c1/D8c2 (ADR-0089/ADR-0090): sessioni di terminale del DE.
 //!
 //! Il test esercita l'endpoint di sessione come lo userebbe un programma
 //! (e, domani, una tile del DE):
@@ -6,20 +6,23 @@
 //! 1. `SESS_STATS` conta la sessione 0 e la indica in focus;
 //! 2. `whoami` **prima** di crearne una fallisce (attestazione: nessun
 //!    handle, nessun ambiente);
-//! 3. `WIN_OPEN` con `w0 = 0` ("la tile della mia sessione") e' negato a chi
-//!    non ha una sessione attaccata — nessun numero magico;
-//! 4. `create` restituisce sessione e mailbox; `whoami` ritrova la **stessa**
-//!    sessione **per pid**, senza argomenti;
-//! 5. la geometria e' quella del display, l'eco e' accesa, il focus resta 0;
-//! 6. il feed scrive nel modello (`state`/`dump`), il resize fa reflow senza
-//!    perdere il testo;
-//! 7. eco spento: l'input iniettato si legge ma **non** appare sul modello;
+//! 3. `create` restituisce sessione e mailbox; `whoami` ritrova la **stessa**
+//!    sessione **per pid**, senza argomenti; `WIN_OPEN` con `w0 = 0` ("la tile
+//!    della mia sessione") e' negato perche' la mia sessione non e' quella in
+//!    focus — nessun numero magico;
+//! 4. la geometria e' quella del display, l'eco e' accesa, il focus resta 0;
+//! 5. il feed scrive nel modello (`state`/`dump`) e il **sink del meccanismo**
+//!    (`civis::sess::out`) arriva nella stessa sessione; il resize fa reflow
+//!    senza perdere il testo;
+//! 6. eco spento: l'input iniettato si legge ma **non** appare sul modello;
 //!    eco acceso: appare;
-//! 8. `bind` e' negato a un'immagine `Untrusted` (il DE positivo e' D8e), il
+//! 7. `bind` e' negato a un'immagine `Untrusted` (il DE positivo e' D8e), il
 //!    focus su una sessione diversa dalla 0 e' negato (D8c1 disegna una sola
 //!    sessione) mentre `focus(0)` riesce senza cambiare un pixel;
-//! 9. `close` libera la sessione (torna a 1, `whoami` torna a fallire); la
-//!    sessione 0 e una inesistente non si chiudono.
+//! 8. `close` libera la sessione (torna a 1, `whoami` torna a fallire); la
+//!    sessione 0 e una inesistente non si chiudono;
+//! 9. D8c2: `/dev/console` non e' piu' apribile e la tastiera non accetta
+//!    write — il ritiro e' loud.
 //!
 //! La sessione **0 e' lo schermo**: il test non ci scrive mai, quindi il gate
 //! (login e shell) non viene toccato. Uscita a punto unico: qualunque
@@ -41,15 +44,17 @@ fn run(console: u64) -> Result<(), &'static str> {
         return Err("whoami senza sessione non e' NotAttached");
     }
 
-    // 3. `WIN_OPEN.w0 = 0` senza sessione e' negato.
-    if civis::win::open(0, (16 << 16) | 16).is_ok() {
-        return Err("WIN_OPEN(0) accettato senza sessione");
-    }
-
-    // 4. Crea una sessione legata a me e ritrovatala per pid.
+    // 3. Crea una sessione legata a me (l'attachment del canale passa a
+    //    lei) e ritrovatala per pid.
     let sess = civis::sess::create().map_err(|_| "create negata")?;
     if sess.id < 1 || sess.shm == 0 {
         return Err("create: id/shm vuoti");
+    }
+    // 3b. `WIN_OPEN.w0 = 0` = "la tile della mia sessione": ora sono attaccato
+    //     a una sessione che **non** e' quella in focus, quindi e' negato —
+    //     nessun numero magico, e una tile non e' un privilegio.
+    if civis::win::open(0, (16 << 16) | 16).is_ok() {
+        return Err("WIN_OPEN(0) accettato su una sessione non in focus");
     }
     let me = civis::sess::whoami().map_err(|_| "whoami non trova la sessione creata")?;
     if me.id != sess.id {
@@ -57,7 +62,7 @@ fn run(console: u64) -> Result<(), &'static str> {
     }
     drop(me);
 
-    // 5. Geometria del display, eco accesa, non in focus.
+    // 4. Geometria del display, eco accesa, non in focus.
     let q = civis::send(console, civis::syscall_numbers::CONSOLE_QUERY, 0, 0)
         .map_err(|_| "CONSOLE_QUERY fallita")?;
     let info = sess.info().map_err(|_| "info fallita")?;
@@ -68,7 +73,7 @@ fn run(console: u64) -> Result<(), &'static str> {
         return Err("info: attese eco accesa e focus spento");
     }
 
-    // 6. Feed: il testo arriva nel modello.
+    // 5. Feed: il testo arriva nel modello.
     sess.write(b"littera\n").map_err(|_| "write negata")?;
     let (non_empty, _crc) = sess.state(0).map_err(|_| "state fallita")?;
     if non_empty < 7 {
@@ -80,7 +85,18 @@ fn run(console: u64) -> Result<(), &'static str> {
         return Err("dump: il testo scritto non c'e'");
     }
 
-    // 7. Resize: il reflow conserva il testo.
+    // 5b. Il sink di stdout del meccanismo (D8c2): `out` risolve la sessione
+    //     **del processo** (attestata) e ci scrive senza che il chiamante
+    //     conosca la mailbox. E' quello che usano login, shell e comandi.
+    if !civis::sess::out(b"out-sink\n") {
+        return Err("out: nessuna sessione raggiungibile");
+    }
+    let (n, _) = sess.dump(tex.len(), &mut tex).map_err(|_| "dump dopo out")?;
+    if !contains(&tex[..n], b"out-sink") {
+        return Err("out: il testo non e' arrivato nella sessione");
+    }
+
+    // 6. Resize: il reflow conserva il testo.
     sess.resize(20, 5).map_err(|_| "resize negata")?;
     let info = sess.info().map_err(|_| "info dopo resize fallita")?;
     if (info.cols, info.rows) != (20, 5) {
@@ -91,7 +107,7 @@ fn run(console: u64) -> Result<(), &'static str> {
         return Err("resize: il testo e' andato perso");
     }
 
-    // 8. Eco spento: l'input si legge, ma non entra nel modello.
+    // 7. Eco spento: l'input si legge, ma non entra nel modello.
     sess.echo(false).map_err(|_| "echo(false) negata")?;
     sess.test_input(b"pw").map_err(|_| "test_input(pw) negata")?;
     let mut inbuf = [0u8; 16];
@@ -104,7 +120,7 @@ fn run(console: u64) -> Result<(), &'static str> {
         return Err("eco spento: l'input e' finito sul modello");
     }
 
-    // 9. Eco acceso: l'input appare sul modello.
+    // 8. Eco acceso: l'input appare sul modello.
     sess.echo(true).map_err(|_| "echo(true) negata")?;
     sess.test_input(b"ok").map_err(|_| "test_input(ok) negata")?;
     let rn = sess.read(&mut inbuf).map_err(|_| "read (eco) negata")?;
@@ -116,13 +132,13 @@ fn run(console: u64) -> Result<(), &'static str> {
         return Err("eco acceso: l'input non appare sul modello");
     }
 
-    // 10. bind e' del DE (>= ThirdParty): a noi e' negato.
+    // 9. bind e' del DE (>= ThirdParty): a noi e' negato.
     let pid = civis::getpid();
     if civis::sess::bind(sess.id, pid).is_ok() {
         return Err("bind accettato da un'immagine Untrusted");
     }
 
-    // 11. Focus su una sessione diversa dalla 0: negato. `focus(0)` riesce e
+    // 10. Focus su una sessione diversa dalla 0: negato. `focus(0)` riesce e
     //     non cambia un pixel (la 0 e' gia' quella disegnata).
     if civis::sess::focus(sess.id).is_ok() {
         return Err("focus su una sessione non in focus accettato in D8c1");
@@ -138,7 +154,7 @@ fn run(console: u64) -> Result<(), &'static str> {
         }
     }
 
-    // 12. Chiudi la sessione (con l'attachment riportato su di lei da
+    // 11. Chiudi la sessione (con l'attachment riportato su di lei da
     //     whoami) e verifica il ritorno allo stato iniziale.
     let again = civis::sess::whoami().map_err(|_| "whoami prima di close")?;
     if again.id != sess.id {
@@ -154,7 +170,7 @@ fn run(console: u64) -> Result<(), &'static str> {
         return Err("whoami dopo close non e' NotAttached");
     }
 
-    // 13. La sessione 0 e una inesistente non si chiudono.
+    // 12. La sessione 0 e una inesistente non si chiudono.
     let d = civis::sess::attach_default().map_err(|_| "attach_default (close 0)")?;
     if d.close().is_ok() {
         return Err("close(0) accettata");
@@ -164,6 +180,21 @@ fn run(console: u64) -> Result<(), &'static str> {
         return Err("close di una sessione inesistente accettata");
     }
     drop(d);
+
+    // 13. D8c2 — il device di testo non esiste piu', e la tastiera non e' un
+    //     terminale: il ritiro e' **loud**, non un alias silenzioso. Un
+    //     vecchio client che continua a scrivere per abitudine lo scopre.
+    if civis::open("/dev/console", 0).is_ok() {
+        return Err("/dev/console e' ancora apribile (D8c2 lo ha ritirato)");
+    }
+    let Ok(kb) = civis::open("/dev/input/keyboard", 0) else {
+        return Err("/dev/input/keyboard non apribile (porta?)");
+    };
+    let refused = civis::write_fs(kb, b"x", 1).is_err();
+    let _ = civis::close(kb);
+    if !refused {
+        return Err("write su /dev/input/keyboard accettata (porta inoltra ancora testo)");
+    }
     Ok(())
 }
 
@@ -191,7 +222,7 @@ pub fn t_session_endpoint() -> bool {
     };
     match run(console) {
         Ok(()) => {
-            println!("[t74] sessioni: create/whoami/feed/resize/eco/focus/close");
+            println!("[t74] sessioni: create/whoami/feed/out/resize/eco/focus/close/ritiro");
             true
         }
         Err(why) => {

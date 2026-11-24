@@ -28,7 +28,7 @@ testland/   test suite meccanismo + repro + demo storiche
   testfs        usertestfs   — ramfs (read/write/mkdir/errori)   → PASS 5/5
   testfat       usertestfat  — FAT32 scrivibile (Fase 20) + /dev/null, /dev/zero → PASS 7/7
   testsarca     usertestsarca — ArcaFS P5+A1+56.1+56.2a+56.2b+56.2c (B+tree COW + commit, recovery/GC + sys-dal-volume) + logging L1 Fase 57 (gateway `Log` RAM-first, bucket per identita', seal, stats, bounce) + namespace POSIX 56.3 (dir emergenti + set RAM, ADR-0042) + quota per bucket A3 (budget, ERR_NOSPC, persistenza, ADR-0044) + rename/symlink S1.1 (file/dir, link+follow, ERR tipizzati) + range read 2 MiB S2.5f/F0 + prefix-overwrite W1 (merge esplicito `ns_write`) + extent dinamici S2.5w/W2 (ADR-0050: COW a blocchi, liveness, XSTATS) + append 512K bound (test59) + cache write-through S2.5w/W3 (ADR-0051: fasce R0/R1/R2, sizing meminfo, hit/reads in XSTATS) + epoche minime S2.5w/W4 (ADR-0052: fd-write a epoca, crash kill-mid recovery, test60) + packing sub-blocco stesso-bucket S2.5w/W5 (ADR-0053: tipo nodo PACKED, bump per bucket, refcount eager + rebuild al bind, test61) + blocchi 64 KiB e rimozione cap 16 MiB S2.5w/W6 (ADR-0054: ARCA_VERSION 3, nessun cap oggetto, walk streaming, test62) + identita' del volume v4 (ADR-0059: superblock 192 B, label + mountpoint dichiarato, test63-64) → PASS 64/64
-  usertests     usertests    — suite meccanismo (70 test, +t59 rename/+t60 symlink/+t61 chdir/+t62 chmod S1.1/+t63 modeset D4/+t64 scroll vs repaint T4/+t65 shm ownership + destroy/+t66 firma immagini ADR-0078 fase 2/+t67 classe nel PCB ADR-0079 fase 3/+t68 porte I/O dal manifest fase 4/+t69 Custos ruoli e capability ADR-0080 fase 5/+t70 consenso per immagine + broker ADR-0080 fase 6/+t71 recv con deadline +t72 Sleep in run/block_on E1/ADR-0083/+t73 finestre del compositor D8b/ADR-0088/+t74 sessioni di terminale D8c1/ADR-0089) → PASS 70/70
+  usertests     usertests    — suite meccanismo (70 test, +t59 rename/+t60 symlink/+t61 chdir/+t62 chmod S1.1/+t63 modeset D4/+t64 scroll vs repaint T4/+t65 shm ownership + destroy/+t66 firma immagini ADR-0078 fase 2/+t67 classe nel PCB ADR-0079 fase 3/+t68 porte I/O dal manifest fase 4/+t69 Custos ruoli e capability ADR-0080 fase 5/+t70 consenso per immagine + broker ADR-0080 fase 6/+t71 recv con deadline +t72 Sleep in run/block_on E1/ADR-0083/+t73 finestre del compositor D8b/ADR-0088/+t74 sessioni di terminale D8c1/D8c2/ADR-0089+0090, `out` e ritiro di `/dev/console`) → PASS 70/70
   identistest   identistest  — protocollo Identis (ADR-0058): sessione/token, verifica credenziali, creazione utente, duplicati, nomi non conformi, elenco utenti, formato del bucket `identis:config` → PASS 11/11
   threadtest    userthreadtest — thread 1:1 (S-T, ADR-0046: create/stack/TLS/futex/IPC/fd/stress-32/FPU-S2.5b) → PASS 12/12
   usertest-client usertestcli  — helper a modalita' (ECHO/ZEROREAD/NULLW/SRV/CHURN/KILLME/SRVDIE/SYNCWAIT/MNTDIE/OPENDIE/MAPHAMMER/FLOOD/NEST/FAULT_*/SHMDEMO/COWDEMO/FORKDEMO/ORPHAN/HARDEN/REG51/EXECDEMO/DUPCLAIM/DUPGRANT/DUPSIBCLAIM/SEEKDENY/SUSPENDENY/SIGCATCH/GRANTDENY/SHDESTROY)
@@ -105,6 +105,15 @@ Righe di gate:
 [threadtest] PASS 12/12
 [shell-native] PASS 33/33
 ```
+
+Il gate verifica anche il **contratto** del boot: il segnale di fine suite e'
+il marker `[gate] boot: login-ready` (D8c2, ADR-0090 — emesso da
+`identis-login` dopo il reply della write del prompt), non piu' la stringa di
+UX `[login] Nome utente:`; e dal D8c2 ci sono tre **asserzioni strutturali**:
+nessun sorgente cita `/dev/console` (unica eccezione: `t_sess.rs`, il test che
+ne prova il ritiro), `DEV_CONSOLE` non e' piu' nell'ABI, e `t64` deve aver
+girato davvero (una suite verde con il test in `SKIP` sarebbe il modo
+silenzioso in cui il ritiro fallisce).
 
 Il build userland (servizi nativi, test suite, flavour POSIX) usa
 `targets/x86_64-unknown-velordo-user.json`: clone di `x86_64-unknown-none`
@@ -206,6 +215,12 @@ espanderle inline, quindi i simboli sono nostri in `libs/civis/src/rt.rs`
 > `RUN_DISPLAY=gtk`: su questo host non ci sono xvfb/xdotool/client VNC e il
 > monitor QEMU non ha comandi display; atteso
 > `[gpu] config change: events=0x1` seguito dalla nuova risoluzione.
+>
+> D8c2 (ADR-0090): `t64` scrive ora sull'**endpoint di sessione**
+> (`SESS_ATTACH_DEFAULT` + `write_screen`, una write per riga: il feed
+> interattivo che esercita lo shift è lo stesso). Il gate verifica che `t64`
+> abbia davvero girato: una suite verde con il test in `SKIP` sarebbe il modo
+> silenzioso in cui il ritiro di `/dev/console` fallisce.
 >
 > D7/T4 (redraw a danno, ADR-0066): **una riga di suite in più** — `t64
 > scroll vs repaint` (il gate passa da 59/59 a **60/60**). Scrive 120 righe
@@ -541,7 +556,7 @@ diritti sono irrevocabili sul canale della suite)
 | t71 | `recv` con deadline (E1, ADR-0083): scadenza già passata → `RecvError::Timeout` senza consumare la coda; **la coda vince** — con una deadline lontana (+10000 tick) il `T_ACK` dell'helper `M_ECHO` appena spawnato viene consegnato (nessun evento perso per un timer in gara); timeout a 1 tick su un helper che non risponde mai → `Timeout` senza hang e senza perdite (poi `kill`)
 | t72 | timer dell'executor (E1, ADR-0083): `run([Sleep(+30), Sleep(+60)])` torna dopo ≥ 60 tick (l'executor arma la **minima** dei task pending e non anticipa); `block_on(Sleep::ticks(25))` dorme ≥ 25 tick (misure con `get_ticks`, nessun risveglio a vuoto)
 | t73 | finestre del compositor (D8b, ADR-0088): un handle di tile **inesistente** è negato (la tile è una capability); `WIN_OPEN` sulla tile primaria crea la superficie (shm) e restituisce l'id; il cliente la mappa RW, disegna un colore noto e il primo `WIN_COMMIT` rende la finestra visibile e **cambia il frame** (prova che i pixel sono arrivati); `WIN_STATS` conta la finestra; `WIN_CLOSE` la rimuove e il CRC del frame torna **byte-identico** a prima (la tile `Direct` viene ridisegnata sotto). SKIP nel fallback VGA |
-| t74 | sessioni di terminale (D8c1, ADR-0089): `SESS_STATS` conta la sessione 0 in focus; `whoami` **prima** di creare non trova nulla (`NotAttached`) e `WIN_OPEN(0)` («la tile della mia sessione») è negato senza attachment; `create` restituisce id + mailbox e `whoami` la **ritrova per pid** senza argomenti; geometria = quella del display, eco accesa, focus spento; il feed arriva al modello (`state`/`dump`), il resize fa reflow senza perdere il testo; eco spento = l'input si legge ma non appare, eco acceso = appare; `bind` è negato a `Untrusted` (è del DE, ≥ `ThirdParty`); `focus` su una sessione ≠ 0 è negato e `focus(0)` non cambia il CRC del frame; `close` riporta a 1/0 e `whoami` torna a fallire; `close(0)` e un id inesistente sono negati. Focus 0 garantito all'uscita |
+| t74 | sessioni di terminale (D8c1/D8c2, ADR-0089/0090): `SESS_STATS` conta la sessione 0 in focus; `whoami` **prima** di creare non trova nulla (`NotAttached`) e `WIN_OPEN(0)` («la tile della mia sessione») è negato senza attachment; `create` restituisce id + mailbox e `whoami` la **ritrova per pid** senza argomenti; geometria = quella del display, eco accesa, focus spento; il feed arriva al modello (`state`/`dump`) e il **sink del meccanismo** `civis::sess::out` scrive nella sessione attestata; il resize fa reflow senza perdere il testo; eco spento = l'input si legge ma non appare, eco acceso = appare; `bind` è negato a `Untrusted` (è del DE, ≥ `ThirdParty`); `focus` su una sessione ≠ 0 è negato e `focus(0)` non cambia il CRC del frame; `close` riporta a 1/0 e `whoami` torna a fallire; `close(0)` e un id inesistente sono negati; **D8c2**: `/dev/console` non è più apribile (ritiro loud) e `write` su `/dev/input/keyboard` è rifiutata (porta non inoltra più testo). Focus 0 garantito all'uscita |
 | t50 | hardening (Fase 35, ADR-0026): un helper prova a killare un fratello (non suo figlio) e a registrare un servizio di sistema (`Init`) → entrambi rifiutati; usertests prova `map_physical` di RAM del kernel (0x100000) → rifiutato; prova a killare devfs (non suo figlio) → rifiutato (servizio vivo) |
 | t51 | identita' misurata (Fase 36, ADR-0027): `peer_info` su Console/Devfs == manifest generato; stabilita' hash tra istanze; same-image positivo (X2 rimpiazza X1 vivo non-init-child, il mount sopravvive al kill); squat con hash diverso rifiutato (mount purgato, open fallisce); `peer_info` a canale morto → Err (helper REG51 + ramo SQUAT di spin) |
 | t52 | exec in-place (Fase 37.0 nucleo + 37.1 argv, env in 43a): helper EXECDEMO diventa testspin su T_GO — stesso PID (T_ACK pre/post), hash rimisurato (diverso da prima, uguale a spin fresco), nuova immagine operativa (T_DONE); gamba argv+env (w1=1, exec ["ARGPROBE","hello","world"] + `T52E=envok`) con report T_DONE(argc,fnv) dal fresh `_start` (env verificato dalla sonda: assente = T_DONE(0,0)); reap via `poll_gone` (i `recv_done` consumano le EXIT_NOTIFY: `wait_exit` dopo sarebbe hang) |

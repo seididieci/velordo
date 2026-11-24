@@ -42,8 +42,11 @@ pub fn t_scroll_equivalence() -> bool {
     }
     // bg uniforme (shift possibile) e shift attivo.
     let _ = civis::send(console, civis::syscall_numbers::CONSOLE_TEST_MODE, 1, 0);
-    let Ok(fd) = civis::open("/dev/console", 0) else {
-        println!("[t64] /dev/console non apribile: SKIP");
+    // D8c2: il device di testo non esiste piu'. Si scrive sulla **sessione 0**
+    // (lo schermo) come farebbe un programma. `write_screen`: il test non deve
+    // finire nel mirror seriale del gate.
+    let Ok(sess) = civis::sess::attach_default() else {
+        println!("[t64] sessione 0 non attaccabile: SKIP");
         return true;
     };
     // 3 schermate di righe, una per write: ogni newline in fondo provoca uno
@@ -60,9 +63,14 @@ pub fn t_scroll_equivalence() -> bool {
         s.push('\u{F520}');
         s.push('\u{E0B0}');
         s.push_str(" testo di prova\n");
-        let _ = civis::write_fs(fd, s.as_bytes(), s.len());
+        // Ogni riga e' una write: se una fallisce il test non ha scritto
+        // niente e il confronto dei CRC sarebbe verde su uno schermo fermo.
+        if sess.write_screen(s.as_bytes()).is_err() {
+            println!("[t64] write sulla sessione 0 fallita: FAIL");
+            return false;
+        }
     }
-    let _ = civis::close(fd);
+    drop(sess);
     let rows = console_grid(console).map(|(_, r)| r as usize).unwrap_or(0);
     let mut before = alloc::vec::Vec::new();
     for row in 0..rows {

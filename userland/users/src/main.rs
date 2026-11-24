@@ -10,27 +10,17 @@ extern crate alloc;
 use alloc::string::String;
 
 use civis;
-use civis::println;
 use identis_proto as proto;
 
 civis::entry!(real_main);
 
-const CONSOLE_PATH: &str = "/dev/console";
-
 /// Variabile d'ambiente con il token di sessione (hex).
 const ENV_SESSION: &str = "VELORDO_SESSION";
 
-/// Scrive su console (VGA + serial).
-static mut CONSOLE_FD: i64 = -1;
-
 fn console_write(data: &[u8]) {
-    unsafe {
-        let _ = civis::write_fs(CONSOLE_FD, data, data.len());
+    if !civis::sess::out(data) {
+        let _ = civis::print_string(data);
     }
-    let s = core::str::from_utf8(data).unwrap_or("");
-    civis::print_str(s);
-    // Flush SEMPRE: la console e' interattiva.
-    civis::flush();
 }
 
 fn console_write_str(s: &str) {
@@ -142,15 +132,6 @@ fn run_text_mode(token: u64) {
 
 /// Entry: apre console, legge il token, elenca gli utenti.
 fn real_main(sp: u64) -> ! {
-    let console_fd = match civis::open(CONSOLE_PATH, 0) {
-        Ok(f) => f,
-        Err(_) => {
-            println!("[users] ERRORE: impossibile aprire console");
-            civis::exit(1);
-        }
-    };
-    unsafe { CONSOLE_FD = console_fd; }
-
     let env = match civis::env_from_stack(sp) {
         Some(e) => e,
         None => {

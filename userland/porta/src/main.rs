@@ -3,19 +3,20 @@
 //! Legge scancode raw (Set 1) da `/dev/kbd` (driver `kbd`), li decodifica
 //! con `pc_keyboard` (layout US) e serve i byte ai client sul device
 //! `/dev/input/keyboard` SENZA echo (Fase 43b: l'echo lo fa il lettore, la
-//! shell con la sua readline — tty resta un trasporto raw). Mappa tasti:
+//! shell con la sua readline — tty resta un trasporto raw). **Nessun testo**
+//! (D8c2, ADR-0090): la coda output verso `/dev/console` e' sparita, il testo
+//! viaggia sull'endpoint di sessione e `/dev/input` non e' scrivibile.
+//! Mappa tasti:
 //! char-by-char, `Enter→\n`, `Backspace→0x08`, frecce→`ESC[A/B/C/D`,
 //! `Home/End→ESC[H/F`, `Delete→ESC[3~`, `Esc→ESC`, resto filtrato.
 //!
 //! REGOLA ANTI-DEADLOCK (Fase 15, ciclo cardo<->tty): un driver che SERVE
 //! richieste sincrone non deve MAI emettere IPC FS sincrone. cardo gli
 //! inoltra relay DEV e resta bloccato finche' non risponde; se nel mentre il
-//! driver resta bloccato su cardo (pump read, echo write), nessuno dei due
+//! driver resta bloccato su cardo (pump read, open del device), nessuno dei due
 //! avanza piu' (osservato: wedge t30/t31). Per questo tty e' un client FS
-//! PURAMENTE async (`read_async`/`write_async`/`open_async`/
-//! `fs_register_async` + collect via poll): non si blocca mai, risponde alle
-//! relay all'istante (i DEV_WRITE vengono accodati e recapitati in background:
-//! le scritte su console/VGA non possono fallire).
+//! PURAMENTE async (`read_async`/`open_async`/`fs_register_async` + collect
+//! via poll): non si blocca mai e risponde alle relay all'istante.
 //!
 //! EVENT-DRIVEN (anti-dilution): tty dorme in `recv()` bloccante e si sveglia
 //! solo su reply async / EXIT_NOTIFY / KBD_NOTIFY (kbd lo avvisa quando ci
@@ -54,7 +55,7 @@ const CLI_REQ: u64 = civis::CLI_REQ_VA;
 const CLI_RESP: u64 = civis::CLI_RESP_VA;
 // Geometria ring + errore IPC (A1) + frame helpers (A2): single source in `civis`.
 use civis::ERR;
-use civis::{req_frame_read, resp_frame_write};
+use civis::resp_frame_write;
 
 // ── Stato ───────────────────────────────────────────────────────────
 
@@ -91,17 +92,12 @@ impl KeyboardLayout for Us104Fix {
     }
 }
 const INPUT_CAPACITY: usize = 256;
-/// Coda output verso /dev/console: echo + DEV_WRITE inoltrati, in ordine.
-/// Le scritte VGA non falliscono mai: le relay DEV_WRITE rispondono OK subito.
-const OUT_CAPACITY: usize = 16384;
 #[derive(Clone, Copy, PartialEq)]
 enum OpKind {
     BufReg,
     OpenKbd,
-    OpenCon,
     Register,
     PumpRead,
-    ConWrite,
 }
 
 #[derive(Clone, Copy)]
@@ -124,7 +120,6 @@ enum Phase {
     LookupFs,
     BufReg,
     OpenKbd,
-    OpenCon,
     Register,
     Steady,
 }
@@ -133,13 +128,10 @@ struct Tty {
     phase: Phase,
     pending: Option<Pending>,
     kbd_fd: i64,
-    con_fd: i64,
     input: VecDeque<u8>,
-    out: alloc::vec::Vec<u8>,
     decoder: Keyboard<Us104Fix, ScancodeSet1>,
     err_streak: u32,
     ready_sent: bool,
-    flush_wait_until: i64,
     /// Pump richiesta (notify kbd o ingresso in Steady): il prossimo giro
     /// avvia una read async (level-triggered: resta finche' non parte).
     pump_now: bool,
@@ -157,9 +149,7 @@ impl Tty {
             phase: Phase::LookupFs,
             pending: None,
             kbd_fd: -1,
-            con_fd: -1,
             input: VecDeque::new(),
-            out: alloc::vec::Vec::new(),
             decoder: Keyboard::new(
                 ScancodeSet1::new(),
                 Us104Fix,
@@ -167,7 +157,6 @@ impl Tty {
             ),
             err_streak: 0,
             ready_sent: false,
-            flush_wait_until: 0,
             pump_now: false,
             pump_wait_until: 0,
             subs: alloc::vec::Vec::new(),
@@ -183,9 +172,7 @@ impl Tty {
         self.pending = None;
         self.phase = Phase::LookupFs;
         self.kbd_fd = -1;
-        self.con_fd = -1;
         self.input.clear();
-        self.out.clear();
         self.err_streak = 0;
     }
 
@@ -253,16 +240,6 @@ impl Tty {
                 }
                 return;
             }
-            Phase::OpenCon => {
-                if let Ok(req) = civis::open_async("/dev/console/console", 0) {
-                    self.pending = Some(Pending { req, kind: OpKind::OpenCon });
-                } else {
-                    for _ in 0..100_000 {
-                        core::hint::spin_loop();
-                    }
-                }
-                return;
-            }
             Phase::Register => {
                 if let Ok(req) = civis::fs_register_async(b"/dev/input") {
                     self.pending = Some(Pending { req, kind: OpKind::Register });
@@ -275,7 +252,7 @@ impl Tty {
             }
             Phase::Steady => {
                 // Peer mai aperti (boot sfortunato): riparti dal lookup.
-                if self.kbd_fd < 0 || self.con_fd < 0 {
+                if self.kbd_fd < 0 {
                     self.reset_to_lookup();
                 }
                 return;
@@ -314,20 +291,6 @@ impl Tty {
                 match civis::fs_collect_msg(m, &mut tmp, 64, false) {
                     Ok(fd) => {
                         self.kbd_fd = fd;
-                        self.err_streak = 0;
-                        self.phase = Phase::OpenCon;
-                    }
-                    Err(_) => {
-                        self.note_error();
-                        self.reset_to_lookup();
-                        return true;
-                    }
-                }
-            }
-            OpKind::OpenCon => {
-                match civis::fs_collect_msg(m, &mut tmp, 64, false) {
-                    Ok(fd) => {
-                        self.con_fd = fd;
                         self.err_streak = 0;
                         self.phase = Phase::Register;
                     }
@@ -373,18 +336,6 @@ impl Tty {
                     }
                     // Ok(0) = vuoto legittimo: niente da fare, nessun errore.
                     Ok(_) => {}
-                }
-            }
-            OpKind::ConWrite => {
-                match civis::fs_collect_msg(m, &mut tmp, 64, false) {
-                    Ok(r) => {
-                        self.err_streak = 0;
-                        let adv = (r as usize).min(self.out.len());
-                        self.out.drain(..adv);
-                    }
-                    Err(_) => {
-                        self.note_error();
-                    }
                 }
             }
         }
@@ -442,9 +393,9 @@ impl Tty {
         }
     }
 
-    /// Accoda byte in input (client). L'eco su console NON passa di qui
-    /// (43b): lo fa il lettore con le sue write (la coda `out` resta per il
-    /// DEV_WRITE dei client, recapitata dal flush come prima).
+    /// Accoda byte in input (client). L'eco NON passa di qui (43b): lo fa il
+    /// lettore scrivendo sulla sessione. Il device e' di sola lettura (D8c2):
+    /// una `DEV_WRITE` viene consumata e rifiutata.
     fn emit(&mut self, bytes: &[u8]) {
         for &b in bytes {
             if self.input.len() < INPUT_CAPACITY {
@@ -480,29 +431,6 @@ impl Tty {
         }
     }
 
-    /// Scarica la coda output verso /dev/console (un chunk async alla volta).
-    fn flush_maybe(&mut self) {
-        if self.phase != Phase::Steady || self.pending.is_some() {
-            return;
-        }
-        if self.out.is_empty() || self.con_fd < 0 {
-            return;
-        }
-        // Backoff dopo un invio fallito (backpressure/restart): non riprovare
-        // a vuoto ogni giro (igiene Livello 1).
-        let now = civis::get_ticks();
-        if now.wrapping_sub(self.flush_wait_until) < 0 {
-            return;
-        }
-        // Bound operativo del frame (single source in `civis`, audit CAP P4):
-        // `write_async` rifiuta oltre `RING_MAX_PAYLOAD`, mai magic number.
-        let n = self.out.len().min(civis::RING_MAX_PAYLOAD);
-        if let Ok(req) = civis::write_async(self.con_fd, &self.out[..n]) {
-            self.pending = Some(Pending { req, kind: OpKind::ConWrite });
-        } else {
-            self.flush_wait_until = now.wrapping_add(2);
-        }
-    }
 }
 
 civis::entry!(real_main);
@@ -531,9 +459,8 @@ fn real_main(_sp: u64) -> ! {
             civis::signal_ready(1);
         }
 
-        // 2. Pump + flush (solo Steady, mai bloccanti: tutto async).
+        // 2. Pump (solo Steady, mai bloccante: tutto async).
         tty.pump_maybe();
-        tty.flush_maybe();
 
         // 3. Attesa messaggi. REGOLA FONDAMENTALE (osservato: sleep-forever):
         //    si dorme in recv() bloccante SOLO se c'e' un wake garantito
@@ -640,19 +567,15 @@ impl Tty {
                 Some(i as u64)
             }
             DEV_WRITE => {
-                // Accoda per il flush async e rispondi OK SUBITO: aspettare il
-                // completamento qui ricreerebbe il ciclo (cardo aspetta noi,
-                // noi cardo).
+                // La tastiera non e' un terminale (D8c2): chi scriveva qui (la
+                // shell POSIX) ora scrive sulla sessione. Il frame va comunque
+                // **consumato** — cardo non lo consuma per le write remote — e
+                // la write e' rifiutata: meglio un errore che un byte sparito.
                 let count = m.w1 as usize;
                 if count > 0 {
-                    let mut data = alloc::vec::Vec::with_capacity(count);
-                    data.resize(count, 0);
-                    unsafe { req_frame_read(CLI_REQ, &mut data, count); }
-                    if self.out.len() + count <= OUT_CAPACITY {
-                        self.out.extend_from_slice(&data);
-                    }
+                    unsafe { civis::req_frame_consume(CLI_REQ, count) };
                 }
-                Some(count as u64)
+                Some(ERR)
             }
             DEV_CLOSE => Some(0),
             _ => None,

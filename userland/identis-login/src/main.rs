@@ -5,7 +5,8 @@
 //! l'hash. La password digitata non viene neanche ecoata a schermo (era un
 //! buco: finiva in chiaro nel log seriale).
 //!
-//! Output su /dev/console (VGA + serial), input da /dev/input/keyboard.
+//! Output sulla **sessione di terminale** (`civis::sess::out`, D8c2: il
+//! mirror seriale lo fa il server), input da `/dev/input/keyboard`.
 //!
 //! Il framing del protocollo e' condiviso (`libs/identis-proto`): qui c'e'
 //! solo il lato client.
@@ -20,12 +21,9 @@ use alloc::vec::Vec;
 
 use blake2s::blake2s;
 use civis;
-use civis::println;
 use identis_proto as proto;
 
 civis::entry!(real_main);
-
-const CONSOLE_PATH: &str = "/dev/console";
 
 /// Token di sessione dell'ultimo login riuscito. Lo userà la shell nativa
 /// (Fase 3.2) per passare la sessione ai programmi che ne hanno bisogno
@@ -42,31 +40,18 @@ static mut LOGIN_USER: [u8; 32] = [0u8; 32];
 #[allow(dead_code)]
 static mut LOGIN_USER_LEN: u8 = 0;
 
-/// Scrive su console (VGA + serial).
-static mut CONSOLE_FD: i64 = -1;
-
+/// Scrive sul terminale: la **sessione** del processo (`civis::sess::out`,
+/// D8c2). Il mirror seriale lo fa il server; se la sessione non e'
+/// raggiungibile (console non ancora su) si cade sul seriale: l'output non si
+/// perde mai.
 fn console_write(data: &[u8]) {
-    unsafe {
-        let _ = civis::write_fs(CONSOLE_FD, data, data.len());
+    if !civis::sess::out(data) {
+        let _ = civis::print_string(data);
     }
-    let s = core::str::from_utf8(data).unwrap_or("");
-    civis::print_str(s);
-    // Flush SEMPRE: la console e' interattiva (un prompt senza newline
-    // resterebbe nel buffer seriale e nessuno lo vedrebbe).
-    civis::flush();
 }
 
-/// Entry: apre console e tastiera, fa il self-test, poi chiede credenziali.
+/// Entry: fa il self-test, poi chiede credenziali.
 fn real_main(_sp: u64) -> ! {
-    let console_fd = match civis::open(CONSOLE_PATH, 0) {
-        Ok(f) => f,
-        Err(_) => {
-            println!("[login] ERRORE: impossibile aprire console");
-            civis::exit(1);
-        }
-    };
-    unsafe { CONSOLE_FD = console_fd; }
-
     // Registra il servizio: serve a **init** per supervisionarlo (e'
     // l'unico modo per entrare nel sistema: se il login fallisce, init lo
     // riavvia come un getty). Nessuno lo risolve per nome.
@@ -115,6 +100,13 @@ fn real_main(_sp: u64) -> ! {
     // un getty): l'utente trova un altro prompt invece di un sistema muto.
     for attempt in 1..=MAX_ATTEMPTS {
         console_write(b"\n[login] Nome utente: ");
+        // D8c2 — il **contratto del gate**: il prompt e' stato accettato e
+        // disegnato dal server (la write sopra ha avuto reply), quindi da qui
+        // in poi il terminale e' pronto. Un marker esplicito, non la stringa
+        // di UX: la aspetta `run-tests.sh` (e `shell_harness.py`).
+        if attempt == 1 {
+            let _ = civis::print_string(b"[gate] boot: login-ready\n");
+        }
         let name = read_line_from_keyboard(false);
         console_write(b"\n[login] Password: ");
         let pwd = read_line_from_keyboard(true);

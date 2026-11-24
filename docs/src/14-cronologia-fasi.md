@@ -4472,3 +4472,78 @@
   che non cambia il CRC del frame, `close` che riporta a 1/0, `close(0)` e id
   inesistente negati, focus 0 garantito all'uscita); unit host 171 (littera 14,
   sess-proto 3). Zero kernel, zero driver, zero cardo.
+
+## D8c2 — Ritiro di `/dev/console`: il testo è una sessione (ADR-0090)
+
+D8c1 aveva lasciato il device come **adattatore** sulla sessione 0, il passo
+di bisezione giusto (gate invariato) ma anche la forma che il DE non può
+tenere: un device è un **nome** e chi scrive deve avere una capability; cardo
+resta nel percorso caldo; il mirror seriale è scritto due volte (device +
+serale, ognuno con la propria copia del budget); e la shell POSIX scriveva
+addirittura sul fd della **tastiera** — `porta` inoltrava `DEV_WRITE` a
+`/dev/console`, tre driver per una riga di testo.
+
+**Due decisioni nuove** (dettate dal codice, non dal piano):
+
+1. **La mailbox è dell'attachment, non della sessione.** In D8c1 era una
+   pagina per sessione, corretta perché l'unico scrittore era il test. Appena
+   il testo diventa l'output di tutti, due clienti della 0 condividono la metà
+   OUT: fra il "client copia" e il "server copia" (dopo aver ricevuto il
+   messaggio) la write dell'uno può essere sovrascritta dall'altro — testo
+   corrotto, nessun errore. Il percorso FS non lo aveva mai fatto perché il
+   ring è **per processo**: ora la mailbox è per **canale**
+   `(canale, pid, shm, mappatura)`, creata al primo attach e distrutta su
+   `SESS_CLOSE`/`EXIT_NOTIFY` (per pid: alla notifica il canale è già
+   invalidato). Sparisce la mailbox della 0 creata al boot in D8c1.
+2. **`SESS_WRITE.w1` = hint di mirror.** L'eco la fa il **lettore** (login,
+   `interpres` e shell POSIX hanno ognuno il proprio editor di linea, con
+   cursore, history e continuazioni ESC): spostarla in `littera` ora
+   significherebbe riscrivere readline due volte. Quindi `w1 = 1` = "solo
+   schermo": l'eco, i ridisegni e i test non entrano nel log su cui il gate fa
+   regex byte-exact. Con l'instradamento dei tasti (D8d) l'eco si sposta nella
+   sessione e `SESS_ECHO` basta.
+
+**Il sink di stdout è uno, nel meccanismo**: `civis::sess::{out, out_screen}`
+risolvono la sessione del processo (`SESS_WHOAMI`), poi l'unico ingresso
+nominato (`SESS_ATTACH_DEFAULT`), con cache per processo invalidata su
+`Ipc`/`ServiceDead` (restart della console) e fallback sul seriale — l'output
+non si perde mai. Su questo si appoggiano login, `interpres`, `create-user`,
+`users`, `logout`, `dns-resolve`, `libr::stdio::route_out` e i due punti della
+shell POSIX (`term_write_bytes` con budget per comando, `term_echo` solo
+schermo). `porta` perde la coda output e la fase di boot `OpenCon`.
+
+**Ritiro loud**: `DEV_CONSOLE` fuori dall'ABI (il numero **non si riusa**),
+`dev_type` senza `"console"`, nessun `fs_register`, nessun gestore `DEV_*`;
+`open("/dev/console")` → `ERR_NOTFOUND` e `write` sulla tastiera → `ERR` (il
+frame viene comunque **consumato**: cardo non lo consuma per le write remote e
+un frame appeso desincronizza il ring del client). Sparisce anche la trappola
+di ADR-0086 (ri-registrare il mount su `EXIT_NOTIFY` del peer FS, con il ciclo
+cardo→console→cardo).
+
+**Marker di boot**: `[gate] boot: login-ready`, emesso da `identis-login`
+**dopo** che la write del prompt ha avuto reply (cioè il server ha già
+alimentato e flushato la sessione) e solo al primo tentativo. `run-tests.sh` e
+`scripts/shell_harness.py` aspettano quello: le stringhe di UX non sono più
+contratto.
+
+**Trappole pagate**: (a) doppio mirror se il client non perde la sua copia
+*nello stesso passo* in cui nasce quella del server; (b) l'eco nel mirror
+cambia il log del gate (da qui `w1`); (c) `run-tests.sh` ha **due** punti che
+parlano del prompt e il harness ne ha un terzo: si cambiano insieme, e **mai**
+mentre il gate gira — bash rilegge il file per offset e una modifica a metà
+esecuzione produce `syntax error near unexpected token` in un punto
+irrelato (successo: il terzo giro è finito con 70/70 e shell 33/33 verdi ma il
+gate è uscito 2 per un errore di sintassi nel contratto, non nel prodotto);
+(d) cercare `/dev/console` **non basta** a trovare chi scriveva testo: la
+shell POSIX scriveva sul fd della tastiera; (e) `CONSOLE_OUT` non è il
+terminale, è il sink seriale del kernel (lo usa anche la PAL `std`).
+
+**Vittoria**: gate `[gate] PASS` (6 suite + shell nativa 33/33, **usertests
+70/70** con t74 esteso a `out` e al ritiro — device non apribile, tastiera non
+scrivibile — e t64 migrato all'endpoint, zero FAIL/PANIC/FAULT, zero
+`[munmap]`), più tre asserzioni strutturali nel gate: nessun sorgente cita il
+device (eccezione: il test che ne prova il ritiro), niente `DEV_CONSOLE`, e
+`t64` deve aver girato davvero (una suite verde con il test in SKIP sarebbe il
+modo silenzioso in cui questo ritiro fallisce). Zero kernel, zero syscall,
+zero servizi: l'unica modifica d'ABI è il `w1` di `SESS_WRITE` e la rimozione
+di `DEV_CONSOLE`.

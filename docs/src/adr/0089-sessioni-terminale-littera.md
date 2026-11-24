@@ -116,6 +116,10 @@ con il terminale principale); `SESS_BIND` e la creazione non legata no.
 
 ### 4. `/dev/console` diventa un adattatore sulla sessione 0
 
+> **Superato da ADR-0090 (D8c2)**: l'adattatore è stato ritirato. Il device
+> non esiste più, la mailbox è per attachment e il mirror seriale è del
+> server. Questa sezione resta come passo di bisezione di D8c1.
+
 Il device non è un secondo canale di testo: è la sessione dello schermo vista
 da chi non parla ancora il protocollo di sessione. `DEV_WRITE` →
 `feed_session(0, …)`, `CONSOLE_*` → sessione in focus. Il gate non cambia:

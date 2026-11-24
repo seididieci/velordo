@@ -28,6 +28,11 @@
 # aspetta piu' il timeout esterno: il prompt e' il segnale di fine suite, e
 # da li' si fa login e si provano i programmi da `usr` (il bug della shell
 # non verificata non era coperto da nessun gate: ADR-0080 fase 6).
+# D8c2/ADR-0090: il segnale e' il **marker** `[gate] boot: login-ready`, che
+# `identis-login` emette dopo che la write del prompt ha avuto reply (il
+# server ha alimentato e flushato la sessione). Il gate non dipende piu' da
+# una stringa di UX, e il testo del prompt arriva dal **mirror** della
+# sessione in focus.
 # L0b (virtio-gpu + MSI-X, ADR-0057): il boot verifica i marker
 # `[gpu] virtio-gpu ...` / `[gpu] display info: 1280x800 enabled=1`.
 # D3 (console virtuale, ADR-0060): i marker sono
@@ -76,7 +81,7 @@ QEMU_PID=$!
 # esterno che chiudeva il gate.
 boot_ok=1
 start=$SECONDS
-while ! rg -qF '[login] Nome utente:' "$LOG" 2>/dev/null; do
+while ! rg -qF '[gate] boot: login-ready' "$LOG" 2>/dev/null; do
     if ! kill -0 "$QEMU_PID" 2>/dev/null; then
         echo "[gate] QEMU terminato prima del prompt del login" >&2
         boot_ok=0
@@ -120,6 +125,25 @@ if [ "$fail" -eq 0 ]; then
     if rg -q '\[munmap\]' "$LOG"; then
         echo "[gate] FAIL: munmap con geometria non di pagina (leak shm):" >&2
         rg -n '\[munmap\]' "$LOG" | head -5 || true
+        fail=1
+    fi
+    # D8c2 (ADR-0090) — il ritiro di `/dev/console` e' **loud** e completo:
+    #  - i sorgenti non citano piu' il device ne' il tipo `DEV_CONSOLE`
+    #    (unica eccezione: `t_sess.rs`, il test che *prova* il ritiro);
+    #  - t64 ha girato davvero: una suite verde con il test in SKIP sarebbe il
+    #    modo silenzioso in cui questo ritiro fallisce.
+    if rg -n '"/dev/console"|b"/dev/console"' --glob '*.rs' \
+            --glob '!testland/usertests/src/t_sess.rs' \
+            kernel libs flavours userland testland pal 2>/dev/null; then
+        echo "[gate] FAIL: /dev/console e' ancora citato nei sorgenti (D8c2)" >&2
+        fail=1
+    fi
+    if rg -n 'DEV_CONSOLE' --glob '*.rs' kernel libs flavours userland testland 2>/dev/null; then
+        echo "[gate] FAIL: DEV_CONSOLE e' ancora nell'ABI (D8c2)" >&2
+        fail=1
+    fi
+    if ! rg -qF '[t64] scroll vs repaint:' "$LOG"; then
+        echo "[gate] FAIL: t64 non ha girato (SKIP?) — il ritiro ha spento il test" >&2
         fail=1
     fi
 fi

@@ -15,7 +15,8 @@
 //!   transita in argv ne' in ambiente, e l'hash BLAKE2s-256 e' calcolato
 //!   **in locale** — nel payload IPC c'e' solo l'hash.
 //!
-//! Output su /dev/console (VGA + serial), input da /dev/input/keyboard.
+//! Output sulla **sessione di terminale** (`civis::sess::out`, D8c2: il
+//! mirror seriale lo fa il server), input da `/dev/input/keyboard`.
 
 #![no_std]
 #![no_main]
@@ -27,12 +28,9 @@ use alloc::vec::Vec;
 use blake2s::blake2s;
 use civis;
 use civis::hex;
-use civis::println;
 use identis_proto as proto;
 
 civis::entry!(real_main);
-
-const CONSOLE_PATH: &str = "/dev/console";
 
 /// Variabile d'ambiente con il token di sessione (hex).
 const ENV_SESSION: &str = "VELORDO_SESSION";
@@ -40,32 +38,15 @@ const ENV_SESSION: &str = "VELORDO_SESSION";
 /// Tentativi in caso di servizio occupato (`R_BUSY`).
 const RETRIES: u32 = 20;
 
-/// Scrive su console (VGA + serial).
-static mut CONSOLE_FD: i64 = -1;
-
 fn console_write(data: &[u8]) {
-    unsafe {
-        let _ = civis::write_fs(CONSOLE_FD, data, data.len());
+    if !civis::sess::out(data) {
+        let _ = civis::print_string(data);
     }
-    let s = core::str::from_utf8(data).unwrap_or("");
-    civis::print_str(s);
-    // Flush SEMPRE: la console e' interattiva (un prompt senza newline
-    // resterebbe nel buffer seriale e nessuno lo vedrebbe).
-    civis::flush();
 }
 
 /// Entry: token di sessione, nome utente, password, richiesta a Identis.
 fn real_main(sp: u64) -> ! {
     // Console per l'output.
-    let console_fd = match civis::open(CONSOLE_PATH, 0) {
-        Ok(f) => f,
-        Err(_) => {
-            println!("[create-user] ERRORE: impossibile aprire console");
-            civis::exit(1);
-        }
-    };
-    unsafe { CONSOLE_FD = console_fd; }
-
     // Token di sessione: senza, niente da fare.
     let token = match read_session_token(sp) {
         Ok(t) => t,

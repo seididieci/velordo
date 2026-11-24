@@ -37,8 +37,8 @@ User mode (ring 3) e entry syscall sono sviluppati nelle sotto-fasi della Fase 6
   via la syscall `spawn` (20), registrandoli come figli (campo `parent` nel PCB).
   La process tree e' radicata in init. (Da Fase 12 spawn ritorna un canale di
   nascita e i servizi si registrano per nome.)
-- **Fase 8.2 — Console server**: un processo user che pubblica
-  `/dev/console` (DEV_WRITE disegna) e mappa il frame buffer
+- **Fase 8.2 — Console server**: un processo user che disegna il testo e mappa
+  il frame buffer
   (`0xB8000` via `map_physical`, syscall 21; dal D3 anche il framebuffer
   virtio-gpu). Da Fase 15 e' solo rendering; tastiera in `kbd`/`porta`
   (sotto). `sys_write(fd=1)` stampa solo su seriale.
@@ -51,8 +51,10 @@ User mode (ring 3) e entry syscall sono sviluppati nelle sotto-fasi della Fase 6
   la risoluzione e' una decisione (il guest sceglie con
   `CONSOLE_SET_MODE`, l'host insiste col config change e la console cede)),
   `console` e' il **console server** (modello a celle, UTF-8, font TrueType
-  rasterizzato a runtime, surface pixel o VGA testuale; pubblica
-  `/dev/console` e possiede i pixel del framebuffer).
+  rasterizzato a runtime, surface pixel o VGA testuale; possiede i pixel del
+  framebuffer e dal D8c2 serve le **sessioni di terminale** con l'endpoint
+  `SESS_*` — nessun device di testo, il seriale e' il mirror della sessione in
+  focus, ADR-0090).
   Il layering `gpu` (driver) → `console` (UI) → `shell` (testo) e' quello
   che regge un futuro desktop: il livello intermedio cresce qui, il driver
   resta un device. Nel path pixel la finestra VGA resta vuota: il terminale
@@ -75,7 +77,7 @@ syscall `spawn`** (numero 20): il kernel crea `init` come unico processo user; i
 spawna tutti i servizi via `spawn(name)`, ogni figlio ha `parent = init`.
 **Completata anche la Fase 8.2 — console server**: `gpu`
 mappa VGA via `map_physical` (syscall 21) a `USER_VGA` (da Fase 15 solo
-rendering su `/dev/console`; tastiera in `kbd`/`porta`). **Completata
+rendering; tastiera in `kbd`/`porta`). **Completata
 anche la Fase 8.3 — uptime
 in userspace**: il processo `uptime` e' stato spostato dal kernel in userspace
 come `useruptime` (syscall `get_ticks`, numero 22). Da Fase 15 il kernel non ha
@@ -351,8 +353,9 @@ esteso cosi' (dettagli in `AGENTS.md` e ADR):
   in ring 3, `io_ranges 0x60-0x64`, `/dev/kbd`, servizio `Kbd` svegliato da
   IRQ1) + `porta` (decode raw in 43b — frecce→ESC, niente echo —,
   `/dev/input/keyboard`, servizio `Porta`, client FS puramente async ed
-  event-driven); console ridotto a rendering (`/dev/console`) + `ESC[D/C/K`
-  (43b); echo ed editing nella readline della shell. Regole: mai IPC
+  event-driven); console ridotto a rendering + `ESC[D/C/K` (43b), dal D8c2
+  display delle **sessioni** (il testo non passa piu' da un device);
+  echo ed editing nella readline della shell. Regole: mai IPC
   sincrone servendo, mai spinner, boot async senza attese di wake,
   handshake per canale. **E0 (ADR-0082)**: i lettori della tastiera non
   pollano più — `INPUT_ATTACH`/`INPUT_DETACH` (focus LIFO in `porta`) e

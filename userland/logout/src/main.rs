@@ -11,36 +11,17 @@
 extern crate alloc;
 
 use civis;
-use civis::println;
 
 civis::entry!(real_main);
 
-const CONSOLE_PATH: &str = "/dev/console";
-
-/// Scrive su console (VGA + serial).
-static mut CONSOLE_FD: i64 = -1;
-
 fn console_write(data: &[u8]) {
-    unsafe {
-        let _ = civis::write_fs(CONSOLE_FD, data, data.len());
+    if !civis::sess::out(data) {
+        let _ = civis::print_string(data);
     }
-    let s = core::str::from_utf8(data).unwrap_or("");
-    civis::print_str(s);
-    // Flush SEMPRE: la console e' interattiva.
-    civis::flush();
 }
 
 /// Entry: apre console, annuncia il logout.
 fn real_main(_sp: u64) -> ! {
-    let console_fd = match civis::open(CONSOLE_PATH, 0) {
-        Ok(f) => f,
-        Err(_) => {
-            println!("[logout] ERRORE: impossibile aprire console");
-            civis::exit(1);
-        }
-    };
-    unsafe { CONSOLE_FD = console_fd; }
-
     console_write(b"logout: riavvio del login...\n");
     civis::exit(0)
 }

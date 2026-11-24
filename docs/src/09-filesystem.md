@@ -160,7 +160,8 @@ tramite `FS_REGISTER`. Mount table dinamica con prefix-based resolution.
 La shell (`usershell`) usa `civis` wrappers per leggere/scrivere file:
 ls, cat, touch, mkdir, help, exit. Il server gpu gestiva la VGA e
 (all'epoca) la tastiera; la shell opera sullo stesso fd del device
-`/dev/input`. (Dalla Fase 15: gpu solo rendering `/dev/console`,
+`/dev/input`. (Dalla Fase 15: gpu solo rendering; dal D8c2 il testo e' una
+sessione, non un device — ADR-0090,
 tastiera in `kbd`/`porta`; comandi estesi in Fase 18.)
 
 **Checkpoint (all'epoca):** test-shell.py PASS 3/3.
@@ -322,7 +323,7 @@ Sensori: `R_STATVFS` (spazio mount: FAT blocchi=cluster da FSInfo con clamp, ram
 | `userland/cardo/src/provider.rs` | Trait `LocalFs` (presentazione POSIX), `LocalFsDyn` object-safe con `AnyHandle` by-value (Fase 49: niente piu' `*const ()`/`DynHandle`), `RamFs`+`Fat32` con match discriminato — Fase 46 scaffolding, Fase 47 wiring ramfs, Fase 48 `LocalFsDyn` FAT32, Fase 49 handle unico |
 | `userland/block/src/main.rs` | block: detect+part, `/dev/sdX`, protocolli `DISK_*`+`DEV_*` (Fase 16; `DISK_RESOLVE` single-source-of-truth, Fase 16c) |
 | `userland/vela/src/main.rs` | vela: `/dev/null`, `/dev/zero` |
-| `userland/gpu/src/main.rs` | gpu: rendering `/dev/console` su VGA (tastiera in `kbd`/`porta` dalla Fase 15) |
+| `userland/gpu/src/main.rs` | gpu: rendering su VGA (tastiera in `kbd`/`porta` dalla Fase 15; dal D8c2 il testo e' una sessione) |
 | `userland/rector/src/main.rs` | rector: spawn servizi + test in sequenza |
 | `syscall-numbers/src/lib.rs` | Costanti `SYS_RING_ALLOC=26`, `SYS_MAP_IN=27` |
 

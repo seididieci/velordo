@@ -464,15 +464,17 @@ class Shell:
         raise RuntimeError("shell non pronta")
 
     def wait_login_prompt(self, timeout=60):
-        """Attende il prompt del login (`[login] Nome utente:`) SENZA fare il
-        login. Nel gate end-to-end il prompt arriva solo DOPO la suite: e' il
-        segnale di fine boot (ADR-0081)."""
+        """Attende il **marker di boot** (`[gate] boot: login-ready`) SENZA fare
+        il login. Nel gate end-to-end arriva solo DOPO la suite: e' il segnale
+        di fine boot (ADR-0081). Da D8c2 (ADR-0090) e' un marker esplicito, non
+        la stringa di UX del prompt: lo emette `identis-login` quando la write
+        del prompt ha avuto reply (il server ha gia' disegnato la sessione)."""
         t0 = time.time()
         while time.time() - t0 < timeout:
-            if b"Nome utente:" in self.read_log():
+            if b"[gate] boot: login-ready" in self.read_log():
                 return
             time.sleep(T_BOOT_POLL)
-        raise RuntimeError("prompt di login mai comparso")
+        raise RuntimeError("marker di boot del login mai comparso")
 
     def wait_native_banner(self, timeout=60):
         """Attende banner + prompt della shell nativa (ADR-0062). Il prompt

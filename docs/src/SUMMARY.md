@@ -117,3 +117,4 @@
 - [ADR-0087: Compositore del DE — crate `musivum` (D8a)](./adr/0087-compositor-musivum.md)
 - [ADR-0088: Finestre del compositor — protocollo `WIN_*` e `civis::win` (D8b)](./adr/0088-finestre-compositor-win.md)
 - [ADR-0089: Sessioni di terminale — `littera` e l'endpoint di sessione (D8c1)](./adr/0089-sessioni-terminale-littera.md)
+- [ADR-0090: Ritiro di `/dev/console` — il testo è una sessione (D8c2)](./adr/0090-ritiro-dev-console.md)

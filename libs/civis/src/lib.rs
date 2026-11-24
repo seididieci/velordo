@@ -210,8 +210,8 @@ pub use syscall_numbers::{INPUT_ATTACH, INPUT_DETACH, INPUT_NOTIFY};
 /// Tag DEV_* op + device type (DocsD): stesso pattern, prima duplicati in
 /// cardo/block/vela/gpu/kbd/tty.
 pub use syscall_numbers::{
-    DEV_CLOSE, DEV_KBD, DEV_KEYBOARD, DEV_CONSOLE, DEV_NULL, DEV_OPEN, DEV_READ,
-    DEV_READDIR, DEV_WRITE, DEV_ZERO,
+    DEV_CLOSE, DEV_KBD, DEV_KEYBOARD, DEV_NULL, DEV_OPEN, DEV_READ, DEV_READDIR,
+    DEV_WRITE, DEV_ZERO,
 };
 /// Tag TIME_* (Fase 50, P1 orologio): client→usertime, data/ora di sistema.
 /// Reply `TIME_NOW`: `w0` = secondi epoch (UTC), `w1` = centesimi di secondo.

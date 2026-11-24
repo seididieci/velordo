@@ -11,8 +11,9 @@ use civis::args::{redir_spec_arg, REDIR_MAGIC};
 // `sys::write(1,…)` restano SEMPRE seriale (sink debug: mirror shell, log
 // init/server). Solo il percorso line-buffer e' instradabile — e' quello che
 // usano i programmi reali. Con tabelle inattive (default) lo stdout va sul
-// **terminale**: `/dev/console` + mirror seriale (ADR-0086); i server nativi
-// (senza hook `persona`) restano invariati sul seriale.
+// **terminale**: la sessione del processo (`civis::sess::out`, D8c2 — il
+// mirror seriale lo fa il server); i server nativi (senza hook `persona`)
+// restano invariati sul seriale.
 //
 // Slot 2 (`2>`/`2>&1`) e' memorizzato ma non hookato in 40.2: niente in
 // userland scrive fd 2 oggi; l'aggancio dei builtin viene con la shell 40.4
@@ -203,49 +204,15 @@ pub fn stdio_active() -> bool {
         || STDIO[2].load(Ordering::Relaxed) >= 0
 }
 
-/// Percorso del device del terminale (console server, ADR-0060): e' il default
-/// stdout dei programmi POSIX (oltre al mirror seriale).
-const CONSOLE_PATH: &str = "/dev/console";
-
-/// fd di `/dev/console` risolto lazy: 0 = non risolto, > 0 = fd + 1. La
-/// console e' spawnata da init PRIMA di ogni programma POSIX; se non e' ancora
-/// registrata il primo `println!` cade sul seriale e il successivo riprova
-/// (si cacha solo il successo).
-static CONSOLE_FD: AtomicI64 = AtomicI64::new(0);
-
-/// fd di `/dev/console`, o `None` se non apribile (fallback seriale).
-fn console_fd() -> Option<i64> {
-    let v = CONSOLE_FD.load(Ordering::Relaxed);
-    if v > 0 {
-        return Some(v - 1);
-    }
-    let fd = match civis::open(CONSOLE_PATH, 0) {
-        Ok(f) if f >= 0 => f,
-        _ => return None,
-    };
-    match CONSOLE_FD.compare_exchange(0, fd + 1, Ordering::Relaxed, Ordering::Relaxed) {
-        Ok(_) => Some(fd),
-        Err(cur) => {
-            // Un altro thread ha vinto la corsa: chiudi il nostro, usa il suo.
-            let _ = civis::close(fd);
-            if cur > 0 { Some(cur - 1) } else { None }
-        }
-    }
-}
-
 /// Instrada `bytes` (stdout). Due casi:
 /// - **redirect attivo** (`STDIO[1] >= 0`): tutto sul file, o prefisso sul file
 ///   + coda sul seriale a write parziale (mai duplicazione);
-/// - **default** (`STDIO[1] < 0`): il **terminale** — write su `/dev/console`
-///   **e** mirror seriale (come i writer nativi: `console_write` di
-///   login/interpres). Cosi' l'output dei programmi POSIX appare sulla console
-///   *e* resta nel log seriale (gate/test automatici): le due meta' sono
-///   inscindibili, mai device senza mirror.
+/// - **default** (`STDIO[1] < 0`): la **sessione di terminale** del processo
+///   (`civis::sess::out`, D8c2): l'output appare sulla console *e* resta nel
+///   log seriale — ma il mirror lo fa il **server**, non questo client.
 /// Ritorna true se "gestito" (mirror seriale incluso: il chiamante
-/// `print::flush` non riscrive). False = nessuna console e nessun redirect: il
+/// `print::flush` non riscrive). False = nessuna sessione e nessun redirect: il
 /// chiamante riversa tutto sul seriale (l'output non si perde mai).
-/// Mai ricorsivo: `write_fs` non stampa (solo IPC+ring), il mirror e'
-/// `sys::write` raw.
 pub(crate) fn route_out(bytes: &[u8]) -> bool {
     let fd = STDIO[1].load(Ordering::Relaxed);
     if fd >= 0 {
@@ -259,16 +226,7 @@ pub(crate) fn route_out(bytes: &[u8]) -> bool {
             Err(_) => false,
         };
     }
-    // Default: terminale (device) + mirror seriale.
-    let Some(cfd) = console_fd() else {
-        return false;
-    };
-    if write_fs(cfd, bytes, bytes.len()).is_err() {
-        // fd stantio (console riavviata): invalida la cache, si riprovera'.
-        CONSOLE_FD.store(0, Ordering::Relaxed);
-    }
-    let _ = sys::write(1, bytes.as_ptr(), bytes.len());
-    true
+    civis::sess::out(bytes)
 }
 
 /// Legge un byte da stdin redirectato. None = non attivo, vuoto o errore.

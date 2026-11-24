@@ -13,13 +13,10 @@ extern crate alloc;
 use alloc::string::String;
 
 use civis;
-use civis::println;
 use net;
 use net_ep;
 
 civis::entry!(real_main);
-
-const CONSOLE_PATH: &str = "/dev/console";
 
 /// Indirizzo IPv4 di destinazione (il servizio dns ascolta in locale).
 const DEST_IPV4: [u8; 4] = [127, 0, 0, 1];
@@ -34,15 +31,10 @@ static FUTEX: u32 = 0;
 
 // ── Console ────────────────────────────────────────────────────────
 
-static mut CONSOLE_FD: i64 = -1;
-
 fn console_write(data: &[u8]) {
-    unsafe {
-        let _ = civis::write_fs(CONSOLE_FD, data, data.len());
+    if !civis::sess::out(data) {
+        let _ = civis::print_string(data);
     }
-    let s = core::str::from_utf8(data).unwrap_or("");
-    civis::print_str(s);
-    civis::flush();
 }
 
 fn console_write_str(s: &str) {
@@ -287,15 +279,6 @@ fn resolve_and_print(dns_chan: u64, ep_id: u16, ring_base: *mut u8, domain: &[u8
 
 /// Entry: apre console, parse argv, delega.
 fn real_main(sp: u64) -> ! {
-    let console_fd = match civis::open(CONSOLE_PATH, 0) {
-        Ok(f) => f,
-        Err(_) => {
-            println!("[dns-resolve] ERRORE: impossibile aprire console");
-            civis::exit(1);
-        }
-    };
-    unsafe { CONSOLE_FD = console_fd; }
-
     // Parse argv.
     let args = match civis::args_from_stack(sp) {
         Some(a) => a,

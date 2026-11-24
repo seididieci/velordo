@@ -178,8 +178,8 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
 - **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
   BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
   **console server** (modello a celle, UTF-8, font TTF rasterizzato a
-  runtime, surface pixel|VGA testuale; serve `/dev/console` e possiede i
-  pixel), `shell` = testo. Il codice di testo vive in `libs/term` (no_std);
+  runtime, surface pixel|VGA testuale; **sessioni di terminale** e mirror
+  seriale, possiede i pixel), `shell` = testo. Il codice di testo vive in `libs/term` (no_std);
   il driver linka solo `term::disp`. Font **Maple Mono NF** (OFL 1.1, in
   `third_party/`) letto dal volume root come oggetto, rasterizzato in punto
   fisso; font fisso 16 px, cella 10x22, griglia dalla risoluzione (128x36 a
@@ -235,14 +235,15 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   Bulk: feed > 256 B differisce render+flush ogni 8 write, `hexdump` a
   blocchi da 4000 B, mirror seriale con budget 256 KiB, scrollback
   `VecDeque` (`hexdump /bg.bmp` 5,2 MB: ~38 min → 31 s).
-  **Mirror seriale + routing stdout POSIX → `/dev/console`** (fatto): il
-  default stdout dei programmi POSIX (`civis::println!` → `print::flush` →
-  hook `civis::persona` → `libr::stdio::route_out`) scrive sul device
-  `/dev/console` **e** specchia sul seriale (stesso pattern dei writer nativi
-  `console_write` di login/interpres): `runhello` dalla shell appare nel
-  terminale *e* nel log seriale, zero output perso; il redirect (`>`) resta
-  file-only. Console, kernel, `porta` e shell nativa intatti. Fuori scope
-  dichiarato: il sink PAL `std::io::stdout` (`write_console` → `SYS_WRITE`).
+  **Mirror seriale + routing stdout POSIX** (D8c2, ADR-0090): il default
+  stdout dei programmi POSIX (`civis::println!` → `print::flush` → hook
+  `civis::persona` → `libr::stdio::route_out`) e dei writer nativi
+  (`console_write` di login/interpres/comandi) passa da `civis::sess::out`:
+  sessione attestata → sessione 0 → seriale, e il **mirror seriale lo fa il
+  server** (una sola scrittura per riga, non piu' device + seriale lato
+  client). Il redirect (`>`) resta file-only (e non entra nel mirror: il file
+  non e' il terminale). Fuori scope dichiarato: il sink PAL
+  `std::io::stdout` (`write_console` → `SYS_WRITE`).
   Due trappole emerse dal gate: (a) il terminale **pieno** cambia
   l'invariante del re-adattamento — crescendo la finestra riappare lo
   scrollback, quindi `non_empty` **cresce** (t63: 900 → 1221) e la prova
@@ -454,6 +455,30 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   la geometria/il flag, non l'id) e `dump_text` si ferma all'ultima riga con
   contenuto o al cursore (le righe vuote in fondo falsano la coda). Test: t74
   (`usertests 70/70`), unit host `littera` 14 + `sess-proto` 3.
+- **Ritiro di `/dev/console` (D8c2, ADR-0090)**: il device di testo **non
+  esiste piu'**. Login, shell nativa, comandi, personalita' POSIX e `t64`
+  scrivono sulla **sessione**; `porta` non inoltra piu' testo (la tastiera
+  resta un device di sola lettura: i tasti entreranno nelle sessioni in D8d).
+  Decisioni: la mailbox e' **dell'attachment** (una per canale, non per
+  sessione — un buffer condiviso si sovrascriverebbe fra il "client copia" e
+  il "server copia"; il ring FS era gia' per processo) e `SESS_WRITE.w1` e'
+  l'hint di mirror (`0` = entra nel log seriale, `1` = solo schermo: eco,
+  ridisegni, test). Il mirror seriale e' del server (sessione in focus, nudo,
+  1 MiB per sessione come rete di sicurezza; il budget *per comando* da
+  256 KiB resta della shell). Ritiro **loud**: `DEV_CONSOLE` fuori dall'ABI
+  (il numero non si riusa), niente `dev_type("console")`, niente
+  `fs_register`, niente gestori `DEV_*`; `open("/dev/console")` →
+  `ERR_NOTFOUND`, `write` sulla tastiera → `ERR` (frame comunque consumato).
+  Il marker `[gate] boot: login-ready` (emesso da `identis-login` **dopo** il
+  reply della write del prompt) sostituisce `[login] Nome utente:` nel
+  contratto di `run-tests.sh` e `scripts/shell_harness.py`. Sparisce la
+  trappola ADR-0086 (ri-registrare il mount su `EXIT_NOTIFY`). Gate invariato
+  (70/70, 33/33) + asserzioni strutturali: nessun sorgente cita il device
+  (tranne il test che ne prova il ritiro), niente `DEV_CONSOLE`, `t64` non in
+  SKIP. **Trappole**: doppio mirror se il client non perde la sua copia nello
+  stesso passo; l'eco non entra nel mirror; due punti di `run-tests.sh` piu'
+  `wait_login_prompt` da cambiare insieme, e **mai** mentre il gate gira (bash
+  rilegge il file per offset: modifica a meta' corsa = errore di sintassi).
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo

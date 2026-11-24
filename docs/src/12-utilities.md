@@ -243,9 +243,9 @@ editabili (wrap VGA).
 - **Read oltre EOF torna `0`** (contratto 18.2-bis); `open` senza `OPEN_CREATE`
   non crea (POSIX, 18.2).
 
-La shell NON mappa la VGA: tutti i passaggi di input/output avvengono
-tramite il device `/dev/input/keyboard`, servito dal terminal server
-`porta` (il server `gpu` fa solo rendering `/dev/console` — Fase 15).
+La shell NON mappa la VGA: l'input arriva dal device `/dev/input/keyboard`
+(servito da `porta`), l'output va sulla **sessione di terminale** (D8c2:
+`civis::sess::out` — il testo non passa piu' da un device).
 
 ### init
 
@@ -265,13 +265,22 @@ embedded; i servizi partono per `object_id` dal volume ArcaFS via
 8. Test: `testfs` → `testfat` → `testarca` → `tests` (attende `TEST_DONE`)
 9. `shell` — shell interattiva (ultima, dopo la suite)
 
-### Terminale video (gpu)
+### Terminale (console)
 
-Rendering VGA in userspace. Gestisce:
-- Scrittura VGA (testo, cursore hardware CRTC)
-- Registrazione device `/dev/console` presso cardo via `FS_REGISTER`
+Rendering in userspace (surface pixel via virtio-gpu o VGA testuale). Dal D3
+il driver e' separato (`gpu`); dal D8c1/D8c2 il **testo e' una sessione**:
 
-La tastiera è gestita da `kbd`/`porta` (Fase 15): input da `/dev/input/keyboard`, echo su `/dev/console` verso la shell.
+- le sessioni (`libs/littera`) e l'endpoint `SESS_*` (mailbox shm **per
+  attachment**, ADR-0090);
+- il **mirror seriale** della sessione in focus (formato nudo: e' il canale
+  live del gate e del debug headless);
+- **nessun device di testo**: `/dev/console` non esiste piu', e `open` su quel
+  nome fallisce loud.
+
+La tastiera e' gestita da `kbd`/`porta` (Fase 15): input da
+`/dev/input/keyboard`; l'echo lo fa il **lettore** (login, shell), che scrive
+sulla sessione con l'hint "solo schermo". In D8d i tasti entreranno nelle
+sessioni e l'eco passera' a `littera`.
 
 ### File system server (cardo)
 

@@ -5,8 +5,12 @@
 //! sistema la capability per parlarle: la **mailbox** e' una pagina condivisa
 //! (shm) creata dal server, mappata in RW dal client, con due meta'
 //! (`sess-proto`): OUT client→sessione (feed), IN sessione→client (input e
-//! dump). Il testo passa solo da qui: `/dev/console` resta un adattatore sulla
-//! sessione 0, non un secondo canale di testo.
+//! dump). Il testo passa solo da qui: `/dev/console` non esiste piu' (D8c2).
+//!
+//! La mailbox e' **dell'attachment** (un canale, un buffer): due clienti della
+//! stessa sessione non si sovrascrivono i byte, come il ring FS per processo.
+//! L'unico sink di stdout dei programmi e' [`out`] (sessione attestata, poi
+//! default, poi seriale): il mirror seriale lo fa il server, non il client.
 //!
 //! Il meccanismo e' **neutro**: nessun verbo POSIX e nessuna nozione di tile
 //! o di DE. La sessione di un processo si trova per **attestazione del pid**
@@ -75,6 +79,17 @@ impl Session {
     /// La chiamata e' **sincrona**: il server consuma la meta' OUT prima di
     /// rispondere, quindi non serve un cursore di coda.
     pub fn write(&self, bytes: &[u8]) -> Result<usize, SessError> {
+        self.write_with(bytes, false)
+    }
+
+    /// Feed **solo schermo** (D8c2): non entra nel mirror seriale del server
+    /// (`SESS_WRITE.w1 = 1`). E' per l'eco dei tasti, i ridisegni e i test:
+    /// il log seriale resta il transcript dell'output, non dei tasti.
+    pub fn write_screen(&self, bytes: &[u8]) -> Result<usize, SessError> {
+        self.write_with(bytes, true)
+    }
+
+    fn write_with(&self, bytes: &[u8], screen_only: bool) -> Result<usize, SessError> {
         let mut done = 0usize;
         while done < bytes.len() {
             let n = (bytes.len() - done).min(MAX_CHUNK);
@@ -85,7 +100,8 @@ impl Session {
                     n,
                 );
             }
-            let r = send(service_chan()?, SESS_WRITE, n as u64, 0).map_err(|_| SessError::Ipc)?;
+            let r = send(service_chan()?, SESS_WRITE, n as u64, screen_only as u64)
+                .map_err(|_| SessError::Ipc)?;
             if r.w0 == !0u64 {
                 return Err(SessError::Denied);
             }
@@ -263,6 +279,57 @@ pub fn focus(id: u32) -> Result<(), SessError> {
 pub fn stats() -> Result<(usize, usize), SessError> {
     let r = send(service_chan()?, SESS_STATS, 0, 0).map_err(|_| SessError::Ipc)?;
     Ok((r.w0 as usize, r.w1 as usize))
+}
+
+// ── Il sink di default (D8c2) ────────────────────────────────────────
+
+/// Sessione corrente del processo, risolta **una volta** e riusata: la
+/// risoluzione costa due IPC (attestazione + eventuale default), il feed una
+/// sola. Una cache stantia (la `console` e' ripartita: la mailbox e' morta e
+/// l'attachment non esiste piu') si butta al primo errore.
+static mut DEFAULT: Option<Session> = None;
+
+/// Scrive `bytes` sulla **sessione del processo** (attestata dal kernel) o, se
+/// non ne ha una, sulla sessione di default (lo schermo). Ritorna `true` se il
+/// testo e' andato sulla sessione; `false` = nessuna sessione raggiungibile e
+/// il chiamante deve usare il seriale: **l'output non si perde mai**.
+///
+/// E' il sink di stdout dei programmi (login, shell, comandi, personalita'
+/// POSIX): il mirror seriale lo fa il server, non il client.
+pub fn out(bytes: &[u8]) -> bool {
+    out_impl(bytes, false)
+}
+
+/// Come [`out`], ma **solo schermo**: non entra nel mirror seriale del server.
+/// Per l'eco dei tasti, i ridisegni e i test.
+pub fn out_screen(bytes: &[u8]) -> bool {
+    out_impl(bytes, true)
+}
+
+fn out_impl(bytes: &[u8], screen_only: bool) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+    // 1. la cache: se la sessione c'e' ancora, un solo IPC.
+    unsafe {
+        if let Some(s) = &*core::ptr::addr_of!(DEFAULT) {
+            if s.write_with(bytes, screen_only).is_ok() {
+                return true;
+            }
+            *core::ptr::addr_of_mut!(DEFAULT) = None;
+        }
+    }
+    // 2. risoluzione: prima l'attestazione (in D8e il DE lega il figlio alla
+    //    sua tile), poi l'unico ingresso nominato (lo schermo).
+    let s = match whoami().or_else(|_| attach_default()) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    if s.write_with(bytes, screen_only).is_err() {
+        return false;
+    }
+    unsafe { *core::ptr::addr_of_mut!(DEFAULT) = Some(s) };
+    true
 }
 
 /// Risolve il canale del servizio `console`.

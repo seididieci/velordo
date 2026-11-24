@@ -6,7 +6,7 @@
 //!   il device **`/dev/display`** (il protocollo in `term::disp`). Non sa
 //!   cosa sono caratteri, celle o font: non disegna nulla.
 //! - `console` (servizio nuovo): possiede i pixel, tiene il modello a celle
-//!   e serve `/dev/console`.
+//!   e serve le **sessioni di terminale** (D8c2: nessun device di testo).
 //!
 //! I pixel sono del **client**: il driver riceve l'indirizzo fisico del
 //! buffer e lo programma sul device (risorsa 2D + scanout). Nessuna mappatura
