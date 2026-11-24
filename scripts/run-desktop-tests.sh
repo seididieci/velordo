@@ -64,8 +64,9 @@ done
 
 # ── I keybinding del DE ─────────────────────────────────────────────
 # `Super+%` = split verticale, `z` = zoom (on/off), `h` = focus a sinistra,
-# `Super+Shift+q` = chiudi. Con una tile di partenza: split -> 2 tile, il focus
-# va sulla nuova (1); `h` torna sulla 0; `Shift+q` chiude la 0 e resta 1.
+# `Super+Shift+q` = chiudi. Con una tile di partenza: split -> 2 tile **con una
+# shell vera nella nuova** (`shell=ok`), il focus va sulla nuova (1); `h` torna
+# sulla 0; `Shift+q` chiude la 0 e resta 1.
 send_mon "sendkey meta_l-shift-5"
 send_mon "sendkey meta_l-z"
 send_mon "sendkey meta_l-z"
@@ -88,7 +89,9 @@ for want in \
     '[tileprobe] TILE_DROP torna a una tile: PASS' \
     '[tileprobe] risultato: PASS' \
     '[impluvium] tastiera sottoscritta' \
-    '[impluvium] split Col -> tile=2 focus=1' \
+    '[impluvium] split Col -> tile=2 focus=1 shell=ok' \
+    '[shell] Velordo shell nativa' \
+    '[shell] Scrivi `help` per i comandi.' \
     '[impluvium] zoom on (tile=2)' \
     '[impluvium] zoom off (tile=2)' \
     '[impluvium] focus 0 (h)'

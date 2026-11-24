@@ -761,9 +761,13 @@ Voci con scope e vittoria dichiarati (non date).
       annidato, focus `hjkl`, zoom, rimozione, minimo), e
       `./scripts/run-desktop-tests.sh` verde: `tileprobe` (server) + i keybinding
       digitati dal monitor (`split Col -> tile=2 focus=1`, `zoom on/off`,
-      `focus 0 (h)`, `close 0 -> tile=1`). Restano a D8f: **spawn di una shell
-      per foglia** (oggi uno split crea una sessione vuota), titoli in testo
-      nella barra, puntatore/floating.
+      `focus 0 (h)`, `close 0 -> tile=1`). **Lo split avvia una shell vera**
+      (`SESS_CREATE` → verifica+`obj_get` → `spawn_image` → `suspend` →
+      `SESS_BIND` → `resume`, layout e focus prima dello spawn) e la morte della
+      shell chiude la tile; l'**eco non va nel vuoto** (`queue_input` ecoa solo
+      con un lettore dichiarato: niente più testo fantasma nelle tile senza
+      programma). Restano: bordo/focus al posto della barra (D8e3), titoli in
+      testo, puntatore/floating (D8f).
 
 - [x] **D8e1 Tile nel server — N sessioni in N rettangoli** (ADR-0092, prima
       metà di D8e; completata 2026-11-24): la console disegna **N** sessioni.

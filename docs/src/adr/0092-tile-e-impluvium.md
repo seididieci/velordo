@@ -5,9 +5,11 @@
 **Accepted** (2026-11-24). **D8e1 implementata e verificata** (`tileprobe` +
 gate invariato). **D8e2 implementata**: `impluvium` nel boot (albero, layout,
 chrome, tastiera al DE con i keybinding `Super+hjkl`/`%`/`"`/`z`/`Shift+q`,
-supervisione per canale, kernel intatto). Resta per D8f/D8e3 lo **spawn di una
-shell per foglia** (oggi uno split crea una sessione vuota) e i titoli in testo
-nella barra.
+supervisione per canale, kernel intatto). Lo **split avvia una shell vera**
+nella sessione nuova (`SESS_CREATE` → verifica+`obj_get` → `spawn_image` →
+`suspend` → `SESS_BIND` → `resume`) e l'uscita della shell chiude la tile.
+Resta per D8e3 il **bordo/focus al posto della barra** e per D8f titoli in
+testo, puntatore e floating.
 
 Dipende da ADR-0087 (compositor `musivum`: layer, clip, danno), ADR-0088
 (finestre `WIN_*`, ospiti clippati alla tile), ADR-0089 (sessioni `littera`),
@@ -120,9 +122,16 @@ DE come **padrone del layout** (`tile_owner`).
   il prefisso non arriva mai a una sessione (e se il DE non c'è, l'editor della
   shell ignora i control byte).
 - **Spawn di una shell per foglia**: `SESS_CREATE` (non legata) → `spawn_image`
-  (come `login`) → **`suspend`** del figlio → `SESS_BIND(sid, pid)` →
-  `resume`. Il `suspend` chiude la finestra in cui il figlio chiama
-  `sess::current()` prima del bind e finisce sulla sessione 0.
+  (come `login`, fail-closed sulla firma) → **`suspend`** del figlio →
+  `SESS_BIND(sid, pid)` → `resume`; se il bind fallisce la shell si **chiude**
+  (mai appesa a session 0). Il `suspend` chiude la finestra in cui il figlio
+  chiama `sess::current()` prima del bind — la bind è una IPC sincrona, quindi
+  il padre si blocca e il figlio girerebbe davvero. Il layout e il focus si
+  applicano **prima** dello spawn: la tile esiste già quando la shell scrive il
+  suo banner. Alla morte della shell la tile si chiude (mai l'ultima).
+- **L'eco non va nel vuoto**: `queue_input` ecoa solo se la sessione ha un
+  **lettore dichiarato** (`reader_of`), oltre al flag. Una tile senza programma
+  non mostra i tasti digitati (era il "testo fantasma" del primo split).
 - **Chrome**: una striscia in `Layer::Overlay` disegnata **dal DE** (un blocco
   colorato per tile, quello in focus evidenziato). Niente font nel DE: i titoli
   in testo sono D8f. L'overlay richiede ≥ `ThirdParty`: primo mattino della

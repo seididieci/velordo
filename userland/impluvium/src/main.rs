@@ -52,6 +52,9 @@ struct De {
     /// La sessione in focus, per **iniettare** (mailbox su di lei): si
     /// riattacca quando il focus cambia (`SESS_ATTACH` sposta il canale).
     injector: Option<civis::sess::Session>,
+    /// I figli avviati per le foglie: `(pid, sessione)`. Serve a togliere la
+    /// tile quando la shell esce.
+    children: Vec<(i64, usize)>,
 }
 
 impl De {
@@ -64,6 +67,7 @@ impl De {
             kb_chan: 0,
             stream: Vec::new(),
             injector: None,
+            children: Vec::new(),
         }
     }
 
@@ -244,15 +248,77 @@ impl De {
             let _ = sess.close();
             return;
         }
+        // La sessione nuova **non** deve ecoare nel vuoto: il lettore sara' la
+        // shell che stiamo per avviare (che si spegne l'eco da sola, in
+        // `input::attach`). Fino ad allora niente tasti a schermo.
+        let _ = sess.echo(false);
+        // Prima il layout e il focus, poi la shell: cosi' la tile esiste (e la
+        // sessione e' quella in focus) gia' quando il programma scrive il suo
+        // banner — altrimenti quelle righe le perde il mirror seriale.
         self.update_area();
         self.apply_layout();
         self.focus_session();
+        let spawned = self.spawn_shell(sid);
+        drop(sess);
         println!(
-            "[impluvium] split {:?} -> tile={} focus={}",
+            "[impluvium] split {:?} -> tile={} focus={} shell={}",
             dir,
             self.tree.len(),
-            self.tree.focus()
+            self.tree.focus(),
+            if spawned { "ok" } else { "NO" }
         );
+    }
+
+    /// Avvia una **shell nella sessione `sid`** (una tile = una sessione = un
+    /// programma).
+    ///
+    /// Ordine che chiude la razza: `spawn_image` (come fa `login`, fail-closed
+    /// sulla firma) -> **`suspend`** del figlio -> `SESS_BIND(sid, pid)` ->
+    /// **`resume`**. Senza il `suspend` il figlio puo' chiamare
+    /// `sess::current()` durante la bind (che e' una IPC sincrona: il padre si
+    /// blocca e il figlio gira) e risolversi sulla sessione 0 — il suo output
+    /// finirebbe nella tile sbagliata.
+    fn spawn_shell(&mut self, sid: usize) -> bool {
+        match civis::fs::rights::rights_execute_verdict(b"sys", b"bin/interpres.bin") {
+            Ok((true, _)) => {}
+            Ok((false, _)) => {
+                println!("[impluvium] shell non eseguibile (firma assente o negata)");
+                return false;
+            }
+            Err(e) => {
+                println!("[impluvium] verifica shell fallita: {:?}", e);
+                return false;
+            }
+        }
+        let Ok(img) = civis::obj_get(b"sys", b"bin/interpres.bin") else {
+            println!("[impluvium] shell non trovata su ArcaFS");
+            return false;
+        };
+        if img.is_empty() {
+            return false;
+        }
+        let Some(meta) = civis::SpawnMeta::new("interpres", 16, &[]) else {
+            return false;
+        };
+        let Ok(chan) = civis::spawn_image(&img, &meta.detached()) else {
+            println!("[impluvium] spawn della shell fallito");
+            return false;
+        };
+        let pid = civis::peer_pid(chan as u64).unwrap_or(-1);
+        if pid <= 0 {
+            return false;
+        }
+        let _ = civis::suspend(pid);
+        let bound = civis::sess::bind(sid as u32, pid).is_ok();
+        let _ = civis::resume(pid);
+        if !bound {
+            // Senza binding la shell scriverebbe sulla sessione 0: si chiude.
+            println!("[impluvium] bind fallito: chiudo la shell");
+            let _ = civis::kill(pid, 0);
+            return false;
+        }
+        self.children.push((pid, sid));
+        true
     }
 
     fn close_focused(&mut self) {
@@ -358,7 +424,28 @@ fn real_main(_sp: u64) -> ! {
                     }
                 }
                 civis::EXIT_NOTIFY => {
-                    if civis::input::device::peer_pid() == m.w1 as i64 {
+                    // Una **shell di foglia** e' morta (`exit`): la sua tile si
+                    // chiude e il fratello prende lo spazio (mai l'ultima).
+                    let dead = m.w1 as i64;
+                    if let Some(pos) = de.children.iter().position(|&(p, _)| p == dead) {
+                        let (_, sid) = de.children.remove(pos);
+                        if de.tree.remove(sid) {
+                            let _ = civis::tile::drop_tile(sid as u32);
+                            if let Ok(sess) = civis::sess::attach_to_session(sid as u32) {
+                                let _ = sess.close();
+                            }
+                            de.update_area();
+                            de.apply_layout();
+                            de.focus_session();
+                            println!(
+                                "[impluvium] shell uscita (pid {}) -> tile={} focus={}",
+                                dead,
+                                de.tree.len(),
+                                de.tree.focus()
+                            );
+                        }
+                    }
+                    if civis::input::device::peer_pid() == dead {
                         // porta ripartita: riattaccati (il botta e risposta e'
                         // gia' nel client, qui si riparte dal device).
                         civis::input::device::detach();

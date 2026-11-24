@@ -632,7 +632,10 @@ impl Term {
             Some(s) => s.push_input(bytes),
             None => return false,
         };
-        if echo {
+        // Il modello ecoa **per il suo lettore**, non nel vuoto: una tile dove
+        // nessuno legge ancora (la sessione creata da uno split, prima che il
+        // programma si attacchi) non deve far comparire i tasti digitati.
+        if echo && self.sessions.reader_of(sid).is_some() {
             self.feed_session(sid, bytes, false);
         }
         true

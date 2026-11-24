@@ -4720,5 +4720,14 @@ nascita, e lo riavvia (il DE partiva due volte); (d) uno split che crea una
 sessione e poi viene rifiutato dal layout deve `SESS_CLOSE`rla, o resta una
 sessione fantasma.
 
-**Resta per D8f**: lo spawn di una shell per foglia (oggi uno split crea una
-sessione vuota), i titoli in testo nella barra, puntatore e floating.
+**Lo split diventa una shell** (chiusura di D8e2, subito dopo il primo uso
+reale): `SESS_CREATE` -> verifica+`obj_get` -> `spawn_image` -> `suspend` ->
+`SESS_BIND` -> `resume`, con layout e focus applicati **prima** dello spawn (la
+tile esiste quando la shell scrive il banner). Se il bind fallisce la shell si
+chiude, mai appesa a session 0. E l'**eco non va nel vuoto**: `queue_input`
+ecoa solo se la sessione ha un lettore dichiarato — il primo split mostrava i
+tasti digitati in una tile senza programma ("testo fantasma"). Alla morte della
+shell la tile si chiude (mai l'ultima).
+
+**Resta**: bordo/focus al posto della barra (D8e3), titoli in testo, puntatore e
+floating (D8f).
