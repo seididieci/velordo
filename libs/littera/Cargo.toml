@@ -1,0 +1,19 @@
+[package]
+name = "littera"
+version = "0.1.0"
+edition = "2021"
+
+# Crate fuori dal workspace del kernel: build freestanding separata, unit test
+# host dalla directory neutra di `scripts/run-unit-tests.sh` (come `term` e
+# `musivum`).
+[workspace]
+
+[dependencies]
+term = { path = "../term" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"

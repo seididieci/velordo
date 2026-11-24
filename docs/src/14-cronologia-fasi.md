@@ -4409,3 +4409,66 @@
   69/69** con t73, zero FAIL/PANIC/FAULT, zero `[munmap]`); t73 prova
   open→commit→close con il CRC del frame che torna identico; unit host 154
   (term 39 con `mark_rect`, musivum 22, …).
+
+- **D8c1 — sessioni di terminale: `littera` + endpoint di sessione (ADR-0089)**
+  (2026-11-24). La tile del DE *è* una sessione di terminale, quindi il primo
+  pezzo del DE è separare il **testo** dal **display**. Nasce `libs/littera`
+  (crate `no_std`, nessuna dipendenza dal sistema): `Session` = `term::Grid` +
+  decoder UTF-8 incrementale + parser ESC/CSI (truecolor/256, `CSI D`/`CSI C`/
+  `CSI K`, `BS`, `CR`, `LF`, `FF`) + coda di input + flag di eco; `Sessions` =
+  tabella (`MAX_SESSIONS = 8`, id = indice di slot **stabile**, focus,
+  attestazioni per pid, attachment per canale, sessione 0 = schermo con
+  scrollback 1000, nuove sessioni 256). La console tiene solo il display
+  (surface, font, danno, T4) e delega: `feed_session(idx, bytes)` +
+  `put_cp(idx, cp)`.
+  **La decisione difficile è lo scroll**: appartiene al modello *e* ai pixel.
+  `Session::put` non scrolla: ritorna `Step::NeedScroll` **prima** di toccare
+  la griglia, chi disegna fa il suo scroll (modello + `shift_rows_up`, T4) e
+  richiama `put` con lo **stesso** codepoint; la sessione ricorda l'azione
+  interrotta (`Resume::{Newline, Home, WideWrap}`) e la completa. L'ordinamento
+  osservabile resta quello del vecchio `put` (verificato test per test contro
+  la versione in git), e la politica T4 della console non cambia di una riga:
+  `shift` solo se la sessione è **disegnata**, non-bulk, sfondo
+  riga-invariante, superficie pixel.
+  **Endpoint di sessione**: 15 tag (0x9B–0xA9), nessuna syscall nuova, nessun
+  `Service` nuovo. La capability è una **mailbox** di una pagina shm
+  (`libs/sess-proto`: OUT cliente→sessione `0..2048`, IN `2048..4096`,
+  `MAX_CHUNK` 2048) creata dal server e mappata RW dal cliente; il client vive
+  nel meccanismo (`civis::sess`, `Drop` che smappa a pagina). Il testo passa
+  **solo** da qui: `/dev/console` diventa un **adattatore sulla sessione 0**
+  (`DEV_WRITE` → `feed_session(0)`, `CONSOLE_*` → sessione in focus), quindi
+  il gate non cambia di un pixel.
+  **Attribuzione per pid, non trasferimento di handle**: `SESS_WHOAMI` non ha
+  argomenti, il server risolve con `SYS_PEER_PID`/`SYS_PEER_INFO` sul canale
+  del messaggio; nessun handle nello spawn, nessun `VELORDO_SESSION`, nessuna
+  passeggiata nei parent. `SESS_BIND` (gated ≥ `ThirdParty`) è per il caso
+  opposto (il DE lega un figlio appena nato); `EXIT_NOTIFY` purga binding e
+  sessioni del morto — mai la 0 — con `munmap` a pagina **prima** di
+  `shm_destroy` (la lezione di D8b). `SESS_CREATE` è aperta anche a
+  `Untrusted`: una sessione non è un privilegio, è memoria bounded (8).
+  **Bisezione rispettata**: prima il refactor con le sessioni dentro e **zero**
+  tag nuovi (gate verde, 69/69) e solo dopo il cablaggio dell'endpoint + t74.
+  Così un fallimento del gate diceva subito da che parte stava.
+  **Trappole del cablaggio**: (a) il client mandava `self.id` in `w0` per
+  `SESS_RESIZE`/`SESS_ECHO` mentre l'ABI documentata è implicita
+  sull'attachment — corretto il client, non il server; (b) `dump_text` deve
+  fermarsi all'ultima riga **con contenuto** (o al cursore), altrimenti le
+  righe vuote in fondo gonfiano il totale e la "coda" del dump è fatta di
+  righe vuote: t74 avrebbe letto il vuoto dopo un resize; (c) la sessione 0
+  non aveva la **mailbox**: e' la prima sessione che esiste (nasce col
+  terminale di boot) ma nessuno la creava, quindi `SESS_ATTACH_DEFAULT`
+  rispondeva `shm 0` e il client non poteva mappare ("attach_default negata").
+  Ora la mailbox della 0 nasce all'avvio, **prima** di `signal_ready`, e i
+  gestori di `SESS_WHOAMI`/`SESS_ATTACH_DEFAULT` rispondono `!0` (fail-loud) se
+  manca invece di consegnare uno shm inesistente; (d) il **contratto del
+  gate** in `run-tests.sh` e' una stringa esatta: `[usertests] PASS 69/69` ha
+  fatto fallire il gate con la suite verde (la riga giusta e' 70/70) — la
+  prima cosa da aggiornare quando un test si aggiunge.
+  **Vittoria**: gate `[gate] PASS` (6 suite + shell nativa 33/33, **usertests
+  70/70** con t74, zero FAIL/PANIC/FAULT, zero `[munmap]`); t74 usa l'endpoint
+  come lo userebbe un programma (stats, `whoami` prima/dopo la creazione,
+  `WIN_OPEN(0)` negato senza sessione, feed/`state`/`dump`, resize con reflow,
+  eco spento/acceso, `bind` negato a `Untrusted`, focus ≠ 0 negato e `focus(0)`
+  che non cambia il CRC del frame, `close` che riporta a 1/0, `close(0)` e id
+  inesistente negati, focus 0 garantito all'uscita); unit host 171 (littera 14,
+  sess-proto 3). Zero kernel, zero driver, zero cardo.

@@ -1,0 +1,18 @@
+[package]
+name = "sess-proto"
+version = "0.1.0"
+edition = "2024"
+
+# Crate fuori dal workspace del kernel: e' un path dep di `civis` (raggiungibile
+# da `userland/interpres`, membro del workspace) ma ha un workspace proprio per
+# i test host — come `net-ep`, va escluso dal root (vedi Cargo.toml).
+[workspace]
+
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"

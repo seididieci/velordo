@@ -109,6 +109,10 @@ velordo/
 │   ├── civis/          # meccanismo di sistema condiviso (ex libr): sys/ipc/heap/
 │   │                   #   fs/spawn/print/args/net + hook `persona` (ADR-0041)
 │   ├── identis-proto/  # protocollo IPC di Identis (ruoli, WHOAMI)
+│   ├── musivum/        # compositor del DE (D8a, ADR-0087): layer, clip, danno
+│   ├── littera/        # sessione di terminale (D8c1, ADR-0089): modello +
+│   │                   #   ANSI + input, senza display
+│   ├── sess-proto/     # layout della mailbox di sessione (D8c1, ADR-0089)
 │   ├── net/            # core rete puro (Ethernet/IPv6/NDP/TCP/SIIT/DNS)
 │   ├── net-ep/         # formato degli slot dei ring endpoint (N7.0, ADR-0074)
 │   ├── custos-proto/   # protocollo IPC di Custos (ADR-0080 fase 5)
@@ -169,7 +173,7 @@ velordo/
 
 ## Stato corrente
 
-Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 69/69` + `[threadtest] PASS 12/12` + `[shell-native] PASS 33/33` (la shell nativa gira nella **stessa** QEMU del gate: login via `sendkey` e `--attach-pid`, `scripts/test-shell-native.py`), zero FAIL/PANIC/FAULT; il gate stampa `[gate] PASS/FAIL` ed **esce != 0** (vedi `docs/src/11-testing.md`). Le fasi POSIX restano storiche dal login nativo (ADR-0062). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
+Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 70/70` + `[threadtest] PASS 12/12` + `[shell-native] PASS 33/33` (la shell nativa gira nella **stessa** QEMU del gate: login via `sendkey` e `--attach-pid`, `scripts/test-shell-native.py`), zero FAIL/PANIC/FAULT; il gate stampa `[gate] PASS/FAIL` ed **esce != 0** (vedi `docs/src/11-testing.md`). Le fasi POSIX restano storiche dal login nativo (ADR-0062). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
 - **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
   BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
@@ -422,6 +426,34 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   misure di tick) → `usertests 68/68`; 33° check della shell (l'ora avanza al
   prompt fermo, forma esatta `ESC[D`×13 + ora + `ESC[C`×5). Guardia: `glyph_width_cells` di ✓ **e**
   ✗ = 1 cella (unit test host in `libs/term`).
+- **Sessioni di terminale (D8c1, ADR-0089)**: il testo esce dalla console e
+  diventa **sessione**. `libs/littera` (`no_std`, zero dipendenze dal sistema)
+  = `Session` (griglia `term::Grid`, decoder UTF-8, parser ESC/CSI, coda di
+  input, eco) + `Sessions` (`MAX_SESSIONS` 8, id = slot **stabile**, focus,
+  attestazioni per pid, attachment per canale; sessione 0 = schermo con
+  scrollback 1000, nuove 256). La console tiene il **display** (surface, font,
+  danno, T4) e delega con `feed_session(idx, bytes)`; il render disegna solo la
+  sessione in `focus` (helper `fgrid_*`). **Lo scroll e' di entrambi**: `put`
+  non scrolla, ritorna `Step::NeedScroll`, chi disegna scrolla (modello +
+  `shift_rows_up`) e richiama `put` con lo **stesso** codepoint; la sessione
+  ricorda l'azione (`Resume::{Newline, Home, WideWrap}`) e la completa — la
+  politica T4 (`can_shift`) resta identica. Endpoint: 15 tag `SESS_*`
+  (0x9B–0xA9, nessuna syscall/tag di servizio nuovo), capability = **mailbox**
+  di una pagina shm (`libs/sess-proto`: OUT `0..2048`, IN `2048..4096`),
+  creata dal server e mappata RW dal cliente (`civis::sess`, `Drop` che smappa
+  a pagina). **Attribuzione per pid** (`SESS_WHOAMI` → `SYS_PEER_PID`), mai
+  handle allo spawn ne' ambiente; `SESS_BIND` (≥ `ThirdParty`) per il DE;
+  `EXIT_NOTIFY` purga binding/sessioni del morto (mai la 0) con `munmap` **a
+  pagina prima** di `shm_destroy`. `/dev/console` e' un **adattatore sulla
+  sessione 0** (`DEV_WRITE` → `feed_session(0)`, `CONSOLE_*` → focus): il
+  device non e' un secondo canale di testo. `WIN_OPEN` con `w0 = 0` = "la tile
+  della mia sessione" (risolta per attestazione, ammessa solo se e' quella in
+  focus). Limiti D8c1: focus solo 0 (tile multiple = D8e), `SESS_RESIZE`
+  negato sulla sessione in focus (la misura e' del display). **Trappole**:
+  `resize`/`echo` hanno la sessione **implicita** nell'attachment (in `w0` va
+  la geometria/il flag, non l'id) e `dump_text` si ferma all'ultima riga con
+  contenuto o al cursore (le righe vuote in fondo falsano la coda). Test: t74
+  (`usertests 70/70`), unit host `littera` 14 + `sess-proto` 3.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
@@ -724,7 +756,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
 
 ```bash
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term, musivum (D8a), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, blake2s, sig, tls: 154 test
+./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, blake2s, sig, tls: 171 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh
@@ -760,7 +792,7 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 69/69
+#   [usertests] PASS 70/70
 #   [threadtest] PASS 12/12
 #   [shell-native] PASS 33/33
 # KVM=1 accelera (-enable-kvm -cpu host, opt-in; senza /dev/kvm resta TCG).

@@ -23,8 +23,10 @@ extern crate alloc;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-/// Righe di scrollback tenute (oltre quelle della griglia).
-const SCROLLBACK_MAX: usize = 1000;
+/// Righe di scrollback tenute (oltre quelle della griglia). Default della
+/// griglia; una sessione puo' chiederne meno (`Grid::new_with_scrollback`):
+/// N sessioni del DE (D8c1) non devono costare 1000 righe l'una.
+pub const SCROLLBACK_MAX: usize = 1000;
 
 /// Colori truecolor predefiniti (RGBA packed, `0xRRGGBBAA`, alpha opaco).
 ///
@@ -180,6 +182,9 @@ pub struct Grid {
     /// spostava fino a 1000 righe (un `hexdump` da 5 MB = ~650 GB di
     /// memmove).
     scrollback: VecDeque<Vec<Cell>>,
+    /// Tetto dello scrollback di **questa** griglia (D8c1: le sessioni del
+    /// DE ne chiedono meno: N terminali non devono costare 1000 righe l'uno).
+    scrollback_max: usize,
     /// Posizione del cursore (colonna, riga).
     pub cursor: (usize, usize),
     /// Cursore visibile.
@@ -190,6 +195,12 @@ pub struct Grid {
 impl Grid {
     /// Nuova griglia `cols×rows` (spazi, fg 0x0F su bg 0x00).
     pub fn new(cols: usize, rows: usize) -> Self {
+        Self::new_with_scrollback(cols, rows, SCROLLBACK_MAX)
+    }
+
+    /// Come [`Grid::new`] ma con un tetto di scrollback esplicito (D8c1: una
+    /// sessione del DE tiene 256 righe, il terminale dello schermo 1000).
+    pub fn new_with_scrollback(cols: usize, rows: usize, scrollback_max: usize) -> Self {
         let cols = cols.max(1);
         let rows = rows.max(1);
         let mut cells = Vec::with_capacity(cols * rows);
@@ -201,6 +212,7 @@ impl Grid {
             rows,
             cells,
             scrollback: VecDeque::new(),
+            scrollback_max: scrollback_max.max(1),
             cursor: (0, 0),
             cursor_visible: true,
             dirty: Dirty::none(),
@@ -413,7 +425,7 @@ impl Grid {
         }
         let first: Vec<Cell> = self.cells[..self.cols].to_vec();
         self.scrollback.push_back(first);
-        if self.scrollback.len() > SCROLLBACK_MAX {
+        if self.scrollback.len() > self.scrollback_max {
             self.scrollback.pop_front();
         }
         self.cells.copy_within(self.cols.., 0);

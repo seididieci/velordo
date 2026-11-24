@@ -24,10 +24,10 @@ use civis;
 use civis::hex;
 
 use term::font::Font;
-use term::grid::{color, Grid};
+use term::grid::{color, Cell};
 use term::surface::{self, Geom, Pixel, Surface, VgaText};
-use term::utf8::Decoder;
 
+use littera::{Sessions, Step};
 use musivum;
 
 // ── Ring I/O (Fase 10.2) ─────────────────────────────────────────
@@ -43,9 +43,19 @@ use civis::{DEV_CLOSE, DEV_OPEN, DEV_READ, DEV_WRITE};
 // Tag delle finestre del DE (D8b, ADR-0088): il servizio console le gestisce
 // direttamente; i clienti le usano tramite `civis::win`.
 use civis::{WIN_CLOSE, WIN_COMMIT, WIN_OPEN, WIN_RAISE, WIN_SET_RECT, WIN_SET_SURFACE, WIN_STATS};
+// Tag delle sessioni di terminale (D8c1, ADR-0089).
+use civis::{
+    SESS_ATTACH_DEFAULT, SESS_BIND, SESS_CLOSE, SESS_CREATE, SESS_DUMP, SESS_ECHO, SESS_FOCUS,
+    SESS_INFO, SESS_READ, SESS_RESIZE, SESS_STATE, SESS_STATS, SESS_TEST_INPUT, SESS_WHOAMI,
+    SESS_WRITE,
+};
 
 /// Valore di errore IPC.
 const ERR: u64 = !0u64;
+
+/// D8c1 — il numero di byte della mailbox di sessione (una pagina, vedi
+/// `sess-proto`): identico al `MAILBOX_BYTES` che il client mappa/smappa.
+const SESS_MAILBOX_BYTES: usize = sess_proto::MAILBOX_BYTES;
 
 /// Indirizzo fisico del buffer testo VGA (mappato dalla console).
 const VGA_TEXT_PHYS: u64 = 0xB8000;
@@ -88,6 +98,15 @@ const WIN_SURFACE_MAX: usize = 64 * 4096;
 
 // ── Il terminale ───────────────────────────────────────────────────
 
+/// Privilegio >= ThirdParty (il DE e i servizi firmati): l'unico check che
+/// apre le operazioni "da DE" (`SESS_BIND`, sessioni non legate, ...).
+fn privileged(class: civis::ImageClass) -> bool {
+    matches!(
+        class,
+        civis::ImageClass::ThirdParty | civis::ImageClass::System
+    )
+}
+
 /// Il rettangolo di pixel di un blocco di celle, con lo sbordo di 1 cella
 /// (I3: il glifo puo' uscire dalla cella) e il clip alla superficie.
 /// `c0..=c1` / `r0..=r1` sono indici di cella inclusivi.
@@ -116,30 +135,20 @@ fn cells_rect(
     musivum::Rect::new(x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
 }
 
-/// Lo stato del terminale: modello, decoder, surface.
+/// Il **display + server** del terminale. Il testo (modello, parser ANSI,
+/// scrollback, input, eco) vive nelle **sessioni** (`littera`): qui resta
+/// tutto cio' che serve a mostrare la sessione in focus e a servire la
+/// capability di sessione.
 struct Term {
-    grid: Grid,
-    decoder: Decoder,
+    /// Le sessioni (1:1 con le tile del DE): la 0 e' lo schermo. In D8c1 si
+    /// disegna solo quella in focus.
+    sessions: Sessions,
+    /// Mailbox di sessione create dal server (owner): `(sess_id, shm_id, ptr,
+    /// map_len)`. La mappatura **RW** serve a leggere la meta' OUT e scrivere
+    /// la IN; va smappata (a pagina) prima di `shm_destroy`.
+    sess_mailboxes: alloc::vec::Vec<(u32, u32, *mut u8, usize)>,
     surface: Surface,
     font: Option<Font>,
-    /// Stato del parser ESC/CSI:
-    /// 0 = normale, 1 = ESC visto, 2 = CSI entry (ESC-[ visto),
-    /// 3 = accumulo parametri CSI (numeri separati da `;`).
-    esc: u8,
-    /// Parametri CSI accumulati (es. `"38;2;255;0;0"` o `"0"`).
-    csi_params: alloc::vec::Vec<u8>,
-    /// Codepoint decodificati (buffer riusato).
-    pending: alloc::vec::Vec<u32>,
-    /// Ultima posizione del cursore disegnata (per ridisegnarla).
-    cursor_drawn: (usize, usize),
-    /// Ultimo stato visibile del cursore (per non ridisegnare la cella del
-    /// cursore a ogni render se nulla e' cambiato: con il danno esplicito
-    /// sarebbe un trasferimento per messaggio).
-    cursor_drawn_visible: bool,
-    /// Colore foreground corrente (truecolor RGBA packed).
-    fg: u32,
-    /// Colore background corrente (truecolor RGBA packed).
-    bg: u32,
     /// Canale del driver `gpu` (0 = nessun driver raggiungibile).
     driver_chan: u64,
     /// La risoluzione *desiderata* dal guest (D4): `None` = "segue l'host".
@@ -173,11 +182,6 @@ struct Term {
     /// `true` se tutte le righe della bg layer sono byte-identiche alla riga
     /// 0: e' la condizione in cui lo scroll puo' spostare i pixel (T4).
     bg_rows_equal: bool,
-    /// T4: il feed corrente e' "in blocco" (molti byte): lo scroll ricompone
-    /// invece di spostare i pixel (i pixel intermedi non esistono).
-    bulk_feed: bool,
-    /// T4/bulk: write in blocco accumulate dall'ultimo render+flush.
-    bulk_writes: u32,
     /// T4: valvola di sicurezza (default `NO_SHIFT`). `true` = mai shift.
     no_shift: bool,
     /// T4 (solo test): bg layer uniforme (senza immagine) per esercitare lo
@@ -198,37 +202,84 @@ struct Term {
 }
 
 impl Term {
-    /// Mangia i byte e aggiorna il modello.
-    fn feed(&mut self, bytes: &[u8]) {
+    /// Larghezza (celle) del glifo `cp`: 1 senza font (host/VGA), il valore
+    /// del font per le icone Nerd (glifi lunghi piu' celle).
+    fn glyph_advance(&mut self, cp: u32) -> usize {
+        match self.font.as_mut() {
+            Some(f) => f.glyph_width_cells(cp).max(1),
+            None => 1,
+        }
+    }
+
+    /// Manda i byte alla sessione `idx`: decode -> modello (con scroll) ->
+    /// render+flush **solo se la sessione e' quella disegnata**.
+    fn feed_session(&mut self, idx: usize, bytes: &[u8]) {
         // T4: un feed lungo e' output di un comando (blocco): lo scroll
-        // ricompone invece di spostare i pixel (vedi `scroll`).
+        // ricompone invece di spostare i pixel (vedi `scroll_session`).
         let bulk = bytes.len() > BULK_FEED_BYTES;
-        self.bulk_feed = bulk;
-        self.decoder.push(bytes, &mut self.pending);
+        let mut cps = match self.sessions.get_mut(idx) {
+            Some(s) => {
+                s.bulk_feed = bulk;
+                s.decode(bytes)
+            }
+            None => return,
+        };
         // `drain` svuota il buffer riusandone la capacita': i codepoint
         // processati NON devono restare nel buffer (il feed successivo li
         // rielaborerebbe, ripetendo gli a-capo e facendo scorrere la griglia).
-        let mut cps = core::mem::take(&mut self.pending);
         for cp in cps.drain(..) {
-            self.put(cp);
+            self.put_cp(idx, cp);
         }
-        self.pending = cps;
-        self.bulk_feed = false;
+        if let Some(s) = self.sessions.get_mut(idx) {
+            s.bulk_feed = false;
+            s.give_pending(cps);
+        }
+        // Solo la sessione in focus ha pixel da aggiornare.
+        if idx != self.sessions.focus {
+            return;
+        }
+        let bw = match self.sessions.get_mut(idx) {
+            Some(s) => s.bulk_writes,
+            None => return,
+        };
         if bulk {
             // T4/bulk: render+flush differiti ogni N write. Il batch finale
             // lo flusha la write interattiva successiva (il prompt).
-            self.bulk_writes += 1;
-            if self.bulk_writes >= BULK_FLUSH_EVERY {
-                self.bulk_writes = 0;
+            let next = bw + 1;
+            if next >= BULK_FLUSH_EVERY {
+                if let Some(s) = self.sessions.get_mut(idx) {
+                    s.bulk_writes = 0;
+                }
                 self.render();
                 self.flush_display();
+            } else if let Some(s) = self.sessions.get_mut(idx) {
+                s.bulk_writes = next;
             }
         } else {
-            self.bulk_writes = 0;
+            if let Some(s) = self.sessions.get_mut(idx) {
+                s.bulk_writes = 0;
+            }
             self.render();
             // Il path non-virgl di QEMU copia la risorsa nella superficie del
             // display **solo al flush**: senza, lo schermo resta nero.
             self.flush_display();
+        }
+    }
+
+    /// Un codepoint nelle sessione `idx`. Se il modello chiede uno scroll,
+    /// lo esegue `scroll_session` (pixel + modello) e si riprova **con lo
+    /// stesso codepoint**: la sessione ricorda l'azione da completare.
+    fn put_cp(&mut self, idx: usize, cp: u32) {
+        let advance = self.glyph_advance(cp);
+        loop {
+            let step = match self.sessions.get_mut(idx) {
+                Some(s) => s.put(cp, advance),
+                None => return,
+            };
+            match step {
+                Step::Done => return,
+                Step::NeedScroll => self.scroll_session(idx),
+            }
         }
     }
 
@@ -320,7 +371,14 @@ impl Term {
             stride: surface_geom.stride,
             geom: grid_geom,
         });
-        self.grid.resize(grid_geom.cols, grid_geom.rows);
+        // D8c1: il riadattamento del display ridimensiona **la sessione 0**
+        // (lo schermo). Le altre sessioni hanno la misura della loro tile:
+        // arrivera' con le tile multiple (D8e).
+        self.sessions.cols = grid_geom.cols;
+        self.sessions.rows = grid_geom.rows;
+        if let Some(s) = self.sessions.get_mut(0) {
+            s.resize(grid_geom.cols, grid_geom.rows);
+        }
         // 5) il fondo del buffer nuovo (colore di pagina + immagine
         //    ricentrata: gli offset sono relativi alla superficie) e
         //    **trasferisci i pixel all'host**: il PRESENT ha agganciato il
@@ -504,7 +562,9 @@ impl Term {
         let c1 = x1.saturating_sub(ox) / cw;
         let r0 = r.y.saturating_sub(oy) / ch;
         let r1 = y1.saturating_sub(oy) / ch;
-        self.grid.mark_rect(c0 as usize, r0 as usize, c1 as usize, r1 as usize);
+        if let Some(s) = self.sessions.focus_mut() {
+            s.grid.mark_rect(c0 as usize, r0 as usize, c1 as usize, r1 as usize);
+        }
         self.render();
 
         // 3. il danno copre il rect ripristinato (il compositor poi ricompone
@@ -556,116 +616,58 @@ impl Term {
         }
     }
 
-    /// Un codepoint nel modello (movimento del cursore, scroll, editing).
-    fn put(&mut self, cp: u32) {
-        match self.esc {
-            1 => {
-                // ESC [ ...
-                self.esc = if cp == b'[' as u32 { 2 } else { 0 };
-                return;
-            }
-            2 => {
-                // CSI: accumuliamo i parametri (numeri e `;`) fino alla
-                // lettera finale del comando (es. `m`, `D`, `C`, `K`).
-                let c = cp as u8;
-                if c.is_ascii_digit() || c == b';' {
-                    self.csi_params.push(c);
-                    return;
-                }
-                let cmd = c;
-                self.esc = 0;
-                let params = core::mem::take(&mut self.csi_params);
-                match cmd {
-                    b'D' => {
-                        // cursore a sinistra (salta l'intero glifo largo)
-                        let back = self.grid.span_back(self.grid.cursor.0, self.grid.cursor.1);
-                        self.grid.cursor.0 -= back;
-                    }
-                    b'C' => {
-                        // cursore a destra
-                        if self.grid.cursor.0 + 1 < self.grid.cols() {
-                            self.grid.cursor.0 += 1;
-                        }
-                    }
-                    b'K' => {
-                        // cancella fino a fine riga (se il cursore e' dentro
-                        // un glifo largo, sparisce lo span intero)
-                        let (col, row) = self.grid.cursor;
-                        self.grid.erase_from(col, row, self.fg, self.bg);
-                    }
-                    b'm' => {
-                        // Select Graphic Rendition: colori truecolor e 256.
-                        self.handle_sgr(&params);
-                    }
-                    _ => {}
-                }
-                return;
-            }
-            _ => {}
+    // ── Sessioni di terminale (D8c1, ADR-0089) ───────────────────────
+
+    /// La shm della mailbox di una sessione.
+    fn sess_shm(&self, sess: u32) -> Option<u32> {
+        self.sess_mailboxes
+            .iter()
+            .find(|(id, _, _, _)| *id == sess)
+            .map(|(_, shm, _, _)| *shm)
+    }
+
+    /// Il puntatore (RW) alla mailbox di una sessione.
+    fn sess_mb(&self, sess: u32) -> Option<*mut u8> {
+        self.sess_mailboxes
+            .iter()
+            .find(|(id, _, _, _)| *id == sess)
+            .map(|(_, _, ptr, _)| *ptr)
+    }
+
+    /// Smonta e distrugge la mailbox di una sessione. Si smappa **a pagina**
+    /// prima di `shm_destroy`: senza, il riferimento della mappatura resta
+    /// appeso e i frame non tornano mai (lezione D8b: `[munmap]` nel gate).
+    fn drop_mailbox(&mut self, sess: u32) {
+        if let Some(pos) = self
+            .sess_mailboxes
+            .iter()
+            .position(|(id, _, _, _)| *id == sess)
+        {
+            let (_, shm, ptr, len) = self.sess_mailboxes.remove(pos);
+            let _ = civis::munmap(ptr as usize, len);
+            let _ = civis::shm_destroy(shm);
         }
-        match cp {
-            0x1B => {
-                self.esc = 1;
-            }
-            0x0A => {
-                // newline: la riga successiva, scroll se siamo in fondo
-                let row = self.grid.cursor.1;
-                if row + 1 >= self.grid.rows() {
-                    self.scroll();
-                } else {
-                    self.grid.cursor.1 = row + 1;
-                }
-                self.grid.cursor.0 = 0;
-            }
-            0x0D => {
-                self.grid.cursor.0 = 0;
-            }
-            0x08 => {
-                // backspace: salta l'intero glifo largo
-                let back = self.grid.span_back(self.grid.cursor.0, self.grid.cursor.1);
-                self.grid.cursor.0 -= back;
-            }
-            0x0C => {
-                // form feed: pulisce tutto, cursore a casa
-                self.grid.clear();
-                self.grid.cursor = (0, 0);
-            }
-            _ => {
-                // Caratteri stampabili o glifi Nerd Font (lunghi piu' celle).
-                let (mut col, mut row) = self.grid.cursor;
+    }
 
-                // Quante celle occupa il glifo (1 per i caratteri normali).
-                let mut advance = 1;
-                if let Some(font) = self.font.as_mut() {
-                    advance = font.glyph_width_cells(cp).max(1);
-                }
-
-                // Un glifo largo che non entra in fondo riga va a capo
-                // **prima** di essere disegnato: altrimenti resterebbe
-                // tagliato dal bordo.
-                if col + advance > self.grid.cols() {
-                    col = 0;
-                    if row + 1 >= self.grid.rows() {
-                        self.scroll();
-                    } else {
-                        row += 1;
-                    }
-                }
-                self.grid.put_wide(col, row, cp, advance, self.fg, self.bg);
-
-                if col + advance >= self.grid.cols() {
-                    // fine riga: il cursore va a capo (e scrolla se serve)
-                    self.grid.cursor.0 = 0;
-                    if row + 1 >= self.grid.rows() {
-                        self.scroll();
-                    } else {
-                        self.grid.cursor.1 = row + 1;
-                    }
-                } else {
-                    self.grid.cursor = (col + advance, row);
-                }
-            }
+    /// Chiude le sessioni di un processo morto (mai la 0), liberandone la
+    /// mailbox.
+    fn purge_sessions_of(&mut self, pid: i64) {
+        for id in self.sessions.purge_pid(pid) {
+            self.drop_mailbox(id as u32);
         }
+    }
+
+    /// La classe dell'immagine del chiamante (mai una dichiarazione del peer).
+    fn peer_class(&self, chan: u64) -> civis::ImageClass {
+        civis::peer_info_class(chan)
+            .map(|(_, c)| c)
+            .unwrap_or(civis::ImageClass::Untrusted)
+    }
+
+    /// Il chiamante puo' parlare alla sessione `sess`: ci e' attaccato, oppure
+    /// e' privilegiato.
+    fn sess_allowed(&self, chan: u64, sess: u32, class: civis::ImageClass) -> bool {
+        self.sessions.attached(chan) == Some(sess as usize) || privileged(class)
     }
 
     /// Area della griglia in pixel: `(x, y, w, h)` clippata alla surface.
@@ -738,20 +740,28 @@ impl Term {
         (crc, hashed)
     }
 
-    /// Scroll (T4, ADR-0066): sposta i pixel se lo sfondo e' riga-invariante
-    /// e il feed e' interattivo; altrimenti ricompone (`mark_all`).
+    /// Scroll della sessione `idx` (T4, ADR-0066).
+    ///
+    /// Se la sessione e' **disegnata** e lo sfondo e' riga-invariante e il feed
+    /// e' interattivo, sposta i pixel; altrimenti ricompone il modello
+    /// (`mark_all`) e il render successivo ridisegna tutto.
     ///
     /// Lo shift e' possibile solo se i pixel sono aggiornati: per questo il
     /// feed "in blocco" (output di un comando) ricompone — il render e'
     /// differito a fine feed e i pixel intermedi non esistono.
-    fn scroll(&mut self) {
-        let can_shift = !self.no_shift
-            && !self.bulk_feed
+    fn scroll_session(&mut self, idx: usize) {
+        let visible = idx == self.sessions.focus;
+        let bulk = self.sessions.get(idx).map(|s| s.bulk_feed).unwrap_or(false);
+        let can_shift = visible
+            && !self.no_shift
+            && !bulk
             && self.bg_rows_equal
             && self.comp.wallpaper().is_some()
             && matches!(self.surface, Surface::Pixel(_));
         if !can_shift {
-            self.grid.scroll_up();
+            if let Some(s) = self.sessions.get_mut(idx) {
+                s.grid.scroll_up();
+            }
             return;
         }
         // I6: prima si disegna il pendente (i pixel del testo appena scritto
@@ -759,10 +769,17 @@ impl Term {
         // I6b: il cursore non deve finire nello shift (diventerebbe un blocco
         // fantasma una riga sopra): lo si cancella prima, ridisegnando la sua
         // cella con cursor_visible = false, poi si ripristina il flag.
-        let cursor_was_visible = self.grid.cursor_visible;
-        self.grid.cursor_visible = false;
+        let cursor_was_visible = match self.sessions.get(idx) {
+            Some(s) => s.grid.cursor_visible,
+            None => return,
+        };
+        if let Some(s) = self.sessions.get_mut(idx) {
+            s.grid.cursor_visible = false;
+        }
         self.render();
-        self.grid.cursor_visible = cursor_was_visible;
+        if let Some(s) = self.sessions.get_mut(idx) {
+            s.grid.cursor_visible = cursor_was_visible;
+        }
         let (gx, gy, gw, gh) = self.grid_px_rect();
         let cell_h = self.surface.geom().cell_h;
         if let Surface::Pixel(p) = &mut self.surface {
@@ -771,8 +788,43 @@ impl Term {
             // ridisegna). Passare `gh - cell_h` lascerebbe ferme DUE righe.
             p.shift_rows_up(gx, gy, gw, gh, cell_h);
         }
-        self.grid.scroll_up_after_shift();
+        if let Some(s) = self.sessions.get_mut(idx) {
+            s.grid.scroll_up_after_shift();
+        }
         self.comp.add_damage(musivum::Rect::new(gx, gy, gw, gh));
+    }
+
+    // ── Letture della griglia in focus (il render disegna solo quella) ──
+    fn fgrid_span_at(&self, col: usize, row: usize) -> (usize, usize) {
+        self.sessions
+            .focus_session()
+            .map(|s| s.grid.span_at(col, row))
+            .unwrap_or((col, 1))
+    }
+
+    fn fgrid_cell(&self, col: usize, row: usize) -> Cell {
+        self.sessions
+            .focus_session()
+            .map(|s| s.grid.cell(col, row))
+            .unwrap_or_default()
+    }
+
+    fn fgrid_cell_width(&self, col: usize, row: usize) -> u8 {
+        self.fgrid_cell(col, row).width
+    }
+
+    fn fgrid_cursor(&self) -> (usize, usize) {
+        self.sessions
+            .focus_session()
+            .map(|s| s.grid.cursor_clamped())
+            .unwrap_or((0, 0))
+    }
+
+    fn fgrid_cursor_visible(&self) -> bool {
+        self.sessions
+            .focus_session()
+            .map(|s| s.grid.cursor_visible)
+            .unwrap_or(false)
     }
 
     /// Ridisegna la zona sporca e il cursore.
@@ -806,9 +858,13 @@ impl Term {
             _ => None,
         };
 
-        let dirty = self.grid.take_dirty();
+        let focus = self.sessions.focus;
+        let dirty = match self.sessions.get_mut(focus) {
+            Some(s) => s.grid.take_dirty(),
+            None => return,
+        };
         if dirty.any {
-            let (cols, rows) = (self.grid.cols(), self.grid.rows());
+            let (cols, rows) = (self.sessions.cols, self.sessions.rows);
             let r0 = dirty.min_row.min(rows.saturating_sub(1));
             let r1 = dirty.max_row.min(rows.saturating_sub(1));
             let c0 = dirty.min_col.min(cols.saturating_sub(1));
@@ -821,9 +877,9 @@ impl Term {
                 let mut bc0 = c0;
                 let mut bc1 = c1;
                 for row in r0..=r1 {
-                    let (s0, _) = self.grid.span_at(c0, row);
+                    let (s0, _) = self.fgrid_span_at(c0, row);
                     bc0 = bc0.min(s0);
-                    let (s1, l1) = self.grid.span_at(c1, row);
+                    let (s1, l1) = self.fgrid_span_at(c1, row);
                     bc1 = bc1.max((s1 + l1).saturating_sub(1));
                 }
                 let geom = self.surface.geom();
@@ -838,11 +894,11 @@ impl Term {
                     self.comp.add_damage(musivum::Rect::new(x0, y0, bw, geom.cell_h));
                     for col in bc0..=bc1 {
                         // Le continuazioni le disegna la testa dello span.
-                        if self.grid.cell(col, row).width == 0 {
+                        if self.fgrid_cell_width(col, row) == 0 {
                             continue;
                         }
                         let is_cursor =
-                            (col, row) == self.grid.cursor_clamped() && self.grid.cursor_visible;
+                            (col, row) == self.fgrid_cursor() && self.fgrid_cursor_visible();
                         self.draw_cell_at(col, row, is_cursor, l0_data, true);
                         self.stat_cells += 1; // T0 (ADR-0066)
                     }
@@ -854,11 +910,11 @@ impl Term {
                         // Le continuazioni le disegna la **testa** dello span:
                         // qui non si ridipinge il background sopra il glifo
                         // largo (era il bug: l'icona restava di una cella).
-                        if self.grid.cell(col, row).width == 0 {
+                        if self.fgrid_cell_width(col, row) == 0 {
                             continue;
                         }
                         let is_cursor =
-                            (col, row) == self.grid.cursor_clamped() && self.grid.cursor_visible;
+                            (col, row) == self.fgrid_cursor() && self.fgrid_cursor_visible();
                         self.draw_cell_at(col, row, is_cursor, l0_data, false);
                         self.stat_cells += 1; // T0 (ADR-0066)
                     }
@@ -868,23 +924,29 @@ impl Term {
         // Il cursore si e' spostato o ha cambiato visibilita': ridisegna la
         // cella del cursore solo se lo stato e' cambiato (con il danno
         // esplicito sarebbe un trasferimento per messaggio).
-        let cur = self.grid.cursor_clamped();
-        let cur_visible = self.grid.cursor_visible;
-        if cur != self.cursor_drawn || cur_visible != self.cursor_drawn_visible {
+        let cur = self.fgrid_cursor();
+        let cur_visible = self.fgrid_cursor_visible();
+        let (drawn, drawn_visible) = match self.sessions.get(focus) {
+            Some(s) => (s.cursor_drawn, s.cursor_drawn_visible),
+            None => return,
+        };
+        if cur != drawn || cur_visible != drawn_visible {
             // Cancella la vecchia posizione del cursore (se diversa).
-            if cur != self.cursor_drawn {
-                let (cc, cr) = self.cursor_drawn;
-                if cc < self.grid.cols() && cr < self.grid.rows() {
+            if cur != drawn {
+                let (cc, cr) = drawn;
+                if cc < self.sessions.cols && cr < self.sessions.rows {
                     self.draw_cell_at(cc, cr, false, l0_data, false);
                 }
             }
             // Disegna il cursore nella nuova posizione.
             let (cc, cr) = cur;
-            if cc < self.grid.cols() && cr < self.grid.rows() {
+            if cc < self.sessions.cols && cr < self.sessions.rows {
                 self.draw_cell_at(cc, cr, cur_visible, l0_data, false);
             }
-            self.cursor_drawn = cur;
-            self.cursor_drawn_visible = cur_visible;
+            if let Some(s) = self.sessions.get_mut(focus) {
+                s.cursor_drawn = cur;
+                s.cursor_drawn_visible = cur_visible;
+            }
         }
         // Nel fallback VGA il cursore e' quello hardware (CRTC).
         let (cc, cr) = cur;
@@ -963,8 +1025,8 @@ impl Term {
         l0_data: Option<(*const u8, usize)>,
         bg_ready: bool,
     ) {
-        let (start, _len) = self.grid.span_at(col, row);
-        let cell = self.grid.cell(start, row);
+        let (start, _len) = self.fgrid_span_at(col, row);
+        let cell = self.fgrid_cell(start, row);
         let span = cell.width.max(1) as usize;
         // D7 (ADR-0066): dichiara il danno subito dopo aver calcolato lo span
         // (una cella toccata e' una cella cambiata), con lo sbordo di 1 cella
@@ -1004,99 +1066,6 @@ impl Term {
         // Celle con carattere: put_char gestisce layer 0 (BMP come sfondo) +
         // glifo in un colpo solo.
         self.draw_cell(start, row, span, cell.cp, cell.fg, cell.bg, cursor);
-    }
-
-    /// Select Graphic Rendition (ESC[...m): truecolor (`38;2` / `48;2`) e 256
-    /// colori (`38;5` / `48;5`). I parametri non riconosciuti vengono ignorati.
-    ///
-    /// Quando il backend e' VGA testuale (nessun alpha, 16 colori), il
-    /// truecolor viene scalato all'indice VGA piu' vicino da
-    /// `surface::nearest_vga`: non viene ignorato.
-    fn handle_sgr(&mut self, params: &[u8]) {
-        // Dividi per `;` e parse i numeri.
-        let mut nums: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
-        let mut cur: u32 = 0;
-        let mut has_num = false;
-        for &b in params {
-            if b == b';' {
-                if has_num {
-                    nums.push(cur);
-                    cur = 0;
-                    has_num = false;
-                }
-            } else if b.is_ascii_digit() {
-                cur = cur.saturating_mul(10).saturating_add((b - b'0') as u32);
-                has_num = true;
-            }
-        }
-        if has_num {
-            nums.push(cur);
-        }
-
-        let mut i = 0;
-        while i < nums.len() {
-            match nums[i] {
-                0 => {
-                    // Reset a default.
-                    self.fg = color::DEFAULT_FG;
-                    self.bg = color::DEFAULT_BG;
-                }
-                38 => {
-                    // Foreground: il token successivo specifica il tipo.
-                    if i + 1 < nums.len() {
-                        match nums[i + 1] {
-                            2 => {
-                                // truecolor: R G B seguono.
-                                if i + 4 < nums.len() {
-                                    self.fg = surface::rgba(
-                                        nums[i + 2] as u8,
-                                        nums[i + 3] as u8,
-                                        nums[i + 4] as u8,
-                                        0xFF,
-                                    );
-                                    i += 4;
-                                }
-                            }
-                            5 => {
-                                // 256 colori: un indice segue.
-                                if i + 2 < nums.len() {
-                                    self.fg = surface::color256(nums[i + 2] as u8);
-                                    i += 2;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                48 => {
-                    // Background: come 38 ma per bg.
-                    if i + 1 < nums.len() {
-                        match nums[i + 1] {
-                            2 => {
-                                if i + 4 < nums.len() {
-                                    self.bg = surface::rgba(
-                                        nums[i + 2] as u8,
-                                        nums[i + 3] as u8,
-                                        nums[i + 4] as u8,
-                                        0xFF,
-                                    );
-                                    i += 4;
-                                }
-                            }
-                            5 => {
-                                if i + 2 < nums.len() {
-                                    self.bg = surface::color256(nums[i + 2] as u8);
-                                    i += 2;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-        }
     }
 
     /// Ridisegna il fondo dell'intero framebuffer: il **colore di pagina**
@@ -1352,28 +1321,20 @@ fn real_main(_sp: u64) -> ! {
         }
     };
 
-    // 4. Il modello: la griglia segue la surface.
+    // 4. Le sessioni: la 0 e' lo **schermo** (la griglia segue la surface) e
+    //    nasce qui, col terminale che vediamo. Il cursore parte da (0, 0): il
+    //    testo scorre dall'alto verso il basso (nuove righe in fondo).
     let geom = surface.geom();
-    let grid = Grid::new(geom.cols, geom.rows);
-    // Nessuna modifica: Grid::new pone il cursore a (0, 0) —
-    // il testo scorre dall'alto verso il basso (nuove righe in fondo).
 
     // D8a: la superficie del compositor (0x0 nel fallback VGA: il compositor
     // non si usa li').
     let (w_surf, h_surf) = surface.pixel_size();
 
     let mut term = Term {
-        grid,
-        decoder: Decoder::new(),
+        sessions: Sessions::new(geom.cols, geom.rows),
+        sess_mailboxes: alloc::vec::Vec::new(),
         surface,
         font,
-        esc: 0,
-        csi_params: alloc::vec::Vec::new(),
-        pending: alloc::vec::Vec::with_capacity(64),
-        cursor_drawn: (0, 0),
-        cursor_drawn_visible: false,
-        fg: color::DEFAULT_FG,
-        bg: color::DEFAULT_BG,
         driver_chan,
         desired: None,
         layer0: None,
@@ -1386,8 +1347,6 @@ fn real_main(_sp: u64) -> ! {
         win_owner: alloc::vec::Vec::new(),
         win_surfaces: alloc::vec::Vec::new(),
         bg_rows_equal: false,
-        bulk_feed: false,
-        bulk_writes: 0,
         no_shift: NO_SHIFT,
         test_uniform_bg: false,
         fb_slot: civis::DMA_SLOT_DEVICE,
@@ -1410,13 +1369,32 @@ fn real_main(_sp: u64) -> ! {
             );
         }
     }
+    // 4b. La sessione 0 ha la sua mailbox **da subito**: e' l'ancora del DE
+    //     (chi si attacca con `SESS_ATTACH_DEFAULT` deve poterla mappare, e il
+    //     terminale di boot e' gia' li'). Come per le altre, la crea il server
+    //     e la mappa RW: legge la meta' OUT, scrive la IN.
+    match civis::shm_create(SESS_MAILBOX_BYTES) {
+        Ok(shm) => match civis::shm_map(shm, 0, civis::PROT_READ | civis::PROT_WRITE) {
+            Ok(va) => term
+                .sess_mailboxes
+                .push((0, shm, va as *mut u8, SESS_MAILBOX_BYTES)),
+            Err(_) => {
+                let _ = civis::shm_destroy(shm);
+                let _ = civis::print_string(b"[console] mailbox sessione 0: map fallita\n");
+            }
+        },
+        Err(_) => {
+            let _ = civis::print_string(b"[console] mailbox sessione 0: shm_create fallita\n");
+        }
+    }
+
     // Fondo: colore di pagina + immagine centrata (se c'e').
     term.build_bg_layer();
     term.flush_display_full();
 
     // 5. Banner sul terminale (il framebuffer o la VGA) + il seriale (sink
     //    di debug): la console si annuncia come il vecchio console server.
-    term.feed(b"Velordo console server\n");
+    term.feed_session(0, b"Velordo console server\n");
     let _ = civis::print_string(b"[console] server up\n");
     log_render_marker(&term);
 
@@ -1455,7 +1433,11 @@ fn real_main(_sp: u64) -> ! {
                             let mut data = alloc::vec::Vec::with_capacity(count);
                             data.resize(count, 0);
                             unsafe { req_frame_read(REQ_RING_VA, &mut data, count); }
-                            term.feed(&data);
+                            // `/dev/console` e' un **adattatore sulla sessione 0**
+                            // (D8c1): il device non e' un secondo canale di testo,
+                            // e' la sessione dello schermo vista da chi non parla
+                            // ancora il protocollo di sessione.
+                            term.feed_session(0, &data);
                         }
                         let _ = civis::reply(msg.tag, msg.w1, 0);
                     }
@@ -1464,8 +1446,15 @@ fn real_main(_sp: u64) -> ! {
                         // T4/bulk: se restava un batch non ancora reso (lo
                         // scrittore chiude senza una write interattiva), lo
                         // si rende ora.
-                        if term.bulk_writes > 0 {
-                            term.bulk_writes = 0;
+                        let pending = term
+                            .sessions
+                            .focus_mut()
+                            .map(|s| s.bulk_writes)
+                            .unwrap_or(0);
+                        if pending > 0 {
+                            if let Some(s) = term.sessions.focus_mut() {
+                                s.bulk_writes = 0;
+                            }
                             term.render();
                             term.flush_display();
                         }
@@ -1499,8 +1488,8 @@ fn real_main(_sp: u64) -> ! {
                                     "[console] display: {}x{} grid={}x{} (adattato, testo conservato)",
                                     g.width,
                                     g.height,
-                                    term.grid.cols(),
-                                    term.grid.rows()
+                                    term.sessions.cols,
+                                    term.sessions.rows
                                 );
                             } else {
                                 let _ = civis::print_string(b"[console] display: riadattamento fallito\n");
@@ -1509,7 +1498,7 @@ fn real_main(_sp: u64) -> ! {
                     }
 
                     civis::syscall_numbers::CONSOLE_QUERY => {
-                        let _ = civis::reply(msg.tag, term.grid.cols() as u64, term.grid.rows() as u64);
+                        let _ = civis::reply(msg.tag, term.sessions.cols as u64, term.sessions.rows as u64);
                     }
 
                     civis::syscall_numbers::CONSOLE_SET_MODE => {
@@ -1526,11 +1515,12 @@ fn real_main(_sp: u64) -> ! {
                         // **ultime** N (il resize che cresce riporta a video
                         // lo scrollback: il testo di prima resta in coda, vedi
                         // `Grid::text_crc_last`).
-                        let _ = civis::reply(
-                            msg.tag,
-                            term.grid.non_empty() as u64,
-                            term.grid.text_crc_last(msg.w0 as usize) as u64,
-                        );
+                        let (non_empty, crc) = term
+                            .sessions
+                            .focus_session()
+                            .map(|s| s.state(msg.w0 as usize))
+                            .unwrap_or((0, 0));
+                        let _ = civis::reply(msg.tag, non_empty as u64, crc as u64);
                     }
 
                     civis::syscall_numbers::CONSOLE_FRAME_CRC => {
@@ -1547,7 +1537,9 @@ fn real_main(_sp: u64) -> ! {
 
                     civis::syscall_numbers::CONSOLE_REPAINT => {
                         // T4 (solo test): riferimento "full repaint".
-                        term.grid.mark_all();
+                        if let Some(s) = term.sessions.focus_mut() {
+                            s.grid.mark_all();
+                        }
                         term.render();
                         term.flush_display_full();
                         let _ = civis::reply(msg.tag, 0, 0);
@@ -1558,7 +1550,9 @@ fn real_main(_sp: u64) -> ! {
                         term.test_uniform_bg = (msg.w0 & 1) != 0;
                         term.no_shift = (msg.w0 & 2) != 0;
                         term.build_bg_layer();
-                        term.grid.mark_all();
+                        if let Some(s) = term.sessions.focus_mut() {
+                            s.grid.mark_all();
+                        }
                         term.render();
                         term.flush_display_full();
                         let _ = civis::reply(msg.tag, 0, 0);
@@ -1566,11 +1560,27 @@ fn real_main(_sp: u64) -> ! {
 
                     // ── Finestre del DE (D8b, ADR-0088) ─────────────────
                     WIN_OPEN => {
-                        // w0 = tile handle (0 = floating), w1 = size hint w<<16|h.
-                        // D8b: esiste una sola tile (lo schermo intero); ogni altra
-                        // — o il floating — e' negata (la policy arriva in D8f/D8g).
-                        let tile = msg.w0 as u32;
+                        // w0 = tile handle, w1 = size hint w<<16|h.
+                        // D8c1: `w0 = 0` significa **"la tile della mia
+                        // sessione"** — risolta per attestazione del pid
+                        // (nessun numero magico passato allo spawn). In D8c1
+                        // si disegna solo la sessione in focus, quindi la
+                        // richiesta e' ammessa solo da chi e' attaccato a
+                        // quella. L'id esplicito della tile (t73) resta
+                        // accettato; ogni altra tile e' negata (policy in
+                        // D8f/D8g).
                         let hint = msg.w1 as u32;
+                        let tile = if msg.w0 == 0 {
+                            match term.sessions.attached(msg.channel) {
+                                Some(sid) if sid == term.sessions.focus => term.tile,
+                                _ => {
+                                    let _ = civis::reply(WIN_OPEN, !0, 0);
+                                    continue;
+                                }
+                            }
+                        } else {
+                            msg.w0 as u32
+                        };
                         let w = (hint >> 16) as u32;
                         let h = (hint & 0xFFFF) as u32;
                         let (sw, sh) = term.surface.pixel_size();
@@ -1685,6 +1695,339 @@ fn real_main(_sp: u64) -> ! {
                         let _ = civis::reply(msg.tag, !0, 0);
                     }
 
+                    // ── Sessioni di terminale (D8c1, ADR-0089) ──────────
+                    SESS_CREATE => {
+                        // w0 = 0 legata al chiamante / 1 non legata (>= ThirdParty).
+                        let class = term.peer_class(msg.channel);
+                        if msg.w0 != 0 && !privileged(class) {
+                            let _ = civis::reply(SESS_CREATE, !0, 0);
+                            continue;
+                        }
+                        let owner = if msg.w0 == 0 {
+                            civis::peer_pid(msg.channel).ok()
+                        } else {
+                            None
+                        };
+                        let id = match term.sessions.create(owner) {
+                            Some(id) => id,
+                            None => {
+                                let _ = civis::reply(SESS_CREATE, !0, 0);
+                                continue;
+                            }
+                        };
+                        let shm = match civis::shm_create(SESS_MAILBOX_BYTES) {
+                            Ok(v) => v,
+                            Err(_) => {
+                                let _ = term.sessions.close(id);
+                                let _ = civis::reply(SESS_CREATE, !0, 0);
+                                continue;
+                            }
+                        };
+                        let va = match civis::shm_map(shm, 0, civis::PROT_READ | civis::PROT_WRITE) {
+                            Ok(v) => v,
+                            Err(_) => {
+                                let _ = civis::shm_destroy(shm);
+                                let _ = term.sessions.close(id);
+                                let _ = civis::reply(SESS_CREATE, !0, 0);
+                                continue;
+                            }
+                        };
+                        term.sess_mailboxes
+                            .push((id as u32, shm, va as *mut u8, SESS_MAILBOX_BYTES));
+                        term.sessions.attach(msg.channel, id);
+                        let _ = civis::reply(SESS_CREATE, id as u64, shm as u64);
+                    }
+
+                    SESS_WHOAMI => {
+                        // Attestazione: nessun argomento, il kernel dice il pid.
+                        let pid = civis::peer_pid(msg.channel).unwrap_or(-1);
+                        match term.sessions.session_of_pid(pid) {
+                            Some(id) => match term.sess_shm(id as u32) {
+                                Some(shm) => {
+                                    term.sessions.attach(msg.channel, id);
+                                    let _ = civis::reply(SESS_WHOAMI, id as u64, shm as u64);
+                                }
+                                None => {
+                                    let _ = civis::reply(SESS_WHOAMI, !0, 0);
+                                }
+                            },
+                            None => {
+                                let _ = civis::reply(SESS_WHOAMI, !0, 0);
+                            }
+                        }
+                    }
+
+                    SESS_ATTACH_DEFAULT => {
+                        // L'unico ingresso **nominato**: la sessione 0.
+                        match term.sess_shm(0) {
+                            Some(shm) => {
+                                term.sessions.attach(msg.channel, 0);
+                                let _ = civis::reply(SESS_ATTACH_DEFAULT, 0, shm as u64);
+                            }
+                            None => {
+                                let _ = civis::reply(SESS_ATTACH_DEFAULT, !0, 0);
+                            }
+                        }
+                    }
+
+                    SESS_BIND => {
+                        // w0 = sessione, w1 = pid: il DE lega un figlio appena nato.
+                        if !privileged(term.peer_class(msg.channel)) {
+                            let _ = civis::reply(SESS_BIND, !0, 0);
+                            continue;
+                        }
+                        let ok = term.sessions.bind(msg.w0 as usize, msg.w1 as i64);
+                        let _ = civis::reply(SESS_BIND, if ok { 0 } else { !0 }, 0);
+                    }
+
+                    SESS_WRITE => {
+                        // w0 = len (byte gia' nella meta' OUT della mailbox).
+                        let class = term.peer_class(msg.channel);
+                        let sid = match term.sessions.attached(msg.channel) {
+                            Some(id) => id,
+                            None => {
+                                let _ = civis::reply(SESS_WRITE, !0, 0);
+                                continue;
+                            }
+                        };
+                        let len = msg.w0 as usize;
+                        if !sess_proto::fits(len) || !term.sess_allowed(msg.channel, sid as u32, class) {
+                            let _ = civis::reply(SESS_WRITE, !0, 0);
+                            continue;
+                        }
+                        let Some(mb) = term.sess_mb(sid as u32) else {
+                            let _ = civis::reply(SESS_WRITE, !0, 0);
+                            continue;
+                        };
+                        let mut data = alloc::vec![0u8; len];
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                (mb as *const u8).add(sess_proto::OUT_OFF),
+                                data.as_mut_ptr(),
+                                len,
+                            );
+                        }
+                        term.feed_session(sid, &data);
+                        let _ = civis::reply(SESS_WRITE, len as u64, 0);
+                    }
+
+                    SESS_READ => {
+                        let sid = match term.sessions.attached(msg.channel) {
+                            Some(id) => id,
+                            None => {
+                                let _ = civis::reply(SESS_READ, !0, 0);
+                                continue;
+                            }
+                        };
+                        let want = (msg.w0 as usize).min(sess_proto::MAX_CHUNK);
+                        let mut buf = alloc::vec![0u8; want];
+                        let n = match term.sessions.get_mut(sid) {
+                            Some(s) => s.read_input(&mut buf),
+                            None => {
+                                let _ = civis::reply(SESS_READ, !0, 0);
+                                continue;
+                            }
+                        };
+                        if let Some(mb) = term.sess_mb(sid as u32) {
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    buf.as_ptr(),
+                                    (mb as *mut u8).add(sess_proto::IN_OFF),
+                                    n,
+                                );
+                            }
+                        }
+                        let _ = civis::reply(SESS_READ, n as u64, 0);
+                    }
+
+                    SESS_RESIZE => {
+                        // w0 = cols<<16|rows. In D8c1 la sessione in focus (lo
+                        // schermo) non si ridimensiona da qui: la sua misura e'
+                        // quella del display.
+                        let sid = match term.sessions.attached(msg.channel) {
+                            Some(id) => id,
+                            None => {
+                                let _ = civis::reply(SESS_RESIZE, !0, 0);
+                                continue;
+                            }
+                        };
+                        if sid == term.sessions.focus {
+                            let _ = civis::reply(SESS_RESIZE, !0, 0);
+                            continue;
+                        }
+                        let g = msg.w0 as u32;
+                        let (cols, rows) = (((g >> 16) as usize).max(1), ((g & 0xFFFF) as usize).max(1));
+                        if let Some(s) = term.sessions.get_mut(sid) {
+                            s.resize(cols, rows);
+                        }
+                        let _ = civis::reply(SESS_RESIZE, 0, 0);
+                    }
+
+                    SESS_ECHO => {
+                        let sid = match term.sessions.attached(msg.channel) {
+                            Some(id) => id,
+                            None => {
+                                let _ = civis::reply(SESS_ECHO, !0, 0);
+                                continue;
+                            }
+                        };
+                        if let Some(s) = term.sessions.get_mut(sid) {
+                            s.echo = msg.w0 != 0;
+                        }
+                        let _ = civis::reply(SESS_ECHO, 0, 0);
+                    }
+
+                    SESS_FOCUS => {
+                        // w0 = sessione da disegnare. D8c1: solo la 0 (le tile
+                        // multiple arrivano in D8e); serve l'attachment o il
+                        // privilegio.
+                        let class = term.peer_class(msg.channel);
+                        let target = msg.w0 as usize;
+                        let allowed = term.sessions.attached(msg.channel) == Some(target)
+                            || privileged(class);
+                        if target != 0 || !allowed || !term.sessions.set_focus(target) {
+                            let _ = civis::reply(SESS_FOCUS, !0, 0);
+                            continue;
+                        }
+                        // La sessione mostrata deve essere ridisegnata tutta.
+                        if let Some(s) = term.sessions.focus_mut() {
+                            s.grid.mark_all();
+                        }
+                        term.render();
+                        term.flush_display_full();
+                        let _ = civis::reply(SESS_FOCUS, 0, 0);
+                    }
+
+                    SESS_CLOSE => {
+                        // w0 = sessione (mai la 0). Attaccato o privilegiato.
+                        let class = term.peer_class(msg.channel);
+                        let sid = msg.w0 as usize;
+                        if sid == 0
+                            || term.sessions.get(sid).is_none()
+                            || !term.sess_allowed(msg.channel, sid as u32, class)
+                        {
+                            let _ = civis::reply(SESS_CLOSE, !0, 0);
+                            continue;
+                        }
+                        let _ = term.sessions.close(sid);
+                        term.drop_mailbox(sid as u32);
+                        let _ = civis::reply(SESS_CLOSE, 0, 0);
+                    }
+
+                    SESS_INFO => {
+                        let class = term.peer_class(msg.channel);
+                        let sid = msg.w0 as usize;
+                        if !term.sess_allowed(msg.channel, sid as u32, class) {
+                            let _ = civis::reply(SESS_INFO, !0, 0);
+                            continue;
+                        }
+                        let (cols, rows, echo) = match term.sessions.get(sid) {
+                            Some(s) => (s.grid.cols(), s.grid.rows(), s.echo),
+                            None => {
+                                let _ = civis::reply(SESS_INFO, !0, 0);
+                                continue;
+                            }
+                        };
+                        let focus = term.sessions.focus == sid;
+                        let g = ((cols as u64) << 16) | rows as u64;
+                        let flags = (echo as u64) | ((focus as u64) << 1);
+                        let _ = civis::reply(SESS_INFO, g, flags);
+                    }
+
+                    SESS_STATE => {
+                        // w0 = sessione, w1 = limite delle ultime celle.
+                        let class = term.peer_class(msg.channel);
+                        let sid = msg.w0 as usize;
+                        if !term.sess_allowed(msg.channel, sid as u32, class) {
+                            let _ = civis::reply(SESS_STATE, !0, 0);
+                            continue;
+                        }
+                        match term.sessions.get(sid) {
+                            Some(s) => {
+                                let (non_empty, crc) = s.state(msg.w1 as usize);
+                                let _ = civis::reply(SESS_STATE, non_empty as u64, crc as u64);
+                            }
+                            None => {
+                                let _ = civis::reply(SESS_STATE, !0, 0);
+                            }
+                        }
+                    }
+
+                    SESS_DUMP => {
+                        // w0 = sessione, w1 = max byte. Il testo va nella meta' IN.
+                        let class = term.peer_class(msg.channel);
+                        let sid = msg.w0 as usize;
+                        if !term.sess_allowed(msg.channel, sid as u32, class) {
+                            let _ = civis::reply(SESS_DUMP, !0, 0);
+                            continue;
+                        }
+                        let want = (msg.w1 as usize).min(sess_proto::MAX_CHUNK);
+                        let mut buf = alloc::vec![0u8; want];
+                        let (n, total) = match term.sessions.get(sid) {
+                            Some(s) => s.dump_text(&mut buf),
+                            None => {
+                                let _ = civis::reply(SESS_DUMP, !0, 0);
+                                continue;
+                            }
+                        };
+                        if let Some(mb) = term.sess_mb(sid as u32) {
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    buf.as_ptr(),
+                                    (mb as *mut u8).add(sess_proto::IN_OFF),
+                                    n,
+                                );
+                            }
+                        }
+                        let _ = civis::reply(SESS_DUMP, n as u64, total as u64);
+                    }
+
+                    SESS_STATS => {
+                        let _ = civis::reply(
+                            SESS_STATS,
+                            term.sessions.count() as u64,
+                            term.sessions.focus as u64,
+                        );
+                    }
+
+                    SESS_TEST_INPUT => {
+                        // Solo test: inietta input nella sessione attaccata come
+                        // farebbe la tastiera (D8d). Con l'eco acceso il testo
+                        // passa dal feed normale (quindi scroll e render).
+                        let sid = match term.sessions.attached(msg.channel) {
+                            Some(id) => id,
+                            None => {
+                                let _ = civis::reply(SESS_TEST_INPUT, !0, 0);
+                                continue;
+                            }
+                        };
+                        let len = msg.w0 as usize;
+                        if !sess_proto::fits(len) {
+                            let _ = civis::reply(SESS_TEST_INPUT, !0, 0);
+                            continue;
+                        }
+                        let Some(mb) = term.sess_mb(sid as u32) else {
+                            let _ = civis::reply(SESS_TEST_INPUT, !0, 0);
+                            continue;
+                        };
+                        let mut data = alloc::vec![0u8; len];
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                (mb as *const u8).add(sess_proto::OUT_OFF),
+                                data.as_mut_ptr(),
+                                len,
+                            );
+                        }
+                        let echo = match term.sessions.get_mut(sid) {
+                            Some(s) => s.push_input(&data),
+                            None => false,
+                        };
+                        if echo {
+                            term.feed_session(sid, &data);
+                        }
+                        let _ = civis::reply(SESS_TEST_INPUT, 0, 0);
+                    }
+
                     civis::EXIT_NOTIFY => {
                         // Solo la morte del **peer FS** (cardo) impone di
                         // rimontare `/dev/console`: ogni processo che stampa e'
@@ -1705,6 +2048,10 @@ fn real_main(_sp: u64) -> ! {
                         let dead = msg.w1 as i64;
                         if dead >= 0 {
                             term.close_windows_of(dead);
+                            // Sessioni del morto: binding, attachment e le
+                            // sessioni di cui era owner (mai la 0), con la
+                            // mailbox smappata e distrutta.
+                            term.purge_sessions_of(dead);
                         }
                     }
 

@@ -11,10 +11,10 @@ ricompilare se stesso. Ordina le priorita' (storage veloce prima, servizi
 fuori dal kernel poi, personalita' per software reale dopo) senza pianificare
 nulla da solo.
 
-## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b)
+## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b + D8c1)
 
 Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` +
-`[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 69/69` +
+`[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 70/70` +
 `[threadtest] PASS 12/12` + `[shell-native] PASS 33/33` (la shell nativa gira
 nella stessa QEMU: login via `sendkey`, `--attach-pid`), zero FAIL/PANIC/FAULT;
 `./run-tests.sh` stampa `[gate] PASS/FAIL` ed esce `!= 0`. La suite FAT32 e'
@@ -647,6 +647,39 @@ Voci con scope e vittoria dichiarati (non date).
       musivum 22, …). Vittoria conseguita: un processo disegna in una finestra
       senza syscall nuove e senza leak; t73 prova open→commit→close con CRC
       identico.
+
+- [x] **D8c1 Sessioni di terminale — `littera` e l'endpoint di sessione**
+      (ADR-0089, completata 2026-11-24): il testo esce dalla console e diventa
+      **sessione**. `libs/littera` (nuovo crate `no_std`, zero dipendenze dal
+      sistema) = `Session` (griglia `term::Grid`, decoder UTF-8, parser
+      ESC/CSI, input, eco) + `Sessions` (tabella `MAX_SESSIONS = 8`, id
+      stabile, focus, attestazioni per pid, attachment per canale); nessuna
+      nozione di display. Lo **scroll** resta una decisione di entrambi: `put`
+      ritorna `Step::NeedScroll`, chi disegna scrolla (modello + shift di
+      pixel, T4) e richiama `put` con lo stesso codepoint, la sessione
+      completa l'azione (`Newline`/`Home`/`WideWrap`).
+      Endpoint di **sessione** con 15 tag (0x9B–0xA9, nessuna syscall nuova,
+      `SERVICE_COUNT` resta 20) e capability = **mailbox** di una pagina shm
+      (`libs/sess-proto`: OUT/IN da 2048 B), creata dal server e mappata RW dal
+      cliente; client nel meccanismo `civis::sess` (`create`/`whoami`/
+      `attach_default`/`bind`/`write`/`read`/`resize`/`echo`/`info`/`state`/
+      `dump`/`close`/`stats`/`test_input`). **Attribuzione per pid**:
+      `SESS_WHOAMI` risolve per `SYS_PEER_PID`, nessun handle allo spawn,
+      nessun ambiente; `SESS_BIND` (DE, ≥ `ThirdParty`) lega un figlio
+      appena nato; `EXIT_NOTIFY` purga binding e sessioni del morto (mai la 0)
+      con `munmap` a pagina **prima** di `shm_destroy`.
+      `/dev/console` diventa un **adattatore sulla sessione 0** (`DEV_WRITE` →
+      `feed_session(0)`, `CONSOLE_*` → focus): il gate non cambia, il device
+      non è un secondo canale di testo. `WIN_OPEN` con `w0 = 0` significa **"la
+      tile della mia sessione"**, risolta per attestazione. Limiti dichiarati
+      in D8c1: focus solo sulla 0 (le tile multiple sono D8e), `SESS_RESIZE`
+      negato sulla sessione in focus (la misura la decide il display, D4),
+      scrollback 1000 per la 0 e 256 per le nuove.
+      Verifica: gate `[gate] PASS` (6 suite + shell nativa 33/33, **usertests
+      70/70** con t74, zero FAIL/PANIC/FAULT, zero `[munmap]`), unit host 171
+      (littera 14, sess-proto 3). Vittoria conseguita: N sessioni di terminale
+      esistono e si servono per capability, il testo non passa più da cardo,
+      zero modifiche al kernel e al resto del sistema.
 
 - [x] **58 Personalità POSIX separata** (58.1–58.6, ADR-0041): meccanismo
       neutro in `libs/civis` (ex `libs/libr`), personalità in

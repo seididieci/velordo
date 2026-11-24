@@ -13,6 +13,7 @@ vfscli = { path = "../vfscli" }
 blake2s = { path = "../../blake2s" }
 net-ep = { path = "../net-ep" }
 broker-proto = { path = "../broker-proto" }
+sess-proto = { path = "../sess-proto" }
 
 [profile.dev]
 panic = "abort"

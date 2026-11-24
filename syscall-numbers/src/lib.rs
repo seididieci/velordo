@@ -741,6 +741,60 @@ pub const WIN_CLOSE: u64 = 0x99;
 /// Reply: `w0` = visibili, `w1` = totali.
 pub const WIN_STATS: u64 = 0x9A;
 
+// ── Sessioni di terminale del DE (D8c1, ADR-0089) ───────────────────
+// Il servizio `console` possiede le sessioni (`littera`): ogni sessione ha
+// una mailbox shm di una pagina consegnata alla creazione (OUT client→server
+// 0..2048, IN server→client 2048..4096, vedi `sess-proto`). La capability e'
+// la mailbox: chi la riceve puo' parlare con **quella** sessione. La sessione
+// di un processo si trova per **attestazione del pid** (`SESS_WHOAMI`), mai
+// con un handle passato allo spawn.
+/// `SESS_CREATE {flags}` → `{sess, shm}`. `w0` = 0 legata al chiamante (owner =
+/// pid), 1 non legata (solo classe >= ThirdParty). Reply `w0` = sessione,
+/// `w1` = shm della mailbox (o `!0` se negata).
+pub const SESS_CREATE: u64 = 0x9B;
+/// `SESS_WHOAMI` → `{sess, shm}`: la sessione **del pid chiamante** (owner o
+/// binding), `!0` se non ne ha. Nessun argomento: l'attestazione e' del kernel.
+pub const SESS_WHOAMI: u64 = 0x9C;
+/// `SESS_ATTACH_DEFAULT` → `{0, shm0}`: l'unico ingresso **nominato** (la
+/// sessione 0, lo schermo). Serve a chi deve parlare con il terminale
+/// principale senza possederlo (es. un comando lanciato dalla shell).
+pub const SESS_ATTACH_DEFAULT: u64 = 0x9D;
+/// `SESS_BIND {sess, pid}` → 0 / `!0`: lega un pid appena spawnato alla
+/// sessione (il DE). Solo classe >= ThirdParty.
+pub const SESS_BIND: u64 = 0x9E;
+/// `SESS_WRITE {len}` → `w0` = len / `!0`: feed degli `len` byte scritti dal
+/// client nella meta' OUT della mailbox della sessione attaccata.
+pub const SESS_WRITE: u64 = 0x9F;
+/// `SESS_READ {max}` → `w0` = n: copia fino a `max` byte di input dalla coda
+/// della sessione nella meta' IN della mailbox.
+pub const SESS_READ: u64 = 0xA0;
+/// `SESS_RESIZE {cols<<16|rows}` → 0 / `!0`: ridimensiona il modello (reflow).
+/// In D8c1 la sessione in focus (lo schermo) non si ridimensiona da qui.
+pub const SESS_RESIZE: u64 = 0xA1;
+/// `SESS_ECHO {on}` → 0 / `!0`: eco dell'input sul modello (flag di
+/// **sessione**, non di canale: i campi password lo spengono).
+pub const SESS_ECHO: u64 = 0xA2;
+/// `SESS_FOCUS {sess}` → 0 / `!0`: la sessione disegnata. In D8c1 solo la
+/// sessione 0 (le altre arriveranno con le tile, D8e).
+pub const SESS_FOCUS: u64 = 0xA3;
+/// `SESS_CLOSE {sess}` → 0 / `!0`: chiude una sessione (mai la 0): il server
+/// smappa e distrugge la mailbox.
+pub const SESS_CLOSE: u64 = 0xA4;
+/// `SESS_INFO {sess}` → `w0` = cols<<16|rows, `w1` = echo | focus<<1.
+pub const SESS_INFO: u64 = 0xA5;
+/// `SESS_STATE {sess, limit}` → `w0` = celle non vuote, `w1` = CRC del testo
+/// delle ultime `limit` celle (gemella di `CONSOLE_STATE`).
+pub const SESS_STATE: u64 = 0xA6;
+/// `SESS_DUMP {sess, max}` → `w0` = n, `w1` = totale: copia la coda del testo
+/// visibile nella meta' IN (le sessioni non in focus si leggono cosi').
+pub const SESS_DUMP: u64 = 0xA7;
+/// `SESS_STATS` → `w0` = sessioni vive, `w1` = focus.
+pub const SESS_STATS: u64 = 0xA8;
+/// `SESS_TEST_INPUT {len}` → 0 / `!0` — **solo test**: inietta `len` byte di
+/// input nella sessione attaccata (come farebbe la tastiera, D8d), provando
+/// `read` ed eco adesso.
+pub const SESS_TEST_INPUT: u64 = 0xA9;
+
 // Alias brevi per comodità d'uso nei clienti.
 pub const WIN_OPN: u64 = WIN_OPEN;
 pub const WIN_CLS: u64 = WIN_CLOSE;

@@ -101,6 +101,11 @@ pub use syscall_numbers::{CUSTOS_AUTHORIZE, CUSTOS_CONSENT, CUSTOS_GRANT, CUSTOS
 pub use syscall_numbers::{BROKER_CLOSE, BROKER_OPEN, BROKER_STATS, BROKER_TX};
 /// Tag delle finestre del DE (D8b, ADR-0088).
 pub use syscall_numbers::{WIN_CLOSE, WIN_OPEN, WIN_RAISE, WIN_SET_RECT, WIN_SET_SURFACE, WIN_STATS, WIN_COMMIT};
+pub use syscall_numbers::{
+    SESS_ATTACH_DEFAULT, SESS_BIND, SESS_CLOSE, SESS_CREATE, SESS_DUMP, SESS_ECHO,
+    SESS_FOCUS, SESS_INFO, SESS_READ, SESS_RESIZE, SESS_STATE, SESS_STATS, SESS_TEST_INPUT,
+    SESS_WHOAMI, SESS_WRITE,
+};
 /// Tag del cancel cooperativo parent→figlio (Fase 44b, job control: Ctrl-C).
 pub use syscall_numbers::JOB_CANCEL;
 /// Tag della notify kernel→kbd su IRQ1 (Fase 15, bridge interrupt→IPC).
@@ -295,6 +300,10 @@ pub mod input;
 /// Meccanismo neutro: nessun verbo POSIX, nessun tipo di socket.
 pub mod net;
 pub mod win;
+/// Sessioni di terminale del DE (D8c1, ADR-0089): client della mailbox di
+/// sessione del servizio `console` (feed, input, resize, eco). Meccanismo
+/// neutro: nessun verbo POSIX, nessuna nozione di tile.
+pub mod sess;
 pub mod broker;
 pub mod print;
 pub mod spawn;

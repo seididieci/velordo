@@ -11,6 +11,10 @@ civis = { path = "../../libs/civis" }
 term = { path = "../../libs/term" }
 # D8a: il compositor del DE (wallpaper, finestre, clip, danno).
 musivum = { path = "../../libs/musivum" }
+# D8c1: le sessioni di terminale (modello + ANSI + input), senza display.
+littera = { path = "../../libs/littera" }
+# Layout della mailbox di sessione, condiviso col client `civis::sess`.
+sess-proto = { path = "../../libs/sess-proto" }
 # BLAKE2s-256: il marker deterministico del rendering (stesso hash del repo).
 blake2s = { path = "../../blake2s" }
 
