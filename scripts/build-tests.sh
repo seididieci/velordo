@@ -59,6 +59,7 @@ build_one testland/dns testland/dns/src/dns.ld dnsprobe.bin dnsprobe
 # Probe socket POSIX (N7.1, ADR-0076): personalità POSIX sopra civis::net,
 # test fuori gate, eseguito solo con `net=1` (dopo dnsprobe).
 build_one testland/posixsock testland/posixsock/src/posixsock.ld posixsock.bin posixsock
+build_one testland/tileprobe testland/tileprobe/src/tileprobe.ld tileprobe.bin tileprobe
 # Probe TLS 1.3 (N6.2, ADR-0072): test fuori gate, eseguito solo con
 # `net=1 tls=1` (server TLS sull'host, scripts/run-tls-tests.sh).
 build_one testland/tlsprobe testland/tlsprobe/src/tlsprobe.ld tlsprobe.bin tlsprobe

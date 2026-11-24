@@ -4616,3 +4616,109 @@ sorgente cita `/dev/input` (eccezione: i test che ne provano il ritiro) e
 `DEV_KEYBOARD` non è più nell'ABI. I tasti arrivano alla **sessione**, non al
 testo; cardo è fuori anche dal percorso dell'input; il DE (D8e) ha già il ruolo
 che gli serve — è il focus owner.
+
+## D8e1 — Tile nel server: N sessioni in N rettangoli (ADR-0092)
+
+Dopo D8d il sistema aveva sessioni vere, testo vero e tasti veri, ma **una**
+tile: la console disegnava solo la sessione in focus, a schermo intero, con una
+sola geometria (`surface.geom()`). Il DE non poteva esistere.
+
+**Decisioni**:
+
+1. **Una tile e' `rect + sessione`**, non un oggetto con stato proprio: la
+   torsione "una tile *e'* una sessione" resa letterale, e l'handle diventa
+   `sid + 1` (`WIN_OPEN(0)` = "la tile della mia sessione" continua a
+   funzionare, `WIN_OPEN(1)` = la prima tile, t73 compreso).
+2. **Staging + commit**: `TILE_SET` scrive, `TILE_COMMIT` applica in un render e
+   un flush solo. Applicare N tile una per una mostrerebbe stati intermedi.
+3. **La geometria diventa per tile**: `Geom::for_rect` (celle intere dentro il
+   rettangolo, origine in coordinate schermo, cosi' il danno resta assoluto) e
+   `Geom::local` per disegnare. Il clip per tile e' una **vista**
+   (`Pixel::view`: base spostata, `width`/`height` del rect, stride invariato):
+   il bounds-check che c'e' gia' diventa il clip, **zero check in piu'** nel
+   percorso caldo.
+4. **Cursore e focus**: il cursore del terminale e' solo della tile in focus
+   (negli altri sarebbe un blocco fantasma per tile); `SESS_FOCUS` accetta
+   qualunque sessione con una tile.
+5. **Modeset**: con una tile il server si adatta da solo (D4, e' cio' che tiene
+   in piedi il gate); con N manda `TILE_SCREEN` al DE.
+
+**La prova e' un CRC, non un'opinione**: il refactor e' stato fatto con una tile
+sola e verificato con il CRC del frame di `t64` **identico** a prima
+(`0xe8264257`, 4 096 000 byte, 735 celle). "Sembra uguale" non e' una prova.
+
+**La trappola**: il render era "una griglia" in **sei** punti, e il sesto
+(`feed_session` rendeva solo se la sessione era in focus) e' stato trovato da
+`tileprobe` — la tile nuova riceveva il testo nel **modello** e non lo
+dipingeva, quindi il suo `TILE_CRC` non cambiava. E' esattamente il modo in cui
+un refactor di rendering passa inosservato con una tile sola: per questo il
+probe vive **fuori dal gate** (e' `usr`, `ThirdParty`: il layout e' un
+privilegio) e confronta i CRC delle due tile.
+
+Altre due: `Pixel::put_char` e' un metodo di `Surface` (la vista si avvolge in
+`Surface::Pixel(view)`) e il **layer 0** va traslato nell'origine della tile, o
+il BMP compare nel posto sbagliato; `copy_from` legge `src` alle stesse
+coordinate, quindi le bande di background si copiano sulla superficie intera.
+
+**Vittoria**: gate `[gate] PASS` (6 suite + shell nativa 33/33, zero
+FAIL/PANIC/FAULT, zero `[munmap]`), unit host 176 (`Geom::for_rect`, `view`,
+rect impacchettato), e `./scripts/run-desktop-tests.sh` con tutti i passi di
+`tileprobe` verdi: due tile affiancate, la prima non cambia di un pixel mentre
+la seconda scrive, zoom/unzoom senza perdere testo, focus fra le tile,
+`TILE_DROP`. Zero kernel, zero syscall: 7 tag.
+
+## D8e2 — `impluvium`: il DE esiste (ADR-0092)
+
+Metà server e metà politica, in due commit. Dopo e1 (le tile nel server) il
+sistema **disegna** N sessioni in N rettangoli, ma nessuno decide il layout: il
+focus owner era ancora la console, e i tasti "globali" (split, zoom, focus) non
+avevano un padrone.
+
+**Il DE** (`userland/impluvium`, `sys/bin/impluvium.bin`): init lo spawana dopo
+`porta` e lo supervisiona **per canale** — `Service::Impluvium` non esiste, e
+`Supervised.svc` diventa `Option<Service>`: **il kernel resta intatto**. Il
+modello (albero, layout, focus geometrico) sta in `libs/impluvium-tree`, puro e
+provato sull'host: `Leaf`/`Split{dir, ratio}`, **sezione aurea**
+(`GOLDEN = 618`: la foglia che si splitta tiene il 61,8%, il `dwindle` di
+Hyprland), `MIN_TILE` e somma **esatta** dell'asse (mai una striscia di fondo
+fra le tile).
+
+**La tastiera passa al DE** (e2.2): `impluvium` e' il focus owner — si
+sottoscrive a `porta` (`INPUT_ATTACH` e' LIFO: e' l'ultimo, vince), legge
+`INPUT_*`, **consuma** i tasti `Super+<tasto>` e **inietta** gli altri nella
+sessione in focus con `SESS_INPUT` (l'input, non il testo: `SESS_WRITE` e'
+un'altra cosa; la mailbox su una sessione nominata arriva da `SESS_ATTACH`).
+Keybinding: `Super+hjkl` focus geometrico, `%`/`"` split, `z` zoom,
+`Shift+q` chiudi. La barra e' una finestra del DE in `Layer::Overlay`
+(blocchi colorati, niente testo) e compare **da due tile in su**: con una tile
+il boot resta identico a D8d.
+
+**`porta` e il tasto Super**: `pc-keyboard 0.7` **non** traccia i modificatori
+GUI (`Modifiers` = shift/ctrl/alt_gr/caps/numpad). Il flag lo tiene `porta` dal
+`KeyEvent` (che porta `state: Down|Up`) *prima* di decodificare, e prefissa i
+byte con `INPUT_SUPER` (0x1C) **nello stesso flusso**: un messaggio separato
+avrebbe ordine non garantito (`Super+h` diventerebbe "h" poi "super"). Il
+prefisso non arriva mai a una sessione.
+
+**Vittoria**: gate `[gate] PASS` con le 33 check della shell che girano
+**attraverso il DE** (login e shell digitati: kbd -> porta -> impluvium ->
+SESS_INPUT -> sessione -> lettore), usertests 71/71, CRC del frame di t64
+identico, zero `[munmap]`; unit host **183**; e il run dedicato
+(`./scripts/run-desktop-tests.sh`) verde in due parti: `tileprobe` (server:
+clip per tile, zoom, focus, CRC) e i **keybinding digitati dal monitor**
+(`[impluvium] split Col -> tile=2 focus=1`, `zoom on/off`, `focus 0 (h)`,
+`close 0 -> tile=1`). Zero kernel, zero syscall: 9 tag in due fasi (`TILE_*`,
+`SESS_ATTACH/INPUT`).
+
+**Trappole pagate**: (a) `send` e' `Ok` anche quando il server rifiuta
+(`w0 = !0`) — vale per ogni gate di capability; (b) un tag usato in un `match`
+senza importarlo diventa un **binding catch-all** (e' successo due volte:
+`DEV_WRITE` in porta, `SESS_ATTACH` in console) e il compilatore lo dice solo
+con un warning "unreachable pattern"; (c) il supervisore vede "assente
+all'avvio" un servizio **senza `svc`** se non gli si passa il canale di
+nascita, e lo riavvia (il DE partiva due volte); (d) uno split che crea una
+sessione e poi viene rifiutato dal layout deve `SESS_CLOSE`rla, o resta una
+sessione fantasma.
+
+**Resta per D8f**: lo spawn di una shell per foglia (oggi uno split crea una
+sessione vuota), i titoli in testo nella barra, puntatore e floating.

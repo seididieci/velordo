@@ -117,6 +117,29 @@ silenzioso in cui il ritiro fallisce). Dal D8d le asserzioni sono cinque: si
 aggiungono "nessun sorgente cita `/dev/input`" (eccezione: i test che ne
 provano il ritiro) e "`DEV_KEYBOARD` fuori dall'ABI".
 
+### Test delle tile (`desktop=1`, fuori dal gate)
+
+`./scripts/run-desktop-tests.sh` — un boot **corto** (`RUN_TESTS=0`) con
+`desktop=1`: init spawana `tileprobe` (`usr`, quindi `ThirdParty`, come
+`posixsock`) e il probe verifica il layout multi-tile. Perché fuori dal gate:
+il layout lo dispone solo un'immagine ≥ `ThirdParty`, e la suite del gate gira
+come `tst` (`Untrusted`).
+
+Le prove (`[tileprobe] ... PASS`): la tile di boot è una e la sessione 0 è in
+focus; `SESS_CREATE` + due `TILE_SET` + `TILE_COMMIT` danno **due tile**
+affiancate; scrivendo nella seconda, il `TILE_CRC` della **prima non cambia** e
+quello della seconda sì (il clip per tile è strutturale: nessun pixel sborda);
+lo **zoom** nasconde la seconda e dà lo schermo alla prima (`TILE_INFO` conta
+una tile), e al ritorno il testo c'è ancora; `SESS_FOCUS` sposta i tasti (e
+`TILE_INFO` lo dice); `TILE_DROP` + `SESS_CLOSE` riportano a una tile.
+
+La **seconda parte** del run prova il DE: con `impluvium` nel boot la tastiera è
+sua, quindi lo script digita dal monitor HMP (`sendkey meta_l-shift-5` ecc.) e
+controlla le righe che il DE stampa — `[impluvium] split Col -> tile=2 focus=1`,
+`zoom on/off`, `focus 0 (h)`: la prova che `Super+%`/`z`/`h` arrivano al DE e che
+i tasti non consumati vanno alla sessione (le 33 check della shell del gate, che
+girano **attraverso** il DE, sono l'altra metà della prova).
+
 Il build userland (servizi nativi, test suite, flavour POSIX) usa
 `targets/x86_64-unknown-velordo-user.json`: clone di `x86_64-unknown-none`
 con `+sse,+sse2,+fxsr` e **senza** soft-float (N6.2.0, ADR-0071); il kernel

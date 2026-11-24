@@ -135,6 +135,11 @@ if [ -f userland/disk/arca.img ]; then
     if [ "${NET:-0}" = "1" ]; then
         APPEND="$APPEND net=1"
     fi
+    # Tile del DE (D8e, ADR-0092): run dedicato con il probe multi-tile
+    # (`usr`, ThirdParty: il layout lo dispone solo il DE). Fuori dal gate.
+    if [ "${DESKTOP:-0}" = "1" ]; then
+        APPEND="$APPEND desktop=1"
+    fi
     # TLS (N6.2, ADR-0072): run dedicato con server TLS sull'host. Richiede
     # `net=1` (il probe usa il servizio `net`); `TLS=1` da solo lo aggiunge.
     if [ "${TLS:-0}" = "1" ]; then

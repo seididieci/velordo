@@ -189,9 +189,43 @@ impl Geom {
             origin_y: (height.saturating_sub(used_h)) / 2,
         }
     }
+
+    /// La geometria di una **tile**: un rettangolo dentro la superficie.
+    ///
+    /// Stesse celle intere e stesso centraggio della [`Geom::for_surface`], ma
+    /// contate dentro il rettangolo e con l'origine in coordinate **schermo**
+    /// (D8e): cosi' il danno e `cells_rect` restano assoluti, e chi disegna usa
+    /// [`Geom::local`] per lavorare nella vista della tile.
+    pub fn for_rect(
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        cell_w: u32,
+        cell_h: u32,
+        ascent_px: i32,
+    ) -> Geom {
+        let mut g = Geom::for_surface(width, height, cell_w, cell_h, ascent_px);
+        g.origin_x += x;
+        g.origin_y += y;
+        g
+    }
+
+    /// La stessa griglia in coordinate **relative** alla sua tile.
+    pub fn local(&self, x: u32, y: u32) -> Geom {
+        Geom {
+            origin_x: self.origin_x.saturating_sub(x),
+            origin_y: self.origin_y.saturating_sub(y),
+            ..*self
+        }
+    }
 }
 
 /// Surface pixel: un framebuffer lineare BGRA.
+///
+/// `Copy`: e' una **vista** (base + geometria), non un possesso — serve a
+/// [`Pixel::view`] per disegnare una tile con il clipping che c'e' gia'.
+#[derive(Clone, Copy)]
 pub struct Pixel {
     /// Base del framebuffer (VA del processo).
     pub ptr: *mut u8,
@@ -218,6 +252,24 @@ impl Pixel {
         let off = (y as usize * self.stride as usize) + (x as usize * 4);
         unsafe {
             core::ptr::write(self.ptr.add(off) as *mut u32, color);
+        }
+    }
+
+    /// La vista di **una tile** dentro questa superficie (D8e).
+    ///
+    /// Stessa superficie (ptr spostato, stride invariato), ma larghezza,
+    /// altezza e geometria del rettangolo: ogni scrittura a coordinate-cella
+    /// (`draw_ink`, `put_char`, i fill) usa il clipping che c'e' gia' su
+    /// `width`/`height`, quindi **nessun pixel esce dalla tile**. `geom` va
+    /// passata **locale** (vedi [`Geom::local`]).
+    pub fn view(&self, x: u32, y: u32, w: u32, h: u32, geom: Geom) -> Pixel {
+        let off = (y as usize) * (self.stride as usize) + (x as usize) * 4;
+        Pixel {
+            ptr: unsafe { self.ptr.add(off) },
+            width: w.min(self.width.saturating_sub(x)),
+            height: h.min(self.height.saturating_sub(y)),
+            stride: self.stride,
+            geom,
         }
     }
 
@@ -973,6 +1025,57 @@ mod tests {
         match s {
             Surface::Pixel(p) => p,
             Surface::VgaText(_) => panic!("attesa Surface::Pixel"),
+        }
+    }
+
+    /// `Geom::for_rect`: celle intere dentro il rettangolo, origine in
+    /// coordinate schermo, e `local` che la riporta nella tile (D8e).
+    #[test]
+    fn geom_for_rect_e_local() {
+        // Schermo 100x50, celle 10x20: rect (20,10)-(80x40) -> 6 colonne e 2
+        // righe, resto orizzontale 20-12*... = 80-60 = 20 px diviso a meta'.
+        let g = Geom::for_rect(20, 10, 80, 40, 10, 20, 15);
+        assert_eq!((g.cols, g.rows), (8, 2));
+        assert_eq!((g.origin_x, g.origin_y), (20, 10));
+        // Il resto verticale (40 - 40) e' zero; quello orizzontale (80-80) zero.
+        // Con una tile non multipla il resto si centra dentro la tile.
+        let h = Geom::for_rect(25, 7, 85, 45, 10, 20, 15);
+        assert_eq!((h.cols, h.rows), (8, 2));
+        assert_eq!(h.origin_x, 25 + (85 - 80) / 2);
+        assert_eq!(h.origin_y, 7 + (45 - 40) / 2);
+        let l = h.local(25, 7);
+        assert_eq!((l.origin_x, l.origin_y), ((85 - 80) / 2, (45 - 40) / 2));
+        // `local` non porta l'origine sotto zero.
+        let z = h.local(100, 100);
+        assert_eq!((z.origin_x, z.origin_y), (0, 0));
+    }
+
+    /// `Pixel::view`: la stessa superficie, ma il clipping e' il rettangolo
+    /// della tile — un glifo al bordo non colora il vicino (D8e).
+    #[test]
+    fn view_clippa_alla_tile() {
+        let mut fb = alloc::vec![0u32; 40 * 44];
+        let mut s = surface_40x44(&mut fb);
+        let base = *pixel_mut(&mut s);
+        // Tile in (10,5) 20x22, griglia di 2x1 celle 10x22, origine locale 0.
+        let geom = Geom {
+            cols: 2,
+            rows: 1,
+            cell_w: 10,
+            cell_h: 22,
+            ascent_px: 16,
+            origin_x: 0,
+            origin_y: 0,
+        };
+        let mut v = base.view(10, 5, 20, 22, geom);
+        v.fill_rect(0, 0, 20, 22, 0x11223344);
+        // Dentro la tile: scritto. Fuori: intatto (colonna 9 e 30).
+        for y in 0..44u32 {
+            for x in 0..40u32 {
+                let inside = (10..30).contains(&x) && (5..27).contains(&y);
+                let want = if inside { 0x11223344 } else { 0 };
+                assert_eq!(fb[(y * 40 + x) as usize], want, "pixel ({},{})", x, y);
+            }
         }
     }
 

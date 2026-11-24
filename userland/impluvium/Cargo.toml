@@ -1,0 +1,18 @@
+[package]
+name = "impluvium"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+civis = { path = "../../libs/civis" }
+impluvium-tree = { path = "../../libs/impluvium-tree" }
+musivum = { path = "../../libs/musivum" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"

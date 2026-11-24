@@ -116,6 +116,8 @@ seed_bin userland/build/siit.bin bin/siit.bin sys bin/siit.bin
 seed_bin userland/build/dns.bin bin/dns.bin sys bin/dns.bin
 # Console server (D3, ADR-0060): servizio di sistema (bucket `sys`).
 seed_bin userland/build/console.bin bin/console.bin sys bin/console.bin
+# DE (D8e): il processo che possiede l'albero delle tile e i tasti.
+seed_bin userland/build/impluvium.bin bin/impluvium.bin sys bin/impluvium.bin
 seed_bin userland/build/useruptime.bin bin/uptime.bin sys bin/uptime.bin
 seed_bin userland/build/vela.bin bin/vela.bin sys bin/vela.bin
 seed_bin userland/build/kbd.bin bin/kbd.bin vela bin/kbd.bin
@@ -225,6 +227,8 @@ seed_bin testland/build/dnsprobe.bin test/dnsprobe.bin tst test/dnsprobe.bin
 # path in `usr/bin` per l'uso manuale dalla shell nativa.
 seed_bin testland/build/posixsock.bin test/posixsock.bin tst test/posixsock.bin
 seed_bin testland/build/posixsock.bin usr/bin/posixsock.bin usr posixsock
+seed_bin testland/build/tileprobe.bin test/tileprobe.bin tst test/tileprobe.bin
+seed_bin testland/build/tileprobe.bin usr/bin/tileprobe.bin usr tileprobe
 # Probe TLS 1.3 (N6.2, ADR-0072): fuori gate, eseguito solo con `tls=1`.
 # Parla con `net` in diretta: `usr` (ThirdParty, firmato), come `nettcp`.
 seed_bin testland/build/tlsprobe.bin test/tlsprobe.bin tst test/tlsprobe.bin

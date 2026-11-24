@@ -21,9 +21,9 @@ use core::ptr;
 
 use crate::sys::{munmap, shm_map};
 use crate::{
-    send, Service, SESS_ATTACH_DEFAULT, SESS_BIND, SESS_CLOSE, SESS_CREATE, SESS_DUMP,
-    SESS_ECHO, SESS_FOCUS, SESS_INFO, SESS_READ, SESS_RESIZE, SESS_STATE, SESS_STATS,
-    SESS_TEST_INPUT, SESS_WHOAMI, SESS_WRITE,
+    send, Service, SESS_ATTACH, SESS_ATTACH_DEFAULT, SESS_BIND, SESS_CLOSE, SESS_CREATE,
+    SESS_DUMP, SESS_ECHO, SESS_FOCUS, SESS_INFO, SESS_INPUT, SESS_READ, SESS_RESIZE, SESS_STATE,
+    SESS_STATS, SESS_TEST_INPUT, SESS_WHOAMI, SESS_WRITE,
 };
 use sess_proto::{IN_OFF, MAILBOX_BYTES, MAX_CHUNK, OUT_OFF};
 
@@ -203,6 +203,24 @@ impl Session {
         Ok(())
     }
 
+    /// **Inietta tasti** (D8e): accoda `bytes` nella coda di **input** della
+    /// sessione (non e' testo: e' quello che fa la tastiera) e sveglia il
+    /// lettore dichiarato con l'hint.
+    pub fn input(&self, bytes: &[u8]) -> Result<(), SessError> {
+        if bytes.len() > MAX_CHUNK {
+            return Err(SessError::Denied);
+        }
+        unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), (self.va + OUT_OFF) as *mut u8, bytes.len());
+        }
+        let r = send(service_chan()?, SESS_INPUT, bytes.len() as u64, 0)
+            .map_err(|_| SessError::Ipc)?;
+        if r.w0 == !0u64 {
+            return Err(SessError::Denied);
+        }
+        Ok(())
+    }
+
     /// **Solo test**: inietta input nella sessione (come la tastiera, D8d).
     pub fn test_input(&self, bytes: &[u8]) -> Result<(), SessError> {
         if bytes.len() > MAX_CHUNK {
@@ -262,6 +280,17 @@ pub fn attach_default() -> Result<Session, SessError> {
         return Err(SessError::Denied);
     }
     Session::attach_to(r.w0 as u32, r.w1 as u32)
+}
+
+/// Un **iniettore** si attacca a una sessione **nominata** (>= `ThirdParty`) e
+/// ne riceve la mailbox: e' cosi' che il DE manda i tasti (D8e). Non lo
+/// dichiara **lettore** (quello resta [`Session::read`]).
+pub fn attach_to_session(id: u32) -> Result<Session, SessError> {
+    let r = send(service_chan()?, SESS_ATTACH, id as u64, 0).map_err(|_| SessError::Ipc)?;
+    if r.w0 == !0u64 {
+        return Err(SessError::Denied);
+    }
+    Session::attach_to(id, r.w1 as u32)
 }
 
 /// Lega `pid` alla sessione `id` (solo >= ThirdParty). Senza argomenti di

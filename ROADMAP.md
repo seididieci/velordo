@@ -11,7 +11,7 @@ ricompilare se stesso. Ordina le priorita' (storage veloce prima, servizi
 fuori dal kernel poi, personalita' per software reale dopo) senza pianificare
 nulla da solo.
 
-## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b + D8c1 + D8c2 + D8d)
+## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b + D8c1 + D8c2 + D8d + D8e)
 
 Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` +
 `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 70/70` +
@@ -735,6 +735,59 @@ Voci con scope e vittoria dichiarati (non date).
       niente `DEV_KEYBOARD`). Vittoria conseguita: i tasti arrivano alla
       **sessione**, non al testo, e cardo è fuori anche dal percorso
       dell'input; il DE (D8e) ha già il ruolo che gli serve — è il focus owner.
+
+- [x] **D8e2 `impluvium` — il DE esiste** (ADR-0092, seconda metà di D8e;
+      completata 2026-11-24): il DE è un **processo** (`sys/bin/impluvium.bin`,
+      spawmano da init dopo `porta`, supervisionato **per canale** — non
+      registra un servizio, quindi `Service::Impluvium` non esiste e il
+      **kernel resta intatto**). Possiede: l'**albero** delle tile
+      (`libs/impluvium-tree`: `Leaf`/`Split{dir,ratio}`, **sezione aurea**
+      `GOLDEN = 618` — la foglia che si splitta tiene il 61,8%, stile `dwindle`
+      di Hyprland — con `MIN_TILE` e somma esatta dell'asse), il **layout**
+      (`TILE_SET`/`TILE_COMMIT`), il **focus** e i **tasti**: si sottoscrive a
+      `porta` (`INPUT_ATTACH`, è il focus owner) e inietta il resto con
+      `SESS_INPUT` (mailbox sulla sessione in focus, `SESS_ATTACH`). Keybinding
+      `Super`: `hjkl` = focus geometrico, `%`/`"` = split, `z` = zoom,
+      `Shift+q` = chiudi. `porta` traccia `LWin`/`RWin` dal `KeyEvent` (che ha
+      lo stato; `pc-keyboard 0.7` non ha i modificatori GUI) e prefissa i tasti
+      con `INPUT_SUPER` (0x1C, stesso flusso = ordine garantito). Chrome: barra
+      in `Layer::Overlay` (una finestra del DE, blocchi colorati, niente testo —
+      titoli in D8f) che compare da due tile in su: con una tile il boot resta
+      identico a D8d.
+      Verifica: gate `[gate] PASS` (6 suite + shell nativa 33/33 — il login e la
+      shell funzionano **coi tasti che passano dal DE** — usertests 71/71, CRC
+      del frame di t64 identico, zero FAIL/PANIC/FAULT, zero `[munmap]`), unit
+      host **183** (`impluvium-tree` 7: sezione aurea, contiguità, split
+      annidato, focus `hjkl`, zoom, rimozione, minimo), e
+      `./scripts/run-desktop-tests.sh` verde: `tileprobe` (server) + i keybinding
+      digitati dal monitor (`split Col -> tile=2 focus=1`, `zoom on/off`,
+      `focus 0 (h)`, `close 0 -> tile=1`). Restano a D8f: **spawn di una shell
+      per foglia** (oggi uno split crea una sessione vuota), titoli in testo
+      nella barra, puntatore/floating.
+
+- [x] **D8e1 Tile nel server — N sessioni in N rettangoli** (ADR-0092, prima
+      metà di D8e; completata 2026-11-24): la console disegna **N** sessioni.
+      Una tile, nel server, e' `rect + sessione` (+ finestra `Direct` in
+      `Layer::Tiles`); l'handle e' `sid + 1`. Protocollo
+      `TILE_SET/COMMIT/INFO/DROP/CRC/SCREEN/SIZE` (0xB0–0xB6, ≥ `ThirdParty`):
+      staging + commit (un render e un flush), `w = 0` = tile nascosta (lo
+      zoom e' un layout), `TILE_CRC` per-tile (la prova "solo questa e'
+      cambiata"). **Geometria per tile**: `Geom::for_rect` (celle intere nel
+      rect, origine in coordinate schermo), `Geom::local`, `Pixel::view` — il
+      clip per tile e' una **vista** della superficie, non un check in piu'
+      nel percorso caldo. Render per tile, cursore solo nella tile in focus,
+      shift T4 ristretto al rect. Con **una** tile il server si adatta da solo
+      al modeset (gate invariato); con N manda `TILE_SCREEN` al DE.
+      Verifica: **CRC del frame identico** a prima del refactor
+      (`0xe8264257`, 4 096 000 byte, 735 celle — t64), gate `[gate] PASS` (6
+      suite + shell nativa 33/33, usertests 71/71, zero FAIL/PANIC/FAULT, zero
+      `[munmap]`), unit host 176, e `./scripts/run-desktop-tests.sh`
+      (`desktop=1`, `tileprobe` in `usr`): due tile affiancate, la prima non
+      cambia di un pixel mentre la seconda scrive, zoom/unzoom, focus,
+      `TILE_DROP`. **Trappola trovata dal probe**: `feed_session` rendeva solo
+      se la sessione era in focus — il sesto punto del "render e' una griglia".
+      Prossima: **D8e2** (`impluvium`: albero a sezione aurea, tastiera al DE,
+      keybinding Super, spawn per foglia, chrome overlay).
 
 - [x] **58 Personalità POSIX separata** (58.1–58.6, ADR-0041): meccanismo
       neutro in `libs/civis` (ex `libs/libr`), personalità in

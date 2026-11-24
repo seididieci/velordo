@@ -446,6 +446,8 @@ stdout: sessione attestata → default → seriale).
 | 0xA6 | `SESS_STATE` | `w0` = sess, `w1` = limite → `(celle non vuote, CRC del testo)` |
 | 0xA7 | `SESS_DUMP` | `w0` = sess, `w1` = max → coda del testo visibile nella meta' IN |
 | 0xA8 | `SESS_STATS` | → `(sessioni vive, focus)` |
+| 0xAB | `SESS_ATTACH` | `w0` = sessione → `w1` = shm: mailbox su una sessione **nominata** (≥ `ThirdParty`, D8e). Non dichiara il lettore: serve a un **iniettore** (il DE) |
+| 0xAC | `SESS_INPUT` | `w0` = len (byte in OUT) → accoda nel **buffer di input** della sessione attaccata (tasti, ≠ `SESS_WRITE` che è testo) e manda l'hint al lettore |
 | 0xA9 | `SESS_TEST_INPUT` | `w0` = len (byte in OUT) — **solo test**: inietta input come la tastiera (stesso percorso + hint) |
 | 0xAA | `SESS_INPUT_EVENT` | console → **lettore dichiarato**, fire-and-forget: c'è input nella coda. Hint coalescente (E2): la coda è la verità |
 
@@ -456,6 +458,37 @@ binding, sessioni di cui il morto era owner (mai la 0) **e le mailbox dei suoi
 attachment**. Il **mirror seriale** della sessione in focus è del server
 (formato nudo, `MIRROR_SESSION_MAX` 1 MiB per sessione come rete di sicurezza;
 il budget per comando resta del client che sa cos'è un comando).
+
+**Tile del DE (D8e, ADR-0092)**: la console disegna le sessioni in
+**rettangoli** (tile); il layout lo decide il DE. Nel server una tile **non ha
+stato proprio**: è `rect + sessione` (+ una finestra `Backing::Direct` in
+`Layer::Tiles`), e l'handle è **`sid + 1`** — la torsione "una tile è una
+sessione" resa letterale. `TILE_SET` scrive in **staging**, `TILE_COMMIT`
+applica tutto in un render + flush solo (niente stati intermedi a schermo). Il
+clip per tile non è una politica: è una **vista** della superficie
+(`Pixel::view`), quindi nessun glifo e nessun ospite possono scrivere fuori dal
+loro rettangolo.
+
+| Tag | Nome | Semantica |
+|-----|------|-----------|
+| 0xB0 | `TILE_SET` | `w0` = sessione, `w1` = `(x,y,w,h)` 4×u16 (`pack_tile_rect`); `w = 0` = tile **nascosta** (sessione viva, non disegnata: è lo zoom). Solo ≥ `ThirdParty` (il layout è un privilegio) |
+| 0xB1 | `TILE_COMMIT` | applica lo staging: ridimensiona le sessioni (la griglia è quella del rect), danno, un render + flush |
+| 0xB2 | `TILE_INFO` | → `(tile visibili, handle in focus)` |
+| 0xB3 | `TILE_DROP` | `w0` = sessione: toglie la tile (il rect torna al fondo); la sessione la chiude chi la possiede |
+| 0xB4 | `TILE_CRC` | `w0` = sessione → `(byte, crc)` del **rect** della tile: la prova "solo questa è cambiata" |
+| 0xB5 | `TILE_SCREEN` | console → DE, fire-and-forget: il display si è riadattato, rilancia il layout (con **una** tile il server si adatta da solo e il tag non parte) |
+| 0xB6 | `TILE_SIZE` | → `(w<<16|h)` del display **in pixel**: l'unità del layout (la cella del font non è pubblica) |
+
+`SESS_FOCUS` accetta qualunque sessione **che ha una tile** (il cursore del
+terminale è solo della tile in focus); `SESS_RESIZE` resta com'è — la misura
+dentro una tile la decide il layout.
+
+Dal D8e la **tastiera è del DE**: `impluvium` è il focus owner (si sottoscrive a
+`porta` con `INPUT_ATTACH`, consuma i tasti `Super+<tasto>` — prefissati da
+`porta` con `INPUT_SUPER` 0x1C, perché `pc-keyboard 0.7` non traccia i
+modificatori GUI — e inietta il resto con `SESS_INPUT`). `WIN_OPEN` con
+`w0 = !0` crea la finestra di **chrome** del DE in `Layer::Overlay` (clip allo
+schermo, solo ≥ `ThirdParty`): è il primo mattone della policy di D8g.
 
 **Input (D8d, ADR-0091)**: i tasti **non sono un device**. `porta` (il servizio
 tastiera) li serve a chi ha la **capability** (`INPUT_ATTACH`, ≥ `ThirdParty`)

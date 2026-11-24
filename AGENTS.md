@@ -505,6 +505,54 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   loop con `recv_timeout` — mai un'attesa bloccante in un server); `t31`/`t74`
   citavano il device e vanno riscritti (o il ritiro passa con i test spenti).
   Test: t75 (`usertests 71/71`), unit host `littera` 16 + `sess-proto` 3 = 173.
+- **Tile nel server (D8e1, ADR-0092)**: la console disegna N sessioni in N
+  rettangoli. Una tile, nel server, e' `rect + sessione` (+ finestra `Direct` in
+  `Layer::Tiles`); l'handle e' `sid + 1` (una tile *e'* una sessione).
+  Protocollo `TILE_SET/COMMIT/INFO/DROP/CRC/SCREEN/SIZE` (0xB0–0xB6, solo >=
+  `ThirdParty`): `TILE_SET` in **staging**, `TILE_COMMIT` applica in un render +
+  flush solo; `w = 0` = tile nascosta (e' cosi' che si fa lo **zoom**);
+  `TILE_CRC` prova "solo questa tile e' cambiata". **La geometria e' per tile**:
+  `Geom::for_rect` (celle intere dentro il rect, origine in coordinate schermo) +
+  `Geom::local` + `Pixel::view` — il clip per tile e' una **vista** (base
+  spostata, `width`/`height` del rect), quindi non c'e' un check in piu' nel
+  percorso caldo e nessun glifo/ospite puo' scrivere fuori. Il render e' per
+  tile; il cursore del terminale e' **solo** della tile in focus. Con **una**
+  tile il server si adatta da solo al modeset (D4, come D8c1) e il gate resta
+  invariato; con N tile manda `TILE_SCREEN` al DE. **Trappole**: il render era
+  "una griglia" in **sei** punti (`render`, `draw_cell_at`,
+  `restore_layer0_cell`, `scroll_session`, `cells_rect`/`grid_px_rect` **e
+  `feed_session`**, che rendeva solo se la sessione era in focus — trovato da
+  `tileprobe`); `Pixel::put_char` e' di `Surface` (la vista si avvolge in
+  `Surface::Pixel(view)`); il **layer 0** va traslato nell'origine della tile e
+  `copy_from` legge `src` alle stesse coordinate (le bande si copiano sulla
+  superficie intera); una tile **nascosta non ridimensiona** la sessione
+  (`Geom::for_rect` di un rect vuoto darebbe 1x1 e distruggerebbe il testo allo
+  zoom); lo shift T4 e' della **tile** che mostra la sessione. Prova fuori dal
+  gate: `./scripts/run-desktop-tests.sh` (`desktop=1`, `tileprobe` in `usr` come
+  `posixsock`); il refactor e1.1 e' stato verificato col **CRC del frame
+  identico** (t64). Unit host 176 (+ `Geom::for_rect`/`view`, rect impacchettato).
+- **Il DE esiste (D8e2, ADR-0092)**: `impluvium` (`sys/bin/impluvium.bin`) e'
+  un processo: init lo spawana **dopo `porta`** (si sottoscrive alla tastiera)
+  e lo supervisiona **per canale** (`Supervised.svc: Option<Service>`) — non
+  registra un servizio, `Service::Impluvium` **non esiste**, kernel intatto.
+  Possiede: **albero** (`libs/impluvium-tree`, `Leaf`/`Split{dir,ratio}`,
+  **sezione aurea** `GOLDEN = 618`, `MIN_TILE`, somma esatta dell'asse), **layout**
+  (`TILE_SET`/`TILE_COMMIT`), **focus** (geometrico, `hjkl`), **tasti** (e' il
+  focus owner: legge `INPUT_*` da `porta` e inietta il resto con `SESS_INPUT`,
+  mailbox sulla sessione in focus via `SESS_ATTACH`) e la **barra** (finestra
+  `Overlay` con blocchi colorati, da due tile in su: con una tile il boot resta
+  identico a D8d). Keybinding **Super**: `hjkl` focus, `%`/`"` split, `z` zoom,
+  `Shift+q` chiudi. `porta` traccia `LWin`/`RWin` dal `KeyEvent` (che ha
+  `state`; `pc-keyboard 0.7` **non** ha i modificatori GUI) e prefissa i tasti
+  con `INPUT_SUPER` (0x1C) **nello stesso flusso** (due code = ordine non
+  garantito). **Trappole**: `send` e' `Ok` anche su rifiuto (`w0 = !0`); i tag
+  usati in un `match` devono essere **importati** o diventano binding
+  catch-all (successo con `SESS_ATTACH` in console e con `DEV_WRITE` in porta);
+  il supervisore vede "assente all'avvio" un servizio senza `svc` se non gli si
+  passa il **canale** di nascita; lo split che crea una sessione deve
+  `SESS_CLOSE`rla se il layout lo rifiuta. Prova: gate (le 33 check della shell
+  girano **attraverso il DE**) + `./scripts/run-desktop-tests.sh` (keybinding
+  digitati dal monitor). Unit host **183** (`impluvium-tree` 7).
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
@@ -806,8 +854,11 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
 ## Testing
 
 ```bash
+# Tile e DE (D8e, FUORI dal gate: il layout lo dispone solo >= ThirdParty)
+./scripts/run-desktop-tests.sh   # tileprobe + keybinding del DE via monitor
+
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, blake2s, sig, tls: 173 test
+./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, syscall-numbers, impluvium-tree, blake2s, sig, tls: 183 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh

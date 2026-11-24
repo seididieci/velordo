@@ -37,9 +37,9 @@ use musivum;
 use civis::{WIN_CLOSE, WIN_COMMIT, WIN_OPEN, WIN_RAISE, WIN_SET_RECT, WIN_SET_SURFACE, WIN_STATS};
 // Tag delle sessioni di terminale (D8c1, ADR-0089).
 use civis::{
-    SESS_ATTACH_DEFAULT, SESS_BIND, SESS_CLOSE, SESS_CREATE, SESS_DUMP, SESS_ECHO, SESS_FOCUS,
-    SESS_INFO, SESS_READ, SESS_RESIZE, SESS_STATE, SESS_STATS, SESS_TEST_INPUT, SESS_WHOAMI,
-    SESS_WRITE,
+    SESS_ATTACH, SESS_ATTACH_DEFAULT, SESS_BIND, SESS_CLOSE, SESS_CREATE, SESS_DUMP, SESS_ECHO,
+    SESS_FOCUS, SESS_INFO, SESS_INPUT, SESS_READ, SESS_RESIZE, SESS_STATE, SESS_STATS,
+    SESS_TEST_INPUT, SESS_WHOAMI, SESS_WRITE,
 };
 
 /// Valore di errore IPC.
@@ -136,6 +136,61 @@ fn cells_rect(
     musivum::Rect::new(x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
 }
 
+/// Una **tile** del DE (D8e): un rettangolo che mostra una sessione.
+///
+/// La tile non ha stato proprio: e' `rect + sessione + finestra` nel
+/// compositor. Il layout lo decide il DE (`TILE_*`, D8e1 passo 2); finche' ce
+/// n'e' **una** e' lo schermo intero con la sessione 0, e il server si adatta
+/// da solo al modeset (D4/D8d).
+#[derive(Clone, Copy)]
+struct Tile {
+    /// Indice **1-based**: handle di `WIN_OPEN` e dei `TILE_*` (`w0 = 0` resta
+    /// "la tile della mia sessione").
+    id: u32,
+    /// La sessione mostrata.
+    sid: usize,
+    /// Il rettangolo sullo schermo (pixel).
+    rect: musivum::Rect,
+    /// La griglia nella tile, in coordinate **schermo** (danno, `cells_rect`).
+    geom: Geom,
+    /// La stessa griglia in coordinate **tile** (per disegnare nella vista).
+    geom_local: Geom,
+    /// La finestra `Direct` in `Layer::Tiles`.
+    win: u32,
+    /// `false` = nascosta (zoom di un'altra tile): la sessione resta viva.
+    visible: bool,
+}
+
+impl Tile {
+    fn build(
+        id: u32,
+        sid: usize,
+        rect: musivum::Rect,
+        cell_w: u32,
+        cell_h: u32,
+        ascent_px: i32,
+    ) -> Tile {
+        let geom = Geom::for_rect(rect.x, rect.y, rect.w, rect.h, cell_w, cell_h, ascent_px);
+        Tile {
+            id,
+            sid,
+            rect,
+            geom,
+            geom_local: geom.local(rect.x, rect.y),
+            win: 0,
+            visible: true,
+        }
+    }
+
+    fn cols(&self) -> usize {
+        self.geom.cols
+    }
+
+    fn rows(&self) -> usize {
+        self.geom.rows
+    }
+}
+
 /// Il **display + server** del terminale. Il testo (modello, parser ANSI,
 /// scrollback, input, eco) vive nelle **sessioni** (`littera`): qui resta
 /// tutto cio' che serve a mostrare la sessione in focus e a servire la
@@ -160,6 +215,13 @@ struct Term {
     /// D8d — tick della prossima **riattaccata** della tastiera dopo la morte
     /// di `porta` (0 = attaccata: il loop dorme senza scadenza).
     kb_retry_at: i64,
+    /// D8e — **staging** del layout: `TILE_SET` scrive qui, `TILE_COMMIT`
+    /// applica tutto in un render solo (niente stati intermedi a schermo).
+    tile_pending: alloc::vec::Vec<(usize, musivum::Rect)>,
+    /// D8e — il canale del **DE** che ha disposto il layout (0 = nessuno): a
+    /// lui si manda `TILE_SCREEN` quando il display si riadatta, invece di
+    /// adattare la tile da soli.
+    tile_owner: u64,
     surface: Surface,
     font: Option<Font>,
     /// Canale del driver `gpu` (0 = nessun driver raggiungibile).
@@ -183,8 +245,10 @@ struct Term {
     /// surface del device (`Backing::Direct`) e il compositor si limita a
     /// sottrarne l'area al fondo.
     comp: musivum::Compositor,
-    /// L'id della tile del terminale nel compositor (registrata all'avvio).
-    tile: u32,
+    /// Le **tile** (D8e): ognuna mostra una sessione nel suo rettangolo. In
+    /// D8e1 ce n'e' una sola (lo schermo, sessione 0); con `TILE_*` il DE ne
+    /// dispone N.
+    tiles: alloc::vec::Vec<Tile>,
     /// Finestre ospite aperte dai clienti (D8b): (win_id, canale richiedente, pid owner).
     /// Serve per chiudere tutte le finestre di un processo alla sua morte (EXIT_NOTIFY).
     win_owner: alloc::vec::Vec<(u32, u64, i64)>,
@@ -248,6 +312,220 @@ impl Term {
         }
     }
 
+    // ── Tile (D8e) ───────────────────────────────────────────────────
+
+    /// L'indice della tile che mostra la sessione `sid`.
+    fn tile_of(&self, sid: usize) -> Option<usize> {
+        self.tiles.iter().position(|t| t.sid == sid)
+    }
+
+    /// L'indice della tile in **focus** (quella che riceve i tasti e dove sta
+    /// il cursore del terminale).
+    fn focus_tile(&self) -> Option<usize> {
+        self.tile_of(self.sessions.focus)
+    }
+
+    /// La geometria della tile `t` in coordinate **schermo** (danno e celle).
+    fn tile_geom(&self, t: usize) -> Geom {
+        self.tiles
+            .get(t)
+            .map(|t| t.geom)
+            .unwrap_or_else(|| self.surface.geom())
+    }
+
+    /// La sessione della tile `t`.
+    fn tile_sid(&self, t: usize) -> usize {
+        self.tiles
+            .get(t)
+            .map(|t| t.sid)
+            .unwrap_or(self.sessions.focus)
+    }
+
+    /// La vista della superficie limitata alla tile `t`: e' cosi' che il
+    /// clipping per tile non richiede un check in piu' — `Pixel::view` porta
+    /// `width`/`height` del rettangolo e il codice di disegno che c'e' gia' ci
+    /// si adatta. `None` = fallback VGA (una sola griglia testuale).
+    fn tile_view(&self, t: usize) -> Option<Pixel> {
+        let tile = self.tiles.get(t)?;
+        match &self.surface {
+            Surface::Pixel(p) => Some(p.view(
+                tile.rect.x,
+                tile.rect.y,
+                tile.rect.w,
+                tile.rect.h,
+                tile.geom_local,
+            )),
+            Surface::VgaText(_) => None,
+        }
+    }
+
+    /// D8e1 — una sola tile: la **1**, grande quanto lo schermo, che mostra la
+    /// sessione 0. Ricalcolata al modeset (il server si adatta da solo finche'
+    /// c'e' una tile: D4/D8d); con N tile il layout arrivera' da `TILE_*`.
+    fn ensure_screen_tile(&mut self) {
+        let geom = self.surface.geom();
+        let (w, h) = match &self.surface {
+            Surface::Pixel(p) => (p.width, p.height),
+            Surface::VgaText(_) => (0, 0),
+        };
+        let rect = musivum::Rect::new(0, 0, w, h);
+        // La griglia della sessione 0 e' quella del display.
+        if let Some(s) = self.sessions.get_mut(0) {
+            s.resize(geom.cols, geom.rows);
+        }
+        self.sessions.cols = geom.cols;
+        self.sessions.rows = geom.rows;
+        let mut tile = Tile::build(1, 0, rect, geom.cell_w, geom.cell_h, geom.ascent_px);
+        // In VGA la geometria e' quella del buffer testuale, non un rect pixel.
+        if matches!(self.surface, Surface::VgaText(_)) {
+            tile.geom = geom;
+            tile.geom_local = geom.local(0, 0);
+        }
+        if let Some(existing) = self.tiles.get(0).copied() {
+            tile.win = existing.win;
+            self.tiles[0] = tile;
+            if tile.win != 0 {
+                self.comp.set_rect(tile.win, rect);
+                self.comp.set_clip(tile.win, rect);
+                self.comp.set_visible(tile.win, true);
+            }
+        } else {
+            if matches!(self.surface, Surface::Pixel(_)) {
+                tile.win = self.comp.open(musivum::Window {
+                    id: 0,
+                    owner: 0,
+                    rect,
+                    clip: rect,
+                    backing: musivum::Backing::Direct,
+                    layer: musivum::Layer::Tiles,
+                    z: 0,
+                    visible: true,
+                });
+            }
+            self.tiles.push(tile);
+        }
+    }
+
+    /// Applica una tile (D8e): crea o aggiorna rettangolo, geometria,
+    /// sessione e finestra del compositor. `rect` vuoto = tile **nascosta**:
+    /// la sessione non si tocca (al ritorno il testo e' dove stava), si toglie
+    /// solo dal compositor.
+    fn apply_tile(&mut self, sid: usize, rect: musivum::Rect) {
+        let hidden = rect.w == 0 || rect.h == 0;
+        let existing = self.tiles.iter().position(|t| t.sid == sid);
+        if hidden {
+            if let Some(i) = existing {
+                let (win, old) = (self.tiles[i].win, self.tiles[i].rect);
+                self.tiles[i].visible = false;
+                if win != 0 {
+                    self.comp.set_visible(win, false);
+                }
+                self.comp.add_damage(old);
+            }
+            return;
+        }
+        let m = match self.font.as_ref() {
+            Some(f) => f.metrics(),
+            None => return,
+        };
+        let mut tile = Tile::build(
+            (sid as u32) + 1,
+            sid,
+            rect,
+            m.cell_w as u32,
+            m.cell_h as u32,
+            m.ascent_px,
+        );
+        // La sessione prende la misura della tile e si ridisegna tutta.
+        if let Some(s) = self.sessions.get_mut(sid) {
+            s.resize(tile.geom.cols, tile.geom.rows);
+            s.grid.mark_all();
+        }
+        match existing {
+            Some(i) => {
+                tile.win = self.tiles[i].win;
+                let old = self.tiles[i].rect;
+                self.tiles[i] = tile;
+                if tile.win != 0 {
+                    self.comp.set_rect(tile.win, rect);
+                    self.comp.set_clip(tile.win, rect);
+                    self.comp.set_visible(tile.win, true);
+                }
+                // Il vecchio rect torna al fondo (o a un'altra tile).
+                self.comp.add_damage(old);
+            }
+            None => {
+                tile.win = self.comp.open(musivum::Window {
+                    id: 0,
+                    owner: 0,
+                    rect,
+                    clip: rect,
+                    backing: musivum::Backing::Direct,
+                    layer: musivum::Layer::Tiles,
+                    z: sid as i32,
+                    visible: true,
+                });
+                self.tiles.push(tile);
+            }
+        }
+        self.comp.add_damage(rect);
+    }
+
+    /// Toglie la tile della sessione `sid` (il rect torna al fondo). La
+    /// sessione resta: la chiude chi la possiede, con `SESS_CLOSE`.
+    fn drop_tile_of(&mut self, sid: usize) {
+        if let Some(i) = self.tiles.iter().position(|t| t.sid == sid) {
+            let (win, rect) = (self.tiles[i].win, self.tiles[i].rect);
+            self.tiles.remove(i);
+            if win != 0 {
+                let _ = self.comp.close(win);
+                self.comp.add_damage(rect);
+            }
+        }
+    }
+
+    /// CRC32 del **rect** della tile: `(byte, crc)`. Prova che un'operazione
+    /// ha toccato una tile e non l'altra.
+    fn tile_crc(&self, sid: usize) -> Option<(usize, u32)> {
+        let rect = self.tiles.iter().find(|t| t.sid == sid)?.rect;
+        let Surface::Pixel(p) = &self.surface else {
+            return None;
+        };
+        let row_bytes = rect.w as usize * 4;
+        let mut crc = 0xFFFF_FFFFu32;
+        let mut hashed = 0usize;
+        for y in 0..rect.h as usize {
+            let sy = rect.y as usize + y;
+            if sy >= p.height as usize {
+                break;
+            }
+            let row = unsafe {
+                core::slice::from_raw_parts(
+                    (p.ptr as *const u8)
+                        .add(sy * p.stride as usize + rect.x as usize * 4),
+                    row_bytes,
+                )
+            };
+            for &b in row {
+                crc ^= b as u32;
+                crc = crc.wrapping_mul(0x0100_0193);
+            }
+            hashed += row_bytes;
+        }
+        Some((hashed, crc))
+    }
+
+    /// Applica lo staging del layout (`TILE_COMMIT`): tutte le tile, poi un
+    /// render e un flush solo.
+    fn commit_tiles(&mut self) {
+        let pending = core::mem::take(&mut self.tile_pending);
+        for (sid, rect) in pending {
+            self.apply_tile(sid, rect);
+        }
+        self.render();
+        self.flush_display();
+    }
+
     /// Manda i byte alla sessione `idx`: decode -> modello (con scroll) ->
     /// render+flush **solo se la sessione e' quella disegnata**. `mirror` =
     /// la write entra nel canale seriale (D8c2): eco, ridisegni e test no
@@ -276,8 +554,11 @@ impl Term {
             s.bulk_feed = false;
             s.give_pending(cps);
         }
-        // Solo la sessione in focus ha pixel da aggiornare.
-        if idx != self.sessions.focus {
+        // D8e: hanno pixel da aggiornare **tutte** le sessioni con una tile
+        // visibile, non solo quella in focus (una tile non in focus si vede lo
+        // stesso: e' il suo rettangolo sullo schermo). Una sessione senza tile
+        // — o nascosta dallo zoom — vive solo nel modello.
+        if !self.tiles.iter().any(|t| t.sid == idx && t.visible) {
             return;
         }
         let bw = match self.sessions.get_mut(idx) {
@@ -498,14 +779,9 @@ impl Term {
             stride: surface_geom.stride,
             geom: grid_geom,
         });
-        // D8c1: il riadattamento del display ridimensiona **la sessione 0**
-        // (lo schermo). Le altre sessioni hanno la misura della loro tile:
-        // arrivera' con le tile multiple (D8e).
-        self.sessions.cols = grid_geom.cols;
-        self.sessions.rows = grid_geom.rows;
-        if let Some(s) = self.sessions.get_mut(0) {
-            s.resize(grid_geom.cols, grid_geom.rows);
-        }
+        // D8e: la misura delle sessioni e' quella delle loro **tile**
+        // (`ensure_screen_tile` qui sotto): con una tile e' lo schermo, come in
+        // D8c1; con N tile decide il layout del DE.
         // 5) il fondo del buffer nuovo (colore di pagina + immagine
         //    ricentrata: gli offset sono relativi alla superficie) e
         //    **trasferisci i pixel all'host**: il PRESENT ha agganciato il
@@ -513,6 +789,20 @@ impl Term {
         //    (il primo FLUSH, senza questo, arriverebbe al primo tasto:
         //    schermo nero fino a li').
         self.build_bg_layer();
+        if self.tiles.len() > 1 && self.tile_owner != 0 {
+            // D8e: con N tile il layout lo decide il DE — gli si dice che il
+            // display e' cambiato e lui rilancia `TILE_SET`/`TILE_COMMIT`. Il
+            // server non si auto-adatta (le tile non sono sue).
+            let _ = civis::send_async(
+                self.tile_owner,
+                civis::TILE_SCREEN,
+                ((w as u64) << 16) | (h as u64),
+                0,
+            );
+        } else {
+            // Una tile sola: e' lo schermo, si adatta da sola (D4/D8c1).
+            self.ensure_screen_tile();
+        }
         self.render();
         self.flush_display_full();
         true
@@ -676,21 +966,25 @@ impl Term {
             }
         }
 
-        // 2. le celle sotto il rect (inchiostro + bg espliciti).
-        let geom = self.surface.geom();
-        let (cw, ch) = (geom.cell_w as u32, geom.cell_h as u32);
-        if cw == 0 || ch == 0 {
-            return;
-        }
-        let (ox, oy) = (geom.origin_x, geom.origin_y);
-        let x1 = r.right().saturating_sub(1);
-        let y1 = r.bottom().saturating_sub(1);
-        let c0 = r.x.saturating_sub(ox) / cw;
-        let c1 = x1.saturating_sub(ox) / cw;
-        let r0 = r.y.saturating_sub(oy) / ch;
-        let r1 = y1.saturating_sub(oy) / ch;
-        if let Some(s) = self.sessions.focus_mut() {
-            s.grid.mark_rect(c0 as usize, r0 as usize, c1 as usize, r1 as usize);
+        // 2. le celle sotto il rect (inchiostro + bg espliciti), per **ogni**
+        //    tile che il rect tocca (D8e: un ospite puo' stare in una tile non
+        //    in focus).
+        for t in 0..self.tiles.len() {
+            let (geom, sid) = (self.tiles[t].geom, self.tiles[t].sid);
+            let (cw, ch) = (geom.cell_w as u32, geom.cell_h as u32);
+            if cw == 0 || ch == 0 {
+                continue;
+            }
+            let (ox, oy) = (geom.origin_x, geom.origin_y);
+            let x1 = r.right().saturating_sub(1);
+            let y1 = r.bottom().saturating_sub(1);
+            let c0 = r.x.saturating_sub(ox) / cw;
+            let c1 = x1.saturating_sub(ox) / cw;
+            let r0 = r.y.saturating_sub(oy) / ch;
+            let r1 = y1.saturating_sub(oy) / ch;
+            if let Some(s) = self.sessions.get_mut(sid) {
+                s.grid.mark_rect(c0 as usize, r0 as usize, c1 as usize, r1 as usize);
+            }
         }
         self.render();
 
@@ -817,14 +1111,18 @@ impl Term {
         self.sessions.attached(chan) == Some(sess as usize) || privileged(class)
     }
 
-    /// Area della griglia in pixel: `(x, y, w, h)` clippata alla surface.
-    fn grid_px_rect(&self) -> (u32, u32, u32, u32) {
-        let g = self.surface.geom();
-        let (sw, sh) = self.surface.pixel_size();
+    /// Area della griglia della tile `t` in pixel: `(x, y, w, h)` clippata
+    /// alla sua superficie (in coordinate schermo).
+    fn grid_px_rect(&self, t: usize) -> (u32, u32, u32, u32) {
+        let g = self.tile_geom(t);
+        let (right, bottom) = match self.tiles.get(t) {
+            Some(tile) => (tile.rect.right(), tile.rect.bottom()),
+            None => self.surface.pixel_size(),
+        };
         let x = g.origin_x;
         let y = g.origin_y;
-        let w = (g.cols as u32 * g.cell_w).min(sw.saturating_sub(x));
-        let h = (g.rows as u32 * g.cell_h).min(sh.saturating_sub(y));
+        let w = (g.cols as u32 * g.cell_w).min(right.saturating_sub(x));
+        let h = (g.rows as u32 * g.cell_h).min(bottom.saturating_sub(y));
         (x, y, w, h)
     }
 
@@ -897,7 +1195,10 @@ impl Term {
     /// feed "in blocco" (output di un comando) ricompone — il render e'
     /// differito a fine feed e i pixel intermedi non esistono.
     fn scroll_session(&mut self, idx: usize) {
-        let visible = idx == self.sessions.focus;
+        // D8e: lo shift e' **della tile** che mostra la sessione (non "della
+        // sessione in focus"): le altre tile non hanno pixel da spostare.
+        let tile = self.tile_of(idx);
+        let visible = tile.map(|t| self.tiles[t].visible).unwrap_or(false);
         let bulk = self.sessions.get(idx).map(|s| s.bulk_feed).unwrap_or(false);
         let can_shift = visible
             && !self.no_shift
@@ -927,8 +1228,11 @@ impl Term {
         if let Some(s) = self.sessions.get_mut(idx) {
             s.grid.cursor_visible = cursor_was_visible;
         }
-        let (gx, gy, gw, gh) = self.grid_px_rect();
-        let cell_h = self.surface.geom().cell_h;
+        let (gx, gy, gw, gh) = match tile {
+            Some(t) => self.grid_px_rect(t),
+            None => return,
+        };
+        let cell_h = self.tile_geom(tile.unwrap_or(0)).cell_h;
         if let Surface::Pixel(p) = &mut self.surface {
             // `h` = tutta la griglia: la funzione lascia invariate le ultime
             // `dy` righe (la nuova ultima riga di celle, che il renderer
@@ -941,52 +1245,49 @@ impl Term {
         self.comp.add_damage(musivum::Rect::new(gx, gy, gw, gh));
     }
 
-    // ── Letture della griglia in focus (il render disegna solo quella) ──
-    fn fgrid_span_at(&self, col: usize, row: usize) -> (usize, usize) {
+    // ── Letture della griglia di una **sessione** (una tile) ────────────
+    fn grid_span_at(&self, sid: usize, col: usize, row: usize) -> (usize, usize) {
         self.sessions
-            .focus_session()
+            .get(sid)
             .map(|s| s.grid.span_at(col, row))
             .unwrap_or((col, 1))
     }
 
-    fn fgrid_cell(&self, col: usize, row: usize) -> Cell {
+    fn grid_cell(&self, sid: usize, col: usize, row: usize) -> Cell {
         self.sessions
-            .focus_session()
+            .get(sid)
             .map(|s| s.grid.cell(col, row))
             .unwrap_or_default()
     }
 
-    fn fgrid_cell_width(&self, col: usize, row: usize) -> u8 {
-        self.fgrid_cell(col, row).width
+    fn grid_cell_width(&self, sid: usize, col: usize, row: usize) -> u8 {
+        self.grid_cell(sid, col, row).width
     }
 
-    fn fgrid_cursor(&self) -> (usize, usize) {
+    fn grid_cursor(&self, sid: usize) -> (usize, usize) {
         self.sessions
-            .focus_session()
+            .get(sid)
             .map(|s| s.grid.cursor_clamped())
             .unwrap_or((0, 0))
     }
 
-    fn fgrid_cursor_visible(&self) -> bool {
+    fn grid_cursor_visible(&self, sid: usize) -> bool {
         self.sessions
-            .focus_session()
+            .get(sid)
             .map(|s| s.grid.cursor_visible)
             .unwrap_or(false)
     }
 
-    /// Ridisegna la zona sporca e il cursore.
+    /// Ridisegna le **tile visibili** e il cursore di quella in focus (D8e).
     ///
-    /// Ottimizzazione: solo le celle dirty vengono ritoccate. Per le celle
-    /// vuote (cp == 0) o con background trasparente, prima si ripristina lo
-    /// sfondo dal layer 0; se manca il layer 0, si riempie col colore di
-    /// background corrente (cosi' i pixel del vecchio carattere non restano
-    /// impressi). Poi si disegna il glifo (se presente).
+    /// Ottimizzazione: solo le celle dirty di ogni sessione vengono ritoccate.
+    /// Per le celle vuote (cp == 0) o con background trasparente, prima si
+    /// ripristina lo sfondo dal layer 0; se manca il layer 0, si riempie col
+    /// colore di background della cella (cosi' i pixel del vecchio carattere
+    /// non restano impressi). Poi si disegna il glifo (se presente).
     fn render(&mut self) {
         // T0 (ADR-0066): misura i cicli per render.
         let t0 = civis::rdtsc();
-        // Estraggo i dati del layer 0 come puntatore+lunghezza (tipo Copy)
-        // PRIMA di qualsiasi mut-borrow su self, per evitare conflitti di
-        // borrow con restore_layer0_cell(&mut self, ...).
         // T4 (solo test): con la bg uniforme il percorso legacy non deve
         // comporre il wallpaper, o shift e repaint darebbero pixel diversi.
         let l0_data = if self.test_uniform_bg {
@@ -994,140 +1295,170 @@ impl Term {
         } else {
             self.layer0.as_ref().map(|v| (v.as_ptr() as *const u8, v.len()))
         };
-
-        // T3 (ADR-0066): con la bg layer pronta il render copia una banda di
-        // background (memcpy) e disegna solo l'inchiostro. Puntatore+len+stride
-        // estratti prima del mut-borrow della surface (come per `l0_data`).
+        // T3 (ADR-0066): banda di background dalla bg layer (memcpy) invece di
+        // fill+blend per cella. Puntatore+len+stride estratti prima del
+        // mut-borrow della surface.
         let bg_data: Option<(*const u8, usize, u32)> = match (self.comp.wallpaper(), &self.surface) {
             (Some(wp), Surface::Pixel(_)) => {
                 Some((wp.data().as_ptr(), wp.data().len(), wp.stride()))
             }
             _ => None,
         };
-
-        let focus = self.sessions.focus;
-        let dirty = match self.sessions.get_mut(focus) {
-            Some(s) => s.grid.take_dirty(),
-            None => return,
-        };
-        if dirty.any {
-            let (cols, rows) = (self.sessions.cols, self.sessions.rows);
-            let r0 = dirty.min_row.min(rows.saturating_sub(1));
-            let r1 = dirty.max_row.min(rows.saturating_sub(1));
-            let c0 = dirty.min_col.min(cols.saturating_sub(1));
-            let c1 = dirty.max_col.min(cols.saturating_sub(1));
-            if let Some((bg_ptr, bg_len, bg_stride)) = bg_data {
-                // Allarga il bbox agli span interi: una banda che parte in
-                // mezzo a un glifo largo cancellerebbe inchiostro che nessuno
-                // ridisegna (Grid marca gia' lo span, ma il bbox puo' essere
-                // stato ristretto da altre celle).
-                let mut bc0 = c0;
-                let mut bc1 = c1;
-                for row in r0..=r1 {
-                    let (s0, _) = self.fgrid_span_at(c0, row);
-                    bc0 = bc0.min(s0);
-                    let (s1, l1) = self.fgrid_span_at(c1, row);
-                    bc1 = bc1.max((s1 + l1).saturating_sub(1));
-                }
-                let geom = self.surface.geom();
-                let bg = unsafe { core::slice::from_raw_parts(bg_ptr, bg_len) };
-                for row in r0..=r1 {
-                    let x0 = geom.origin_x + (bc0 as u32) * geom.cell_w;
-                    let y0 = geom.origin_y + (row as u32) * geom.cell_h;
-                    let bw = ((bc1 - bc0 + 1) as u32) * geom.cell_w;
-                    if let Surface::Pixel(p) = &mut self.surface {
-                        p.copy_from(bg, bg_stride, x0, y0, bw, geom.cell_h);
-                    }
-                    self.comp.add_damage(musivum::Rect::new(x0, y0, bw, geom.cell_h));
-                    for col in bc0..=bc1 {
-                        // Le continuazioni le disegna la testa dello span.
-                        if self.fgrid_cell_width(col, row) == 0 {
-                            continue;
-                        }
-                        let is_cursor =
-                            (col, row) == self.fgrid_cursor() && self.fgrid_cursor_visible();
-                        self.draw_cell_at(col, row, is_cursor, l0_data, true);
-                        self.stat_cells += 1; // T0 (ADR-0066)
-                    }
-                }
-            } else {
-                // Fallback (VGA o bg layer non pronta): percorso per-cella.
-                for row in r0..=r1 {
-                    for col in c0..=c1 {
-                        // Le continuazioni le disegna la **testa** dello span:
-                        // qui non si ridipinge il background sopra il glifo
-                        // largo (era il bug: l'icona restava di una cella).
-                        if self.fgrid_cell_width(col, row) == 0 {
-                            continue;
-                        }
-                        let is_cursor =
-                            (col, row) == self.fgrid_cursor() && self.fgrid_cursor_visible();
-                        self.draw_cell_at(col, row, is_cursor, l0_data, false);
-                        self.stat_cells += 1; // T0 (ADR-0066)
-                    }
-                }
+        for t in 0..self.tiles.len() {
+            if !self.tiles[t].visible {
+                continue;
             }
+            self.render_tile(t, l0_data, bg_data);
         }
-        // Il cursore si e' spostato o ha cambiato visibilita': ridisegna la
-        // cella del cursore solo se lo stato e' cambiato (con il danno
-        // esplicito sarebbe un trasferimento per messaggio).
-        let cur = self.fgrid_cursor();
-        let cur_visible = self.fgrid_cursor_visible();
-        let (drawn, drawn_visible) = match self.sessions.get(focus) {
-            Some(s) => (s.cursor_drawn, s.cursor_drawn_visible),
-            None => return,
-        };
-        if cur != drawn || cur_visible != drawn_visible {
-            // Cancella la vecchia posizione del cursore (se diversa).
-            if cur != drawn {
-                let (cc, cr) = drawn;
-                if cc < self.sessions.cols && cr < self.sessions.rows {
-                    self.draw_cell_at(cc, cr, false, l0_data, false);
-                }
-            }
-            // Disegna il cursore nella nuova posizione.
-            let (cc, cr) = cur;
-            if cc < self.sessions.cols && cr < self.sessions.rows {
-                self.draw_cell_at(cc, cr, cur_visible, l0_data, false);
-            }
-            if let Some(s) = self.sessions.get_mut(focus) {
-                s.cursor_drawn = cur;
-                s.cursor_drawn_visible = cur_visible;
-            }
-        }
-        // Nel fallback VGA il cursore e' quello hardware (CRTC).
-        let (cc, cr) = cur;
+        self.render_cursor(l0_data);
+        // Nel fallback VGA il cursore e' quello hardware (CRTC): uno solo, la
+        // griglia e' una.
         if matches!(self.surface, Surface::VgaText(_)) {
+            let sid = self.sessions.focus;
+            let (cc, cr) = self.grid_cursor(sid);
             unsafe { move_hw_cursor(cr, cc) };
         }
         self.stat_renders += 1; // T0 (ADR-0066)
         self.stat_cyc_render += civis::rdtsc() - t0;
     }
 
-    /// Riempe una cella (o uno span di celle) col suo background (nessun
-    /// glifo). Usato per le celle vuote quando non c'e' un layer 0 da
-    /// ripristinare.
-    fn paint_cell_bg(&mut self, col: usize, row: usize, span: usize, bg: u32) {
-        let surface = match &mut self.surface {
-            Surface::Pixel(p) => p,
-            _ => return,
+    /// La zona sporca della **tile `t`**: una banda di background per riga
+    /// (memcpy dalla bg layer, in coordinate schermo) e poi l'inchiostro.
+    fn render_tile(
+        &mut self,
+        t: usize,
+        l0_data: Option<(*const u8, usize)>,
+        bg_data: Option<(*const u8, usize, u32)>,
+    ) {
+        let sid = self.tile_sid(t);
+        let (cols, rows, geom) = match self.tiles.get(t) {
+            Some(tile) => (tile.cols(), tile.rows(), tile.geom),
+            None => return,
         };
-        let cw = surface.geom.cell_w as u32;
-        let ch = surface.geom.cell_h as u32;
-        let x = surface.geom.origin_x + (col as u32) * cw;
-        let y = surface.geom.origin_y + (row as u32) * ch;
-        let w = cw * span.max(1) as u32;
-        let color = surface::rgba_to_bgra(bg);
-        for yy in 0..ch {
-            for xx in 0..w {
-                unsafe { surface.put(x + xx, y + yy, color) };
+        if cols == 0 || rows == 0 {
+            return;
+        }
+        let dirty = match self.sessions.get_mut(sid) {
+            Some(s) => s.grid.take_dirty(),
+            None => return,
+        };
+        if !dirty.any {
+            return;
+        }
+        let r0 = dirty.min_row.min(rows.saturating_sub(1));
+        let r1 = dirty.max_row.min(rows.saturating_sub(1));
+        let c0 = dirty.min_col.min(cols.saturating_sub(1));
+        let c1 = dirty.max_col.min(cols.saturating_sub(1));
+        // Il cursore del terminale c'e' **solo** nella tile in focus.
+        let (cc, cr) = self.grid_cursor(sid);
+        let cursor_here = self.focus_tile() == Some(t) && self.grid_cursor_visible(sid);
+        if let Some((bg_ptr, bg_len, bg_stride)) = bg_data {
+            // Allarga il bbox agli span interi: una banda che parte in mezzo a
+            // un glifo largo cancellerebbe inchiostro che nessuno ridisegna.
+            let mut bc0 = c0;
+            let mut bc1 = c1;
+            for row in r0..=r1 {
+                let (s0, _) = self.grid_span_at(sid, c0, row);
+                bc0 = bc0.min(s0);
+                let (s1, l1) = self.grid_span_at(sid, c1, row);
+                bc1 = bc1.max((s1 + l1).saturating_sub(1));
+            }
+            let bg = unsafe { core::slice::from_raw_parts(bg_ptr, bg_len) };
+            for row in r0..=r1 {
+                let x0 = geom.origin_x + (bc0 as u32) * geom.cell_w;
+                let y0 = geom.origin_y + (row as u32) * geom.cell_h;
+                let bw = ((bc1 - bc0 + 1) as u32) * geom.cell_w;
+                // La banda sta nella griglia, che sta nella tile: nessun
+                // sbordo (il clip per tile lo fa la **vista** per le celle).
+                if let Surface::Pixel(p) = &mut self.surface {
+                    p.copy_from(bg, bg_stride, x0, y0, bw, geom.cell_h);
+                }
+                self.comp.add_damage(musivum::Rect::new(x0, y0, bw, geom.cell_h));
+                for col in bc0..=bc1 {
+                    // Le continuazioni le disegna la testa dello span.
+                    if self.grid_cell_width(sid, col, row) == 0 {
+                        continue;
+                    }
+                    let is_cursor = cursor_here && (col, row) == (cc, cr);
+                    self.draw_cell_at(t, col, row, is_cursor, l0_data, true);
+                    self.stat_cells += 1; // T0 (ADR-0066)
+                }
+            }
+        } else {
+            // Fallback (VGA o bg layer non pronta): percorso per-cella.
+            for row in r0..=r1 {
+                for col in c0..=c1 {
+                    // Le continuazioni le disegna la **testa** dello span: qui
+                    // non si ridipinge il background sopra il glifo largo (era
+                    // il bug: l'icona restava di una cella).
+                    if self.grid_cell_width(sid, col, row) == 0 {
+                        continue;
+                    }
+                    let is_cursor = cursor_here && (col, row) == (cc, cr);
+                    self.draw_cell_at(t, col, row, is_cursor, l0_data, false);
+                    self.stat_cells += 1; // T0 (ADR-0066)
+                }
             }
         }
     }
 
-    /// Disegna una cella sulla surface attiva (tutto lo span del glifo).
+    /// Il cursore del terminale della tile in focus: si ridisegna solo se si e'
+    /// spostato o ha cambiato visibilita'.
+    fn render_cursor(&mut self, l0_data: Option<(*const u8, usize)>) {
+        let Some(t) = self.focus_tile() else {
+            return;
+        };
+        let sid = self.tile_sid(t);
+        let (cols, rows) = match self.tiles.get(t) {
+            Some(tile) => (tile.cols(), tile.rows()),
+            None => return,
+        };
+        let cur = self.grid_cursor(sid);
+        let cur_visible = self.grid_cursor_visible(sid);
+        let (drawn, drawn_visible) = match self.sessions.get(sid) {
+            Some(s) => (s.cursor_drawn, s.cursor_drawn_visible),
+            None => return,
+        };
+        if cur != drawn || cur_visible != drawn_visible {
+            // Cancella la vecchia posizione del cursore (se diversa).
+            if cur != drawn {
+                let (dc, dr) = drawn;
+                if dc < cols && dr < rows {
+                    self.draw_cell_at(t, dc, dr, false, l0_data, false);
+                }
+            }
+            let (cc, cr) = cur;
+            if cc < cols && cr < rows {
+                self.draw_cell_at(t, cc, cr, cur_visible, l0_data, false);
+            }
+            if let Some(s) = self.sessions.get_mut(sid) {
+                s.cursor_drawn = cur;
+                s.cursor_drawn_visible = cur_visible;
+            }
+        }
+    }
+
+    /// Riempe una cella (o uno span di celle) col suo background (nessun
+    /// glifo). Usato per le celle vuote quando non c'e' un layer 0 da
+    /// ripristinare. Si disegna nella **vista** della tile: il clip e' il suo
+    /// rettangolo, niente pixel nel vicino.
+    fn paint_cell_bg(&mut self, t: usize, col: usize, row: usize, span: usize, bg: u32) {
+        let Some(mut view) = self.tile_view(t) else {
+            return;
+        };
+        let cw = view.geom.cell_w as u32;
+        let ch = view.geom.cell_h as u32;
+        let x = view.geom.origin_x + (col as u32) * cw;
+        let y = view.geom.origin_y + (row as u32) * ch;
+        let w = cw * span.max(1) as u32;
+        let color = surface::rgba_to_bgra(bg);
+        view.fill_rect(x, y, w, ch, color);
+    }
+
+    /// Disegna una cella nella **tile `t`** (tutto lo span del glifo).
     fn draw_cell(
         &mut self,
+        t: usize,
         col: usize,
         row: usize,
         span: usize,
@@ -1136,8 +1467,6 @@ impl Term {
         bg: u32,
         cursor: bool,
     ) {
-        // Nel path VGA il font non serve (il BIOS disegna il carattere).
-        let font = self.font.as_mut();
         // Passa il layer 0 a put_char: i pixel BMP sovrapposti vengono
         // copiati sopra lo sfondo prima del glifo, cosi' il testo resta
         // sopra l'immagine senza cancellarla. T4 (solo test): con la bg
@@ -1151,8 +1480,31 @@ impl Term {
                 (v.as_slice(), self.layer0_width, l0_h, self.layer0_offset_x, self.layer0_offset_y)
             })
         };
-        self.surface
-            .put_char(col, row, span, cp, fg, bg, cursor, font, l0);
+        // La vista si prende **prima** del prestito del font (sono due campi
+        // diversi di `self`, ma il compilatore lo deve sapere).
+        let view = self.tile_view(t);
+        // Nel path VGA il font non serve (il BIOS disegna il carattere).
+        let font = self.font.as_mut();
+        match view {
+            Some(view) => {
+                // Path pixel: la vista porta il clip della tile, e il layer 0
+                // (che e' dello schermo) si trasla nell'origine della tile.
+                let (rx, ry) = self
+                    .tiles
+                    .get(t)
+                    .map(|tile| (tile.rect.x, tile.rect.y))
+                    .unwrap_or((0, 0));
+                let l0 = l0.map(|(d, w, h, ox, oy)| {
+                    (d, w, h, ox.saturating_sub(rx), oy.saturating_sub(ry))
+                });
+                let mut surf = Surface::Pixel(view);
+                surf.put_char(col, row, span, cp, fg, bg, cursor, font, l0);
+            }
+            // Fallback VGA: una sola griglia testuale, nessuna tile pixel.
+            None => self
+                .surface
+                .put_char(col, row, span, cp, fg, bg, cursor, font, l0),
+        }
     }
 
     /// Disegna la cella (col,row): se e' una continuazione disegna la testa
@@ -1166,19 +1518,22 @@ impl Term {
     /// completo, che resta l'unica verita' per alpha e layer 0.
     fn draw_cell_at(
         &mut self,
+        t: usize,
         col: usize,
         row: usize,
         cursor: bool,
         l0_data: Option<(*const u8, usize)>,
         bg_ready: bool,
     ) {
-        let (start, _len) = self.fgrid_span_at(col, row);
-        let cell = self.fgrid_cell(start, row);
+        let sid = self.tile_sid(t);
+        let (start, _len) = self.grid_span_at(sid, col, row);
+        let cell = self.grid_cell(sid, start, row);
         let span = cell.width.max(1) as usize;
         // D7 (ADR-0066): dichiara il danno subito dopo aver calcolato lo span
         // (una cella toccata e' una cella cambiata), con lo sbordo di 1 cella
-        // e il clip alla superficie.
-        let geom = self.surface.geom();
+        // e il clip alla superficie. La geom e' quella della tile, in
+        // coordinate **schermo**: il danno resta assoluto.
+        let geom = self.tile_geom(t);
         let (sw, sh) = self.surface.pixel_size();
         self.comp.add_damage(cells_rect(
             geom,
@@ -1192,8 +1547,15 @@ impl Term {
         // T3: background gia' corretto dalla banda -> solo inchiostro.
         // Copre anche `cp == 0` (la banda ha gia' messo il fondo giusto).
         if bg_ready && cell.bg == color::BLACK {
-            if let Surface::Pixel(p) = &mut self.surface {
-                p.draw_ink(start, row, span, cell.cp, cell.fg, cursor, self.font.as_mut());
+            match self.tile_view(t) {
+                Some(mut view) => {
+                    view.draw_ink(start, row, span, cell.cp, cell.fg, cursor, self.font.as_mut())
+                }
+                None => {
+                    if let Surface::Pixel(p) = &mut self.surface {
+                        p.draw_ink(start, row, span, cell.cp, cell.fg, cursor, self.font.as_mut());
+                    }
+                }
             }
             return;
         }
@@ -1204,15 +1566,15 @@ impl Term {
         if cell.cp == 0 {
             if let Some((ptr, len)) = l0_data {
                 let l0_slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-                self.restore_layer0_cell(start, row, span, l0_slice);
+                self.restore_layer0_cell(t, start, row, span, l0_slice);
             } else {
-                self.paint_cell_bg(start, row, span, cell.bg);
+                self.paint_cell_bg(t, start, row, span, cell.bg);
             }
             return;
         }
         // Celle con carattere: put_char gestisce layer 0 (BMP come sfondo) +
         // glifo in un colpo solo.
-        self.draw_cell(start, row, span, cell.cp, cell.fg, cell.bg, cursor);
+        self.draw_cell(t, start, row, span, cell.cp, cell.fg, cell.bg, cursor);
     }
 
     /// Ridisegna il fondo dell'intero framebuffer: il **colore di pagina**
@@ -1291,36 +1653,25 @@ impl Term {
             p.copy_from(bg, bg_stride, 0, 0, w_fb, h_fb);
         }
         self.comp.set_wallpaper(wp);
-        // D8a: una sola tile, grande quanto lo schermo, che scrive
-        // **direttamente** nel buffer del device (`Backing::Direct`). Il
-        // compositor non copia nulla: sottrae la sua area al fondo, che qui
-        // coincide con tutto lo schermo — il wallpaper resta la sorgente che
-        // la tile legge per comporre le proprie bande (T3), non un layer
-        // ridipinto a ogni frame.
-        let screen = musivum::Rect::new(0, 0, w_fb, h_fb);
-        self.comp.set_screen(screen);
-        if self.tile == 0 {
-            self.tile = self.comp.open(musivum::Window {
-                id: 0,
-                owner: 0,
-                rect: screen,
-                clip: screen,
-                backing: musivum::Backing::Direct,
-                layer: musivum::Layer::Tiles,
-                z: 0,
-                visible: true,
-            });
-        } else {
-            self.comp.set_rect(self.tile, screen);
-            self.comp.set_clip(self.tile, screen);
-        }
+        // D8a/D8e: la tile (o le tile) le registra `ensure_screen_tile` /
+        // `TILE_*`, con `Backing::Direct`: il compositor non copia nulla,
+        // sottrae la loro area al fondo. Il wallpaper resta la sorgente che le
+        // tile leggono per comporre le proprie bande (T3).
+        self.comp.set_screen(musivum::Rect::new(0, 0, w_fb, h_fb));
     }
 
     /// Ripristina una cella (o uno span di celle) dal layer 0: prima il colore
     /// di pagina su tutta la zona (cancella il carattere precedente e i
     /// margini fuori dall'immagine), poi l'overlap del BMP composto con il
     /// suo alpha.
-    fn restore_layer0_cell(&mut self, col: usize, row: usize, span: usize, layer0: &[u8]) {
+    fn restore_layer0_cell(
+        &mut self,
+        t: usize,
+        col: usize,
+        row: usize,
+        span: usize,
+        layer0: &[u8],
+    ) {
         let bg = surface::rgba_to_bgra(color::BLACK);
         let w_img = self.layer0_width;
         let ox = self.layer0_offset_x;
@@ -1330,20 +1681,28 @@ impl Term {
         } else {
             (layer0.len() / (w_img as usize * 4)) as u32
         };
-        let surface = match &mut self.surface {
-            Surface::Pixel(p) => p,
-            _ => return,
+        let Some(mut view) = self.tile_view(t) else {
+            return;
         };
-        let cw = surface.geom.cell_w as u32;
-        let ch = surface.geom.cell_h as u32;
-        let x = surface.geom.origin_x + (col as u32) * cw;
-        let y = surface.geom.origin_y + (row as u32) * ch;
+        // Nella vista si lavora in coordinate **tile**: la geometria e' quella
+        // locale e il layer 0 (che e' dello schermo) si trasla dell'origine.
+        let cw = view.geom.cell_w as u32;
+        let ch = view.geom.cell_h as u32;
+        let x = view.geom.origin_x + (col as u32) * cw;
+        let y = view.geom.origin_y + (row as u32) * ch;
         let span_px = cw * span.max(1) as u32;
+        let (rx, ry) = self
+            .tiles
+            .get(t)
+            .map(|tile| (tile.rect.x, tile.rect.y))
+            .unwrap_or((0, 0));
+        let ox = ox.saturating_sub(rx);
+        let oy = oy.saturating_sub(ry);
 
-        // Fondo di pagina (clippato alla superficie).
-        let w = span_px.min(surface.width.saturating_sub(x));
-        let h = ch.min(surface.height.saturating_sub(y));
-        surface.fill_rect(x, y, w, h, bg);
+        // Fondo di pagina (clippato alla tile dalla vista).
+        let w = span_px.min(view.width.saturating_sub(x));
+        let h = ch.min(view.height.saturating_sub(y));
+        view.fill_rect(x, y, w, h, bg);
 
         // Overlap con il BMP, riga per riga (l'offset sorgente e' in BYTE:
         // `w_img * 4` per riga — senza il `* 4` si copiava bene solo la prima
@@ -1355,7 +1714,7 @@ impl Term {
         if overlap_x_start < overlap_x_end && overlap_y_start < overlap_y_end {
             let n = overlap_x_end - overlap_x_start;
             for sy in overlap_y_start..overlap_y_end {
-                if sy >= surface.height {
+                if sy >= view.height {
                     break;
                 }
                 let sy0 = (sy - oy) as usize;
@@ -1364,7 +1723,7 @@ impl Term {
                 if src_off + bytes > layer0.len() {
                     break;
                 }
-                surface.blend_bgra_span(
+                view.blend_bgra_span(
                     overlap_x_start,
                     sy,
                     n,
@@ -1466,6 +1825,8 @@ fn real_main(_sp: u64) -> ! {
         mirror_left: [MIRROR_SESSION_MAX; littera::MAX_SESSIONS],
         mirror_truncated: [false; littera::MAX_SESSIONS],
         kb_retry_at: 0,
+        tile_pending: alloc::vec::Vec::new(),
+        tile_owner: 0,
         surface,
         font,
         driver_chan,
@@ -1476,7 +1837,7 @@ fn real_main(_sp: u64) -> ! {
         layer0_offset_y: 0,
         // D8a: il compositor del DE. La tile si registra in `build_bg_layer`.
         comp: musivum::Compositor::new(musivum::Rect::new(0, 0, w_surf, h_surf)),
-        tile: 0,
+        tiles: alloc::vec::Vec::new(),
         win_owner: alloc::vec::Vec::new(),
         win_surfaces: alloc::vec::Vec::new(),
         bg_rows_equal: false,
@@ -1509,6 +1870,8 @@ fn real_main(_sp: u64) -> ! {
 
     // Fondo: colore di pagina + immagine centrata (se c'e').
     term.build_bg_layer();
+    // D8e: una tile (la 1) = lo schermo, che mostra la sessione 0.
+    term.ensure_screen_tile();
     term.flush_display_full();
 
     // 5. Banner sul terminale (il framebuffer o la VGA) + il seriale (sink
@@ -1659,9 +2022,18 @@ fn real_main(_sp: u64) -> ! {
                         // accettato; ogni altra tile e' negata (policy in
                         // D8f/D8g).
                         let hint = msg.w1 as u32;
-                        let tile = if msg.w0 == 0 {
+                        // D8e: le tile sono indicizzate 1..N (la finestra di un
+                        // ospite e' clippata al rect della **sua** tile).
+                        let tile_id = if msg.w0 == 0 {
                             match term.sessions.attached(msg.channel) {
-                                Some(sid) if sid == term.sessions.focus => term.tile,
+                                Some(sid) if sid == term.sessions.focus => match term.focus_tile()
+                                {
+                                    Some(t) => term.tiles[t].id,
+                                    None => {
+                                        let _ = civis::reply(WIN_OPEN, !0, 0);
+                                        continue;
+                                    }
+                                },
                                 _ => {
                                     let _ = civis::reply(WIN_OPEN, !0, 0);
                                     continue;
@@ -1672,10 +2044,30 @@ fn real_main(_sp: u64) -> ! {
                         };
                         let w = (hint >> 16) as u32;
                         let h = (hint & 0xFFFF) as u32;
+                        // Il rect della tile (clip dell'ospite) e la superficie.
+                        // D8e: `w0 = !0` = finestra di **chrome** del DE —
+                        // `Layer::Overlay`, clip allo schermo, solo >=
+                        // `ThirdParty` (il piano §10.1: "il layer e' un
+                        // privilegio"; primo mattone della policy di D8g).
+                        let chrome = tile_id == !0u32;
+                        let (tile_rect, layer) = if chrome {
+                            if !privileged(term.peer_class(msg.channel)) {
+                                let _ = civis::reply(WIN_OPEN, !0, 0);
+                                continue;
+                            }
+                            let (sw, sh) = term.surface.pixel_size();
+                            (musivum::Rect::new(0, 0, sw, sh), musivum::Layer::Overlay)
+                        } else {
+                            match term.tiles.iter().find(|t| t.id == tile_id) {
+                                Some(t) => (t.rect, musivum::Layer::TileGuests),
+                                None => {
+                                    let _ = civis::reply(WIN_OPEN, !0, 0);
+                                    continue;
+                                }
+                            }
+                        };
                         let (sw, sh) = term.surface.pixel_size();
-                        let ok = tile != 0
-                            && tile == term.tile
-                            && sw > 0
+                        let ok = sw > 0
                             && sh > 0
                             && w > 0
                             && h > 0
@@ -1716,8 +2108,11 @@ fn real_main(_sp: u64) -> ! {
                         };
                         let ptr = va as *mut u8;
                         let map_len = ((bytes + 4095) / 4096) * 4096;
-                        let rect = musivum::Rect::new(0, 0, w, h);
-                        let clip = musivum::Rect::new(0, 0, sw, sh);
+                        // D8e: l'ospite nasce **dentro** la sua tile — il rect
+                        // parte dall'origine della tile e il clip e' il suo
+                        // rettangolo (la torsione 1: un ospite non disegna fuori).
+                        let rect = musivum::Rect::new(tile_rect.x, tile_rect.y, w, h);
+                        let clip = tile_rect;
                         // `visible: false` finche' il cliente non fa il primo
                         // COMMIT: aprire non deve dipingere un rect nero.
                         let id = term.comp.open(musivum::Window {
@@ -1728,8 +2123,8 @@ fn real_main(_sp: u64) -> ! {
                             backing: musivum::Backing::Owned(musivum::Surface::new(
                                 ptr, w, h, w * 4,
                             )),
-                            layer: musivum::Layer::TileGuests,
-                            z: 0,
+                            layer,
+                            z: if chrome { 100 } else { 0 },
                             visible: false,
                         });
                         if id == 0 {
@@ -1782,6 +2177,76 @@ fn real_main(_sp: u64) -> ! {
                     WIN_SET_RECT | WIN_SET_SURFACE | WIN_RAISE => {
                         // Non implementati in D8b (arrivano con floating/D8f).
                         let _ = civis::reply(msg.tag, !0, 0);
+                    }
+
+                    // ── Tile del DE (D8e, ADR-0092) ────────────────────
+                    civis::TILE_SET => {
+                        // w0 = sessione, w1 = rect impacchettato. Solo il DE
+                        // (>= ThirdParty) dispone il layout. Staging: si
+                        // applica con TILE_COMMIT.
+                        if !privileged(term.peer_class(msg.channel)) {
+                            let _ = civis::reply(civis::TILE_SET, !0, 0);
+                            continue;
+                        }
+                        let sid = msg.w0 as usize;
+                        let (x, y, w, h) = civis::syscall_numbers::unpack_tile_rect(msg.w1);
+                        if term.sessions.get(sid).is_none() {
+                            let _ = civis::reply(civis::TILE_SET, !0, 0);
+                            continue;
+                        }
+                        let rect = musivum::Rect::new(x, y, w, h);
+                        term.tile_pending.retain(|&(s, _)| s != sid);
+                        term.tile_pending.push((sid, rect));
+                        let _ = civis::reply(civis::TILE_SET, 0, 0);
+                    }
+
+                    civis::TILE_COMMIT => {
+                        if !privileged(term.peer_class(msg.channel)) {
+                            let _ = civis::reply(civis::TILE_COMMIT, !0, 0);
+                            continue;
+                        }
+                        if term.tile_pending.is_empty() {
+                            let _ = civis::reply(civis::TILE_COMMIT, !0, 0);
+                            continue;
+                        }
+                        // Da qui il DE e' il **padrone del layout**: al
+                        // modeset si manda TILE_SCREEN a lui, non si adatta.
+                        term.tile_owner = msg.channel;
+                        term.commit_tiles();
+                        let _ = civis::reply(civis::TILE_COMMIT, 0, 0);
+                    }
+
+                    civis::TILE_INFO => {
+                        let visible = term.tiles.iter().filter(|t| t.visible).count();
+                        let focus = (term.sessions.focus as u64) + 1;
+                        let _ = civis::reply(civis::TILE_INFO, visible as u64, focus);
+                    }
+
+                    civis::TILE_DROP => {
+                        if !privileged(term.peer_class(msg.channel)) {
+                            let _ = civis::reply(civis::TILE_DROP, !0, 0);
+                            continue;
+                        }
+                        term.drop_tile_of(msg.w0 as usize);
+                        term.render();
+                        term.flush_display();
+                        let _ = civis::reply(civis::TILE_DROP, 0, 0);
+                    }
+
+                    civis::TILE_SIZE => {
+                        let (w, h) = term.surface.pixel_size();
+                        let _ = civis::reply(civis::TILE_SIZE, ((w as u64) << 16) | h as u64, 0);
+                    }
+
+                    civis::TILE_CRC => {
+                        match term.tile_crc(msg.w0 as usize) {
+                            Some((bytes, crc)) => {
+                                let _ = civis::reply(civis::TILE_CRC, bytes as u64, crc as u64);
+                            }
+                            None => {
+                                let _ = civis::reply(civis::TILE_CRC, !0, 0);
+                            }
+                        }
                     }
 
                     // ── Sessioni di terminale (D8c1, ADR-0089) ──────────
@@ -1928,6 +2393,65 @@ fn real_main(_sp: u64) -> ! {
                         let _ = civis::reply(SESS_READ, n as u64, 0);
                     }
 
+                    SESS_ATTACH => {
+                        // w0 = sessione: mailbox per un **iniettore** nominato
+                        // (il DE, D8e). Non dichiara il lettore.
+                        let class = term.peer_class(msg.channel);
+                        if !privileged(class) || term.sessions.get(msg.w0 as usize).is_none() {
+                            let _ = civis::reply(SESS_ATTACH, !0, 0);
+                            continue;
+                        }
+                        let pid = civis::peer_pid(msg.channel).unwrap_or(-1);
+                        match term.ensure_mailbox(msg.channel, pid) {
+                            Some(shm) => {
+                                // La capability e' la mailbox; l'attachment
+                                // dice su quale sessione scrive (`SESS_INPUT`).
+                                term.sessions.attach(msg.channel, msg.w0 as usize);
+                                let _ = civis::reply(SESS_ATTACH, 0, shm as u64);
+                            }
+                            None => {
+                                let _ = civis::reply(SESS_ATTACH, !0, 0);
+                            }
+                        }
+                    }
+
+                    SESS_INPUT => {
+                        // w0 = len (byte in OUT): accoda nel **buffer di input**
+                        // della sessione attaccata (non e' testo) e sveglia il
+                        // lettore dichiarato.
+                        let class = term.peer_class(msg.channel);
+                        let sid = match term.sessions.attached(msg.channel) {
+                            Some(id) => id,
+                            None => {
+                                let _ = civis::reply(SESS_INPUT, !0, 0);
+                                continue;
+                            }
+                        };
+                        let len = msg.w0 as usize;
+                        if !sess_proto::fits(len) || !term.sess_allowed(msg.channel, sid as u32, class)
+                        {
+                            let _ = civis::reply(SESS_INPUT, !0, 0);
+                            continue;
+                        }
+                        let Some(mb) = term.sess_mb(msg.channel) else {
+                            let _ = civis::reply(SESS_INPUT, !0, 0);
+                            continue;
+                        };
+                        let mut data = alloc::vec![0u8; len];
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                (mb as *const u8).add(sess_proto::OUT_OFF),
+                                data.as_mut_ptr(),
+                                len,
+                            );
+                        }
+                        let queued = term.queue_input(sid, &data);
+                        let _ = civis::reply(SESS_INPUT, 0, 0);
+                        if queued {
+                            term.hint_reader(sid, data.len());
+                        }
+                    }
+
                     SESS_RESIZE => {
                         // w0 = cols<<16|rows. In D8c1 la sessione in focus (lo
                         // schermo) non si ridimensiona da qui: la sua misura e'
@@ -1966,23 +2490,37 @@ fn real_main(_sp: u64) -> ! {
                     }
 
                     SESS_FOCUS => {
-                        // w0 = sessione da disegnare. D8c1: solo la 0 (le tile
-                        // multiple arrivano in D8e); serve l'attachment o il
+                        // w0 = sessione che riceve i **tasti** (D8e: qualunque
+                        // sessione con una tile). Serve l'attachment o il
                         // privilegio.
                         let class = term.peer_class(msg.channel);
                         let target = msg.w0 as usize;
                         let allowed = term.sessions.attached(msg.channel) == Some(target)
                             || privileged(class);
-                        if target != 0 || !allowed || !term.sessions.set_focus(target) {
+                        if !allowed
+                            || term.sessions.get(target).is_none()
+                            || term.tile_of(target).is_none()
+                        {
                             let _ = civis::reply(SESS_FOCUS, !0, 0);
                             continue;
                         }
-                        // La sessione mostrata deve essere ridisegnata tutta.
-                        if let Some(s) = term.sessions.focus_mut() {
-                            s.grid.mark_all();
+                        let old = term.sessions.focus;
+                        if old != target {
+                            // Il cursore del terminale e' **solo** della tile in
+                            // focus: la vecchia lo ridisegna spento, la nuova
+                            // acceso (`render_cursor` fa il resto).
+                            for sid in [old, target] {
+                                if let Some(s) = term.sessions.get_mut(sid) {
+                                    let (c, r) = s.cursor_drawn;
+                                    let c = c.min(s.grid.cols().saturating_sub(1));
+                                    let r = r.min(s.grid.rows().saturating_sub(1));
+                                    s.grid.mark_rect(c, r, c, r);
+                                }
+                            }
+                            let _ = term.sessions.set_focus(target);
                         }
                         term.render();
-                        term.flush_display_full();
+                        term.flush_display();
                         let _ = civis::reply(SESS_FOCUS, 0, 0);
                     }
 

@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 // ── Syscall numbers ────────────────────────────────────────────────────────
 // Single source of truth: kernel e userland (civis) dipendono da questo crate.
@@ -502,6 +502,13 @@ pub const INPUT_ATTACH: u64 = 0x46;
 pub const INPUT_DETACH: u64 = 0x47;
 pub const INPUT_NOTIFY: u64 = 0x48;
 pub const INPUT_READ: u64 = 0x49;
+/// `INPUT_SUPER` — **byte di prefisso** nel flusso di `INPUT_READ` (D8e): quello
+/// che segue e' un tasto con **Super** premuto. `pc-keyboard 0.7` non traccia i
+/// modificatori GUI (`Modifiers` = shift/ctrl/alt_gr/caps/numpad): il flag lo
+/// tiene `porta` dal `KeyEvent` (`LWin`/`RWin`, `Down`/`Up`) e lo scrive qui,
+/// nello stesso flusso ordinato dei byte — non in un messaggio a parte, che
+/// arriverebbe in ordine non garantito.
+pub const INPUT_SUPER: u8 = 0x1C;
 pub const SVC_READY: u64 = 0x7D;
 pub const TEST_DONE: u64 = 0x7E;
 pub const INIT_BOUNCE: u64 = 0x7F;
@@ -806,6 +813,60 @@ pub const SESS_TEST_INPUT: u64 = 0xA9;
 /// (E2): la verita' e' la coda, un hint perso non perde un tasto. Il lettore
 /// si dichiara leggendo (`SESS_READ`).
 pub const SESS_INPUT_EVENT: u64 = 0xAA;
+/// `SESS_ATTACH {sess}` -> `w1` = shm: mailbox su una sessione **nominata**
+/// (>= `ThirdParty`), per un iniettore che non e' il lettore (il DE, D8e).
+/// Non dichiara il chiamante come **lettore** — quello resta `SESS_READ`.
+pub const SESS_ATTACH: u64 = 0xAB;
+/// `SESS_INPUT {len}` -> 0: accoda `len` byte nel **buffer di input** della
+/// sessione attaccata (tasti, non testo: ≠ `SESS_WRITE`) e manda l'hint al
+/// lettore dichiarato. D8e: la tastiera passa al DE.
+pub const SESS_INPUT: u64 = 0xAC;
+
+// ── Tile del DE (D8e, ADR-0092) ─────────────────────────────────────
+// La console disegna le **sessioni** in rettangoli (tile). Il layout lo decide
+// il DE: `TILE_SET` per tile, `TILE_COMMIT` applica (un render, un flush). La
+// tile non ha stato proprio nel server: e' `rect + sessione`, e l'handle e'
+// **`sid + 1`** (1:1, come la torsione "una tile e' una sessione").
+//
+// - TILE_SET {sid, rect}: `w0` = sessione, `w1` = `pack_tile_rect`; `w = 0` =
+//   tile **nascosta** (sessione viva, non disegnata). Solo >= ThirdParty.
+// - TILE_COMMIT: applica lo staging (ridimensiona le sessioni, danno, un
+//   flush).
+// - TILE_INFO -> `(tile visibili, handle in focus)`.
+// - TILE_DROP {sid}: toglie la tile (la sessione la chiude chi la possiede).
+// - TILE_CRC {sid} -> `(crc, byte)` del rect della tile (prova "solo questa
+//   tile e' cambiata", per i test).
+// - TILE_SCREEN {wh}: console -> DE, fire-and-forget: il display si e'
+//   riadattato, rilancia il layout (con una tile sola il server si adatta da
+//   solo e il tag non parte).
+pub const TILE_SET: u64 = 0xB0;
+pub const TILE_COMMIT: u64 = 0xB1;
+pub const TILE_INFO: u64 = 0xB2;
+pub const TILE_DROP: u64 = 0xB3;
+pub const TILE_CRC: u64 = 0xB4;
+pub const TILE_SCREEN: u64 = 0xB5;
+/// `TILE_SIZE` -> `(w<<16|h)` del display **in pixel**: e' l'unita' in cui si
+/// dispone il layout (le celle non bastano: la cella del font non e' pubblica).
+pub const TILE_SIZE: u64 = 0xB6;
+
+/// Impacchetta un rettangolo di tile in `w1`: `x | y<<16 | w<<32 | h<<48`
+/// (schermo <= 65535 per lato). Single source: la usano il DE e la console.
+pub fn pack_tile_rect(x: u32, y: u32, w: u32, h: u32) -> u64 {
+    ((x as u64) & 0xFFFF)
+        | (((y as u64) & 0xFFFF) << 16)
+        | (((w as u64) & 0xFFFF) << 32)
+        | (((h as u64) & 0xFFFF) << 48)
+}
+
+/// Inversa di [`pack_tile_rect`]: `(x, y, w, h)`.
+pub fn unpack_tile_rect(v: u64) -> (u32, u32, u32, u32) {
+    (
+        (v & 0xFFFF) as u32,
+        ((v >> 16) & 0xFFFF) as u32,
+        ((v >> 32) & 0xFFFF) as u32,
+        ((v >> 48) & 0xFFFF) as u32,
+    )
+}
 
 // Alias brevi per comodità d'uso nei clienti.
 pub const WIN_OPN: u64 = WIN_OPEN;
@@ -1431,3 +1492,22 @@ pub const IRQ_NOTIFY_NET: u64 = 0x45;
 pub const MSI_VECTOR_GPU: u8 = 0x50;
 /// Vettore IDT/LAPIC dedicato a `NetDev` (MSI-X virtio-net, ADR-0069).
 pub const MSI_VECTOR_NET: u8 = 0x51;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Il rect di una tile viaggia in un registro: `(x, y, w, h)` 4x u16.
+    #[test]
+    fn tile_rect_impacchettato_e_riletto() {
+        assert_eq!(unpack_tile_rect(pack_tile_rect(10, 20, 300, 400)), (10, 20, 300, 400));
+        // Tile nascosta: `w = 0` (la sessione resta viva, non si disegna).
+        assert_eq!(unpack_tile_rect(pack_tile_rect(0, 0, 0, 0)), (0, 0, 0, 0));
+        // Lati massimi (schermo <= 65535).
+        let m = 65535;
+        assert_eq!(unpack_tile_rect(pack_tile_rect(m, m, m, m)), (m, m, m, m));
+        // Nessun bit si sporca fra i campi.
+        let v = pack_tile_rect(0xFFFF, 0, 0, 0xFFFF);
+        assert_eq!(unpack_tile_rect(v), (0xFFFF, 0, 0, 0xFFFF));
+    }
+}

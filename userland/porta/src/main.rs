@@ -29,7 +29,9 @@
 
 extern crate alloc;
 use alloc::collections::VecDeque;
-use pc_keyboard::{DecodedKey, HandleControl, KeyCode, Keyboard, KeyboardLayout, ScancodeSet1, layouts};
+use pc_keyboard::{
+    DecodedKey, HandleControl, KeyCode, KeyState, Keyboard, KeyboardLayout, ScancodeSet1, layouts,
+};
 
 use civis::println;
 
@@ -124,6 +126,10 @@ struct Tty {
     pump_now: bool,
     /// Backoff dopo un pump fallito (vedi retry in collect PumpRead).
     pump_wait_until: i64,
+    /// D8e — il tasto **Super** e' premuto (protocollo `INPUT_SUPER`).
+    /// `pc-keyboard` non lo traccia fra i modificatori: lo seguiamo qui dal
+    /// `KeyEvent` e prefissiamo i byte del tasto successivo.
+    super_down: bool,
     /// Lettori sottoscritti agli eventi di input, in ordine di attach: il
     /// **ultimo** ha il focus (LIFO). Potati su `INPUT_DETACH` e alla morte
     /// del client (`EXIT_NOTIFY`), cosi' il focus torna al precedente.
@@ -146,6 +152,7 @@ impl Tty {
             ready_sent: false,
             pump_now: false,
             pump_wait_until: 0,
+            super_down: false,
             subs: alloc::vec::Vec::new(),
         }
     }
@@ -315,26 +322,41 @@ impl Tty {
         let before = self.input.len();
         for &sc in scancodes {
             if let Ok(Some(event)) = self.decoder.add_byte(sc) {
+                // D8e: Super e' un modificatore che `pc-keyboard 0.7` non ha —
+                // lo seguiamo dal `KeyEvent` (che porta lo stato) **prima** di
+                // decodificare, e non emettiamo byte per il tasto in se'.
+                if matches!(event.code, KeyCode::LWin | KeyCode::RWin) {
+                    self.super_down = matches!(event.state, KeyState::Down | KeyState::SingleShot);
+                    continue;
+                }
                 if let Some(decoded) = self.decoder.process_keyevent(event) {
+                    // Con Super premuto i byte del tasto sono preceduti dal
+                    // prefisso: il DE li consuma, una sessione non li vede.
+                    let super_key = self.super_down;
                     match decoded {
                         DecodedKey::Unicode(c) => {
                             let mut tmp = [0u8; 4];
                             let s = c.encode_utf8(&mut tmp);
-                            self.emit(s.as_bytes());
+                            self.emit_key(s.as_bytes(), super_key);
                         }
-                        DecodedKey::RawKey(code) => match code {
-                            KeyCode::Return | KeyCode::NumpadEnter => self.emit(b"\n"),
-                            KeyCode::Backspace => self.emit(b"\x08"),
-                            KeyCode::ArrowUp => self.emit(b"\x1b[A"),
-                            KeyCode::ArrowDown => self.emit(b"\x1b[B"),
-                            KeyCode::ArrowRight => self.emit(b"\x1b[C"),
-                            KeyCode::ArrowLeft => self.emit(b"\x1b[D"),
-                            KeyCode::Home => self.emit(b"\x1b[H"),
-                            KeyCode::End => self.emit(b"\x1b[F"),
-                            KeyCode::Delete => self.emit(b"\x1b[3~"),
-                            KeyCode::Escape => self.emit(b"\x1b"),
-                            _ => {}
-                        },
+                        DecodedKey::RawKey(code) => {
+                            let bytes: &[u8] = match code {
+                                KeyCode::Return | KeyCode::NumpadEnter => b"\n",
+                                KeyCode::Backspace => b"\x08",
+                                KeyCode::ArrowUp => b"\x1b[A",
+                                KeyCode::ArrowDown => b"\x1b[B",
+                                KeyCode::ArrowRight => b"\x1b[C",
+                                KeyCode::ArrowLeft => b"\x1b[D",
+                                KeyCode::Home => b"\x1b[H",
+                                KeyCode::End => b"\x1b[F",
+                                KeyCode::Delete => b"\x1b[3~",
+                                KeyCode::Escape => b"\x1b",
+                                _ => b"",
+                            };
+                            if !bytes.is_empty() {
+                                self.emit_key(bytes, super_key);
+                            }
+                        }
                     }
                 }
             }
@@ -360,6 +382,13 @@ impl Tty {
     /// Accoda byte in input. L'eco NON passa di qui (43b/D8d): la fa il lettore
     /// scrivendo sulla sessione (o il modello, se il flag di sessione e'
     /// acceso).
+    fn emit_key(&mut self, bytes: &[u8], super_key: bool) {
+        if super_key {
+            self.emit(&[civis::INPUT_SUPER]);
+        }
+        self.emit(bytes);
+    }
+
     fn emit(&mut self, bytes: &[u8]) {
         for &b in bytes {
             if self.input.len() < INPUT_CAPACITY {

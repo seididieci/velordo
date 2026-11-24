@@ -374,6 +374,23 @@ fn cmdline_has_tls() -> bool {
     false
 }
 
+/// Cerca il token `desktop=1` nella cmdline (D8e: run dedicato delle tile,
+/// fuori dal gate — il layout lo dispone solo un'immagine >= ThirdParty).
+fn cmdline_has_desktop() -> bool {
+    let cmd = civis::boot_cmdline();
+    let mut i = 0usize;
+    while i + 9 <= cmd.len() {
+        if &cmd[i..i + 9] == b"desktop=1"
+            && (i == 0 || cmd[i - 1] == b' ' || cmd[i - 1] == 0)
+            && (i + 9 == cmd.len() || cmd[i + 9] == b' ' || cmd[i + 9] == 0)
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Cerca il token `net=1` nella cmdline (ADR-0069: run di rete dedicato,
 /// fuori dal gate). Stesso match a token intero di `s25=1`.
 fn cmdline_has_net() -> bool {
@@ -429,7 +446,10 @@ fn run_test(meta: &SvcMeta, supervised: &mut [Supervised]) {
 /// loop che ricevono (run_test + supervisore): il chiamante risponde con
 /// reply (i test guidano il caos tramite init invece di killare direttamente).
 fn handle_bounce(supervised: &mut [Supervised], svc_disc: u64) -> u64 {
-    match supervised.iter_mut().find(|e| e.svc as u64 == svc_disc) {
+    match supervised
+        .iter_mut()
+        .find(|e| e.svc.map(|s| s as u64) == Some(svc_disc))
+    {
         Some(e) => {
             // Un servizio gia' morto (o il **login** che ha avuto successo:
             // `LoginGate` lascia `pid = -1`) non ha un processo da uccidere,
@@ -441,7 +461,7 @@ fn handle_bounce(supervised: &mut [Supervised], svc_disc: u64) -> u64 {
                 restart_service(e);
                 return e.pid.max(0) as u64;
             }
-            println!("[init] bounce: uccido pid={} ({})", e.pid, e.svc as u64);
+            println!("[init] bounce: uccido pid={} ({})", e.pid, svc_disc);
             let _ = civis::kill(e.pid, 0);
             e.pid as u64
         }
@@ -557,7 +577,10 @@ enum OnDeath {
 /// Voce della tabella di supervisione.
 struct Supervised {
     meta: &'static SvcMeta,
-    svc: civis::Service,
+    /// Il servizio registrato, se c'e': il **DE** (D8e) non ne registra uno
+    /// (`Service::Impluvium` non esiste, kernel intatto) e si supervisiona
+    /// per **canale**.
+    svc: Option<civis::Service>,
     chan: i64,
     pid: i64,
     restarts: u32,
@@ -575,7 +598,7 @@ impl Supervised {
     const fn new(meta: &'static SvcMeta, svc: civis::Service) -> Self {
         Supervised {
             meta,
-            svc,
+            svc: Some(svc),
             chan: -1,
             pid: -1,
             restarts: 0,
@@ -691,7 +714,10 @@ fn restart_service(e: &mut Supervised) {
         };
         e.chan = chan;
         if wait_ready(chan) {
-            e.pid = civis::service_pid(e.svc).unwrap_or(-1);
+            e.pid = match e.svc {
+                Some(svc) => civis::service_pid(svc).unwrap_or(-1),
+                None => civis::peer_pid(chan as u64).unwrap_or(-1),
+            };
             println!("[init] supervisione: riavviato pid={}", e.pid);
             return;
         }
@@ -712,6 +738,14 @@ const SVC_GPU: SvcMeta = SvcMeta {
 };
 /// Console server (D3): modello a celle, font, surface; sessioni di terminale
 /// (D8c2: nessun device di testo).
+/// DE (D8e): albero delle tile, focus, tasti. **Non registra un servizio**
+/// (`Service::Impluvium` non esiste: il kernel resta intatto) — init lo
+/// supervisiona per canale.
+const SVC_IMPLUVIUM: SvcMeta = SvcMeta {
+    bin: b"impluvium",
+    obj: Some((b"sys", b"bin/impluvium.bin")),
+    prio: 16,
+};
 const SVC_CONSOLE: SvcMeta = SvcMeta {
     bin: b"console",
     obj: Some((b"sys", b"bin/console.bin")),
@@ -862,6 +896,9 @@ const TEST_DNS: SvcMeta = SvcMeta { bin: b"dnsprobe", obj: Some((b"tst", b"test/
 // rete e' il broker (ADR-0080 fase 6), provata da netudp/net3/net4.
 #[cfg(not(feature = "skip_tests"))]
 const TEST_POSIXSOCK: SvcMeta = SvcMeta { bin: b"posixsock", obj: Some((b"usr", b"posixsock")), prio: 16 };
+/// D8e — probe delle **tile** (layout): `usr` (`ThirdParty`), perche' il
+/// layout lo dispone solo il DE. Run dedicato (`desktop=1`).
+const TEST_TILEPROBE: SvcMeta = SvcMeta { bin: b"tileprobe", obj: Some((b"usr", b"tileprobe")), prio: 16 };
 // Probe TLS 1.3 (N6.2, ADR-0072): solo con `net=1` **e** `tls=1`; si salta da
 // solo se manca `sys:tls.conf` (server TLS sull'host, script dedicato).
 // N6.2: parla col servizio `net` in diretta (`tls_net`): software spedito in
@@ -999,6 +1036,16 @@ fn real_main(_sp: u64) -> ! {
         civis::exit(1);
     }
     let _ = civis::vestigia::log(b"init", b"tty ready");
+    // DE (D8e): albero delle tile, focus, tasti. Dopo porta (si sottoscrive
+    // alla tastiera) e prima del login (i tasti passano da lui). Il canale
+    // serve alla **supervisione per canale** (il DE non registra un servizio):
+    // senza, il supervisore lo vedrebbe "assente all'avvio" e lo riavvierebbe.
+    let de_chan = boot_svc(&SVC_IMPLUVIUM, true).unwrap_or(-1);
+    if de_chan < 0 {
+        println!("[init] impluvium FAILED (DE assente: la console inietta i tasti)");
+    } else {
+        let _ = civis::vestigia::log(b"init", b"de ready");
+    }
     // 6. userposix + attesa READY (Fase 40.3, P1): skeleton senza dipendenze
     //    (registra solo il servizio e resta in recv), riesce subito a boot.
     if boot_svc(&SVC_POSIX, true).is_none() {
@@ -1070,6 +1117,17 @@ fn real_main(_sp: u64) -> ! {
         Supervised::new(&SVC_TIME, civis::Service::Time),
         Supervised::new(&SVC_VESTIGIA, civis::Service::Vestigia),
         Supervised::new(&SVC_CUSTOS, civis::Service::Custos),
+        // DE (D8e): **senza** servizio (kernel intatto), supervisione per canale.
+        Supervised {
+            svc: None,
+            chan: de_chan,
+            pid: if de_chan >= 0 {
+                civis::peer_pid(de_chan as u64).unwrap_or(-1)
+            } else {
+                -1
+            },
+            ..Supervised::new(&SVC_IMPLUVIUM, civis::Service::Test)
+        },
         // Rete (ADR-0069): pid -1 se non spawnati (net=1 assente); il loop
         // di supervisione salta i pid negativi.
         Supervised::new(&SVC_NETDEV, civis::Service::NetDev),
@@ -1093,15 +1151,19 @@ fn real_main(_sp: u64) -> ! {
         // login (ultimo della sequenza) arrivava dopo oltre un minuto.
         if matches!(
             e.svc,
-            civis::Service::Net
-                | civis::Service::NetDev
-                | civis::Service::Siit
-                | civis::Service::Dns
-                | civis::Service::NetBroker
+            Some(civis::Service::Net)
+                | Some(civis::Service::NetDev)
+                | Some(civis::Service::Siit)
+                | Some(civis::Service::Dns)
+                | Some(civis::Service::NetBroker)
         ) {
             e.disabled = !net_enabled;
         }
-        e.pid = civis::service_pid(e.svc).unwrap_or(-1);
+        e.pid = match e.svc {
+            Some(svc) => civis::service_pid(svc).unwrap_or(-1),
+            // Il DE: il pid si ricava dal canale di nascita.
+            None => civis::peer_pid(e.chan as u64).unwrap_or(-1),
+        };
     }
 
     // Test suite in sequenza: usertestfs, usertestfat, usertests (Fase 9.5).
@@ -1144,6 +1206,15 @@ fn real_main(_sp: u64) -> ! {
         run_test(&TEST_THREADS, &mut supervised);
     }
 
+    // D8e: le **tile** (multi-tile, zoom, focus, CRC per tile). Fuori dal gate
+    // e indipendente dalla suite (`desktop=1`): il probe e' `usr`
+    // (`ThirdParty`) e dispone il layout. Con `RUN_TESTS=0` il boot arriva qui
+    // in pochi secondi (run dedicato).
+    if cmdline_has_desktop() {
+        println!("[init] avvio tileprobe (desktop=1)");
+        run_test(&TEST_TILEPROBE, &mut supervised);
+    }
+
     // Bench throughput (Fase 23, feature `bench`): dopo l'eventuale suite,
     // prima della shell. Mai nel gate (rumore di timing + log dedicato).
     #[cfg(feature = "bench")]
@@ -1179,7 +1250,7 @@ fn real_main(_sp: u64) -> ! {
         civis::exit(1);
     }
     for e in supervised.iter_mut() {
-        if e.svc == civis::Service::Login {
+        if e.svc == Some(civis::Service::Login) {
             // Il pid dal **canale** (peer_pid), non dal servizio registrato:
             // il canale di nascita e' la fonte di verita' (il peer e' il
             // login) e non dipende da un messaggio ne' da una registrazione
@@ -1196,7 +1267,10 @@ fn real_main(_sp: u64) -> ! {
             continue;
         }
         if e.pid < 0 {
-            e.pid = civis::service_pid(e.svc).unwrap_or(-1);
+            e.pid = match e.svc {
+                Some(svc) => civis::service_pid(svc).unwrap_or(-1),
+                None => civis::peer_pid(e.chan as u64).unwrap_or(-1),
+            };
         }
         if e.pid < 0 {
             println!("[init] supervisione: servizio assente all'avvio, riavvio");

@@ -158,6 +158,13 @@ if [ "$fail" -eq 0 ]; then
         echo "[gate] FAIL: DEV_KEYBOARD e' ancora nell'ABI (D8d)" >&2
         fail=1
     fi
+    # D8e (ADR-0092) — il DE **non** e' un servizio registrato: se
+    # `Service::Impluvium` comparisse nel kernel o nei numeri condivisi, il
+    # piano sarebbe stato tradito (il kernel doveva restare intatto).
+    if rg -n 'Service::Impluvium|Impluvium =' --glob '*.rs' syscall-numbers kernel 2>/dev/null; then
+        echo "[gate] FAIL: Service::Impluvium esiste (il kernel doveva restare intatto)" >&2
+        fail=1
+    fi
 fi
 
 # Fase shell nativa: stessa QEMU, login gia' al prompt. Gli stessi 33 check

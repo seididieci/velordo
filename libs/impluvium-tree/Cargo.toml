@@ -1,0 +1,11 @@
+[package]
+name = "impluvium-tree"
+version = "0.1.0"
+edition = "2021"
+
+# Workspace proprio: il modello del DE si prova sull'host (`cargo test`), come
+# `sess-proto`/`net-ep`. Senza, Cargo vedrebbe due root annidate.
+[workspace]
+
+[dependencies]
+musivum = { path = "../musivum" }

@@ -59,6 +59,7 @@ build_one userland/net     userland/net/src/net.ld         net.bin         netd
 # Console server (D3, ADR-0060): modello a celle, font TTF, surface; serve
 # /dev/console. Il driver `gpu` pubblica /dev/display.
 build_one userland/console userland/console/src/console.ld console.bin    console
+build_one userland/impluvium userland/impluvium/src/impluvium.ld impluvium.bin impluvium
 build_one userland/kbd     userland/kbd/src/kbd.ld         kbd.bin         kbd
 build_one userland/porta   userland/porta/src/porta.ld     porta.bin       porta
 build_one userland/uptime  userland/uptime/src/uptime.ld   useruptime.bin  useruptime
