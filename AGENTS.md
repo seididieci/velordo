@@ -552,7 +552,8 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   passa il **canale** di nascita; lo split che crea una sessione deve
   `SESS_CLOSE`rla se il layout lo rifiuta. Prova: gate (le 33 check della shell
   girano **attraverso il DE**) + `./scripts/run-desktop-tests.sh` (keybinding
-  digitati dal monitor). Unit host **183** (`impluvium-tree` 7).
+  digitati dal monitor, `t76` che confronta i CRC delle due tile per il bordo).
+  Unit host **183** (`impluvium-tree` 7).
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo

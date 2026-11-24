@@ -132,9 +132,23 @@ fn main_checks() -> bool {
         "CRC non leggibile",
     );
 
-    // 5. Il focus si sposta (e torna): e' chi riceve i tasti.
+    // 5. Il focus si sposta (e torna): e' chi riceve i tasti, e il **bordo**
+    //    della tile lo segue (D8e3: accento sulla tile in focus, scuro sulle
+    //    altre) — quindi cambiano i pixel di *entrambe* le tile.
+    let crc_a_before = civis::tile::crc(0).ok();
+    let crc_b_before = civis::tile::crc(sid).ok();
     let f1 = civis::sess::focus(sid).is_ok();
     let (_, focus_a) = civis::tile::info().unwrap_or((0, 0));
+    let crc_a_hot = civis::tile::crc(0).ok();
+    let crc_b_hot = civis::tile::crc(sid).ok();
+    step(
+        "il bordo segue il focus",
+        crc_a_before.is_some()
+            && crc_a_before != crc_a_hot
+            && crc_b_before.is_some()
+            && crc_b_before != crc_b_hot,
+        "i bordi non sono cambiati col focus",
+    );
     let f0 = civis::sess::focus(0).is_ok();
     let (_, focus_b) = civis::tile::info().unwrap_or((0, 0));
     step(

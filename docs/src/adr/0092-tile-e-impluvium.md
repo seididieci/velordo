@@ -8,8 +8,9 @@ chrome, tastiera al DE con i keybinding `Super+hjkl`/`%`/`"`/`z`/`Shift+q`,
 supervisione per canale, kernel intatto). Lo **split avvia una shell vera**
 nella sessione nuova (`SESS_CREATE` → verifica+`obj_get` → `spawn_image` →
 `suspend` → `SESS_BIND` → `resume`) e l'uscita della shell chiude la tile.
-Resta per D8e3 il **bordo/focus al posto della barra** e per D8f titoli in
-testo, puntatore e floating.
+Il **bordo della tile segue il focus** (accento sulla tile in focus, scuro
+sulle altre: tmux-style) e la **barra non c'e'** piu': il DE non disegna nulla,
+i 22 px tornano al testo. Resta per D8f titoli in testo, puntatore e floating.
 
 Dipende da ADR-0087 (compositor `musivum`: layer, clip, danno), ADR-0088
 (finestre `WIN_*`, ospiti clippati alla tile), ADR-0089 (sessioni `littera`),
@@ -132,10 +133,14 @@ DE come **padrone del layout** (`tile_owner`).
 - **L'eco non va nel vuoto**: `queue_input` ecoa solo se la sessione ha un
   **lettore dichiarato** (`reader_of`), oltre al flag. Una tile senza programma
   non mostra i tasti digitati (era il "testo fantasma" del primo split).
-- **Chrome**: una striscia in `Layer::Overlay` disegnata **dal DE** (un blocco
-  colorato per tile, quello in focus evidenziato). Niente font nel DE: i titoli
-  in testo sono D8f. L'overlay richiede ≥ `ThirdParty`: primo mattino della
-  policy di D8g.
+- **Chrome**: **il bordo della tile** (D8e3) — 2 px *dentro* il rect (la
+  griglia è inset, così il bordo non copre testo; due tile adiacenti fanno una
+  linea di 4 px), colore **accento** sulla tile in focus e scuro sulle altre.
+  Lo disegna la **console** (rect e focus li conosce già: nessun tag nuovo) e
+  con una tile sola/zoomata **non c'è** — il boot resta identico a D8d. La
+  barra `Overlay` del primo giro è stata **tolta**: mangiava una riga di testo e
+  il bordo fa lo stesso mestiere meglio. La capability `WIN_OPEN(!0) → Overlay`
+  resta nel server (policy ≥ `ThirdParty`) come gancio per D8g.
 - **Niente slot di servizio nuovo**: `Service::Impluvium` costringerebbe a
   toccare il kernel (`service_from_disc` + `service_name` + `SERVICE_COUNT`).
   Il DE non registra un servizio: `signal_ready` viaggia sul canale di nascita
@@ -178,6 +183,10 @@ DE come **padrone del layout** (`tile_owner`).
     pixel sbagliati;
   - il cursore del terminale è di **una** tile (quella in focus): disegnarlo in
     tutte Produce N blocchi fantasma e cambia il CRC di t64;
+  - il **bordo** va disegnato **dopo** il render delle tile e **prima** del
+    flush, e ridisegnato al cambio di focus: è l'unica cosa che dipende dal
+    focus oltre al cursore (t76 lo prova confrontando i CRC di *entrambe* le
+    tile);
   - il modeset con N tile non deve auto-adattare (le tile sono del DE):
     altrimenti il server e il DE si contendono i rect.
 - Fuori scope dichiarato: puntatore e floating (D8f); titoli in testo nella

@@ -86,6 +86,7 @@ for want in \
     '[tileprobe] zoom: una tile visibile: PASS' \
     '[tileprobe] unzoom: di nuovo due tile: PASS' \
     '[tileprobe] focus sulla seconda tile: PASS' \
+    '[tileprobe] il bordo segue il focus: PASS' \
     '[tileprobe] TILE_DROP torna a una tile: PASS' \
     '[tileprobe] risultato: PASS' \
     '[impluvium] tastiera sottoscritta' \

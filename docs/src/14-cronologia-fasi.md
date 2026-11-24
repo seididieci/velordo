@@ -4729,5 +4729,15 @@ ecoa solo se la sessione ha un lettore dichiarato — il primo split mostrava i
 tasti digitati in una tile senza programma ("testo fantasma"). Alla morte della
 shell la tile si chiude (mai l'ultima).
 
-**Resta**: bordo/focus al posto della barra (D8e3), titoli in testo, puntatore e
-floating (D8f).
+**Bordo invece di barra** (D8e3, subito dopo): il confine fra le tile si vede —
+2 px *dentro* il rect (la griglia è inset, il bordo non copre testo; due tile
+adiacenti fanno 4 px), scuro sulle tile inattive e **accento** (lo stesso
+blu-viola del prompt) su quella in focus. Lo disegna la console, che rect e
+focus li conosce già: nessun tag nuovo, nessun IPC in più. Con una tile sola o
+zoomata il bordo non c'è (il boot resta identico a D8d). La **barra** del primo
+giro è stata tolta: mangiava una riga di testo e il bordo fa lo stesso mestiere
+meglio; la capability `WIN_OPEN(!0) → Overlay` resta nel server come gancio per
+D8g. `t76` confronta i CRC di **entrambe** le tile prima e dopo il cambio di
+focus: la prova che il bordo segue il focus.
+
+**Resta**: titoli in testo, puntatore e floating (D8f).

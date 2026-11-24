@@ -32,9 +32,6 @@ use musivum::Rect;
 
 civis::entry!(real_main);
 
-/// Altezza della barra in pixel: una riga di testo (cella 10x22).
-const BAR_PX: u32 = 22;
-
 /// Il DE.
 struct De {
     /// L'albero delle tile.
@@ -43,8 +40,6 @@ struct De {
     area: Rect,
     /// Dimensione del display in pixel.
     screen: (u32, u32),
-    /// La finestra della barra: `(win, va, shm)`.
-    chrome: Option<(u32, usize, u32)>,
     /// Il canale di `porta` (0 = non ancora sottoscritto).
     kb_chan: u64,
     /// Byte accumulati dalla tastiera (un tasto può arrivare a pezzi).
@@ -63,7 +58,6 @@ impl De {
             tree: Tree::new(0),
             area: Rect::EMPTY,
             screen: (0, 0),
-            chrome: None,
             kb_chan: 0,
             stream: Vec::new(),
             injector: None,
@@ -84,15 +78,12 @@ impl De {
         true
     }
 
-    /// L'area delle tile: lo schermo intero con una tile sola, sotto la barra
-    /// quando ce ne sono di piu'.
+    /// L'area delle tile: **tutto lo schermo**. La barra non c'e' (D8e3): il
+    /// focus lo dice il bordo della tile, colorato dal server — cosi' non si
+    /// perde una riga di testo e il chrome non e' un rettangolo in piu'.
     fn update_area(&mut self) {
         let (w, h) = self.screen;
-        self.area = if self.tree.len() > 1 && h > BAR_PX {
-            Rect::new(0, BAR_PX, w, h - BAR_PX)
-        } else {
-            Rect::new(0, 0, w, h)
-        };
+        self.area = Rect::new(0, 0, w, h);
     }
 
     /// Pubblica il layout al server: una `TILE_SET` per tile, le sessioni
@@ -115,66 +106,6 @@ impl De {
         // Il canale del DE si sposta sulla sessione in focus: da lì inietta.
         self.injector = None;
         self.injector = civis::sess::attach_to_session(sid).ok();
-        self.draw_chrome();
-    }
-
-    /// La barra: un blocco per tile, quello in focus evidenziato. E' una
-    /// finestra `Overlay` del DE (nessun testo: i titoli sono D8f).
-    fn draw_chrome(&mut self) {
-        let n = self.tree.len();
-        if n < 2 {
-            // Con una tile la barra non serve: la si chiude.
-            if let Some((win, _, _)) = self.chrome.take() {
-                let _ = civis::win::close(win);
-            }
-            return;
-        }
-        let (sw, _) = self.screen;
-        if self.chrome.is_none() {
-            let size = (sw << 16) | BAR_PX;
-            let Ok(open) = civis::win::open(!0u32, size) else {
-                return;
-            };
-            let va = match civis::shm_map(open.shm_id, 0, civis::PROT_READ | civis::PROT_WRITE) {
-                Ok(v) => v,
-                Err(_) => {
-                    let _ = civis::win::close(open.win);
-                    return;
-                }
-            };
-            self.chrome = Some((open.win, va, open.shm_id));
-        }
-        let Some((win, va, _)) = self.chrome else {
-            return;
-        };
-        let leaves = self.tree.leaves();
-        let focus = self.tree.focus();
-        let n = leaves.len().max(1);
-        let bw = sw / n as u32;
-        // Sfondo della barra: grigio scuro; blocco della tile in focus:
-        // accento; gli altri: grigio.
-        const BG: u32 = 0xFF20_2024; // BGRA
-        const IDLE: u32 = 0xFF50_5058;
-        const HOT: u32 = 0xFF98_8A_5A; // BGR di un ambra
-        let ptr = va as *mut u32;
-        let row_words = sw as usize;
-        for y in 0..BAR_PX as usize {
-            for x in 0..row_words {
-                let slot = (x as u32 / bw).min(n as u32 - 1) as usize;
-                let hot = leaves.get(slot).copied() == Some(focus);
-                let c = if x as u32 % bw < bw.saturating_sub(2) && (2..BAR_PX - 2).contains(&(y as u32)) {
-                    if hot {
-                        HOT
-                    } else {
-                        IDLE
-                    }
-                } else {
-                    BG
-                };
-                unsafe { core::ptr::write(ptr.add(y * row_words + x) as *mut u32, c) };
-            }
-        }
-        let _ = civis::win::commit(win, 0);
     }
 
     /// Consuma i byte della tastiera: `Super+<tasto>` sono i comandi del DE,

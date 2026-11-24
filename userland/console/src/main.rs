@@ -55,6 +55,16 @@ const SESS_MAILBOX_BYTES: usize = sess_proto::MAILBOX_BYTES;
 /// della shell — e' lei che sa cosa e' un comando.
 const MIRROR_SESSION_MAX: usize = 1024 * 1024;
 
+/// D8e3 — **bordo di una tile** (px), dentro il rect e fuori dalla griglia:
+/// due tile adiacenti fanno una linea di `2*TILE_BORDER`. Con una tile sola
+/// (o zoomata) il bordo non c'e' e il boot resta identico a D8d.
+const TILE_BORDER: u32 = 2;
+/// Bordo della tile in **focus**: l'accento del terminale (lo stesso blu-viola
+/// del prompt), tmux-style. Cosi' la barra non serve.
+const BORDER_FOCUS: u32 = 0xFF5B_7CFF; // BGRA: A=FF, R=5B, G=7C, B=FF
+/// Bordo delle altre tile: il colore del fondo, appena piu' chiaro.
+const BORDER_IDLE: u32 = 0xFF24_2020; // BGRA
+
 /// D8c2 — avviso di tetto raggiunto (una volta per sessione).
 const MIRROR_TRUNCATED_MSG: &[u8] = b"\n[mirror seriale: tetto di sessione raggiunto]\n";
 
@@ -159,6 +169,9 @@ struct Tile {
     win: u32,
     /// `false` = nascosta (zoom di un'altra tile): la sessione resta viva.
     visible: bool,
+    /// Spessore del bordo (px) **dentro** il rect: la griglia ci sta dentro.
+    /// 0 = nessun bordo (una tile sola / zoomata).
+    border: u32,
 }
 
 impl Tile {
@@ -169,8 +182,20 @@ impl Tile {
         cell_w: u32,
         cell_h: u32,
         ascent_px: i32,
+        border: u32,
     ) -> Tile {
-        let geom = Geom::for_rect(rect.x, rect.y, rect.w, rect.h, cell_w, cell_h, ascent_px);
+        // La griglia sta **dentro** il bordo: il rect resta intero (il clip per
+        // tile resta quello), cambia solo dove cade il testo.
+        let b = border.min(rect.w / 2).min(rect.h / 2);
+        let geom = Geom::for_rect(
+            rect.x + b,
+            rect.y + b,
+            rect.w - 2 * b,
+            rect.h - 2 * b,
+            cell_w,
+            cell_h,
+            ascent_px,
+        );
         Tile {
             id,
             sid,
@@ -179,6 +204,7 @@ impl Tile {
             geom_local: geom.local(rect.x, rect.y),
             win: 0,
             visible: true,
+            border: b,
         }
     }
 
@@ -314,6 +340,44 @@ impl Term {
 
     // ── Tile (D8e) ───────────────────────────────────────────────────
 
+    /// Il bordo che spetta a un rect: niente bordo se copre lo schermo (una
+    /// tile sola, boot identico a D8d, e zoom: tmux `-Z` non borda).
+    fn border_for(&self, rect: musivum::Rect) -> u32 {
+        let (sw, sh) = self.surface.pixel_size();
+        if sw == 0 || sh == 0 || (rect.w >= sw && rect.h >= sh) {
+            0
+        } else {
+            TILE_BORDER
+        }
+    }
+
+    /// I **bordi** delle tile (D8e3): accento sulla tile in focus, scuro sulle
+    /// altre. Si ridisegnano dopo ogni cambio di layout o di focus; il danno
+    /// e' il rect della tile (poche migliaia di pixel).
+    fn draw_borders(&mut self) {
+        let focus = self.sessions.focus;
+        for t in 0..self.tiles.len() {
+            let tile = self.tiles[t];
+            if tile.border == 0 || !tile.visible {
+                continue;
+            }
+            let color = if tile.sid == focus {
+                BORDER_FOCUS
+            } else {
+                BORDER_IDLE
+            };
+            let b = tile.border;
+            let r = tile.rect;
+            if let Surface::Pixel(p) = &mut self.surface {
+                p.fill_rect(r.x, r.y, r.w, b, color);
+                p.fill_rect(r.x, r.y + r.h - b, r.w, b, color);
+                p.fill_rect(r.x, r.y, b, r.h, color);
+                p.fill_rect(r.x + r.w - b, r.y, b, r.h, color);
+            }
+            self.comp.add_damage(r);
+        }
+    }
+
     /// L'indice della tile che mostra la sessione `sid`.
     fn tile_of(&self, sid: usize) -> Option<usize> {
         self.tiles.iter().position(|t| t.sid == sid)
@@ -375,7 +439,7 @@ impl Term {
         }
         self.sessions.cols = geom.cols;
         self.sessions.rows = geom.rows;
-        let mut tile = Tile::build(1, 0, rect, geom.cell_w, geom.cell_h, geom.ascent_px);
+        let mut tile = Tile::build(1, 0, rect, geom.cell_w, geom.cell_h, geom.ascent_px, 0);
         // In VGA la geometria e' quella del buffer testuale, non un rect pixel.
         if matches!(self.surface, Surface::VgaText(_)) {
             tile.geom = geom;
@@ -428,6 +492,7 @@ impl Term {
             Some(f) => f.metrics(),
             None => return,
         };
+        let border = self.border_for(rect);
         let mut tile = Tile::build(
             (sid as u32) + 1,
             sid,
@@ -435,6 +500,7 @@ impl Term {
             m.cell_w as u32,
             m.cell_h as u32,
             m.ascent_px,
+            border,
         );
         // La sessione prende la misura della tile e si ridisegna tutta.
         if let Some(s) = self.sessions.get_mut(sid) {
@@ -523,6 +589,7 @@ impl Term {
             self.apply_tile(sid, rect);
         }
         self.render();
+        self.draw_borders();
         self.flush_display();
     }
 
@@ -2232,6 +2299,7 @@ fn real_main(_sp: u64) -> ! {
                         }
                         term.drop_tile_of(msg.w0 as usize);
                         term.render();
+                        term.draw_borders();
                         term.flush_display();
                         let _ = civis::reply(civis::TILE_DROP, 0, 0);
                     }
@@ -2523,6 +2591,8 @@ fn real_main(_sp: u64) -> ! {
                             let _ = term.sessions.set_focus(target);
                         }
                         term.render();
+                        // L'accento del bordo segue il focus (D8e3).
+                        term.draw_borders();
                         term.flush_display();
                         let _ = civis::reply(SESS_FOCUS, 0, 0);
                     }

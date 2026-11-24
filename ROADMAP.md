@@ -766,8 +766,13 @@ Voci con scope e vittoria dichiarati (non date).
       `SESS_BIND` → `resume`, layout e focus prima dello spawn) e la morte della
       shell chiude la tile; l'**eco non va nel vuoto** (`queue_input` ecoa solo
       con un lettore dichiarato: niente più testo fantasma nelle tile senza
-      programma). Restano: bordo/focus al posto della barra (D8e3), titoli in
-      testo, puntatore/floating (D8f).
+      programma). **Il confine fra le tile si vede** (D8e3): bordo di 2 px
+      *dentro* il rect (griglia inset, due tile adiacenti fanno 4 px), scuro
+      sulle tile inattive e **accento** su quella in focus — disegnato dalla
+      console (rect e focus li ha già, nessun tag nuovo); la **barra è stata
+      tolta** (mangiava una riga, il bordo fa meglio) e `t76` prova che il bordo
+      segue il focus coi CRC di entrambe le tile. Con una tile sola o zoomata
+      non c'è bordo. Restano: titoli in testo, puntatore/floating (D8f).
 
 - [x] **D8e1 Tile nel server — N sessioni in N rettangoli** (ADR-0092, prima
       metà di D8e; completata 2026-11-24): la console disegna **N** sessioni.
