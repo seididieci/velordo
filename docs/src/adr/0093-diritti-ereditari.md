@@ -76,6 +76,15 @@ sono l'unica codifica, condivisa da kernel e `civis`.
   rifiuta `meta_len` diverso.
 - `SYS_PEER_INFO` (47) espone i diritti ereditari **packed in `r10`** (stesso
   formato); `rdx` resta la classe. `civis::peer_info_rights`/`peer_info_ops`.
+- **Hardening dei gate di ruolo** (stesso passo): `SYS_TRUST_IMAGE` e
+  `SYS_SPAWN` per nome richiedono, oltre al ruolo (init/cardo, pid 1), anche la
+  **classe `System`** del chiamante. Se init esegue un'immagine `Untrusted`
+  (downgrade), non può più promuovere immagini nella trust table né spawnare il
+  TCB embedded: chiude il caso «init degradato che riapre la porta».
+- **`spawn_copy`/`create_thread` copiano `image_class` dal padre/leader**
+  (non la ricalcolano da `image_id`): il fork/thread di un processo `System`
+  forzato (init, embedded) resta `System` — il contenuto è lo stesso e la
+  classe forzata è del padre, non del binario embedded non firmato.
 
 ### Cardo e shell (S3.4b)
 
@@ -113,8 +122,12 @@ non quello dell'**autenticità**.
 - **`t77`** (nel gate, gira come `tst`/`Untrusted`): spawn/exec nudi di
   un'immagine `System` → `-1`; fork + exec → `-1`; thread del gruppo con floor
   del leader → spawn `System` negato; `SYS_SPAWN` per nome da non-init → `-1`;
-  attenuazione annidata di `ops` verificata con `peer_info`; init invariato
-  (la suite stessa ne è la prova). Conteggio: `usertests 72/72`.
+  attenuazione annidata di `ops` verificata con `peer_info`; **bit riservati**
+  in `rights` → `-1`; **fork** che eredita floor/ops (`peer_info_rights`);
+  **`ceiling_for` con ops ereditate** (`rightshelper` spawnato con
+  `OPEN|READ`: read ok, write negata); **gate strutturali** da `Untrusted`
+  (`trust_image`, `dma_alloc` slot device, `map_mmio`) → `Err`; init
+  invariato (la suite stessa ne è la prova). Conteggio: `usertests 72/72`.
 - **`t67`/`t68` adattati**: non possono più spawnare un'immagine `System` da
   `tst` (era proprio l'elevazione che S3.4 vieta). t67 verifica la classe
   `System` di un processo vivo (cardo) e il **rifiuto** dello spawn elevato;

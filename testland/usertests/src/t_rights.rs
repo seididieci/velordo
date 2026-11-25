@@ -185,6 +185,112 @@ pub fn t_spawn_rights() -> bool {
         pass = false;
     }
 
+    // (6b) `ceiling_for` con ops ereditate: `rightshelper` spawnato con
+    // `ops = READ` legge (ok) e la scrittura e' negata da cardo.
+    if let Some(img) = civis::load_file("/test/rightshelper.bin") {
+        let _ = civis::fs::rights::rights_execute_verdict(b"tst", b"test/rightshelper.bin");
+        let meta = civis::SpawnMeta::new("rightshelper", 16, &[])
+            .map(|m| m.ops(civis::RIGHTS_OPEN | civis::RIGHTS_READ));
+        match meta.map(|m| civis::spawn_image(&img, &m)) {
+            Some(Ok(chan)) => {
+                let mut verdict = None;
+                let t0 = civis::get_ticks();
+                while civis::get_ticks() - t0 < 500 {
+                    match civis::recv_timeout((civis::get_ticks() + 10) as u64) {
+                        Ok(m) if m.tag == 0x78 => {
+                            let _ = civis::reply(0x78, 0, 0);
+                            verdict = Some(m.w0);
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(_) => {}
+                    }
+                }
+                match verdict {
+                    Some(bits) => {
+                        let read = bits & 1 != 0;
+                        let write = bits & 2 != 0;
+                        if !read || write {
+                            println!(
+                                "[usertests] t77: ceiling_for read={} write={} (atteso true/false)",
+                                read, write
+                            );
+                            pass = false;
+                        }
+                    }
+                    None => {
+                        println!("[usertests] t77: nessun verdetto da rightshelper");
+                        pass = false;
+                    }
+                }
+            }
+            _ => {
+                println!("[usertests] t77: spawn rightshelper (ops READ) fallito");
+                pass = false;
+            }
+        }
+    } else {
+        println!("[usertests] t77: rightshelper non caricabile");
+        pass = false;
+    }
+
+    // (6c) fork: il figlio COW eredita floor/ops (`peer_info_rights`).
+    if let Some(img) = civis::load_file("/test/demo.bin") {
+        let _ = civis::fs::rights::rights_execute_verdict(b"ns", b"test/demo.bin");
+        if let Some(meta) = civis::SpawnMeta::new("demo", 16, &[]) {
+            if let Ok(chan) = civis::spawn_image(&img, &meta) {
+                let pid = civis::peer_pid(chan as u64).ok();
+                match civis::peer_info_rights(chan as u64) {
+                    Ok((_, _, rights)) => {
+                        if rights_floor(rights) != civis::ImageClass::Untrusted
+                            || rights_ops(rights) != civis::RIGHTS_ALL
+                        {
+                            println!("[usertests] t77: fork floor/ops errati");
+                            pass = false;
+                        }
+                    }
+                    Err(_) => {
+                        println!("[usertests] t77: peer_info_rights (demo) fallita");
+                        pass = false;
+                    }
+                }
+                if let Some(p) = pid {
+                    let _ = civis::kill(p, 0);
+                }
+            } else {
+                println!("[usertests] t77: spawn demo (fork) fallito");
+                pass = false;
+            }
+        }
+    }
+
+    // (6d) `SpawnMeta.rights` con bit riservati -> rifiutato (fail-loud).
+    if let Some(img) = civis::load_file("/test/demo.bin") {
+        let _ = civis::fs::rights::rights_execute_verdict(b"ns", b"test/demo.bin");
+        if let Some(mut meta) = civis::SpawnMeta::new("demo", 16, &[]) {
+            meta.rights = 1u64 << 40; // bit riservato
+            if civis::spawn_image(&img, &meta).is_ok() {
+                println!("[usertests] t77: diritti riservati accettati");
+                pass = false;
+            }
+        }
+    }
+
+    // (6e) Gate strutturali da `Untrusted`: trust_image, dma device, mmio.
+    let id = civis::image_id(b"x");
+    if civis::trust_image(id, civis::ImageClass::System, &[]).is_ok() {
+        println!("[usertests] t77: trust_image da Untrusted ammesso");
+        pass = false;
+    }
+    if civis::dma_alloc_slot(1, civis::DMA_SLOT_DEVICE).is_ok() {
+        println!("[usertests] t77: dma slot device da Untrusted ammesso");
+        pass = false;
+    }
+    if civis::map_mmio(0, 0, 1).is_ok() {
+        println!("[usertests] t77: map_mmio da Untrusted ammesso");
+        pass = false;
+    }
+
     // (7) init (System) continua a spawnare `tst`/`usr`/`sys`: questa suite
     // stessa ne e' la prova (gira e ha eseguito i punti sopra).
 

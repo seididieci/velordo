@@ -610,11 +610,18 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   esplicitamente. `SYS_PEER_INFO` espone i diritti packed in `r10`.
   `cardo::policy::ceiling_for = policy & peer_info_ops` (fail-closed su `0`).
   La shell nativa lancia i programmi con floor `ThirdParty`: un `Untrusted`
-  viene rifiutato dal **kernel**, un `exec` verso `System` non eleva. Test:
-  `t77` nel gate (`usertests 72/72`) + probe `usr/bin/floorprobe` fuori gate
-  (`scripts/run-rights-tests.sh`). Trappola: **ogni** via di creazione
-  (`create_user`/`exec_current`/`create_spawn_copy`/`create_thread`) va
-  bonificata, o il default permissivo riapre la falla in silenzio.
+  viene rifiutato dal **kernel**, un `exec` verso `System` non eleva.
+  **Hardening**: `SYS_TRUST_IMAGE` e `SYS_SPAWN` per nome richiedono anche la
+  classe `System` del chiamante (init degradato non riapre la trust table né
+  spawana il TCB); `spawn_copy`/`create_thread` copiano `image_class` dal
+  padre/leader. Test: `t77` nel gate (`usertests 72/72`: vie di creazione,
+  bit riservati, `ceiling_for` con `rightshelper` `OPEN|READ`, fork floor/ops,
+  gate strutturali) + `scripts/run-rights-tests.sh` fuori gate
+  (`floorprobe` e `floorposix`: floor `ThirdParty`, `Untrusted` rifiutato,
+  `ThirdParty` ammesso, `exec`/`spawn` di `System` negati). Trappola: **ogni**
+  via di creazione (`create_user`/`exec_current`/`create_spawn_copy`/
+  `create_thread`) va bonificata, o il default permissivo riapre la falla in
+  silenzio.
 
 ## Important Notes
 

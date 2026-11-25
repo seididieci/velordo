@@ -4849,3 +4849,19 @@ ereditaria ci sta senza rompere `peer_info_class`.
 
 **Fuori scope dichiarato**: attenuazione del subtree dei path (qui solo la
 maschera ops), capability di sessione (S3.3c), TTL/rotazione del token.
+
+**Hardening e copertura completa** (stesso passo): `SYS_TRUST_IMAGE` e
+`SYS_SPAWN` per nome richiedono anche la **classe `System`** del chiamante
+(oltre al ruolo): init degradato a `Untrusted` non può più promuovere immagini
+né spawnare il TCB. `create_spawn_copy`/`create_thread` **copiano**
+`image_class` dal padre/leader invece di ricalcolarla da `image_id` (il
+fork/thread di un `System` forzato resta `System`). `t77` esteso copre bit
+riservati in `rights`, `ceiling_for` con ops ereditate (helper `rightshelper`
+spawnato con `OPEN|READ`: read ok, write negata), fork con `peer_info_rights`,
+gate strutturali (`trust_image`, `dma_alloc` device, `map_mmio`). Fuori gate
+`floorprobe` verifica anche `exec`/`spawn` di `System` e che
+`req_floor = Untrusted` erediti (non abbassi); `floorposix` fa la stessa prova
+dalla **personalità POSIX** (`libr::exec`): la finestra non resta aperta.
+**Trappola**: un probe lanciato dalla shell (non da init) non deve fare
+`send(TEST_DONE)` sincrono — la shell non risponde e il probe resta bloccato a
+metà, lasciando la shell in attesa dell'EXIT_NOTIFY (deadlock silenzioso).

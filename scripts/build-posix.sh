@@ -27,3 +27,5 @@ build_one flavours/posix/server flavours/posix/server/src/posix.ld userposix.bin
 build_one flavours/posix/shell  flavours/posix/shell/src/shell.ld   usershell.bin usershell
 # runhello (Fase 37.2): programma lanciabile dalla shell, non un servizio.
 build_one flavours/posix/cli/runhello flavours/posix/cli/runhello/src/runhello.ld userrunhello.bin userrunhello
+# floorposix (S3.4b): prova che la personalità POSIX non eleva (libr::exec).
+build_one flavours/posix/cli/floorposix flavours/posix/cli/floorposix/src/floorposix.ld userfloorposix.bin userfloorposix

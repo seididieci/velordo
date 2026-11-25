@@ -29,7 +29,9 @@ fn finish(ok: bool) -> ! {
     } else {
         println!("[floorprobe] risultato: FAIL");
     }
-    let _ = civis::send(
+    // Lanciato dalla shell (non da init): il `TEST_DONE` e' un hint, non una
+    // richiesta sincrona (la shell non risponde -> deadlock).
+    let _ = civis::send_async(
         civis::CHANNEL_PARENT,
         civis::TEST_DONE,
         if ok { 1 } else { 0 },
@@ -89,6 +91,40 @@ fn real_main(_sp: u64) -> ! {
     };
     if !allowed {
         println!("[floorprobe] ThirdParty rifiutato (floor troppo stretto)");
+        ok = false;
+    }
+
+    // 3. `System` (l'interprete nativo) rifiutato sia in spawn sia in exec:
+    // il floor `ThirdParty` e la no-elevazione valgono anche qui.
+    let interp = civis::obj_get(b"sys", b"bin/interpres.bin").unwrap_or_default();
+    if interp.is_empty() {
+        println!("[floorprobe] interpres non caricabile");
+        finish(false);
+    }
+    let _ = civis::fs::rights::rights_execute_verdict(b"sys", b"bin/interpres.bin");
+    let sys_spawn_refused = match civis::SpawnMeta::new("interpres", 16, &[]) {
+        Some(meta) => civis::spawn_image(&interp, &meta).is_err(),
+        None => false,
+    };
+    if !sys_spawn_refused {
+        println!("[floorprobe] spawn System ammesso (no elevazione rotta)");
+        ok = false;
+    }
+    if civis::exec_image(&interp).is_ok() {
+        println!("[floorprobe] exec System ammesso (no elevazione rotta)");
+        ok = false;
+    }
+
+    // 4. `req_floor = Untrusted` (0) significa **eredita**, non abbassa: un
+    // figlio `Untrusted` resta rifiutato dal floor `ThirdParty` del padre.
+    let floor_inherit = match civis::SpawnMeta::new("demo", 16, &[])
+        .map(|m| m.floor(civis::ImageClass::Untrusted))
+    {
+        Some(meta) => civis::spawn_image(&demo, &meta).is_err(),
+        None => false,
+    };
+    if !floor_inherit {
+        println!("[floorprobe] req_floor=Untrusted ha abbassato il floor");
         ok = false;
     }
 

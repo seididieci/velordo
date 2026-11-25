@@ -151,8 +151,13 @@ un processo `ThirdParty` (la shell nativa lo lancia con floor `ThirdParty`),
 mentre la suite gira come `tst` (`Untrusted`) e non può spawnare `ThirdParty`
 (no elevazione: è la regola introdotta da S3.4). Il probe
 (`usr/bin/floorprobe.bin`) verifica che un'immagine `Untrusted` è **rifiutata
-dal kernel** (floor), una `ThirdParty` è ammessa, e l'`exec` di un `Untrusted`
-è negato.
+dal kernel** (floor), una `ThirdParty` è ammessa, l'`exec`/`spawn` di `System`
+è negato e `req_floor = Untrusted` eredita (non abbassa); poi
+`floorposix` (`usr/bin/floorposix.bin`, personalità POSIX) verifica che
+`libr::exec` di `System` e di `Untrusted` è negato. Nel gate `t77` copre le
+stesse vie da `tst` più `ceiling_for` (helper `rightshelper` con `OPEN|READ`:
+read ok, write negata), i bit riservati, il fork che eredita floor/ops e i gate
+strutturali (`trust_image`, `dma_alloc` device, `map_mmio`).
 
 Il build userland (servizi nativi, test suite, flavour POSIX) usa
 `targets/x86_64-unknown-velordo-user.json`: clone di `x86_64-unknown-none`

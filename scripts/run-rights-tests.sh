@@ -99,13 +99,32 @@ while kill -0 "$QEMU_PID" 2>/dev/null; do
     sleep 1
 done
 
+# Parte POSIX: `libr::exec` (la porta della personalità) non deve elevare.
+send_text "floorposix"
+send_text $'\n'
+START=$SECONDS
+while kill -0 "$QEMU_PID" 2>/dev/null; do
+    if grep -aqF '[floorposix] risultato:' "$LOG" 2>/dev/null; then
+        sleep 1
+        break
+    fi
+    if [ $((SECONDS - START)) -ge "$TIMEOUT" ]; then
+        echo "[rights] timeout ${TIMEOUT}s: floorposix mai concluso" >&2
+        break
+    fi
+    sleep 1
+done
+
 kill "$QEMU_PID" 2>/dev/null || true
 wait "$QEMU_PID" 2>/dev/null || true
 
 fail=0
 for want in \
     '[floorprobe] risultato: PASS' \
-    '[floorprobe] partenza (floor ThirdParty)'
+    '[floorprobe] partenza (floor ThirdParty)' \
+    '[floorposix] exec System: rifiutato' \
+    '[floorposix] exec Untrusted: rifiutato' \
+    '[floorposix] risultato: PASS'
 do
     if ! grep -aqF -- "$want" "$LOG"; then
         echo "[rights] manca: $want" >&2

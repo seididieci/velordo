@@ -831,9 +831,12 @@ Voci con scope e vittoria dichiarati (non date).
       Verifica: `t77` nel gate (7 punti: spawn/exec nudi, fork+exec, thread,
       spawn per nome, attenuazione annidata, init invariato) → `usertests
       72/72`; `t67`/`t68` adattati (non possono più spawnare `System` da
-      `tst`: provano il rifiuto); probe `usr/bin/floorprobe` fuori gate
-      (`scripts/run-rights-tests.sh`: `Untrusted` rifiutato, `ThirdParty`
-      ammesso, exec negato). Gate: `[gate] PASS`, zero FAIL/PANIC/FAULT.
+      `tst`: provano il rifiuto); **hardening**: `SYS_TRUST_IMAGE` e
+      `SYS_SPAWN` per nome chiedono anche la classe `System`, e
+      fork/thread copiano `image_class` dal padre. Probe `usr/bin/floorprobe`
+      e `usr/bin/floorposix` fuori gate (`scripts/run-rights-tests.sh`:
+      `Untrusted`/`System` rifutati, `ThirdParty` ammesso, anche dalla
+      personalità POSIX). Gate: `[gate] PASS`, zero FAIL/PANIC/FAULT.
       **Trappola**: ogni via di creazione (`create_user`, `exec_current`,
       `create_spawn_copy`, `create_thread`) va bonificata, o il default
       permissivo riapre la falla senza errori di compilazione.

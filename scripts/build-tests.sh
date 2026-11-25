@@ -61,6 +61,8 @@ build_one testland/dns testland/dns/src/dns.ld dnsprobe.bin dnsprobe
 build_one testland/posixsock testland/posixsock/src/posixsock.ld posixsock.bin posixsock
 build_one testland/tileprobe testland/tileprobe/src/tileprobe.ld tileprobe.bin tileprobe
 build_one testland/floorprobe testland/floorprobe/src/floorprobe.ld floorprobe.bin floorprobe
+# Helper per il tetto ops ereditato (S3.4b): legge (ok) e scrive (negato).
+build_one testland/rightshelper testland/rightshelper/src/rightshelper.ld rightshelper.bin rightshelper
 # Probe TLS 1.3 (N6.2, ADR-0072): test fuori gate, eseguito solo con
 # `net=1 tls=1` (server TLS sull'host, scripts/run-tls-tests.sh).
 build_one testland/tlsprobe testland/tlsprobe/src/tlsprobe.ld tlsprobe.bin tlsprobe

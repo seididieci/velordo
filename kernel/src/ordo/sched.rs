@@ -109,9 +109,20 @@ pub(crate) fn trust_register(
     // deve essere UNO (il servizio che verifica le firme). Un figlio di init
     // qualsiasi non basta: sarebbe un hole (chiunque spawato da init
     // promuoverebbe immagini arbitrarie).
-    let allowed = caller_pid == 1
+    //
+    // S3.4 hardening: oltre al **ruolo** serve la **classe** `System` del
+    // chiamante. Se init (o cardo) ha eseguito un'immagine `Untrusted`
+    // (downgrade), non puo' piu' promuovere immagini a `System`: chiude il
+    // caso "init degradato che riapre la trust table".
+    let role = caller_pid == 1
         || crate::relay::channels::lookup(syscall_numbers::Service::Cardo) == Some(caller_pid);
-    if !allowed {
+    if !role {
+        return false;
+    }
+    let class_ok =
+        crate::ordo::sched::process_image_class(caller_pid)
+            == Some(syscall_numbers::ImageClass::System);
+    if !class_ok {
         return false;
     }
     let mut ranges = [(0u16, 0u16); syscall_numbers::TRUST_IO_MAX];

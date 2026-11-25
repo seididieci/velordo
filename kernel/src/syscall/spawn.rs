@@ -12,10 +12,18 @@ pub(super) fn sys_spawn(name_ptr: u64, name_len: usize) -> i64 {
     // `vestigia`, `rector`). E' un privilegio di init: senza questo gate
     // qualunque processo poteva spawnare `block` e ottenere le porte ATA.
     // I programmi si lanciano con `spawn_image`/`exec` (byte in mano).
-    if current_id() != 1 {
+    //
+    // S3.4 hardening: serve anche la **classe** `System`. Init all'avvio e'
+    // System (forzata dal kernel); se esegue un'immagine `Untrusted` (downgrade)
+    // non puo' piu' spawnare il TCB embedded.
+    let caller = current_id() as usize;
+    let class = crate::ordo::sched::process_image_class(caller)
+        .unwrap_or(syscall_numbers::ImageClass::Untrusted);
+    if caller != 1 || class != syscall_numbers::ImageClass::System {
         crate::serial_println!(
-            "[syscall] spawn per nome: pid={} rifiutato (solo init)",
-            current_id()
+            "[syscall] spawn per nome: pid={} classe {:?} rifiutato (solo init System)",
+            caller,
+            class
         );
         return -1;
     }
