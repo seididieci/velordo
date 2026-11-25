@@ -616,15 +616,23 @@ impl Term {
     }
 
     /// Applica lo staging del layout (`TILE_COMMIT`): tutte le tile, poi un
-    /// render e un flush solo.
+    /// solo render+flush. I **margini** (bordo + centraggio delle celle)
+    /// vanno ricoperti col wallpaper: il render copre solo le celle, e senza
+    /// questo la striscia tra bordo e griglia tiene i pixel del layout
+    /// precedente (i residui del login dopo il primo `TILE_SET`).
     fn commit_tiles(&mut self) {
         let pending = core::mem::take(&mut self.tile_pending);
         for (sid, rect) in pending {
             self.apply_tile(sid, rect);
         }
-        self.render();
+        let (sw, sh) = self.surface.pixel_size();
+        if sw > 0 && sh > 0 {
+            self.repaint_tile_area(musivum::Rect::new(0, 0, sw, sh));
+        } else {
+            self.render();
+        }
         self.draw_borders();
-        self.flush_display();
+        self.flush_display_full();
     }
 
     /// Manda i byte alla sessione `idx`: decode -> modello (con scroll) ->
