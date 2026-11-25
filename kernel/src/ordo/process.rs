@@ -237,6 +237,13 @@ pub struct Process {
     /// spawn/exec calcolando l'`ImageId` sui byte caricati e confrontandolo
     /// con la trust table. Mai ereditata da `exec` (ricalcolata).
     pub image_class: syscall_numbers::ImageClass,
+    /// S3.4a — **floor di classe** ereditato (classe minima delle immagini che
+    /// questo processo puo' eseguire). Monotono: `spawn` fa `max(padre,
+    /// richiesto)`, `exec` lo conserva. Default `Untrusted` (nessun limite).
+    pub class_floor: syscall_numbers::ImageClass,
+    /// S3.4a — **maschera ops** ereditata: cardo fa `min(policy, questa)`.
+    /// Monotona verso il basso; default `RIGHTS_ALL`.
+    pub ops_ceiling: u32,
     /// Gruppo thread (S-T, ADR-0046): `Some(leader)` se questo PCB e' un
     /// thread 1:1 (condivide cr3/canali/fd/heap/VMA del leader, `None`
     /// per processi e leader. Il teardown mm/canali/notifiche avviene solo
@@ -351,6 +358,8 @@ impl Process {
             text_id: 0,
             image_id: syscall_numbers::ImageId::default(),
             image_class: syscall_numbers::ImageClass::Untrusted,
+            class_floor: syscall_numbers::ImageClass::Untrusted,
+            ops_ceiling: syscall_numbers::RIGHTS_ALL,
             thread_group: None,
             fs_base: 0,
             futex_woken: None,
@@ -390,6 +399,11 @@ impl Process {
         detached: bool,
         stack_frames: u32,
         args: Option<&crate::arc::vmm_user::ParsedArgs<'_>>,
+        req_floor: syscall_numbers::ImageClass,
+        req_ops: u32,
+        p_floor: syscall_numbers::ImageClass,
+        p_ops: u32,
+        p_class: syscall_numbers::ImageClass,
         pid: usize,
     ) -> Option<Process> {
         // Validazione PRIMA di allocare (ELF malformato = nessun leak).
@@ -418,6 +432,27 @@ impl Process {
                 Some((c, _, n)) => (c, &trust_ranges[..n]),
                 None => (syscall_numbers::ImageClass::Untrusted, io_ranges),
             };
+
+        // S3.4a — diritti ereditari (monotoni): il figlio puo' solo
+        // restringere. Floor = max(padre, richiesto); ops = padre & richiesta
+        // (`0` = eredita). Ammesso sse `floor <= class(immagine) <= classe del
+        // padre`: nessuna elevazione. Il rifiuto avviene PRIMA di allocare
+        // stack/address space (nessun leak).
+        let floor = if req_floor as u64 > p_floor as u64 {
+            req_floor
+        } else {
+            p_floor
+        };
+        let ops_ceiling = if req_ops == 0 { p_ops } else { p_ops & req_ops };
+        if (image_class as u64) < (floor as u64) || (image_class as u64) > (p_class as u64) {
+            crate::serial_println!(
+                "[ordo] spawn rifiutato: classe {} fuori da floor {} .. padre {}",
+                image_class.as_u64(),
+                floor.as_u64(),
+                p_class.as_u64()
+            );
+            return None;
+        }
 
         // Kernel stack: RSP0 (per rientrare a ring 0 su interrupt) + frame.
         // Come sopra: base PHYS (teardown), top VIRT (RSP0 + frame iniziale).
@@ -493,6 +528,8 @@ impl Process {
             text_id,
             image_id,
             image_class,
+            class_floor: floor,
+            ops_ceiling,
             thread_group: None,
             fs_base: 0,
             futex_woken: None,
@@ -536,6 +573,8 @@ impl Process {
         text_id: u32,
         image_id: syscall_numbers::ImageId,
         stack_frames: u32,
+        class_floor: syscall_numbers::ImageClass,
+        ops_ceiling: u32,
     ) -> Process {
         Process {
             name,
@@ -565,6 +604,8 @@ impl Process {
             text_id,
             image_id,
             image_class: crate::ordo::sched::trust_class(image_id),
+            class_floor,
+            ops_ceiling,
             thread_group: None,
             fs_base: 0,
             futex_woken: None,
@@ -606,6 +647,8 @@ impl Process {
         entry: u64,
         user_stack: u64,
         fs_base: u64,
+        class_floor: syscall_numbers::ImageClass,
+        ops_ceiling: u32,
     ) -> Option<Process> {
         if entry == 0 || user_stack == 0 {
             return None;
@@ -655,6 +698,8 @@ impl Process {
             text_id,
             image_id,
             image_class: crate::ordo::sched::trust_class(image_id),
+            class_floor,
+            ops_ceiling,
             thread_group: Some(leader),
             fs_base,
             futex_woken: None,

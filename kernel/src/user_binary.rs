@@ -61,6 +61,8 @@ fn spawn_user(
             false,
             crate::arc::vmm_user::USER_STACK_FRAMES as u32,
             None,
+            syscall_numbers::ImageClass::Untrusted,
+            0,
         )
     }?;
     crate::serial_println!(
@@ -91,6 +93,8 @@ pub fn spawn_image(
     detached: bool,
     stack_frames: u32,
     args: Option<&crate::arc::vmm_user::ParsedArgs<'_>>,
+    req_floor: syscall_numbers::ImageClass,
+    req_ops: u32,
 ) -> Option<usize> {
     if len == 0 {
         return None;
@@ -101,7 +105,7 @@ pub fn spawn_image(
     let id = unsafe {
         crate::ordo::sched::create_user(
             "image", priority, elf, parent, parent_chan, io_ranges, detached, stack_frames,
-            args,
+            args, req_floor, req_ops,
         )
     }?;
     crate::ordo::sched::set_owned_name(id, owned);

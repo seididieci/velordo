@@ -175,7 +175,7 @@ velordo/
 
 ## Stato corrente
 
-Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 71/71` + `[threadtest] PASS 12/12` + `[shell-native] PASS 33/33` (la shell nativa gira nella **stessa** QEMU del gate: login via `sendkey` e `--attach-pid`, `scripts/test-shell-native.py`), zero FAIL/PANIC/FAULT; il gate stampa `[gate] PASS/FAIL` ed **esce != 0** (vedi `docs/src/11-testing.md`). Le fasi POSIX restano storiche dal login nativo (ADR-0062). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
+Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 72/72` + `[threadtest] PASS 12/12` + `[shell-native] PASS 33/33` (la shell nativa gira nella **stessa** QEMU del gate: login via `sendkey` e `--attach-pid`, `scripts/test-shell-native.py`), zero FAIL/PANIC/FAULT; il gate stampa `[gate] PASS/FAIL` ed **esce != 0** (vedi `docs/src/11-testing.md`). Le fasi POSIX restano storiche dal login nativo (ADR-0062). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
 - **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
   BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
@@ -600,6 +600,21 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   `PASS` sono il contratto). L'eco del backspace c'e' in **ogni** campo (nel
   campo username senza, si autenticava una stringa diversa da quella
   mostrata).
+- **Diritti ereditari all'avvio (S3.4, ADR-0093)**: un figlio **non ha piu'
+  diritti del padre**. `SpawnMeta.rights` (64 B, packed: floor di classe nei
+  bit 0..8, maschera ops nei bit 8..40, `0` = eredita) e il PCB
+  (`class_floor`, `ops_ceiling`): `create_user` applica
+  `floor = max(padre, richiesto)` / `ops = padre & richiesta` e **rifiuta** se
+  `floor <= class(immagine) <= classe_del_padre` non vale; `exec` **conserva**
+  floor e ops (monotonia); `spawn_copy`/`create_thread` li copiano
+  esplicitamente. `SYS_PEER_INFO` espone i diritti packed in `r10`.
+  `cardo::policy::ceiling_for = policy & peer_info_ops` (fail-closed su `0`).
+  La shell nativa lancia i programmi con floor `ThirdParty`: un `Untrusted`
+  viene rifiutato dal **kernel**, un `exec` verso `System` non eleva. Test:
+  `t77` nel gate (`usertests 72/72`) + probe `usr/bin/floorprobe` fuori gate
+  (`scripts/run-rights-tests.sh`). Trappola: **ogni** via di creazione
+  (`create_user`/`exec_current`/`create_spawn_copy`/`create_thread`) va
+  bonificata, o il default permissivo riapre la falla in silenzio.
 
 ## Important Notes
 
@@ -912,7 +927,7 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
 #   [identistest] PASS 11/11
-#   [usertests] PASS 71/71
+#   [usertests] PASS 72/72
 #   [threadtest] PASS 12/12
 #   [shell-native] PASS 33/33
 # KVM=1 accelera (-enable-kvm -cpu host, opt-in; senza /dev/kvm resta TCG).

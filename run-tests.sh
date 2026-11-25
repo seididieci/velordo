@@ -105,7 +105,7 @@ if [ "$fail" -eq 0 ]; then
         '[testsarca] PASS 64/64' \
         '[posixtests] PASS 4/4' \
         '[identistest] PASS 11/11' \
-        '[usertests] PASS 71/71' \
+        '[usertests] PASS 72/72' \
         '[threadtest] PASS 12/12'
     do
         if ! rg -qF -- "$want" "$LOG"; then

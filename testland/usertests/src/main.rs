@@ -42,6 +42,7 @@ mod t_sess;
 mod t_input;
 mod t_time;
 mod t_sig;
+mod t_rights;
 mod t_stable;
 mod t_win;
 // ── main ─────────────────────────────────────────────────────────────
@@ -126,6 +127,7 @@ fn real_main(_sp: u64) -> ! {
     helpers::report(&mut total, &mut ok, "t73 finestre del compositor (D8b)", t_win::t_window_lifecycle());
     helpers::report(&mut total, &mut ok, "t74 sessioni di terminale (D8c2)", t_sess::t_session_endpoint());
     helpers::report(&mut total, &mut ok, "t75 input dalle sessioni (D8d)", t_input::t_session_input());
+    helpers::report(&mut total, &mut ok, "t77 diritti ereditari all'avvio (S3.4a)", t_rights::t_spawn_rights());
     // t34 per ULTIMO: i drop sono irrevocabili sul canale di usertests.
     helpers::report(&mut total, &mut ok, "t34 diritti per-canale lato server", t_fs::t_rights());
 

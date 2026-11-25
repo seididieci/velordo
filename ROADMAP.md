@@ -11,7 +11,7 @@ ricompilare se stesso. Ordina le priorita' (storage veloce prima, servizi
 fuori dal kernel poi, personalita' per software reale dopo) senza pianificare
 nulla da solo.
 
-## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b + D8c1 + D8c2 + D8d + D8e + D8f)
+## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b + D8c1 + D8c2 + D8d + D8e + D8f + S3.4)
 
 Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` +
 `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 70/70` +
@@ -816,6 +816,27 @@ Voci con scope e vittoria dichiarati (non date).
       verde (login via monitor, poi keybinding del DE), e `interpres`/`users`/
       `create-user` che leggono il token dal server (`SESS_TOKEN`) con
       `t74`/`t75` verdi. `VELORDO_SESSION` non esiste più.
+
+- [x] **S3.4a/b Diritti ereditari all'avvio** (ADR-0093, completata
+      2026-11-25): un figlio **non ha più diritti del padre**. Kernel:
+      `SpawnMeta` 56→64 B con `rights` packed (floor di classe bit 0..8,
+      maschera ops bit 8..40, `0` = eredita), `class_floor`/`ops_ceiling` nel
+      PCB, `create_user` con `floor = max(padre, richiesto)` / `ops = padre &
+      richiesta` e rifiuto se `floor ≤ class(immagine) ≤ classe_del_padre`,
+      `exec` che **conserva** floor e ops (monotonia), `spawn_copy`/`thread`
+      che li copiano esplicitamente, `SYS_PEER_INFO` con i diritti packed in
+      `r10`. Cardo: `ceiling_for = policy & peer_info_ops` (fail-closed su
+      `0`). Shell nativa: floor `ThirdParty` ai figli (un `Untrusted` è
+      rifiutato dal kernel, un `exec` verso `System` non eleva).
+      Verifica: `t77` nel gate (7 punti: spawn/exec nudi, fork+exec, thread,
+      spawn per nome, attenuazione annidata, init invariato) → `usertests
+      72/72`; `t67`/`t68` adattati (non possono più spawnare `System` da
+      `tst`: provano il rifiuto); probe `usr/bin/floorprobe` fuori gate
+      (`scripts/run-rights-tests.sh`: `Untrusted` rifiutato, `ThirdParty`
+      ammesso, exec negato). Gate: `[gate] PASS`, zero FAIL/PANIC/FAULT.
+      **Trappola**: ogni via di creazione (`create_user`, `exec_current`,
+      `create_spawn_copy`, `create_thread`) va bonificata, o il default
+      permissivo riapre la falla senza errori di compilazione.
 
 - [x] **58 Personalità POSIX separata** (58.1–58.6, ADR-0041): meccanismo
       neutro in `libs/civis` (ex `libs/libr`), personalità in

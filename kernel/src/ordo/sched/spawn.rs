@@ -108,11 +108,16 @@ pub fn spawn_thread(entry: u64, stack: u64, fs: u64) -> Option<usize> {
         let l = &sched.processes[group];
         (l.name, l.name_owned, l.name_len, l.priority, l.cr3, l.tss_slot, l.cbs_server, l.text_id, l.image_id)
     };
+    // S3.4a: il thread eredita floor e ops dal leader del gruppo.
+    let (floor, ops) = {
+        let l = &sched.processes[group];
+        (l.class_floor, l.ops_ceiling)
+    };
     let id = sched.alloc_pid()?;
     let thread = match unsafe {
         Process::create_thread(
             name, name_owned, name_len, priority, group, cr3, tss_slot,
-            cbs, text_id, img, entry, rsp, fs,
+            cbs, text_id, img, entry, rsp, fs, floor, ops,
         )
     } {
         Some(t) => t,
@@ -140,15 +145,31 @@ pub unsafe fn create_user(
     detached: bool,
     stack_frames: u32,
     args: Option<&crate::arc::vmm_user::ParsedArgs<'_>>,
+    req_floor: syscall_numbers::ImageClass,
+    req_ops: u32,
 ) -> Option<usize> {
     let mut guard = SCHED.lock();
     let sched = guard.as_mut().expect("scheduler non inizializzato");
+
+    // S3.4a — diritti del padre: il figlio puo' solo restringere (monotonia).
+    // `parent = None` = spawn dal kernel (embedded/init): nessun limite.
+    let (p_floor, p_ops, p_class) = match parent {
+        Some(p) if p < sched.processes.len() => {
+            let pp = &sched.processes[p];
+            (pp.class_floor, pp.ops_ceiling, pp.image_class)
+        }
+        _ => (
+            syscall_numbers::ImageClass::Untrusted,
+            syscall_numbers::RIGHTS_ALL,
+            syscall_numbers::ImageClass::System,
+        ),
+    };
 
     let id = sched.alloc_pid()?;
     let process = match unsafe {
         Process::create_user(
             name, priority, elf, parent, parent_chan, io_ranges, detached, stack_frames,
-            args, id,
+            args, req_floor, req_ops, p_floor, p_ops, p_class, id,
         )
     } {
         Some(p) => p,

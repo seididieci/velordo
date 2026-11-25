@@ -1372,6 +1372,38 @@ impl ImageClass {
     }
 }
 
+// ── Diritti ereditari all'avvio (S3.4a) ─────────────────────────────
+//
+// `SpawnMeta.rights` e il registro `r10` di `SYS_PEER_INFO` condividono lo
+// stesso formato packed: bit 0..8 = floor (classe minima delle immagini che il
+// figlio potra' eseguire), bit 8..40 = maschera ops ereditata. **Zero =
+// eredita** (mai "nessun diritto" ne' "tutti i diritti"): il campo assente e'
+// il caso normale, e la monotonia la applica il kernel.
+pub const RIGHTS_FLOOR_SHIFT: u32 = 0;
+pub const RIGHTS_OPS_SHIFT: u32 = 8;
+pub const RIGHTS_FLOOR_MASK: u64 = 0xFF;
+pub const RIGHTS_OPS_MASK: u64 = 0xFFFF_FFFF;
+
+/// Impacchetta `(floor, ops)` nel formato di `SpawnMeta.rights` / `r10`.
+pub const fn rights_pack(floor: ImageClass, ops: u32) -> u64 {
+    ((floor as u64) & RIGHTS_FLOOR_MASK) | (((ops as u64) & RIGHTS_OPS_MASK) << RIGHTS_OPS_SHIFT)
+}
+
+/// Floor dal campo packed (`0` = eredita).
+pub const fn rights_floor(rights: u64) -> ImageClass {
+    ImageClass::from_u64((rights >> RIGHTS_FLOOR_SHIFT) & RIGHTS_FLOOR_MASK)
+}
+
+/// Maschera ops dal campo packed (`0` = eredita).
+pub const fn rights_ops(rights: u64) -> u32 {
+    ((rights >> RIGHTS_OPS_SHIFT) & RIGHTS_OPS_MASK) as u32
+}
+
+/// Bit riservati del formato: devono essere 0 (forward-compat, fail-loud).
+pub const fn rights_reserved(rights: u64) -> u64 {
+    rights & !(RIGHTS_FLOOR_MASK | (RIGHTS_OPS_MASK << RIGHTS_OPS_SHIFT))
+}
+
 /// Servizi di sistema raggiungibili per nome (ADR-0008, IPC per nome).
 /// Il discriminant coincide con l'indice di slot nel registry del kernel
 /// (`channels.rs`): `#[repr(u64)]` + assegnazione esplicita per rendere

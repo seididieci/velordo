@@ -137,12 +137,19 @@ pub(super) fn sys_peer_info(chan: usize) -> i64 {
             // classe autorevole del peer, non una dichiarazione.
             let class = crate::ordo::sched::process_image_class(peer)
                 .unwrap_or(syscall_numbers::ImageClass::Untrusted);
+            // S3.4a: diritti ereditari packed in `r10` (stesso formato di
+            // `SpawnMeta.rights`): floor nei bit bassi, ops sopra. cardo li
+            // usa per il tetto del canale; i test per verificare l'eredita'.
+            let rights = crate::ordo::sched::process_rights(peer)
+                .map(|(floor, ops)| syscall_numbers::rights_pack(floor, ops))
+                .unwrap_or(0);
             unsafe {
                 let p = addr_of_mut!(PERCPU);
                 (*p).ipc_override = 1;
                 (*p).ret_rdi = lo;
                 (*p).ret_rsi = hi;
                 (*p).ret_rdx = class.as_u64();
+                (*p).ret_r10 = rights;
             }
             0
         }

@@ -57,6 +57,25 @@ pub fn exec_current(bytes: &[u8], args_block: Option<&[u8]>) -> Result<(), ()> {
         return Err(());
     }
 
+    // S3.4a — l'exec **non eleva**: la nuova classe deve stare tra il floor
+    // ereditato e la classe corrente del processo. Floor e ops si conservano
+    // (monotoni: la persona resta, cambia solo l'immagine).
+    let new_class = super::trust_class(image_id);
+    let (floor, cur_class) = {
+        let p = &sched.processes[me];
+        (p.class_floor, p.image_class)
+    };
+    if (new_class as u64) < (floor as u64) || (new_class as u64) > (cur_class as u64) {
+        crate::serial_println!(
+            "[exec ] pid={} rifiutata: classe {} fuori da floor {} .. corrente {}",
+            me,
+            new_class.as_u64(),
+            floor.as_u64(),
+            cur_class.as_u64()
+        );
+        return Err(());
+    }
+
     // Snapshot scalari (il borrow finisce qui).
     let (cr3, top, slot, old_text, frames) = {
         let p = &sched.processes[me];

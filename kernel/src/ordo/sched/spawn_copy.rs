@@ -66,6 +66,12 @@ pub fn spawn_copy_current() -> Option<(usize, usize)> {
             sched.processes[p_mm].stack_frames,
         )
     };
+    // S3.4a: il fork eredita floor e ops dal padre (monotonia: il figlio non
+    // li riallarga, e `exec` li conservera').
+    let (p_floor, p_ops) = {
+        let p = &sched.processes[p_mm];
+        (p.class_floor, p.ops_ceiling)
+    };
     // Solo processi user duplicabili (cr3 propria, mai quella kernel).
     if p_cr3 == crate::arc::vmm_user::kernel_cr3() {
         crate::relay::channels::release_pid(child_pid);
@@ -152,6 +158,7 @@ pub fn spawn_copy_current() -> Option<(usize, usize)> {
         Process::create_spawn_copy(
             p_name, p_owned, p_nlen, p_prio, p_req, p_parent, child_cr3,
             stack_base, stack_top, saved, tss_slot, tss_sel, p_text, p_hash, p_frames,
+            p_floor, p_ops,
         )
     };
     sched.place_process(child_pid, child);

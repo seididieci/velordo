@@ -33,6 +33,12 @@ pub struct SpawnMeta {
     /// zero = nessun argv → argc=0.
     pub args_ptr: u64,
     pub args_len: u64,
+    /// S3.4a: diritti **ereditari** del figlio, packed (vedi
+    /// `syscall_numbers::{rights_pack, rights_floor, rights_ops}`): bit 0..8 =
+    /// floor di classe, bit 8..40 = maschera ops. `0` = eredita dal padre
+    /// (caso normale). Il kernel applica la monotonia: il figlio puo' solo
+    /// restringere, mai riallargare.
+    pub rights: u64,
 }
 
 impl SpawnMeta {
@@ -52,6 +58,7 @@ impl SpawnMeta {
             io_ranges: [(0, 0); 4],
             args_ptr: 0,
             args_len: 0,
+            rights: 0,
         };
         let bytes = name.as_bytes();
         let n = bytes.len().min(16);
@@ -83,6 +90,21 @@ impl SpawnMeta {
     pub fn argv(mut self, block: &[u8]) -> Self {
         self.args_ptr = block.as_ptr() as u64;
         self.args_len = block.len() as u64;
+        self
+    }
+
+    /// S3.4a — **floor di classe** del figlio: la classe minima che potra'
+    /// eseguire. Il kernel fa `max(padre, richiesto)`: chiedere un floor piu'
+    /// basso del padre non lo abbassa. `Untrusted` = nessun limite (eredita).
+    pub fn floor(mut self, class: crate::ImageClass) -> Self {
+        self.rights = syscall_numbers::rights_pack(class, syscall_numbers::rights_ops(self.rights));
+        self
+    }
+
+    /// S3.4a — **maschera ops** del figlio: il kernel fa `padre & richiesta`
+    /// (solo verso il basso). `0` = eredita tutte le ops del padre.
+    pub fn ops(mut self, mask: u32) -> Self {
+        self.rights = syscall_numbers::rights_pack(syscall_numbers::rights_floor(self.rights), mask);
         self
     }
 }
@@ -241,6 +263,27 @@ pub fn peer_info_class(chan: u64) -> Result<(ImageId, ImageClass), Error> {
     } else {
         Ok((ImageId::new(rdi, rsi), ImageClass::from_u64(rdx)))
     }
+}
+
+/// `peer_info_rights(chan)`: come [`peer_info_class`] ma riporta anche i
+/// **diritti ereditari** del peer (S3.4a) nel formato packed di
+/// `syscall_numbers::rights_*`: floor nei bit bassi, maschera ops sopra.
+/// `0` = nessun limite ereditato (padre `Untrusted`, ops `ALL`).
+#[inline]
+pub fn peer_info_rights(chan: u64) -> Result<(ImageId, ImageClass, u64), Error> {
+    let (rax, rdi, rsi, rdx, r10) = unsafe { syscall4_out(SYS_PEER_INFO, chan, 0, 0, 0) };
+    if rax != 0 {
+        Err(Error::ServerDied)
+    } else {
+        Ok((ImageId::new(rdi, rsi), ImageClass::from_u64(rdx), r10))
+    }
+}
+
+/// `peer_info_ops(chan)`: la sola **maschera ops** ereditata del peer. Comodita'
+/// per cardo (`ceiling_for`), che non ha bisogno del floor.
+#[inline]
+pub fn peer_info_ops(chan: u64) -> Result<u32, Error> {
+    peer_info_rights(chan).map(|(_, _, rights)| syscall_numbers::rights_ops(rights))
 }
 
 /// Identita' crittografica dei byte di un'immagine (ADR-0078): BLAKE2s-256

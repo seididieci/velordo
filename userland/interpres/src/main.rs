@@ -903,6 +903,11 @@ fn try_execute_external(program: &str, args: &[&str]) -> bool {
                 return true;
             }
         };
+        // S3.4b — i figli della shell non possono essere piu' privilegiati dei
+        // programmi utente: floor `ThirdParty`. Un'immagine non firmata viene
+        // rifiutata dal **kernel** (non da un check facoltativo qui), e un
+        // `exec` verso `System` non eleva.
+        meta = meta.floor(civis::ImageClass::ThirdParty);
         if let Some(ref p) = packed {
             meta = meta.argv(p);
         }

@@ -61,6 +61,9 @@ struct SpawnMeta {
     io_ranges: [(u16, u16); 4],
     args_ptr: u64,
     args_len: u64,
+    /// S3.4a: diritti ereditari packed (`syscall_numbers::rights_*`).
+    /// `0` = eredita dal padre.
+    rights: u64,
 }
 
 /// Immagine massima spawabile (Fase 39: single source in `syscall-numbers`,
@@ -115,6 +118,13 @@ pub(super) fn sys_spawn_image(img_ptr: u64, img_len: usize, meta_ptr: u64, meta_
     } else {
         crate::arc::vmm_user::USER_STACK_FRAMES as u32
     };
+    // S3.4a — diritti ereditari: bit riservati a 0 (forward-compat) e
+    // `0` = eredita. Il kernel applica la monotonia in `create_user`.
+    if syscall_numbers::rights_reserved(meta.rights) != 0 {
+        return -1;
+    }
+    let req_floor = syscall_numbers::rights_floor(meta.rights);
+    let req_ops = syscall_numbers::rights_ops(meta.rights);
     // Argv packed (S2.5e, stesso formato di exec): copiato in heap kernel
     // (stabile: niente TOCTOU) e validato PRIMA di creare nulla. Zero = argc=0.
     let args_block: Option<alloc::vec::Vec<u8>> = if meta.args_len == 0 {
@@ -171,6 +181,8 @@ pub(super) fn sys_spawn_image(img_ptr: u64, img_len: usize, meta_ptr: u64, meta_
         detached,
         stack_frames,
         parsed.as_ref(),
+        req_floor,
+        req_ops,
     ) {
         Some(pid) => {
             let disp = core::str::from_utf8(&meta.name[..name_len]).unwrap_or("?");

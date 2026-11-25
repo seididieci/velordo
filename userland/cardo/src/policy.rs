@@ -410,10 +410,22 @@ pub fn name_of(id: civis::ImageId) -> &'static str {
 }
 
 /// Tetto ops per il canale `chan` (chiamato una volta all'handshake).
-pub fn ceiling_for(chan: u64) -> u32 {    // (1) init: TCB pid 1, fuori manifest per costruzione.
+pub fn ceiling_for(chan: u64) -> u32 {
+    // (1) init: TCB pid 1, fuori manifest per costruzione.
     if civis::peer_pid(chan).unwrap_or(-1) == 1 {
         return civis::RIGHTS_ALL;
     }
+    let base = ceiling_base_for(chan);
+    // S3.4a — il figlio non ha piu' diritti del padre: la maschera ereditata
+    // (nel PCB, esposta da `peer_info`) attenua il tetto della policy. `0` =
+    // canale di cui non si conoscono i diritti: fail-closed.
+    let inherited = civis::peer_info_ops(chan).unwrap_or(0);
+    base & inherited
+}
+
+/// Tetto della **policy** per il canale (identita' dell'immagine), prima
+/// dell'attenuazione ereditaria (S3.4a).
+fn ceiling_base_for(chan: u64) -> u32 {
     // (2+3) identita' nota: cerca prima nei servizi, poi nei test.
     if let Ok((id, class)) = civis::peer_info_class(chan) {
         unsafe {

@@ -255,3 +255,19 @@ pub fn set_image_class(pid: usize, class: syscall_numbers::ImageClass) {
         p.image_class = class;
     }
 }
+
+/// S3.4a — **diritti ereditari** di `pid`: `(floor, ops)`. `None` se il pid non
+/// esiste o e' terminato. `peer_info` li espone in `r10` (packed) e cardo li
+/// usa per il tetto ops del canale.
+pub fn process_rights(pid: usize) -> Option<(syscall_numbers::ImageClass, u32)> {
+    let guard = SCHED.lock();
+    let sched = guard.as_ref()?;
+    if pid >= sched.processes.len() {
+        return None;
+    }
+    let p = &sched.processes[pid];
+    if p.state == State::Terminated {
+        return None;
+    }
+    Some((p.class_floor, p.ops_ceiling))
+}

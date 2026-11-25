@@ -4803,3 +4803,49 @@ il login, perché il token è già della sessione 0 quando il DE parte.
 
 **Resta**: titoli in testo nella barra, puntatore/floating (D8g), e
 l'attenuazione dei diritti dei figli (S3.4, dopo D8f: tocca il kernel).
+
+## S3.4 — Diritti ereditari all'avvio (ADR-0093)
+
+Il debito di ADR-0055 §5 («i diritti si ereditano attraverso `spawn`») diventa
+vero. Prima di questa fase il padre non veniva consultato: `handle_rights_execute`
+(cardo) guardava il **chiamante** e la firma del **target**, ma la discendenza
+non entrava, e `exec` poteva **elevare** (`usershell` ThirdParty → `interpres`
+System). Il controllo in `libr`/shell era facoltativo: `SYS_EXEC` e
+`SYS_SPAWN_IMAGE` non chiedevano nulla.
+
+**Il meccanismo** (S3.4a, kernel): `SpawnMeta.rights` packed (floor di classe
+nei bit 0..8, maschera ops nei bit 8..40, `0` = eredita), `class_floor` e
+`ops_ceiling` nel PCB. `create_user` fa `floor = max(padre, richiesto)`,
+`ops = padre & richiesta` e **rifiuta** se `floor ≤ class(immagine) ≤
+classe_del_padre` non vale; `exec_current` applica la stessa regola **senza**
+richiesta (floor e ops si conservano: monotonia); `create_spawn_copy` (fork) e
+`create_thread` li copiano **esplicitamente**. `SYS_PEER_INFO` espone i diritti
+packed in `r10` (stesso formato), `rdx` resta la classe. `SpawnMeta` cresce
+56→64 B: kernel e `civis` nello stesso commit, rebuild di tutti i binari.
+
+**S3.4b**: `cardo::policy::ceiling_for = policy(identità) & peer_info_ops`
+(fail-closed su `0`); la shell nativa lancia i programmi con floor
+`ThirdParty`, quindi un `Untrusted` è rifiutato dal **kernel** e un `exec`
+verso `System` non eleva.
+
+**Test**: `t77` nel gate (spawn/exec nudi di `System` da `tst` → `-1`,
+fork+exec, thread del gruppo, `SYS_SPAWN` per nome, attenuazione annidata delle
+ops via `peer_info`, init invariato) → `usertests 72/72`. `t67`/`t68` adattati:
+non possono più spawnare `System` da `tst` (era l'elevazione che la fase
+vieta); provano la classe `System` di un processo vivo e il **rifiuto** dello
+spawn elevato; la copertura delle porte dal manifest si sposta sul probe
+`usr`. **`usr/bin/floorprobe`** (fuori gate, `scripts/run-rights-tests.sh`): la
+shell nativa lo lancia con floor `ThirdParty`; il probe verifica `Untrusted`
+rifiutato, `ThirdParty` ammesso, `exec` di `Untrusted` negato.
+
+**Trappole pagate**: (a) il figlio COW **non eredita i canali FS**, quindi il
+test fork+exec deve caricare/verificare nel padre e lasciare al figlio solo
+`exec` (syscall pura) + `send` sul canale di nascita, o il figlio fa `#PF` al
+primo IPC; (b) `spawn_copy`/`create_thread` costruiscono il `Process` campo per
+campo: un campo dimenticato non dà errore di compilazione e il default
+permissivo riapre la falla (per questo i punti 3 e 4 di `t77` sono
+obbligatori); (c) `SYS_PEER_INFO` aveva un registro libero (`r10`): la maschera
+ereditaria ci sta senza rompere `peer_info_class`.
+
+**Fuori scope dichiarato**: attenuazione del subtree dei path (qui solo la
+maschera ops), capability di sessione (S3.3c), TTL/rotazione del token.

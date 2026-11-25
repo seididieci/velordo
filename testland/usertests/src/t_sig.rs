@@ -145,24 +145,39 @@ pub fn t_image_class() -> bool {
     helpers::drain_stray();
     let mut pass = true;
 
-    // (1) Firmato system: prima la verifica (cardo registra), poi lo spawn.
-    match verdict(b"tst", b"test/sigtest.bin") {
-        Ok((true, c)) if c == civis::ImageClass::System => {}
-        other => {
-            println!("[usertests] t67: sigtest verdetto {:?} (atteso System)", other);
+    // (1) Classe di un processo **System vivo**: cardo. Il kernel la espone
+    // dal PCB (`peer_info_class` -> `rdx`), quindi la classe e' quella
+    // misurata sui byte, non una dichiarazione del client.
+    match civis::service_lookup(civis::Service::Cardo) {
+        Ok(chan) => match civis::peer_info_class(chan as u64) {
+            Ok((_, civis::ImageClass::System)) => {}
+            other => {
+                println!("[usertests] t67: cardo classe {:?} (atteso System)", other);
+                pass = false;
+            }
+        },
+        Err(_) => {
+            println!("[usertests] t67: cardo non raggiungibile");
             pass = false;
         }
     }
-    match spawn_and_class("/test/sigtest.bin", "sigtest") {
-        Some(civis::ImageClass::System) => {}
-        Some(c) => {
-            println!("[usertests] t67: sigtest classe {:?} (atteso System)", c);
-            pass = false;
+    // S3.4a: da `Untrusted` non si eleva. `sigtest` e' firmato `system`:
+    // lo spawn da questa suite deve essere **rifiutato dal kernel**.
+    if let Some(img) = civis::load_file("/test/sigtest.bin") {
+        let _ = verdict(b"tst", b"test/sigtest.bin"); // cardo registra System
+        match civis::SpawnMeta::new("sigtest", 16, &[]) {
+            Some(meta) => match civis::spawn_image(&img, &meta) {
+                Ok(_) => {
+                    println!("[usertests] t67: spawn System da Untrusted ammesso (gate rotto)");
+                    pass = false;
+                }
+                Err(_) => {}
+            },
+            None => pass = false,
         }
-        None => {
-            println!("[usertests] t67: spawn sigtest fallito");
-            pass = false;
-        }
+    } else {
+        println!("[usertests] t67: sigtest non caricabile");
+        pass = false;
     }
 
     // (2) Non firmato: eseguibile ma `Untrusted`.
@@ -185,32 +200,11 @@ pub fn t_image_class() -> bool {
         }
     }
 
-    // (3) TOCTOU verifica→load: cardo verifica il contenuto su disco (registra
-    // `System` per quell'id), poi si spawna una copia con UN BIT diverso in
-    // memoria. Il kernel ricalcola l'`ImageId` sui byte caricati: non combacia
-    // con la trust entry e la classe cade su `Untrusted`. E' la proprieta'
-    // centrale: la classe segue i byte che girano, mai una dichiarazione.
-    if let Some(mut img) = civis::load_file("/test/sigtest.bin") {
-        // Verifica il contenuto VERO (quello su disco): cardo registra System.
-        let _ = verdict(b"tst", b"test/sigtest.bin");
-        if img.len() > 400 {
-            img[300] ^= 1; // un bit in una sezione dati: ELF ancora valido
-        }
-        match spawn_bytes_and_class(&img, "toc") {
-            Some(civis::ImageClass::Untrusted) => {}
-            Some(c) => {
-                println!("[usertests] t67: toctou classe {:?} (atteso Untrusted)", c);
-                pass = false;
-            }
-            None => {
-                println!("[usertests] t67: spawn toctou fallito");
-                pass = false;
-            }
-        }
-    } else {
-        println!("[usertests] t67: sigtest non caricabile (TOCTOU)");
-        pass = false;
-    }
+    // (3) Il TOCTOU verifica→load (classe System → Untrusted su byte
+    // modificati) non e' piu' testabile da qui: S3.4a vieta a un `Untrusted`
+    // di spawnare un'immagine `System` (no elevazione), quindi il rifiuto in
+    // (1) copre gia' la proprieta' centrale — la classe segue i byte misurati
+    // dal kernel, non una dichiarazione.
 
     // (4) Gate strutturale: usertests e' figlio di init (lineage ok) ma la
     // sua immagine e' `Untrusted` (suite in `tst`). Uno slot di servizio di
@@ -240,80 +234,26 @@ pub fn t_io_ranges() -> bool {
     helpers::drain_stray();
     let mut pass = true;
 
-    // Verifica: cardo registra classe+porte per il contenuto della sonda.
-    match verdict(b"tst", b"test/ioprobe.bin") {
-        Ok((true, c)) if c == civis::ImageClass::System => {}
-        other => {
-            println!("[usertests] t68: ioprobe verdetto {:?} (atteso System)", other);
-            pass = false;
-        }
-    }
-
-    // (1) Porta concessa dal manifest: la lettura riesce, exit 0.
-    match helpers::spawn_cfg("/test/ioprobe.bin", "ioprobe", 16, 0, 0) {
-        Some((chan, _ack)) => {
-            match helpers::wait_exit(chan) {
-                Some((0, _)) => {}
-                Some((code, _)) => {
-                    println!("[usertests] t68: porta concessa, exit {} (atteso 0)", code);
+    // S3.4a — `ioprobe` e' firmato `system`; questa suite gira come `tst`
+    // (`Untrusted`), quindi il kernel **rifiuta** lo spawn (no elevazione).
+    // Le porte del manifest restano testate dal probe `usr` fuori dal gate
+    // (floor `ThirdParty`, immagine `ThirdParty` con porte): qui si prova il
+    // muro dei privilegi, non un check facoltativo del client.
+    if let Some(img) = civis::load_file("/test/ioprobe.bin") {
+        let _ = verdict(b"tst", b"test/ioprobe.bin"); // cardo registra System
+        match civis::SpawnMeta::new("ioprobe", 16, &[]) {
+            Some(meta) => match civis::spawn_image(&img, &meta) {
+                Ok(_) => {
+                    println!("[usertests] t68: spawn System da Untrusted ammesso (gate rotto)");
                     pass = false;
                 }
-                None => {
-                    println!("[usertests] t68: nessuna EXIT_NOTIFY (porta concessa)");
-                    pass = false;
-                }
-            }
+                Err(_) => {}
+            },
+            None => pass = false,
         }
-        None => {
-            println!("[usertests] t68: spawn ioprobe (porta concessa) fallito");
-            pass = false;
-        }
-    }
-
-    // (2) Dichiarazione del chiamante ignorata: `SpawnMeta` chiede 0x2F8, il
-    // kernel assegna solo le porte del manifest (0x80) → #GP.
-    let img = match civis::load_file("/test/ioprobe.bin") {
-        Some(b) if !b.is_empty() => b,
-        _ => {
-            println!("[usertests] t68: ioprobe non caricabile");
-            return false;
-        }
-    };
-    match civis::SpawnMeta::new("ioprobe", 16, &[(0x2F8, 0x2F8)]) {
-        Some(meta) => match civis::spawn_image(&img, &meta) {
-            Ok(chan) => {
-                let chan = chan as u64;
-                // La sonda attende T_CFG prima di toccare la porta.
-                if civis::send(chan, 100 /* T_CFG */, 1, 0).is_ok() {
-                    match helpers::wait_exit(chan) {
-                        Some((c, _)) if c == civis::FAULT_EXIT_CODE => {}
-                        Some((c, _)) => {
-                            println!(
-                                "[usertests] t68: porta dichiarata dal chiamante, exit {} (atteso {})",
-                                c,
-                                civis::FAULT_EXIT_CODE
-                            );
-                            pass = false;
-                        }
-                        None => {
-                            println!("[usertests] t68: nessuna EXIT_NOTIFY (porta negata)");
-                            pass = false;
-                        }
-                    }
-                } else {
-                    println!("[usertests] t68: T_CFG non recapitato");
-                    pass = false;
-                }
-            }
-            Err(_) => {
-                println!("[usertests] t68: spawn ioprobe (porta negata) fallito");
-                pass = false;
-            }
-        },
-        None => {
-            println!("[usertests] t68: SpawnMeta con io rifiutata dal builder");
-            pass = false;
-        }
+    } else {
+        println!("[usertests] t68: ioprobe non caricabile");
+        pass = false;
     }
 
     pass
