@@ -190,6 +190,21 @@ impl De {
         // shell che stiamo per avviare (che si spegne l'eco da sola, in
         // `input::attach`). Fino ad allora niente tasti a schermo.
         let _ = sess.echo(false);
+        // D8f: copia il token dalla sessione 0 (dove il login lo ha messo con
+        // SESS_TOKEN_SET) sulla sessione della nuova tile, prima di spawnare.
+        // Sessione 0: il token c'e' gia'. `Session::set_token` scrive sulla
+        // sessione a cui e' attaccato il canale, quindi si attacca prima a 0
+        // (per leggere) e poi a `sid` (per scrivere).
+        if sid != 0 {
+            let token = civis::sess::attach_to_session(0)
+                .and_then(|s| s.token())
+                .unwrap_or(0);
+            if let Ok(s) = civis::sess::attach_to_session(sid as u32) {
+                let _ = s.set_token(token);
+            }
+            // `s` viene drop qui (smunmap della sua mailbox); il canale resta
+            // attaccato a `sid`, serve per SESS_INPUT del DE.
+        }
         // Prima il layout e il focus, poi la shell: cosi' la tile esiste (e la
         // sessione e' quella in focus) gia' quando il programma scrive il suo
         // banner — altrimenti quelle righe le perde il mirror seriale.
@@ -209,6 +224,9 @@ impl De {
 
     /// Avvia una **shell nella sessione `sid`** (una tile = una sessione = un
     /// programma).
+    ///
+    /// Il token e' gia' stato copiato sulla sessione `sid` dal chiamante
+    /// (`split` lo copia dalla sessione 0; la sessione 0 lo ha già dal login).
     ///
     /// Ordine che chiude la razza: `spawn_image` (come fa `login`, fail-closed
     /// sulla firma) -> **`suspend`** del figlio -> `SESS_BIND(sid, pid)` ->
@@ -396,6 +414,7 @@ fn real_main(sp: u64) -> ! {
                     let dead = m.w1 as i64;
                     if let Some(pos) = de.children.iter().position(|&(p, _)| p == dead) {
                         let (_, sid) = de.children.remove(pos);
+                        let was_last = de.children.is_empty();
                         if de.tree.remove(sid) {
                             let _ = civis::tile::drop_tile(sid as u32);
                             if let Ok(sess) = civis::sess::attach_to_session(sid as u32) {
@@ -410,6 +429,14 @@ fn real_main(sp: u64) -> ! {
                                 de.tree.len(),
                                 de.tree.focus()
                             );
+                        }
+                        // D8f passo 5: l'ultima shell che esce chiude la
+                        // sessione (non lascia una tile vuota). Il DE esce con
+                        // 0; il login, che e' in attesa della sua morte,
+                        // riapre il prompt (OnDeath::LoginGate con codice 0).
+                        if was_last {
+                            println!("[impluvium] ultima shell uscita: fine sessione");
+                            civis::exit(0);
                         }
                     }
                     if civis::input::device::peer_pid() == dead {
