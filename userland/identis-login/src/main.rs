@@ -55,8 +55,10 @@ fn console_write(data: &[u8]) {
 fn real_main(_sp: u64) -> ! {
     // Pulisce la sessione 0: il login non deve lasciare i messaggi di una
     // sessione precedente (es. dopo un logout) sullo schermo quando riparte.
-    // out_screen non entra nel mirror seriale: solo lo schermo si pulisce.
-    let _ = civis::sess::out_screen(b"\x1b[2J\x1b[H");
+    // `0x0C` (form feed) e' il clear supportato dal modello (`littera`:
+    // `grid.clear()` + cursore a 0,0 e tutte le celle sporche); `CSI 2J` non
+    // e' implementato. out_screen non entra nel mirror seriale.
+    let _ = civis::sess::out_screen(b"\x0C");
 
     // Registra il servizio: serve a **init** per supervisionarlo (e'
     // l'unico modo per entrare nel sistema: se il login fallisce, init lo

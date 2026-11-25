@@ -589,6 +589,32 @@ impl Term {
         Some((hashed, crc))
     }
 
+    /// D8f — il **DE è morto**: il layout torna alla console (una tile 0 a
+    /// tutto schermo, **senza bordo**) e i pixel dei bordi spariscono, insieme
+    /// al testo della sessione 0 (lo schermo del login riparte pulito). Il DE
+    /// è riconosciuto dal suo canale di layout (`tile_owner`).
+    fn reset_layout_after_de(&mut self) {
+        self.tile_owner = 0;
+        self.tile_pending.clear();
+        for t in &self.tiles {
+            if t.win != 0 {
+                let _ = self.comp.close(t.win);
+                self.comp.add_damage(t.rect);
+            }
+        }
+        self.tiles.clear();
+        self.sessions.focus = 0;
+        if let Some(s) = self.sessions.get_mut(0) {
+            s.grid.clear();
+        }
+        self.ensure_screen_tile();
+        // Copre i bordi (pixel fuori dalla griglia) col wallpaper e ridisegna
+        // le celle: con una tile il bordo non c'e' (login a tutto schermo).
+        let (w, h) = self.surface.pixel_size();
+        self.repaint_tile_area(musivum::Rect::new(0, 0, w, h));
+        self.flush_display_full();
+    }
+
     /// Applica lo staging del layout (`TILE_COMMIT`): tutte le tile, poi un
     /// render e un flush solo.
     fn commit_tiles(&mut self) {
@@ -2830,6 +2856,13 @@ fn real_main(_sp: u64) -> ! {
                             // sessioni di cui era owner (mai la 0), con la
                             // mailbox smappata e distrutta.
                             term.purge_sessions_of(dead);
+                            // D8f: se è morto il **DE** (il padrone del
+                            // layout), il server torna a una tile 0 a tutto
+                            // schermo senza bordo: i bordi e il testo della
+                            // sessione spariscono, il login riparte pulito.
+                            if term.tile_owner != 0 && msg.channel == term.tile_owner {
+                                term.reset_layout_after_de();
+                            }
                         }
                     }
 
