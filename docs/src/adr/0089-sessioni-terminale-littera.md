@@ -71,7 +71,7 @@ passa solo da qui; `SESS_WRITE`/`SESS_READ`/`SESS_DUMP` sono chunk da al più
 | Tag | Nome | Semantica |
 |---|---|---|
 | 0x9B | `SESS_CREATE` | `w0` = flag (0 = legata al chiamante, 1 = non legata) → `w0` = sess, `w1` = shm della mailbox |
-| 0x9C | `SESS_WHOAMI` | nessun argomento → la sessione **del pid chiamante** (owner o binding) |
+| 0x9C | `SESS_WHOAMI` | nessun argomento → la sessione **del pid chiamante**: binding, owner, o risalendo i padri (D8f, max 16 livelli via `ps_info.parent`) |
 | 0x9D | `SESS_ATTACH_DEFAULT` | → la sessione 0: l'unico ingresso **nominato** |
 | 0x9E | `SESS_BIND` | `w0` = sess, `w1` = pid: il DE lega un figlio appena nato |
 | 0x9F | `SESS_WRITE` | `w0` = len (byte in OUT) → feed della sessione attaccata |
@@ -101,12 +101,21 @@ mailbox manca: mai un id che il client non può mappare.
 Chi è la sessione di un processo lo dice il **kernel**, non il processo: il
 server usa `SYS_PEER_PID`/`SYS_PEER_INFO` sul canale del messaggio e risolve
 per pid (`SESS_WHOAMI`). Nessun handle passato allo spawn, nessun
-`VELORDO_SESSION` in ambiente, nessun argv da fidarsi, nessuna passeggiata
-nell'albero dei parent. `SESS_BIND` esiste per il caso opposto (il DE crea una
-sessione per un figlio appena nato: il padre la lega **al** figlio), ed è
-gated a classe ≥ `ThirdParty`. `EXIT_NOTIFY` purga binding e sessioni di cui
-il morto era owner — mai la 0 — smappando e distruggendo la mailbox
-(`munmap` a pagina **prima** di `shm_destroy`, come in D8b).
+`VELORDO_SESSION` in ambiente, nessun argv da fidarsi. `SESS_BIND` esiste per il
+caso opposto (il DE crea una sessione per un figlio appena nato: il padre la
+lega **al** figlio), ed è gated a classe ≥ `ThirdParty`. `EXIT_NOTIFY` purga
+binding e sessioni di cui il morto era owner — mai la 0 — smappando e
+distruggendo la mailbox (`munmap` a pagina **prima** di `shm_destroy`, come in
+D8b).
+
+**D8f — la risalita dei padri**: un comando lanciato dentro una tile (`users`,
+`ls`, ...) non è legato a nessuno; solo la shell lo è. Leggere l'output sulla 0
+significava vederlo nella tile sbagliata (o non vederlo affatto). Ora
+`SESS_WHOAMI`, se il pid non ha né binding né owner, risale i padri con
+`ps_info(pid).parent` (massimo 16 livelli, il primo che ha una sessione vince).
+Resta **attestazione**: la catena la riporta il kernel, un processo non può
+fingersi figlio di un altro. Un padre morto o ri-parentato a init ferma la
+risalita (il chiamante ripiega sulla 0, come prima).
 
 Policy: `SESS_CREATE` è **aperta anche a `Untrusted`** (una sessione non è un
 privilegio: è memoria bounded, 8 al massimo, e serve ai programmi che non

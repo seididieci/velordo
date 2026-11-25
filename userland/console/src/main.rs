@@ -107,6 +107,13 @@ const BULK_FLUSH_EVERY: u32 = 8;
 /// del kernel ha un tetto di 64 frame (256 KiB); oltre, `shm_create` fallisce.
 const WIN_SURFACE_MAX: usize = 64 * 4096;
 
+/// D8f — profondita' massima della risalita dei padri in `SESS_WHOAMI`: un
+/// figlio lanciato da una shell non e' legato a nessuno, e deve parlare con la
+/// sessione della tile in cui e' stato lanciato. 16 livelli coprono
+/// login → DE → shell → comando → figlio; un albero piu' profondo si ferma
+/// (e il chiamante ripiega sulla 0, come prima).
+const ANCESTRY_MAX: usize = 16;
+
 // ── Il terminale ───────────────────────────────────────────────────
 
 /// Privilegio >= ThirdParty (il DE e i servizi firmati): l'unico check che
@@ -1166,6 +1173,27 @@ impl Term {
             let _ = civis::munmap(ptr as usize, len);
             let _ = civis::shm_destroy(shm);
         }
+    }
+
+    /// La sessione del processo `pid`, **risalendo i padri** (D8f): il binding
+    /// esplicito (o l'owner) vale per chi e' legato, ma un comando lanciato
+    /// dentro una tile non lo e' — il padre (la shell della tile) si'. La
+    /// catena viene dal kernel (`ps_info.parent`), quindi resta attestazione:
+    /// un processo non puo' fingersi figlio di un altro.
+    fn session_of_process(&self, pid: i64) -> Option<usize> {
+        let mut cur = pid;
+        for _ in 0..ANCESTRY_MAX {
+            if cur < 0 {
+                return None;
+            }
+            if let Some(sid) = self.sessions.session_of_pid(cur) {
+                return Some(sid);
+            }
+            // Padre morto o senza padre: la risalita si ferma (fail-loud: il
+            // chiamante risponde "non attaccato", non una sessione a caso).
+            cur = civis::ps_info(cur as u32)?.parent? as i64;
+        }
+        None
     }
 
     /// La classe dell'immagine del chiamante (mai una dichiarazione del peer).
@@ -2353,9 +2381,11 @@ fn real_main(_sp: u64) -> ! {
                     }
 
                     SESS_WHOAMI => {
-                        // Attestazione: nessun argomento, il kernel dice il pid.
+                        // Attestazione: nessun argomento, il kernel dice il pid;
+                        // se il processo non e' legato (un comando lanciato da
+                        // una shell) risaliamo i padri fino alla tile (D8f).
                         let pid = civis::peer_pid(msg.channel).unwrap_or(-1);
-                        match term.sessions.session_of_pid(pid) {
+                        match term.session_of_process(pid) {
                             Some(id) => match term.ensure_mailbox(msg.channel, pid) {
                                 Some(shm) => {
                                     term.sessions.attach(msg.channel, id);
