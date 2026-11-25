@@ -60,7 +60,7 @@ vecchio `put` della console, e la console mantiene la sua politica T4 intatta
 (`shift` solo se disegnata, non-bulk, sfondo riga-invariante, superficie
 pixel).
 
-### 2. L'endpoint di sessione: 15 tag, nessuna syscall, nessun servizio nuovo
+### 2. L'endpoint di sessione: nessuna syscall, nessun servizio nuovo
 
 La capability è una **mailbox**: una pagina shm (4096 B) che il server crea,
 mappa RW e consegna alla creazione (`sess-proto`: OUT client→sessione
@@ -85,6 +85,11 @@ passa solo da qui; `SESS_WRITE`/`SESS_READ`/`SESS_DUMP` sono chunk da al più
 | 0xA7 | `SESS_DUMP` | `w0` = sess, `w1` = max → coda del testo visibile in IN |
 | 0xA8 | `SESS_STATS` | → `(sessioni vive, focus)` |
 | 0xA9 | `SESS_TEST_INPUT` | `w0` = len (byte in OUT) — solo test: inietta input |
+| 0xAA | `SESS_INPUT_EVENT` | console → lettore dichiarato: c'è input (hint coalescente, D8d) |
+| 0xAB | `SESS_ATTACH` | `w0` = sess (≥ `ThirdParty`) → `w1` = shm: mailbox per un **iniettore** (il DE, D8e) |
+| 0xAC | `SESS_INPUT` | `w0` = len (byte in OUT) → accoda nei **tasti** della sessione attaccata |
+| 0xAD | `SESS_TOKEN_SET` | `w0` = token → lo scrive sulla sessione **attaccata** (solo `System`, D8f) |
+| 0xAE | `SESS_TOKEN` | → `w0` = token della sessione **attaccata** (`0` = anonima, D8f) |
 
 Zero syscall nuove, zero `Service` nuovi (`SERVICE_COUNT` resta 20): il
 servizio che possiede le sessioni è `console`, che già possiede i pixel.
@@ -122,6 +127,19 @@ privilegio: è memoria bounded, 8 al massimo, e serve ai programmi che non
 hanno ancora un'identità firmata — l'utente la vede nascere e morire);
 l'ingresso nominato `SESS_ATTACH_DEFAULT` è aperto (serve a chi deve parlare
 con il terminale principale); `SESS_BIND` e la creazione non legata no.
+
+**D8f — il token è della sessione, non dell'ambiente**: il token di sessione
+emesso da Identis smette di viaggiare come `VELORDO_SESSION` in env (un bearer
+che si eredita per caso, leggibile da chiunque in quel terminale e perso da chi
+non lo copia). Vive nel server: `SESS_TOKEN_SET` lo scrive sulla sessione
+**attaccata** al canale (solo `System`: il login sulla 0, il DE quando propaga
+a una tile) e `SESS_TOKEN` lo legge, sempre dalla sessione attaccata — quindi
+un processo di una tile non può leggere il token di un'altra, e l'attachment a
+sua volta si stabilisce solo per attestazione (`SESS_WHOAMI` + ancestry). `0` =
+sessione anonima; la chiusura della sessione porta via il token. I programmi
+(`interpres`, `users`, `create-user`) leggono `civis::sess::token()` e non
+hanno più un fallback env silenzioso: se la sessione non ha un token, lo
+dicono.
 
 ### 4. `/dev/console` diventa un adattatore sulla sessione 0
 

@@ -128,10 +128,18 @@ fn real_main(_sp: u64) -> ! {
                     }
                 }
                 console_write(b"[login] SUCCESS\n");
+                // D8f — l'identita' e' della **sessione**, non dell'ambiente:
+                // il token va nel server, sulla sessione a cui il login e'
+                // attaccato (la 0). Da qui in poi `users`/`create-user` lo
+                // leggono con `SESS_TOKEN` (attestazione), non da una
+                // variabile d'ambiente che chiunque puo' leggere o perdere.
+                let token = unsafe { SESSION_TOKEN };
+                if civis::sess::set_token(token).is_err() {
+                    console_write(b"[login] ERRORE: token di sessione non registrato\n");
+                }
                 // La shell prende il posto del login: il login e' il programma
                 // di autenticazione, non il terminale. La shell e' la **nativa**
-                // (Fase 3.2, S3.2a): eredita la sessione da `VELORDO_SESSION`
-                // e offre `help`, `users`, `create-user`, `logout`, `exit`.
+                // (Fase 3.2, S3.2a) e legge la sessione dal server.
                 // Il binario e' spawnato *detached*: quando il login esce, la
                 // shell viene ri-parentata a init (senza, la cascata della
                 // morte del parent la ucciderebbe).
@@ -161,9 +169,9 @@ fn real_main(_sp: u64) -> ! {
 const MAX_ATTEMPTS: u32 = 3;
 
 /// Spawla l'interprete nativa dall'oggetto ArcaFS (`sys:bin/interpres.bin`).
-/// Passa le variabili d'ambiente `VELORDO_SESSION` (token hex) e
-/// `VELORDO_USER` (nome utente): servono alla shell per il prompt con
-/// glifi Nerd Font.
+/// Passa solo `USER` (il nome utente, per il prompt con glifi Nerd Font): il
+/// **token non viaggia piu' in ambiente** (D8f) — sta nel server, sulla
+/// sessione, e la shell lo legge con `SESS_TOKEN`.
 ///
 /// **Verifica prima dello spawn** (ADR-0078/0079, come `init`): la classe di
 /// un'immagine arriva al kernel dalla trust table, che cardo popola quando
@@ -197,9 +205,6 @@ fn spawn_shell() {
         }
     };
 
-    let token = unsafe { SESSION_TOKEN };
-    let token_hex = format!("{:016x}", token);
-
     // Costruisci il nome utente come byte slice.
     let user_bytes = unsafe { &LOGIN_USER[..LOGIN_USER_LEN as usize] };
     let user_str = core::str::from_utf8(user_bytes).unwrap_or("");
@@ -214,12 +219,10 @@ fn spawn_shell() {
         }
     };
 
-    // Env: VELORDO_SESSION + USER. pack_args accetta un array
-    // di slice (più env). L'interprete li legge con env_from_stack().
-    let session_env = alloc::format!("VELORDO_SESSION={}", token_hex);
+    // Env: solo `USER` (un nome, non un segreto). Il token sta nel server.
     let user_env = alloc::format!("USER={}", user_str);
 
-    if let Some(packed) = civis::pack_args(&[], &[&session_env.as_bytes(), &user_env.as_bytes()]) {
+    if let Some(packed) = civis::pack_args(&[], &[&user_env.as_bytes()]) {
         meta = meta.argv(&packed);
         match civis::spawn_image(&img, &meta.detached()) {
             Ok(_chan) => console_write(b"[login] shell nativa avviata\n"),

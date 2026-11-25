@@ -100,6 +100,11 @@ pub struct Session {
     pub echo: bool,
     /// pid che possiede la sessione (attestazione), `None` = non legata.
     pub owner: Option<i64>,
+    /// Token di sessione (D8f): l'**identita'** della sessione vive qui, non
+    /// in una variabile d'ambiente. `0` = sessione anonima (nessun login).
+    /// Lo scrive il login (`SESS_TOKEN_SET`) e lo legge chi e' attaccato
+    /// (`SESS_TOKEN`); muore con la sessione.
+    pub token: u64,
     resume: Resume,
 }
 
@@ -121,6 +126,7 @@ impl Session {
             input: VecDeque::new(),
             echo: true,
             owner,
+            token: 0,
             resume: Resume::None,
         }
     }

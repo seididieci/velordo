@@ -23,7 +23,7 @@ use crate::sys::{munmap, shm_map};
 use crate::{
     send, Service, SESS_ATTACH, SESS_ATTACH_DEFAULT, SESS_BIND, SESS_CLOSE, SESS_CREATE,
     SESS_DUMP, SESS_ECHO, SESS_FOCUS, SESS_INFO, SESS_INPUT, SESS_READ, SESS_RESIZE, SESS_STATE,
-    SESS_STATS, SESS_TEST_INPUT, SESS_WHOAMI, SESS_WRITE,
+    SESS_STATS, SESS_TEST_INPUT, SESS_TOKEN, SESS_TOKEN_SET, SESS_WHOAMI, SESS_WRITE,
 };
 use sess_proto::{IN_OFF, MAILBOX_BYTES, MAX_CHUNK, OUT_OFF};
 
@@ -179,6 +179,30 @@ impl Session {
     /// Accende/spegne l'eco dell'input (flag di sessione).
     pub fn echo(&self, on: bool) -> Result<(), SessError> {
         let r = send(service_chan()?, SESS_ECHO, on as u64, 0).map_err(|_| SessError::Ipc)?;
+        if r.w0 == !0u64 {
+            return Err(SessError::Denied);
+        }
+        Ok(())
+    }
+
+    /// Il **token della sessione** (D8f): l'identita' vive nel server, non in
+    /// una variabile d'ambiente. La richiesta viaggia sulla sessione
+    /// **attaccata** al canale (l'id non si passa, come `resize`/`echo`):
+    /// l'attachment e' la prova, quindi un processo di una tile non legge il
+    /// token di un'altra. `0` = sessione anonima.
+    pub fn token(&self) -> Result<u64, SessError> {
+        let r = send(service_chan()?, SESS_TOKEN, 0, 0).map_err(|_| SessError::Ipc)?;
+        if r.w0 == !0u64 {
+            return Err(SessError::NotAttached);
+        }
+        Ok(r.w0)
+    }
+
+    /// Scrive il token sulla sessione attaccata (solo immagini >= `System`:
+    /// il login sulla 0, il DE quando propaga a una tile nuova). `0` =
+    /// sessione anonima. La morte della sessione porta via il token.
+    pub fn set_token(&self, token: u64) -> Result<(), SessError> {
+        let r = send(service_chan()?, SESS_TOKEN_SET, token, 0).map_err(|_| SessError::Ipc)?;
         if r.w0 == !0u64 {
             return Err(SessError::Denied);
         }
@@ -400,6 +424,21 @@ fn out_impl(bytes: &[u8], screen_only: bool) -> bool {
         return false;
     };
     s.write_with(bytes, screen_only).is_ok()
+}
+
+/// Il **token della sessione del processo** (D8f): l'identita' sta nel server,
+/// non in una variabile d'ambiente. `Ok(0)` = sessione anonima (nessun login),
+/// `Err(NotAttached)` = nessuna sessione raggiungibile. E' il rimpiazzo del
+/// bearer `VELORDO_SESSION` per `interpres`/`users`/`create-user`.
+pub fn token() -> Result<u64, SessError> {
+    current().ok_or(SessError::NotAttached)?.token()
+}
+
+/// Scrive il token sulla **sessione del processo** (il login, sulla 0). Il DE
+/// che propaga a una tile nuova usa invece [`Session::set_token`] sulla
+/// sessione a cui si e' appena attaccato.
+pub fn set_token(token: u64) -> Result<(), SessError> {
+    current().ok_or(SessError::NotAttached)?.set_token(token)
 }
 
 /// Risolve il canale del servizio `console`.

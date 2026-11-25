@@ -39,7 +39,7 @@ use civis::{WIN_CLOSE, WIN_COMMIT, WIN_OPEN, WIN_RAISE, WIN_SET_RECT, WIN_SET_SU
 use civis::{
     SESS_ATTACH, SESS_ATTACH_DEFAULT, SESS_BIND, SESS_CLOSE, SESS_CREATE, SESS_DUMP, SESS_ECHO,
     SESS_FOCUS, SESS_INFO, SESS_INPUT, SESS_READ, SESS_RESIZE, SESS_STATE, SESS_STATS,
-    SESS_TEST_INPUT, SESS_WHOAMI, SESS_WRITE,
+    SESS_TEST_INPUT, SESS_TOKEN, SESS_TOKEN_SET, SESS_WHOAMI, SESS_WRITE,
 };
 
 /// Valore di errore IPC.
@@ -2588,6 +2588,53 @@ fn real_main(_sp: u64) -> ! {
                             s.echo = msg.w0 != 0;
                         }
                         let _ = civis::reply(SESS_ECHO, 0, 0);
+                    }
+
+                    SESS_TOKEN_SET => {
+                        // w0 = token (D8f): l'**identita' della sessione** vive
+                        // nel server, non in una variabile d'ambiente. Solo
+                        // `System` (il login sulla 0, il DE sulla tile dove
+                        // propaga) e solo sulla sessione **attaccata** al
+                        // canale — implicita, come `SESS_RESIZE`.
+                        let sid = match term.sessions.attached(msg.channel) {
+                            Some(id) => id,
+                            None => {
+                                let _ = civis::reply(SESS_TOKEN_SET, !0, 0);
+                                continue;
+                            }
+                        };
+                        if !matches!(term.peer_class(msg.channel), civis::ImageClass::System) {
+                            let _ = civis::reply(SESS_TOKEN_SET, !0, 0);
+                            continue;
+                        }
+                        let ok = match term.sessions.get_mut(sid) {
+                            Some(s) => {
+                                s.token = msg.w0;
+                                true
+                            }
+                            None => false,
+                        };
+                        let _ = civis::reply(SESS_TOKEN_SET, if ok { 0 } else { !0 }, 0);
+                    }
+
+                    SESS_TOKEN => {
+                        // Il token della sessione **attaccata**: l'attachment
+                        // e' la prova (lo stabilisce `SESS_WHOAMI`, che risale i
+                        // padri), quindi un processo di una tile non legge
+                        // quello di un'altra. `0` = sessione anonima.
+                        let tok = term
+                            .sessions
+                            .attached(msg.channel)
+                            .and_then(|sid| term.sessions.get(sid))
+                            .map(|s| s.token);
+                        match tok {
+                            Some(t) => {
+                                let _ = civis::reply(SESS_TOKEN, t, 0);
+                            }
+                            None => {
+                                let _ = civis::reply(SESS_TOKEN, !0, 0);
+                            }
+                        }
                     }
 
                     SESS_FOCUS => {

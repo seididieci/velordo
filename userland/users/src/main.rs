@@ -1,7 +1,8 @@
 //! users — elenca gli utenti registrati (Fase 1, ADR-0055).
 //!
-//! Programma esterno estratto dalla shell nativa. Output testuale su console.
-//! Richiede una sessione attiva (VELORDO_SESSION).
+//! Programma esterno estratto dalla shell nativa. Output testuale sulla
+//! sessione di terminale. Richiede una sessione attiva: il token lo legge dal
+//! **server** (D8f, `SESS_TOKEN` + ancestry), non dall'ambiente.
 
 #![no_std]
 #![no_main]
@@ -13,9 +14,6 @@ use civis;
 use identis_proto as proto;
 
 civis::entry!(real_main);
-
-/// Variabile d'ambiente con il token di sessione (hex).
-const ENV_SESSION: &str = "VELORDO_SESSION";
 
 fn console_write(data: &[u8]) {
     if !civis::sess::out(data) {
@@ -36,24 +34,6 @@ fn resolve_identis() -> Result<u64, &'static str> {
         }
     }
     Err("Identis non trovato")
-}
-
-/// Parsa una stringa esadecimale in u64.
-fn hex_parse_u64(raw: &[u8]) -> Option<u64> {
-    if raw.is_empty() || raw.len() > 16 {
-        return None;
-    }
-    let mut v = 0u64;
-    for &b in raw {
-        let d = match b {
-            b'0'..=b'9' => b - b'0',
-            b'a'..=b'f' => b - b'a' + 10,
-            b'A'..=b'F' => b - b'a' + 10,
-            _ => return None,
-        };
-        v = (v << 4) | d as u64;
-    }
-    Some(v)
 }
 
 /// Modalita' testuale: output su console (comportamento originale).
@@ -130,25 +110,12 @@ fn run_text_mode(token: u64) {
     }
 }
 
-/// Entry: apre console, legge il token, elenca gli utenti.
-fn real_main(sp: u64) -> ! {
-    let env = match civis::env_from_stack(sp) {
-        Some(e) => e,
-        None => {
-            console_write(b"[users] ERRORE: ambiente non leggibile\n");
-            civis::exit(1);
-        }
-    };
-
-    let token = match env.get(ENV_SESSION) {
-        Some(r) => match hex_parse_u64(r) {
-            Some(t) => t,
-            None => {
-                console_write(b"ERRORE: nessuna sessione attiva (login richiesto)\n");
-                civis::exit(1);
-            }
-        },
-        None => {
+/// Entry: legge il token dalla **sessione** (D8f: vive nel server, risolto
+/// per attestazione del pid) e elenca gli utenti.
+fn real_main(_sp: u64) -> ! {
+    let token = match civis::sess::token() {
+        Ok(t) if t != 0 => t,
+        _ => {
             console_write(b"ERRORE: nessuna sessione attiva (login richiesto)\n");
             civis::exit(1);
         }

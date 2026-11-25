@@ -2,9 +2,11 @@
 //! Identis via IPC di accodare l'hash della password nel bucket
 //! `identis:config`.
 //!
-//! - Il **token di sessione** arriva dall'ambiente (`VELORDO_SESSION`,
-//!   hex): e' la capability concessa dal login. Senza, il programma non puo'
-//!   fare nulla (Identis rifiuta comunque, ma falliamo subito e pulito).
+//! - Il **token di sessione** arriva dalla **sessione** (`SESS_TOKEN`, D8f):
+//!   e' la capability concessa dal login, custodita dal server e risolta per
+//!   attestazione del pid (mai in una variabile d'ambiente). Senza, il
+//!   programma non puo' fare nulla (Identis rifiuta comunque, ma falliamo
+//!   subito e pulito).
 //! - Il **nome utente** arriva da argv (`create-user alice`) o e' chiesto
 //!   alla tastiera.
 //! - I **ruoli** (ADR-0080, fase 5) arrivano da argv[2] come
@@ -27,13 +29,9 @@ use alloc::vec::Vec;
 
 use blake2s::blake2s;
 use civis;
-use civis::hex;
 use identis_proto as proto;
 
 civis::entry!(real_main);
-
-/// Variabile d'ambiente con il token di sessione (hex).
-const ENV_SESSION: &str = "VELORDO_SESSION";
 
 /// Tentativi in caso di servizio occupato (`R_BUSY`).
 const RETRIES: u32 = 20;
@@ -48,12 +46,10 @@ fn console_write(data: &[u8]) {
 fn real_main(sp: u64) -> ! {
     // Console per l'output.
     // Token di sessione: senza, niente da fare.
-    let token = match read_session_token(sp) {
-        Ok(t) => t,
-        Err(msg) => {
-            console_write(b"[create-user] ERRORE: ");
-            console_write(msg.as_bytes());
-            console_write(b"\n");
+    let token = match civis::sess::token() {
+        Ok(t) if t != 0 => t,
+        _ => {
+            console_write(b"[create-user] ERRORE: nessuna sessione attiva (login richiesto)\n");
             civis::exit(1);
         }
     };
@@ -131,15 +127,6 @@ fn real_main(sp: u64) -> ! {
             civis::exit(1);
         }
     }
-}
-
-/// Legge il token di sessione dall'ambiente (hex a 16 cifre).
-fn read_session_token(sp: u64) -> Result<u64, &'static str> {
-    let env = civis::env_from_stack(sp).ok_or("ambiente non leggibile")?;
-    let raw = env
-        .get(ENV_SESSION)
-        .ok_or("nessuna sessione: login non riuscito o VELORDO_SESSION assente")?;
-    hex::parse_u64(raw).ok_or("token di sessione malformato")
 }
 
 /// Ruoli da argv[2] (`ruolo[,ruolo...]`), default `user`.

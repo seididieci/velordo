@@ -450,12 +450,17 @@ stdout: sessione attestata → default → seriale).
 | 0xAC | `SESS_INPUT` | `w0` = len (byte in OUT) → accoda nel **buffer di input** della sessione attaccata (tasti, ≠ `SESS_WRITE` che è testo) e manda l'hint al lettore |
 | 0xA9 | `SESS_TEST_INPUT` | `w0` = len (byte in OUT) — **solo test**: inietta input come la tastiera (stesso percorso + hint) |
 | 0xAA | `SESS_INPUT_EVENT` | console → **lettore dichiarato**, fire-and-forget: c'è input nella coda. Hint coalescente (E2): la coda è la verità |
+| 0xAD | `SESS_TOKEN_SET` | `w0` = token → lo scrive sulla sessione **attaccata** al canale (implicita, come `SESS_RESIZE`); solo `System`. L'identità della sessione vive nel server (D8f) |
+| 0xAE | `SESS_TOKEN` | → `w0` = token della sessione **attaccata** (`0` = anonima): l'attachment è la prova, quindi una tile non legge il token di un'altra (D8f) |
 
 Nessuna syscall nuova e nessun `Service` nuovo (`SERVICE_COUNT` resta 20). La
 sessione di un processo si trova per **attestazione del pid**, mai con un
 handle passato allo spawn o un'ambiente da fidarsi; `EXIT_NOTIFY` purga
 binding, sessioni di cui il morto era owner (mai la 0) **e le mailbox dei suoi
-attachment**. Il **mirror seriale** della sessione in focus è del server
+attachment**. Il **token di sessione** sta nel server (D8f): `SESS_TOKEN_SET`
+sulla sessione attaccata (solo `System`) e `SESS_TOKEN` in lettura — non è più
+un bearer in `VELORDO_SESSION` (l'unica variabile d'ambiente che resta è `USER`,
+un nome). Il **mirror seriale** della sessione in focus è del server
 (formato nudo, `MIRROR_SESSION_MAX` 1 MiB per sessione come rete di sicurezza;
 il budget per comando resta del client che sa cos'è un comando).
 

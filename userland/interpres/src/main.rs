@@ -387,9 +387,6 @@ mod env;
 
 civis::entry!(real_main);
 
-/// Variabile d'ambiente con il token di sessione (hex).
-const ENV_SESSION: &str = "VELORDO_SESSION";
-
 /// Variabile d'ambiente con il nome utente.
 const ENV_USER: &str = "USER";
 
@@ -399,12 +396,8 @@ const RETRIES: u32 = 20;
 /// Tentativi di risoluzione del servizio Identis.
 const IDENTIS_RESOLVE_RETRIES: u32 = 50;
 
-/// Stack pointer iniziale (per leggere VELORDO_USER dall'env).
+/// Stack pointer iniziale (per leggere USER dall'env).
 static mut SHELL_SP: u64 = 0;
-
-/// Token di sessione in formato hex (letto all'avvio, usato per spawn figli).
-static mut SESSION_TOKEN_HEX: [u8; 17] = [0u8; 17];
-static mut SESSION_TOKEN_LEN: usize = 0;
 
 fn console_write(data: &[u8]) {
     if !civis::sess::out(data) {
@@ -418,25 +411,18 @@ fn console_write_str(s: &str) {
 
 /// Entry: apre console, legge il token di sessione, entra nel loop REPL.
 fn real_main(_sp: u64) -> ! {
-    // Salva lo stack pointer per la lettura dell'env (VELORDO_USER).
+    // Salva lo stack pointer per la lettura dell'env (USER).
     unsafe { SHELL_SP = _sp; }
 
     // READY a init: il login ha gia' fatto il suo, noi segnaliamo di essere
     // vivi (utile se init ci supervisionasse in futuro).
     civis::signal_ready(1);
 
-    // Token di sessione dall'ambiente (passato dal login).
-    let mut session_token = read_session_token(_sp);
-
-    // Memorizza il token hex globalmente per i figli (spawn esterni).
-    if let Some(token) = session_token {
-        let hex = alloc::format!("{:016x}", token);
-        let n = hex.len().min(16);
-        unsafe {
-            SESSION_TOKEN_HEX[..n].copy_from_slice(hex.as_bytes());
-            SESSION_TOKEN_LEN = n;
-        }
-    }
+    // D8f — il token viene dalla **sessione** (il server lo custodisce, il
+    // login l'ha scritto con `SESS_TOKEN_SET`), non dall'ambiente: `SESS_TOKEN`
+    // risolve per attestazione del pid (whoami + ancestry). `0` = sessione
+    // anonima (nessun login): i comandi che ne hanno bisogno lo dicono.
+    let mut session_token = civis::sess::token().ok().filter(|&t| t != 0);
 
     console_write_str("\n[shell] Velordo shell nativa (S3.2a)\n");
     match session_token {
@@ -550,7 +536,12 @@ fn real_main(_sp: u64) -> ! {
                 CmdResult::TokenExpired => {
                     console_write_str("Token scaduto, reinserire le credenziali\n");
                     match auth_and_get_token() {
-                        Some(t) => { session_token = Some(t); }
+                        Some(t) => {
+                            session_token = Some(t);
+                            // D8f — il token nuovo va **anche nel server**: i
+                            // figli lo leggono con `SESS_TOKEN`, non da env.
+                            let _ = civis::sess::set_token(t);
+                        }
                         None => { last_exit = 1; } // auth failed
                     }
                 }
@@ -895,24 +886,15 @@ fn try_execute_external(program: &str, args: &[&str]) -> bool {
             console_write_str(" on`)\n");
         }
 
-        // 6. Esegui l'immagine con spawn_image, passando argv + env.        // Il blocco packed deve restare vivo fino a dopo la syscall
-        // (il kernel lo copia). Env: VELORDO_SESSION=<hex> per i programmi
-        // che lo richiedono (es. `users`).
+        // 6. Esegui l'immagine con spawn_image, passando argv. Niente env: il
+        // token non viaggia piu' qui (D8f) — i figli lo leggono dalla
+        // **sessione** (`SESS_TOKEN` + ancestry), che il kernel attesta.
         let mut argv: Vec<&[u8]> = Vec::with_capacity(args.len() + 1);
         argv.push(key_bytes);
         for a in args {
             argv.push(a.as_bytes());
         }
-        let mut env: Vec<&[u8]> = Vec::new();
-        // `pack_args` separa le voci con NUL: la variabile deve essere UNA
-        // stringa `VELORDO_SESSION=<hex>`, non due voci.
-        let mut session_env: Vec<u8> = Vec::new();
-        let hex_data = unsafe { &SESSION_TOKEN_HEX[..SESSION_TOKEN_LEN] };
-        if !hex_data.is_empty() {
-            session_env.extend_from_slice(b"VELORDO_SESSION=");
-            session_env.extend_from_slice(hex_data);
-            env.push(&session_env);
-        }
+        let env: Vec<&[u8]> = Vec::new();
         let packed = civis::pack_args(&argv, &env);
         let mut meta = match civis::SpawnMeta::new(program, 16, &[]) {
             Some(m) => m,
@@ -1006,31 +988,6 @@ fn auth_and_get_token() -> Option<u64> {
             None
         }
     }
-}
-
-/// Legge il token di sessione dall'ambiente (hex a 16 cifre).
-fn read_session_token(sp: u64) -> Option<u64> {
-    let env = civis::env_from_stack(sp)?;
-    let raw = env.get(ENV_SESSION)?;
-    parse_hex_u64(raw)
-}
-
-/// Parsa una stringa esadecimale in u64 (`None` se malformata).
-fn parse_hex_u64(raw: &[u8]) -> Option<u64> {
-    if raw.is_empty() || raw.len() > 16 {
-        return None;
-    }
-    let mut v = 0u64;
-    for &b in raw {
-        let d = match b {
-            b'0'..=b'9' => b - b'0',
-            b'a'..=b'f' => b - b'a' + 10,
-            b'A'..=b'F' => b - b'A' + 10,
-            _ => return None,
-        };
-        v = (v << 4) | d as u64;
-    }
-    Some(v)
 }
 
 /// Legge il nome utente dall'ambiente (`USER`). Ritorna `""` se non

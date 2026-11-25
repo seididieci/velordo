@@ -440,8 +440,8 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   non scrolla, ritorna `Step::NeedScroll`, chi disegna scrolla (modello +
   `shift_rows_up`) e richiama `put` con lo **stesso** codepoint; la sessione
   ricorda l'azione (`Resume::{Newline, Home, WideWrap}`) e la completa — la
-  politica T4 (`can_shift`) resta identica. Endpoint: 15 tag `SESS_*`
-  (0x9B–0xA9, nessuna syscall/tag di servizio nuovo), capability = **mailbox**
+  politica T4 (`can_shift`) resta identica. Endpoint: tag `SESS_*`
+  (0x9B–0xAE, nessuna syscall/tag di servizio nuovo), capability = **mailbox**
   di una pagina shm (`libs/sess-proto`: OUT `0..2048`, IN `2048..4096`),
   creata dal server e mappata RW dal cliente (`civis::sess`, `Drop` che smappa
   a pagina). **Attribuzione per pid** (`SESS_WHOAMI` → `SYS_PEER_PID`), mai
@@ -449,6 +449,12 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   risoluzione **risale i padri** (`ps_info.parent`, max 16) — un comando
   lanciato in una tile parla con *quella* tile (prima finiva sulla 0) e resta
   attestazione (la catena la dice il kernel); `SESS_BIND` (≥ `ThirdParty`) per il DE;
+  **D8f passo 2**: il token di sessione vive nel **server**
+  (`SESS_TOKEN_SET` 0xAD, solo `System`, sulla sessione **attaccata**;
+  `SESS_TOKEN` 0xAE in lettura): `VELORDO_SESSION` non esiste piu', login
+  scrive il token sulla 0, `interpres`/`users`/`create-user` leggono
+  `civis::sess::token()` (niente fallback env) e l'unica variabile che resta
+  e' `USER` (un nome);
   `EXIT_NOTIFY` purga binding/sessioni del morto (mai la 0) con `munmap` **a
   pagina prima** di `shm_destroy`. `/dev/console` e' un **adattatore sulla
   sessione 0** (`DEV_WRITE` → `feed_session(0)`, `CONSOLE_*` → focus): il

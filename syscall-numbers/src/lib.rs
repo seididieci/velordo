@@ -821,6 +821,17 @@ pub const SESS_ATTACH: u64 = 0xAB;
 /// sessione attaccata (tasti, non testo: ≠ `SESS_WRITE`) e manda l'hint al
 /// lettore dichiarato. D8e: la tastiera passa al DE.
 pub const SESS_INPUT: u64 = 0xAC;
+/// `SESS_TOKEN_SET {token}` -> 0 / `!0` (D8f): l'**identita' della sessione**
+/// vive nel server, non in una variabile d'ambiente. Scrive il token sulla
+/// sessione **attaccata** al canale (implicita, come `SESS_RESIZE`); solo
+/// immagini >= `System` (il login sulla 0, il DE sulla tile dove propaga).
+/// `0` = sessione anonima. La morte della sessione porta via il token.
+pub const SESS_TOKEN_SET: u64 = 0xAD;
+/// `SESS_TOKEN` -> `w0` = token / `!0` (D8f): il token della sessione
+/// **attaccata** al canale. L'attachment e' la prova (lo stabilisce
+/// `SESS_WHOAMI`, che risale i padri): un processo di una tile non legge il
+/// token di un'altra. `0` = sessione anonima.
+pub const SESS_TOKEN: u64 = 0xAE;
 
 // ── Tile del DE (D8e, ADR-0092) ─────────────────────────────────────
 // La console disegna le **sessioni** in rettangoli (tile). Il layout lo decide
