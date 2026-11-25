@@ -41,6 +41,27 @@ PY
     sleep 1
 }
 
+# Digita una stringa sul monitor (sendkey per carattere, stesso schema di
+# `shell_harness.py`). Serve al login: dal D8f il DE parte **dopo**
+# l'autenticazione, quindi i tasti del DE hanno senso solo a sessione aperta.
+send_text() {
+    python3 - "$MON" "$1" <<'PY'
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sys.argv[1])
+for ch in sys.argv[2]:
+    key = "ret" if ch == "\n" else ch
+    s.sendall(("sendkey %s\n" % key).encode())
+    time.sleep(0.05)
+try:
+    s.recv(4096)
+except Exception:
+    pass
+s.close()
+PY
+    sleep 0.3
+}
+
 rm -f "$LOG" "$MON"
 echo "[desktop] boot con desktop=1 (log $LOG)"
 DESKTOP=1 RUN_TESTS=0 SERIAL="file:$LOG" MONITOR="unix:$MON,server=on,wait=off" \
@@ -57,6 +78,31 @@ while kill -0 "$QEMU_PID" 2>/dev/null; do
     fi
     if [ $((SECONDS - START)) -ge "$TIMEOUT" ]; then
         echo "[desktop] timeout ${TIMEOUT}s: probe mai concluso" >&2
+        break
+    fi
+    sleep 1
+done
+
+# ── Login (D8f) ─────────────────────────────────────────────────────
+# Il DE non e' piu' un servizio di boot: lo spawma `identis-login` dopo
+# l'autenticazione. Si aspetta il prompt del login, si digitano le credenziali
+# e si aspetta che il DE abbia preso la tastiera prima di mandargli i tasti.
+LOGIN_START=$SECONDS
+while ! grep -aqF 'Nome utente:' "$LOG" 2>/dev/null; do
+    if [ $((SECONDS - LOGIN_START)) -ge "$TIMEOUT" ]; then
+        echo "[desktop] timeout ${TIMEOUT}s: prompt del login mai comparso" >&2
+        break
+    fi
+    sleep 1
+done
+send_text "root"
+send_text $'\n'
+send_text "root"
+send_text $'\n'
+DE_START=$SECONDS
+while ! grep -aqF '[impluvium] tastiera sottoscritta' "$LOG" 2>/dev/null; do
+    if [ $((SECONDS - DE_START)) -ge "$TIMEOUT" ]; then
+        echo "[desktop] timeout ${TIMEOUT}s: DE mai partito dopo il login" >&2
         break
     fi
     sleep 1

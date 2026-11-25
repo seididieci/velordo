@@ -17,13 +17,16 @@
 //! niente testo (i titoli sono D8f).
 //!
 //! Non registra un servizio (`Service::Impluvium` non esiste: il kernel resta
-//! intatto): init lo spawana e lo supervisiona **per canale**.
+//! intatto): lo spawana il **login** (D8f) dentro la sessione autenticata, ed
+//! e' init a sorvegliare il login. Le shell delle tile nascono da qui.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use civis::println;
@@ -50,6 +53,9 @@ struct De {
     /// I figli avviati per le foglie: `(pid, sessione)`. Serve a togliere la
     /// tile quando la shell esce.
     children: Vec<(i64, usize)>,
+    /// Nome utente del login (D8f): passato alle shell come `USER` (un nome,
+    /// non un segreto). Vuoto = nessun nome (prompt senza utente).
+    user: String,
 }
 
 impl De {
@@ -62,6 +68,7 @@ impl De {
             stream: Vec::new(),
             injector: None,
             children: Vec::new(),
+            user: String::new(),
         }
     }
 
@@ -231,6 +238,15 @@ impl De {
         let Some(meta) = civis::SpawnMeta::new("interpres", 16, &[]) else {
             return false;
         };
+        // D8f — `USER` alla shell (il token invece e' gia' nella sessione, e
+        // la shell lo legge dal server per attestazione). L'env block deve
+        // restare vivo fino a dopo lo spawn (il kernel lo copia nella
+        // syscall).
+        let user_env = format!("USER={}", self.user);
+        let meta = match civis::pack_args(&[], &[&user_env.as_bytes()]) {
+            Some(packed) => meta.argv(&packed),
+            None => meta,
+        };
         let Ok(chan) = civis::spawn_image(&img, &meta.detached()) else {
             println!("[impluvium] spawn della shell fallito");
             return false;
@@ -295,9 +311,22 @@ fn next_key(rest: &[u8]) -> Option<(u8, usize)> {
     Some((0, n + 1))
 }
 
-fn real_main(_sp: u64) -> ! {
+/// Il nome utente del login, dall'ambiente del DE (`USER`, D8f). Un nome —
+/// non un segreto: il DE lo copia nell'ambiente delle shell per il prompt.
+fn read_user(sp: u64) -> String {
+    let Some(env) = civis::env_from_stack(sp) else {
+        return String::new();
+    };
+    match env.get("USER") {
+        Some(v) => core::str::from_utf8(v).unwrap_or("").into(),
+        None => String::new(),
+    }
+}
+
+fn real_main(sp: u64) -> ! {
     println!("[impluvium] partenza");
     let mut de = De::new();
+    de.user = read_user(sp);
     // 1. La console c'e' (init la spawna prima): misura e primo layout.
     for _ in 0..200 {
         if de.measure() {
@@ -311,7 +340,6 @@ fn real_main(_sp: u64) -> ! {
         if !de.apply_layout() {
             println!("[impluvium] layout iniziale rifiutato");
         }
-        de.focus_session();
         println!(
             "[impluvium] display {}x{} area {}x{} tile={}",
             de.screen.0,
@@ -321,6 +349,9 @@ fn real_main(_sp: u64) -> ! {
             de.tree.len()
         );
     }
+    // La sessione 0 e' il terminale di boot: il DE ci inietta comunque (anche
+    // nel fallback VGA, dove e' lui il focus owner).
+    de.focus_session();
     // 2. La tastiera (D8e: il DE e' il focus owner; `porta` parte dopo la
     //    console, quindi si riprova).
     if civis::input::device::attach().is_ok() {
@@ -328,6 +359,11 @@ fn real_main(_sp: u64) -> ! {
         println!("[impluvium] tastiera sottoscritta (Super = modificatore)");
     } else {
         println!("[impluvium] tastiera non disponibile: la console inietta");
+    }
+    // 3. La shell della **tile 0** (D8f): prima la avviava il login; ora la
+    //    sessione e' del DE, che la riempie come fa per ogni tile nuova.
+    if !de.spawn_shell(0) {
+        println!("[impluvium] shell iniziale NON avviata");
     }
     civis::signal_ready(1);
 

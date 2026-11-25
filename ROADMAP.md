@@ -11,7 +11,7 @@ ricompilare se stesso. Ordina le priorita' (storage veloce prima, servizi
 fuori dal kernel poi, personalita' per software reale dopo) senza pianificare
 nulla da solo.
 
-## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b + D8c1 + D8c2 + D8d + D8e)
+## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b + D8c1 + D8c2 + D8d + D8e + D8f)
 
 Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` +
 `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 70/70` +
@@ -797,6 +797,25 @@ Voci con scope e vittoria dichiarati (non date).
       se la sessione era in focus — il sesto punto del "render e' una griglia".
       Prossima: **D8e2** (`impluvium`: albero a sezione aurea, tastiera al DE,
       keybinding Super, spawn per foglia, chrome overlay).
+
+- [x] **D8f Il login è il capo della sessione** (ADR-0089/0092, D8f):
+      `identis-login` non è più un lanciatore one-shot: dopo l'autenticazione
+      scrive il token nella sessione 0 (`SESS_TOKEN_SET`, solo `System`), spawna
+      `impluvium` dentro la sessione (solo `USER` in env, token nel server), e
+      resta vivo in `recv` aspettando la morte del DE = fine sessione; allora
+      azzera il token della 0 ed esce 0. `init` supervisiona il login con
+      `OnDeath::LoginGate` aggiornato: **uscita 0 = sessione conclusa → prompt
+      subito** (contatore fallimenti azzerato); **uscita != 0 = accesso negato
+      → backoff e tetto ai riavvii**. Il DE (ora un processo dell'utente, non un
+      servizio di boot) crea la shell della tile 0 (`spawn_shell(0)` con
+      `USER`) e, per ogni split, copia il token (`SESS_TOKEN` → `SESS_TOKEN_SET`)
+      sulla sessione nuova prima di spawnare, così `users`/`create-user`
+      funzionano in ogni tile. Zero cambiamenti al kernel.
+      Verifica: gate `[gate] PASS` (6 suite + shell nativa 33/33, usertests
+      71/71, zero FAIL/PANIC/FAULT, zero `[munmap]`), `./scripts/run-desktop-tests.sh`
+      verde (login via monitor, poi keybinding del DE), e `interpres`/`users`/
+      `create-user` che leggono il token dal server (`SESS_TOKEN`) con
+      `t74`/`t75` verdi. `VELORDO_SESSION` non esiste più.
 
 - [x] **58 Personalità POSIX separata** (58.1–58.6, ADR-0041): meccanismo
       neutro in `libs/civis` (ex `libs/libr`), personalità in

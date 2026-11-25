@@ -5,7 +5,9 @@
 **Accepted** (2026-11-24). **D8e1 implementata e verificata** (`tileprobe` +
 gate invariato). **D8e2 implementata**: `impluvium` nel boot (albero, layout,
 chrome, tastiera al DE con i keybinding `Super+hjkl`/`%`/`"`/`z`/`Shift+q`,
-supervisione per canale, kernel intatto). Lo **split avvia una shell vera**
+supervisione per canale, kernel intatto). **D8f**: il DE non e' piu' nel boot
+— lo spawana il login dentro la sessione autenticata e init sorveglia il
+login. Lo **split avvia una shell vera**
 nella sessione nuova (`SESS_CREATE` → verifica+`obj_get` → `spawn_image` →
 `suspend` → `SESS_BIND` → `resume`) e l'uscita della shell chiude la tile.
 Il **bordo della tile segue il focus** (accento sulla tile in focus, scuro
@@ -99,6 +101,12 @@ DE come **padrone del layout** (`tile_owner`).
 
 ### 5. `impluvium` (D8e2): il DE come processo
 
+- **Chi lo avvia (D8f)**: non è più `init` a spawarlo nel boot. Lo spawana
+  **`identis-login` dopo l'autenticazione**, dentro la sessione 0 (token nel
+  server, `USER` in env), e resta vivo in `recv` aspettando la sua morte: il DE
+  è un processo **dell'utente**, con un'identità, non un servizio di sistema.
+  Init sorveglia il login (`OnDeath::LoginGate`), non il DE. La shell della
+  tile 0 nasce da `spawn_shell(0)` del DE, non più dal login.
 - **Albero**: `Leaf(sid)` / `Split { dir, ratio }`, rapporto in per-mille con
   `GOLDEN = 618` — il `dwindle` di Hyprland: la foglia che si splitta tiene il
   61,8%, la tile nuova il 38,2%, e i rapporti sopravvivono a resize e zoom

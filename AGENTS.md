@@ -541,9 +541,10 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   `posixsock`); il refactor e1.1 e' stato verificato col **CRC del frame
   identico** (t64). Unit host 176 (+ `Geom::for_rect`/`view`, rect impacchettato).
 - **Il DE esiste (D8e2, ADR-0092)**: `impluvium` (`sys/bin/impluvium.bin`) e'
-  un processo: init lo spawana **dopo `porta`** (si sottoscrive alla tastiera)
-  e lo supervisiona **per canale** (`Supervised.svc: Option<Service>`) — non
-  registra un servizio, `Service::Impluvium` **non esiste**, kernel intatto.
+  un processo. **D8f**: non e' piu' un servizio di boot — lo spawana il
+  **login**, dentro la sessione autenticata (`USER` in env, token nel server),
+  ed e' il login a essere sorvegliato da init. Non registra un servizio,
+  `Service::Impluvium` **non esiste**, kernel intatto.
   Possiede: **albero** (`libs/impluvium-tree`, `Leaf`/`Split{dir,ratio}`,
   **sezione aurea** `GOLDEN = 618`, `MIN_TILE`, somma esatta dell'asse), **layout**
   (`TILE_SET`/`TILE_COMMIT`), **focus** (geometrico, `hjkl`), **tasti** (e' il
@@ -557,11 +558,14 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   garantito). **Trappole**: `send` e' `Ok` anche su rifiuto (`w0 = !0`); i tag
   usati in un `match` devono essere **importati** o diventano binding
   catch-all (successo con `SESS_ATTACH` in console e con `DEV_WRITE` in porta);
-  il supervisore vede "assente all'avvio" un servizio senza `svc` se non gli si
-  passa il **canale** di nascita; lo split che crea una sessione deve
-  `SESS_CLOSE`rla se il layout lo rifiuta. Prova: gate (le 33 check della shell
-  girano **attraverso il DE**) + `./scripts/run-desktop-tests.sh` (keybinding
-  digitati dal monitor, `t76` che confronta i CRC delle due tile per il bordo).
+  lo split che crea una sessione deve
+  `SESS_CLOSE`rla se il layout lo rifiuta. **D8f**: la shell della tile 0 la
+  crea il DE (`spawn_shell(0)` al boot), non piu' il login; le voci
+  supervisionate senza servizio richiederebbero il **canale** di nascita o il
+  supervisore le vedrebbe "assenti all'avvio" (non ce ne sono piu': il DE e'
+  del login). Prova: gate (le 33 check della shell
+  girano **attraverso il DE**) + `./scripts/run-desktop-tests.sh` (login via
+  monitor, poi keybinding, `t76` che confronta i CRC delle due tile per il bordo).
   Unit host **183** (`impluvium-tree` 7).
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
@@ -584,14 +588,18 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   bearer in env (`VELORDO_SESSION`), il bucket home `usr:<nome>` non esiste
   ancora, e `create-user` non e' lanciato da nessuno (manca la shell nativa).
 - **Il login e' il gate (ADR-0062, D5)**: `userland/identis-login` prova 3
-  volte, **la shell parte solo dopo l'autenticazione** (prima partiva
-  comunque: login fallito = shell aperta), e `init` lo supervisiona come un
-  **getty** (`Service::Login = 13`, `OnDeath::LoginGate`: uscita 0 = shell
-  avviata = nessun riavvio; uscita != 0 = accesso negato = riavvio con
-  backoff e tetto ai riavvii). Il boot finisce quindi al **prompt** del
-  login: il gate di regressione si chiude col timeout (le righe `PASS` sono
-  il contratto). L'eco del backspace c'e' in **ogni** campo (nel campo
-  username senza, si autenticava una stringa diversa da quella mostrata).
+  volte e **la shell parte solo dopo l'autenticazione** (prima partiva
+  comunque: login fallito = shell aperta). **D8f**: il login e' il
+  **capo-sessione** — dopo l'autenticazione scrive il token nella sessione 0,
+  spawma il DE con `USER`, aspetta la sua morte (= fine sessione), azzera il
+  token ed esce 0. `init` lo supervisiona come un **getty**
+  (`Service::Login = 13`, `OnDeath::LoginGate`): **uscita 0 = sessione
+  conclusa → prompt subito** (contatore fallimenti azzerato); **uscita != 0 =
+  accesso negato → backoff e tetto ai riavvii**. Il boot finisce quindi al
+  **prompt** del login: il gate di regressione si chiude col timeout (le righe
+  `PASS` sono il contratto). L'eco del backspace c'e' in **ogni** campo (nel
+  campo username senza, si autenticava una stringa diversa da quella
+  mostrata).
 
 ## Important Notes
 

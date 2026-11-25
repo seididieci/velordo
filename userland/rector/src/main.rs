@@ -431,7 +431,7 @@ fn run_test(meta: &SvcMeta, supervised: &mut [Supervised]) {
                 let _ = civis::reply(0, r, 0);
             }
             Ok(m) if m.tag == civis::EXIT_NOTIFY => {
-                handle_child_death(supervised, m.w1 as i64, m.w0 as i64);
+                handle_child_death(supervised, m.w1 as i64, m.w0 as i64, m.channel as u64);
             }
             Ok(_) => {}
             Err(_) => {}
@@ -474,8 +474,19 @@ fn handle_bounce(supervised: &mut [Supervised], svc_disc: u64) -> u64 {
 
 /// Gestisce EXIT_NOTIFY di un figlio: se supervisionato → restart, altrimenti
 /// log. Usato sia da run_test che dal loop supervisore (single path).
-fn handle_child_death(supervised: &mut [Supervised], pid: i64, code: i64) {
-    match supervised.iter_mut().find(|e| e.pid == pid) {
+///
+/// Il match e' per **pid + canale di nascita**: il pid si riusa (un test
+/// appena reclamato puo' cedere il numero a un servizio nuovo) e una
+/// `EXIT_NOTIFY` rimasta in coda verrebbe attribuita al processo sbagliato —
+/// l'ha visto D8f: la morte del threadtest veniva letta come "sessione
+/// conclusa" del login appena spawnato (stesso pid, canale diverso). Il
+/// canale e' la firma del legame (ADR-0010). Le voci di boot senza canale
+/// registrato restano permissive (`chan < 0`).
+fn handle_child_death(supervised: &mut [Supervised], pid: i64, code: i64, chan: u64) {
+    match supervised
+        .iter_mut()
+        .find(|e| e.pid == pid && (e.chan < 0 || e.chan == chan as i64))
+    {
         Some(e) if !e.held => {
             if e.on_death == OnDeath::LoginGate {
                 restart_login(e, code);
@@ -502,20 +513,29 @@ fn handle_child_death(supervised: &mut [Supervised], pid: i64, code: i64) {
     }
 }
 
-/// Il **login** e' morto: si riavvia **solo se ha fallito** (codice != 0).
+/// Il **login** e' morto. Due casi, distinti dal codice di uscita (D8f):
 ///
-/// Il login e' il gate del sistema (la shell parte solo se l'autenticazione
-/// e' riuscita): fallito, init lo riavvia come un getty — l'utente trova un
-/// altro prompt invece di un sistema muto. Riuscito (codice 0), la shell e'
-/// gia' partita e non si tocca niente.
+/// - **0 = sessione conclusa** (l'utente ha fatto `exit`/`logout` e il DE,
+///   ultimo figlio, e' uscito): il prompt torna **subito**, senza backoff, e
+///   il contatore dei fallimenti riparte da zero;
+/// - **!= 0 = accesso fallito** (tentativi esauriti, Identis irraggiungibile):
+///   init lo riavvia come un getty, con anti spawn-storm (3 riavvii in 300
+///   tick, poi HELD: accesso negato, ma il sistema vivo e loggato).
 ///
-/// Anti spawn-storm come `restart_service`: 3 riavvii in 300 tick, poi HELD
-/// (accesso negato, ma il sistema vivo e loggato).
+/// Sparisce la vecchia regola "uscita 0 = non riavviare": il login adesso
+/// torna sempre (e' il capo-sessione, non un lanciatore one-shot).
 fn restart_login(e: &mut Supervised, code: i64) {
     if code == 0 {
-        println!("[init] login ok (shell avviata): niente riavvio");
-        e.pid = -1;
-        return;
+        println!("[init] login: sessione conclusa, riapro il prompt");
+        // Una sessione conclusa non e' un tentativo fallito: si riparte
+        // puliti. Se lo spawn del nuovo prompt fallisce si cade nel
+        // percorso con backoff (sotto).
+        e.restarts = 0;
+        e.window_start = civis::get_ticks();
+        if spawn_login(e) {
+            return;
+        }
+        println!("[init] login: spawn del nuovo prompt fallito");
     }
     // Anti spawn-storm come `restart_service`: 3 riavvii in 300 tick, poi
     // HELD (accesso negato, ma il sistema vivo e loggato).
@@ -538,24 +558,34 @@ fn restart_login(e: &mut Supervised, code: i64) {
         // Pausa prima del riavvio: se il login muore subito (Identis
         // irraggiungibile) il ciclo non diventa una macina da respawn.
         civis::spin_ticks(50);
-        let Some(chan) = spawn_entry(e.meta) else {
-            println!("[init] login: spawn FAILED, riprovo");
-            continue;
-        };
-        e.chan = chan;
-        // Il READY attende che il login abbia **registrato il servizio**: e'
-        // da li' che init ricava il pid. Senza l'attesa il pid sarebbe -1 e
-        // la morte successiva non sarebbe riconosciuta (niente altri
-        // riavvii: il sistema resterebbe muto).
-        if wait_ready(chan) {
-            // Il pid dal canale (peer_pid): deterministico, non una race
-            // sulla registrazione del servizio.
-            e.pid = civis::peer_pid(chan as u64).unwrap_or(-1);
-            println!("[init] login riavviato pid={}", e.pid);
+        if spawn_login(e) {
             return;
         }
         println!("[init] login: READY mancante (morte/timeout), riprovo");
     }
+}
+
+/// Spawna un login e attende il suo `SVC_READY` (il login vi registra il
+/// servizio, cosi' init ne ricava il pid). `false` = spawn o READY falliti:
+/// il chiamante decide il backoff.
+fn spawn_login(e: &mut Supervised) -> bool {
+    let Some(chan) = spawn_entry(e.meta) else {
+        println!("[init] login: spawn FAILED, riprovo");
+        return false;
+    };
+    e.chan = chan;
+    // Il READY attende che il login abbia **registrato il servizio**: e' da
+    // li' che init ricava il pid. Senza l'attesa il pid sarebbe -1 e la morte
+    // successiva non sarebbe riconosciuta (niente altri riavvii: il sistema
+    // resterebbe muto).
+    if !wait_ready(chan) {
+        return false;
+    }
+    // Il pid dal canale (peer_pid): deterministico, non una race sulla
+    // registrazione del servizio.
+    e.pid = civis::peer_pid(chan as u64).unwrap_or(-1);
+    println!("[init] login (ri)avviato pid={}", e.pid);
+    true
 }
 
 /// Servizio supervisionato da init (Fase 14, init-restart): alla morte viene
@@ -567,19 +597,18 @@ fn restart_login(e: &mut Supervised, code: i64) {
 enum OnDeath {
     /// Riavvia il servizio (la via normale).
     Restart,
-    /// Il **login**: la shell parte solo se l'autenticazione e' riuscita,
-    /// quindi si riavvia **solo se il login ha fallito** (codice di uscita
-    /// != 0). Se ha riescito (codice 0) la shell e' gia' partita: un altro
-    /// prompt qui sarebbe una seconda porta aperta.
+    /// Il **login**: e' il capo-sessione (D8f), quindi torna sempre. Uscita
+    /// 0 = sessione conclusa (prompt subito); != 0 = accesso fallito
+    /// (backoff e tetto, come un getty).
     LoginGate,
 }
 
 /// Voce della tabella di supervisione.
 struct Supervised {
     meta: &'static SvcMeta,
-    /// Il servizio registrato, se c'e': il **DE** (D8e) non ne registra uno
-    /// (`Service::Impluvium` non esiste, kernel intatto) e si supervisiona
-    /// per **canale**.
+    /// Il servizio registrato, se c'e' (la voce del login e' registrata;
+    /// tutte le voci attuali lo sono — il `None` resta per i figli senza
+    /// servizio, se ne arriveranno).
     svc: Option<civis::Service>,
     chan: i64,
     pid: i64,
@@ -636,7 +665,7 @@ fn wait_ready(chan: i64) -> bool {
                 return false;
             }
             Ok(m) if m.tag == civis::EXIT_NOTIFY => {
-                stash_death(m.w1 as i64, m.w0 as i64);
+                stash_death(m.w1 as i64, m.w0 as i64, m.channel as u64);
             }
             Ok(_) => {}
             Err(_) => {}
@@ -650,15 +679,18 @@ fn wait_ready(chan: i64) -> bool {
 /// Morti altrui viste dentro `wait_ready` (vedi sopra): init e' single-thread
 /// e single-loop, un array statico basta (cap 8 > 7 servizi supervisionati).
 /// Accesso via `addr_of_mut!` (edition 2024: niente `static_mut_refs`).
-static mut STRAY_DEATHS: [(i64, i64); STRAY_CAP] = [(0, 0); STRAY_CAP];
+static mut STRAY_DEATHS: [(i64, i64, u64); STRAY_CAP] = [(0, 0, 0); STRAY_CAP];
 static mut N_STRAY: usize = 0;
 const STRAY_CAP: usize = 8;
 
-fn stash_death(pid: i64, code: i64) {
+fn stash_death(pid: i64, code: i64, chan: u64) {
     unsafe {
         let n = core::ptr::addr_of_mut!(N_STRAY).read();
         if n < STRAY_CAP {
-            core::ptr::addr_of_mut!(STRAY_DEATHS).cast::<(i64, i64)>().add(n).write((pid, code));
+            core::ptr::addr_of_mut!(STRAY_DEATHS)
+                .cast::<(i64, i64, u64)>()
+                .add(n)
+                .write((pid, code, chan));
             core::ptr::addr_of_mut!(N_STRAY).write(n + 1);
         } else {
             println!("[init] supervisione: stash morti pieno, perdo pid={}", pid);
@@ -677,11 +709,16 @@ fn drain_stray_deaths(supervised: &mut [Supervised]) {
                 None
             } else {
                 core::ptr::addr_of_mut!(N_STRAY).write(n - 1);
-                Some(core::ptr::addr_of_mut!(STRAY_DEATHS).cast::<(i64, i64)>().add(n - 1).read())
+                Some(
+                    core::ptr::addr_of_mut!(STRAY_DEATHS)
+                        .cast::<(i64, i64, u64)>()
+                        .add(n - 1)
+                        .read(),
+                )
             }
         };
         match next {
-            Some((pid, code)) => handle_child_death(supervised, pid, code),
+            Some((pid, code, chan)) => handle_child_death(supervised, pid, code, chan),
             None => return,
         }
     }
@@ -738,14 +775,6 @@ const SVC_GPU: SvcMeta = SvcMeta {
 };
 /// Console server (D3): modello a celle, font, surface; sessioni di terminale
 /// (D8c2: nessun device di testo).
-/// DE (D8e): albero delle tile, focus, tasti. **Non registra un servizio**
-/// (`Service::Impluvium` non esiste: il kernel resta intatto) — init lo
-/// supervisiona per canale.
-const SVC_IMPLUVIUM: SvcMeta = SvcMeta {
-    bin: b"impluvium",
-    obj: Some((b"sys", b"bin/impluvium.bin")),
-    prio: 16,
-};
 const SVC_CONSOLE: SvcMeta = SvcMeta {
     bin: b"console",
     obj: Some((b"sys", b"bin/console.bin")),
@@ -1036,16 +1065,9 @@ fn real_main(_sp: u64) -> ! {
         civis::exit(1);
     }
     let _ = civis::vestigia::log(b"init", b"tty ready");
-    // DE (D8e): albero delle tile, focus, tasti. Dopo porta (si sottoscrive
-    // alla tastiera) e prima del login (i tasti passano da lui). Il canale
-    // serve alla **supervisione per canale** (il DE non registra un servizio):
-    // senza, il supervisore lo vedrebbe "assente all'avvio" e lo riavvierebbe.
-    let de_chan = boot_svc(&SVC_IMPLUVIUM, true).unwrap_or(-1);
-    if de_chan < 0 {
-        println!("[init] impluvium FAILED (DE assente: la console inietta i tasti)");
-    } else {
-        let _ = civis::vestigia::log(b"init", b"de ready");
-    }
+    // Il DE (D8f) **non** e' un servizio di boot: lo spavna il login, dentro
+    // la sessione autenticata (cosi' ha un'identita' e le sue shell hanno il
+    // token). Init non lo conosce piu': niente supervisione per canale.
     // 6. userposix + attesa READY (Fase 40.3, P1): skeleton senza dipendenze
     //    (registra solo il servizio e resta in recv), riesce subito a boot.
     if boot_svc(&SVC_POSIX, true).is_none() {
@@ -1117,17 +1139,6 @@ fn real_main(_sp: u64) -> ! {
         Supervised::new(&SVC_TIME, civis::Service::Time),
         Supervised::new(&SVC_VESTIGIA, civis::Service::Vestigia),
         Supervised::new(&SVC_CUSTOS, civis::Service::Custos),
-        // DE (D8e): **senza** servizio (kernel intatto), supervisione per canale.
-        Supervised {
-            svc: None,
-            chan: de_chan,
-            pid: if de_chan >= 0 {
-                civis::peer_pid(de_chan as u64).unwrap_or(-1)
-            } else {
-                -1
-            },
-            ..Supervised::new(&SVC_IMPLUVIUM, civis::Service::Test)
-        },
         // Rete (ADR-0069): pid -1 se non spawnati (net=1 assente); il loop
         // di supervisione salta i pid negativi.
         Supervised::new(&SVC_NETDEV, civis::Service::NetDev),
@@ -1254,7 +1265,10 @@ fn real_main(_sp: u64) -> ! {
             // Il pid dal **canale** (peer_pid), non dal servizio registrato:
             // il canale di nascita e' la fonte di verita' (il peer e' il
             // login) e non dipende da un messaggio ne' da una registrazione
-            // che potrebbe non essere ancora visibile.
+            // che potrebbe non essere ancora visibile. Il canale si registra
+            // nella voce: e' la firma con cui si riconosce la *sua* morte
+            // (un pid riusato puo' portarsi dietro una notifica stantia).
+            e.chan = login_chan;
             e.pid = civis::peer_pid(login_chan as u64).unwrap_or(-1);
             println!("[init] login ready pid={}", e.pid);
         }
@@ -1283,7 +1297,7 @@ fn real_main(_sp: u64) -> ! {
         drain_stray_deaths(&mut supervised);
         match civis::recv() {
             Ok(m) if m.tag == civis::EXIT_NOTIFY => {
-                handle_child_death(&mut supervised, m.w1 as i64, m.w0 as i64);
+                handle_child_death(&mut supervised, m.w1 as i64, m.w0 as i64, m.channel as u64);
             }
             Ok(m) if m.tag == civis::INIT_BOUNCE => {
                 let r = handle_bounce(&mut supervised, m.w0);

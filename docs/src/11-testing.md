@@ -133,12 +133,15 @@ lo **zoom** nasconde la seconda e dà lo schermo alla prima (`TILE_INFO` conta
 una tile), e al ritorno il testo c'è ancora; `SESS_FOCUS` sposta i tasti (e
 `TILE_INFO` lo dice); `TILE_DROP` + `SESS_CLOSE` riportano a una tile.
 
-La **seconda parte** del run prova il DE: con `impluvium` nel boot la tastiera è
-sua, quindi lo script digita dal monitor HMP (`sendkey meta_l-shift-5` ecc.) e
-controlla le righe che il DE stampa — `[impluvium] split Col -> tile=2 focus=1`,
-`zoom on/off`, `focus 0 (h)`: la prova che `Super+%`/`z`/`h` arrivano al DE e che
-i tasti non consumati vanno alla sessione (le 33 check della shell del gate, che
-girano **attraverso** il DE, sono l'altra metà della prova).
+La **seconda parte** del run prova il DE: `impluvium` non è più un servizio di
+boot (D8f) — lo lancia `identis-login` dopo l'autenticazione — quindi lo script
+**fa il login** dal monitor (`sendkey` di `root`/`root`), aspetta che il DE abbia
+preso la tastiera e solo allora digita i keybinding (`sendkey meta_l-shift-5`
+ecc.), controllando le righe che il DE stampa — `[impluvium] split Col ->
+tile=2 focus=1`, `zoom on/off`, `focus 0 (h)`: la prova che `Super+%`/`z`/`h`
+arrivano al DE e che i tasti non consumati vanno alla sessione (le 33 check
+della shell del gate, che girano **attraverso** il DE, sono l'altra metà della
+prova).
 
 Il build userland (servizi nativi, test suite, flavour POSIX) usa
 `targets/x86_64-unknown-velordo-user.json`: clone di `x86_64-unknown-none`

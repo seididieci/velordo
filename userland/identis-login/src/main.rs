@@ -8,6 +8,13 @@
 //! Output sulla **sessione di terminale** (`civis::sess::out`, D8c2: il
 //! mirror seriale lo fa il server), input dalla sessione (D8d).
 //!
+//! **D8f — il login e' il capo-sessione**: dopo l'autenticazione il token va
+//! nel **server** (`SESS_TOKEN_SET`, sulla sessione 0) e il login spawma il
+//! DE (`impluvium`) dentro la sessione, con il solo `USER` in ambiente. Resta
+//! vivo in `recv` finche' il DE non muore (= fine sessione), poi azzera il
+//! token della 0 ed esce 0: `init` (politica `LoginGate`) riapre subito il
+//! prompt. Non e' piu' un lanciatore one-shot e il token non viaggia in env.
+//!
 //! Il framing del protocollo e' condiviso (`libs/identis-proto`): qui c'e'
 //! solo il lato client.
 
@@ -25,14 +32,8 @@ use identis_proto as proto;
 
 civis::entry!(real_main);
 
-/// Token di sessione dell'ultimo login riuscito. Lo userà la shell nativa
-/// (Fase 3.2) per passare la sessione ai programmi che ne hanno bisogno
-/// (es. `create-user`): per ora e' solo custodito qui.
-#[allow(dead_code)]
-static mut SESSION_TOKEN: u64 = 0;
-
-/// Nome utente dell'ultimo login riuscito. Passato alla shell come
-/// `VELORDO_USER` per il prompt con glifi Nerd Font.
+/// Nome utente dell'ultimo login riuscito. Passato al DE come `USER` (un
+/// nome, non un segreto: il prompt con glifi Nerd Font lo mostra).
 #[allow(dead_code)]
 static mut LOGIN_USER: [u8; 32] = [0u8; 32];
 
@@ -118,9 +119,10 @@ fn real_main(_sp: u64) -> ! {
 
         match proto::send_payload_retry(chan, civis::IDENTIS_VERIFY, &payload, RETRIES) {
             Ok(r) if r.ok() => {
+                // Il token vive nel server (D8f): niente statico, niente env.
+                let token = r.w1;
                 unsafe {
-                    SESSION_TOKEN = r.w1;
-                    // Salva il nome utente per la shell (prompt Nerd Font).
+                    // Salva il nome utente per il DE/shell (prompt Nerd Font).
                     let bytes = name.as_bytes();
                     LOGIN_USER_LEN = bytes.len().min(31) as u8;
                     for i in 0..LOGIN_USER_LEN as usize {
@@ -133,18 +135,26 @@ fn real_main(_sp: u64) -> ! {
                 // attaccato (la 0). Da qui in poi `users`/`create-user` lo
                 // leggono con `SESS_TOKEN` (attestazione), non da una
                 // variabile d'ambiente che chiunque puo' leggere o perdere.
-                let token = unsafe { SESSION_TOKEN };
                 if civis::sess::set_token(token).is_err() {
                     console_write(b"[login] ERRORE: token di sessione non registrato\n");
                 }
-                // La shell prende il posto del login: il login e' il programma
-                // di autenticazione, non il terminale. La shell e' la **nativa**
-                // (Fase 3.2, S3.2a) e legge la sessione dal server.
-                // Il binario e' spawnato *detached*: quando il login esce, la
-                // shell viene ri-parentata a init (senza, la cascata della
-                // morte del parent la ucciderebbe).
-                spawn_shell();
-                civis::exit(0);
+                // Il login e' il **capo-sessione**: lancia il DE dentro la
+                // sessione e resta vivo. Non avvia piu' la shell: e' il DE a
+                // creare le tile e le shell (una per tile).
+                match spawn_de() {
+                    Some((_chan, pid)) => {
+                        wait_session_end(pid);
+                        // Fine sessione: il token muore con lei (niente
+                        // identita' stantia alla prossima autenticazione).
+                        let _ = civis::sess::set_token(0);
+                        console_write(b"[login] Sessione conclusa\n");
+                        civis::exit(0);
+                    }
+                    None => {
+                        console_write(b"[login] ERRORE: DE non avviato\n");
+                        civis::exit(1);
+                    }
+                }
             }
             Ok(r) => {
                 console_write(b"[login] FAIL (");
@@ -168,71 +178,83 @@ fn real_main(_sp: u64) -> ! {
 /// la password: il login riprova, non chiude).
 const MAX_ATTEMPTS: u32 = 3;
 
-/// Spawla l'interprete nativa dall'oggetto ArcaFS (`sys:bin/interpres.bin`).
-/// Passa solo `USER` (il nome utente, per il prompt con glifi Nerd Font): il
-/// **token non viaggia piu' in ambiente** (D8f) — sta nel server, sulla
-/// sessione, e la shell lo legge con `SESS_TOKEN`.
+/// Spawna il **DE** (`impluvium`) dall'oggetto ArcaFS
+/// (`sys:bin/impluvium.bin`), dentro la sessione autenticata: passa solo
+/// `USER` (il token e' gia' nel server, sulla sessione 0). Ritorna
+/// `(canale, pid)`; `None` = non avviato (motivo gia' scritto sul terminale).
 ///
 /// **Verifica prima dello spawn** (ADR-0078/0079, come `init`): la classe di
 /// un'immagine arriva al kernel dalla trust table, che cardo popola quando
-/// qualcuno **verifica** l'oggetto (`R_RIGHTS_EXECUTE`). Senza questa
-/// chiamata il login spawnava la shell come `Untrusted`: `ceiling_for` le
-/// dava `DEFAULT_UNKNOWN_OPS` (che non include `RIGHTS_EXECUTE`) e ogni
-/// esecuzione di un programma da `/usr/bin` falliva con un `ERR` opaco.
-/// Fail-closed: se l'oggetto non e' eseguibile la shell non parte e il
-/// motivo e' scritto sul terminale.
-fn spawn_shell() {
-    match civis::fs::rights::rights_execute_verdict(b"sys", b"bin/interpres.bin") {
+/// qualcuno **verifica** l'oggetto (`R_RIGHTS_EXECUTE`). Senza, il DE
+/// partirebbe `Untrusted` e non potrebbe ne' prendere i tasti ne' disporre il
+/// layout. Fail-closed e loud.
+///
+/// Il DE **non** e' detached: e' un figlio del login, e la sua morte e' il
+/// segnale di fine sessione che il login aspetta.
+fn spawn_de() -> Option<(i64, i64)> {
+    match civis::fs::rights::rights_execute_verdict(b"sys", b"bin/impluvium.bin") {
         Ok((true, _class)) => {}
         Ok((false, _)) => {
-            console_write(b"[login] shell nativa non eseguibile (firma assente o negata)\n");
-            return;
+            console_write(b"[login] DE non eseguibile (firma assente o negata)\n");
+            return None;
         }
         Err(e) => {
-            console_write(b"[login] verifica shell fallita: ");
+            console_write(b"[login] verifica DE fallita: ");
             let msg = format!("{:?}", e);
             console_write(msg.as_bytes());
             console_write(b"\n");
-            return;
+            return None;
         }
     }
 
-    let img = match civis::obj_get(b"sys", b"bin/interpres.bin") {
+    let img = match civis::obj_get(b"sys", b"bin/impluvium.bin") {
         Ok(v) if !v.is_empty() => v,
         _ => {
-            console_write(b"[login] shell nativa non trovata su ArcaFS\n");
-            return;
+            console_write(b"[login] DE non trovato su ArcaFS\n");
+            return None;
         }
     };
 
-    // Costruisci il nome utente come byte slice.
     let user_bytes = unsafe { &LOGIN_USER[..LOGIN_USER_LEN as usize] };
     let user_str = core::str::from_utf8(user_bytes).unwrap_or("");
 
-    // Costruisce i metadati, l'env block e spawn. L'env block deve restare
-    // vivo fino a dopo lo spawn (il kernel copia il blocco dentro la syscall).
-    let mut meta = match civis::SpawnMeta::new("interpres", 16, &[]) {
+    let mut meta = match civis::SpawnMeta::new("impluvium", 16, &[]) {
         Some(m) => m,
         None => {
             console_write(b"[login] SpawnMeta non valido\n");
-            return;
+            return None;
         }
     };
 
     // Env: solo `USER` (un nome, non un segreto). Il token sta nel server.
     let user_env = alloc::format!("USER={}", user_str);
+    let Some(packed) = civis::pack_args(&[], &[&user_env.as_bytes()]) else {
+        console_write(b"[login] DE: env non impacchettabile\n");
+        return None;
+    };
+    meta = meta.argv(&packed);
 
-    if let Some(packed) = civis::pack_args(&[], &[&user_env.as_bytes()]) {
-        meta = meta.argv(&packed);
-        match civis::spawn_image(&img, &meta.detached()) {
-            Ok(_chan) => console_write(b"[login] shell nativa avviata\n"),
-            Err(_) => console_write(b"[login] spawn della shell fallito\n"),
+    let chan = match civis::spawn_image(&img, &meta) {
+        Ok(c) => c,
+        Err(_) => {
+            console_write(b"[login] spawn del DE fallito\n");
+            return None;
         }
-    } else {
-        // pack_args fallisce: spawn senza env (la shell dira' "nessuna sessione")
-        match civis::spawn_image(&img, &meta.detached()) {
-            Ok(_chan) => console_write(b"[login] shell nativa avviata\n"),
-            Err(_) => console_write(b"[login] spawn della shell fallito\n"),
+    };
+    let pid = civis::peer_pid(chan as u64).ok()?;
+    console_write(b"[login] DE avviato\n");
+    Some((chan, pid))
+}
+
+/// Aspetta la **fine della sessione**: la morte del DE. Ignora gli altri
+/// messaggi (READY del DE, hint di input residui): l'unico evento che conta
+/// qui e' l'`EXIT_NOTIFY` del figlio.
+fn wait_session_end(de_pid: i64) {
+    loop {
+        if let Ok(m) = civis::recv() {
+            if civis::is_exit_notify(&m) && m.w1 as i64 == de_pid {
+                return;
+            }
         }
     }
 }

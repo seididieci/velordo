@@ -4741,3 +4741,65 @@ D8g. `t76` confronta i CRC di **entrambe** le tile prima e dopo il cambio di
 focus: la prova che il bordo segue il focus.
 
 **Resta**: titoli in testo, puntatore e floating (D8f).
+
+## D8f — Il login è il capo della sessione (ADR-0089/0092)
+
+**Il login diventa capo-sessione**, non più un lanciatore one-shot. Il token di
+sessione smette di viaggiare per env (`VELORDO_SESSION` sparisce da
+`identis-login`, `interpres`, `users`, `create-user`) e vive nel **server**
+delle sessioni: `SESS_TOKEN_SET` (0xAD) lo scrive sulla sessione attaccata al
+canale (solo immagini `System`: il login sulla 0, il DE quando propaga a una
+tile nuova); `SESS_TOKEN` (0xAE) lo legge, sempre dalla sessione attaccata —
+l'attachment è la prova, quindi una tile non legge il token di un'altra. `0` =
+sessione anonima; la chiusura della sessione porta via il token.
+
+```
+init -> console, porta, kbd, ... -> identis-login        (sessione 0 = boot)
+  utente/password OK:
+    SESS_TOKEN_SET(token)   -> il token e' della sessione 0 (nel server)
+    spawn impluvium   env: USER=<nome>                    (niente token in env)
+    resta vivo: aspetta la fine della sessione
+      morte del DE (= fine sessione) -> set_token(0) -> exit 0
+    init (LoginGate): uscita 0 = prompt subito;
+                        uscita != 0 = backoff e tetto riavvii
+```
+
+**Cosa cambia**:
+
+- `identis-login` (`userland/identis-login`): dopo `[login] SUCCESS` fa
+  `civis::sess::set_token(token)` sulla sessione 0, poi `spawn_de()`
+  (`impluvium`, `USER` in env, verifica della firma prima dello spawn) e
+  `wait_session_end(de_pid)` su `recv` (solo `EXIT_NOTIFY` del figlio
+  conta). Alla fine azzera `SESS_TOKEN_SET(0)` ed esce 0.
+- `init` (`userland/rector`): `impluvium` non è più un servizio di boot (niente
+  supervisione per canale, `SVC_IMPLUVIUM` tolto dalla tabella); il login resta
+  in `Supervised` con `OnDeath::LoginGate` aggiornato (codice 0 = sessione
+  conclusa → prompt subito, contatore azzerato; ≠ 0 = accesso fallito → backoff
+  e tetto). `handle_child_death` ora matcha per **pid + canale di nascita** (i
+  pid si riusano: una `EXIT_NOTIFY` stantia non deve chiudere la sessione di
+  un login appena spawnato con lo stesso pid).
+- `impluvium` (`userland/impluvium`): legge `USER` dall'env del login,
+  attacca la sessione 0 (focus iniziale), avvia `spawn_shell(0)` al boot
+  (prima lo faceva il login), copia il token (`SESS_TOKEN` → `SESS_TOKEN_SET`)
+  sulla sessione di ogni tile nuova prima di spawnare la shell, e chiude la
+  tile alla morte della shell (mai l'ultima). Kernel intatto.
+- `libs/civis/src/sess.rs`: `Session::{token,set_token}` + free `token()`/
+  `set_token()`; `littera::Session.token` (azzera con la sessione).
+- `userland/console`: braccia per `SESS_TOKEN_SET`/`SESS_TOKEN` (set: `System`
+  + sessione attaccata; read: sessione attaccata, `0` = anonima).
+
+**Vittoria**: gate `[gate] PASS` (6 suite + shell nativa 33/33, usertests
+71/71, zero FAIL/PANIC/FAULT, zero `[munmap]`), `./scripts/run-desktop-tests.sh`
+verde (login via monitor, poi keybinding del DE), `interpres`/`users`/
+`create-user` leggono il token dal server (`t74`/`t75` verdi). Il login resta
+vivo come capo-sessione e riprende lo schermo a fine sessione.
+
+**Trappole pagate**: (a) il pid si riusa — `handle_child_death` matcha
+pid+canale, altrimenti la morte di un test (stesso pid, canale diverso)
+sembrava "sessione conclusa" del login appena spawnato; (b) il token va tolto
+per davvero dall'env: nessun fallback silenzioso, i tre programmi leggono solo
+dal server; (c) la shell della tile 0 la crea il DE (`spawn_shell(0)`), non più
+il login, perché il token è già della sessione 0 quando il DE parte.
+
+**Resta**: titoli in testo nella barra, puntatore/floating (D8g), e
+l'attenuazione dei diritti dei figli (S3.4, dopo D8f: tocca il kernel).
