@@ -836,7 +836,10 @@ Voci con scope e vittoria dichiarati (non date).
       fork/thread copiano `image_class` dal padre. Probe `usr/bin/floorprobe`
       e `usr/bin/floorposix` fuori gate (`scripts/run-rights-tests.sh`:
       `Untrusted`/`System` rifutati, `ThirdParty` ammesso, anche dalla
-      personalità POSIX). Gate: `[gate] PASS`, zero FAIL/PANIC/FAULT.
+      personalità POSIX). **Subtree ereditario**: cardo tiene `pid → subtree`
+      e all'handshake risale i padri (`ps_info.parent`) per ereditare il
+      prefisso di path; `subtreehelper`+`subtreechild` in `t77` (dentro `tmp`
+      sì, fuori no). Gate: `[gate] PASS`, zero FAIL/PANIC/FAULT.
       **Trappola**: ogni via di creazione (`create_user`, `exec_current`,
       `create_spawn_copy`, `create_thread`) va bonificata, o il default
       permissivo riapre la falla senza errori di compilazione.

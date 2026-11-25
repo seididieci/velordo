@@ -618,10 +618,16 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   bit riservati, `ceiling_for` con `rightshelper` `OPEN|READ`, fork floor/ops,
   gate strutturali) + `scripts/run-rights-tests.sh` fuori gate
   (`floorprobe` e `floorposix`: floor `ThirdParty`, `Untrusted` rifiutato,
-  `ThirdParty` ammesso, `exec`/`spawn` di `System` negati). Trappola: **ogni**
-  via di creazione (`create_user`/`exec_current`/`create_spawn_copy`/
-  `create_thread`) va bonificata, o il default permissivo riapre la falla in
-  silenzio.
+  `ThirdParty` ammesso, `exec`/`spawn` di `System` negati). **Subtree**: cardo
+  tiene `pid → subtree` e all'handshake risale i padri (`ps_info.parent`, bound
+  16) per ereditare il **prefisso di path** (attestazione, non trasferimento);
+  `R_RIGHTS_DROP` solo in restringimento. Test: `subtreehelper`+`subtreechild`
+  in `t77` (padre restringe a `tmp`, il figlio legge dentro e non fuori).
+  Trappole: **ogni** via di creazione (`create_user`/`exec_current`/
+  `create_spawn_copy`/`create_thread`) va bonificata, o il default permissivo
+  riapre la falla in silenzio; su cardo l'handshake con `ps_info` va in una
+  funzione `#[inline(never)]` (firewall), o LTO sfonda lo stack di 16 KiB
+  (`#PF` user-mode sotto la guardia).
 
 ## Important Notes
 

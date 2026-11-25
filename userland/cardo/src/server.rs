@@ -161,6 +161,72 @@ fn reply_io_stats(disk: &mut Option<btree_drv::DiskEngine>) -> Result<(), u64> {
     Ok(())
 }
 
+/// S3.4 subtree: risale i padri di `pid` (max 16) e ritorna il subtree del
+/// primo pid noto (`""` = root). La catena la dice il kernel (`ps_info`),
+/// quindi e' **attestazione**: un processo non puo' fingersi figlio di un
+/// altro. Un padre senza canale FS (mai parlato con cardo) si salta; un padre
+/// morto ferma la risalita.
+#[inline(never)]
+fn inherited_subtree(pid: i64, map: &BTreeMap<u32, String>) -> String {
+    if pid < 0 {
+        return String::new();
+    }
+    let mut cur = pid as u32;
+    for _ in 0..16 {
+        if let Some(s) = map.get(&cur) {
+            return s.clone();
+        }
+        let Some(e) = civis::ps_info(cur) else { break };
+        let Some(p) = e.parent else { break };
+        if p == cur {
+            break;
+        }
+        cur = p;
+    }
+    String::new()
+}
+
+/// S3.4 subtree: registra il canale nuovo e il suo subtree ereditato.
+/// **Firewall** `#[inline(never)]`: con LTO il frame dell'handshake verrebbe
+/// fuso col loop di `real_main` e sfonderebbe lo stack di 16 KiB (trappola
+/// nota di cardo: #PF user-mode sotto la guardia).
+#[inline(never)]
+fn register_client(
+    chan: u64,
+    ceil: u32,
+    pid: i64,
+    rights: &mut BTreeMap<u64, rights::ChanRights>,
+    pid_subtree: &mut BTreeMap<u32, String>,
+) {
+    let inherited = inherited_subtree(pid, pid_subtree);
+    rights.insert(chan, rights::ChanRights::new(ceil, inherited.clone()));
+    if pid >= 0 {
+        pid_subtree.insert(pid as u32, inherited);
+    }
+}
+
+/// S3.4 subtree: applica un `R_RIGHTS_DROP` e propaga il nuovo subtree al
+/// pid (per l'eredita' dei figli). Firewall `#[inline(never)]` come
+/// `register_client`.
+#[inline(never)]
+fn drop_rights(
+    rights: &mut BTreeMap<u64, rights::ChanRights>,
+    pid_subtree: &mut BTreeMap<u32, String>,
+    chan: u64,
+    keep: u32,
+    payload: &[u8],
+    ceiling: u32,
+) -> Result<u64, u64> {
+    let r = rights::handle_rights_drop(rights, chan, keep, payload, ceiling).ok_or(ERR);
+    if r.is_ok() {
+        if let Ok(pid) = civis::peer_pid(chan) {
+            let sub = String::from(rights::rights_subtree(rights, chan));
+            pid_subtree.insert(pid as u32, sub);
+        }
+    }
+    r
+}
+
 fn real_main(_sp: u64) -> ! {
     println!("[cardo] starting");
 
@@ -358,6 +424,7 @@ fn real_main(_sp: u64) -> ! {
 
     // Diritti per-canale (Fase 17): entry assente = {ALL, root}.
     let mut rights: BTreeMap<u64, rights::ChanRights> = BTreeMap::new();
+    let mut pid_subtree: BTreeMap<u32, String> = BTreeMap::new();
     // Tetto policy su identita' (Fase 45): chan → mask massima, classificato
     // UNA volta all'handshake (peer_info), purgato all'EXIT_NOTIFY come
     // rings/rights. Effettivo = drop_mask & ceiling (mai widen).
@@ -432,6 +499,8 @@ fn real_main(_sp: u64) -> ! {
             let ceil = policy::ceiling_for(chan);
             policy.insert(chan, ceil);
             trust.insert(chan, policy::classify(chan));
+            let pid = civis::peer_pid(chan).unwrap_or(-1);
+            register_client(chan, ceil, pid, &mut rights, &mut pid_subtree);
             println!("[cardo] client chan {} registered rings req={:#x} resp={:#x} ceiling={:#x}", chan, msg.w0, msg.w1, ceil);
             let _ = civis::reply(0, 0, 0);
             continue;
@@ -550,6 +619,7 @@ fn real_main(_sp: u64) -> ! {
                 pipes.end_closed(pipe_id, write);
             }
             rings.remove(&chan);
+            pid_subtree.remove(&(msg.w1 as u32));
             // Baseline wall-clock (Fase 50): se il morto era il server Time,
             // cade (al prossimo bisogno si rilegge, mai wall stale).
             wall::note_peer_death(chan);
@@ -1256,7 +1326,14 @@ fn real_main(_sp: u64) -> ! {
 
             // DROP/GET partono dal tetto policy (Fase 45), non da ALL: un
             // canale restrittivo non puo' "droppare verso l'alto".
-            R_RIGHTS_DROP => rights::handle_rights_drop(&mut rights, chan, w0 as u32, &payload, ceiling).ok_or(ERR),
+            R_RIGHTS_DROP => drop_rights(
+                &mut rights,
+                &mut pid_subtree,
+                chan,
+                w0 as u32,
+                &payload,
+                ceiling,
+            ),
 
             R_RIGHTS_GET => rights::handle_rights_get(&rights, &rings, chan, ceiling).ok_or(ERR),
 

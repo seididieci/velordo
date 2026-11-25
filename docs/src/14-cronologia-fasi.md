@@ -4865,3 +4865,20 @@ dalla **personalità POSIX** (`libr::exec`): la finestra non resta aperta.
 **Trappola**: un probe lanciato dalla shell (non da init) non deve fare
 `send(TEST_DONE)` sincrono — la shell non risponde e il probe resta bloccato a
 metà, lasciando la shell in attesa dell'EXIT_NOTIFY (deadlock silenzioso).
+
+**Subtree ereditario** (chiusura del passo dichiarato fuori scope): la maschera
+ops non bastava, il **prefisso di path** restava per-canale e non ereditato —
+un padre ristretto a `/tmp` lasciava al figlio il subtree root. Cardo ora tiene
+`pid → subtree` (aggiornata all'handshake e a `R_RIGHTS_DROP`, purgata su
+`EXIT_NOTIFY`) e all'handshake di un canale nuovo **risale i padri** con
+`ps_info(pid).parent` (bound 16) fino al primo subtree noto: **attestazione**,
+non trasferimento (il kernel dice la catena, il processo non può fingersi
+figlio). Il figlio può solo restringere. Test: `subtreehelper` crea
+`tmp/subtree.txt`, restringe il proprio canale a `tmp`, spawna `subtreechild`
+che legge dentro (ok) e fuori (`hello.txt`, negato).
+
+**Trappola pagata**: aggiungere l'handshake al loop di cardo **sfonda lo stack
+di 16 KiB** (LTO fonde i frame: `#PF` write a `0x40001fffbff8`, sotto la
+guardia). Gli helper `register_client`/`drop_rights`/`inherited_subtree` sono
+`#[inline(never)]` (firewall), come i livelli btree/volume. Diagnosi: il `#PF`
+compariva **dopo** il log dell'handshake, con `rip` nel codice ma `cr3` user.

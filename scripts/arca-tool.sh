@@ -231,6 +231,8 @@ seed_bin testland/build/tileprobe.bin test/tileprobe.bin tst test/tileprobe.bin
 seed_bin testland/build/tileprobe.bin usr/bin/tileprobe.bin usr tileprobe
 seed_bin testland/build/floorprobe.bin usr/bin/floorprobe.bin usr floorprobe
 seed_bin testland/build/rightshelper.bin test/rightshelper.bin tst test/rightshelper.bin
+seed_bin testland/build/subtreehelper.bin test/subtreehelper.bin tst test/subtreehelper.bin
+seed_bin testland/build/subtreechild.bin test/subtreechild.bin tst test/subtreechild.bin
 seed_bin flavours/posix/build/userfloorposix.bin usr/bin/floorposix.bin usr floorposix
 # Probe TLS 1.3 (N6.2, ADR-0072): fuori gate, eseguito solo con `tls=1`.
 # Parla con `net` in diretta: `usr` (ThirdParty, firmato), come `nettcp`.

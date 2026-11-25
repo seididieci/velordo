@@ -156,8 +156,10 @@ dal kernel** (floor), una `ThirdParty` è ammessa, l'`exec`/`spawn` di `System`
 `floorposix` (`usr/bin/floorposix.bin`, personalità POSIX) verifica che
 `libr::exec` di `System` e di `Untrusted` è negato. Nel gate `t77` copre le
 stesse vie da `tst` più `ceiling_for` (helper `rightshelper` con `OPEN|READ`:
-read ok, write negata), i bit riservati, il fork che eredita floor/ops e i gate
-strutturali (`trust_image`, `dma_alloc` device, `map_mmio`).
+read ok, write negata), i bit riservati, il fork che eredita floor/ops, i gate
+strutturali (`trust_image`, `dma_alloc` device, `map_mmio`) e il **subtree
+ereditario** (`subtreehelper`: il padre restringe a `tmp`, il figlio legge
+dentro e non fuori).
 
 Il build userland (servizi nativi, test suite, flavour POSIX) usa
 `targets/x86_64-unknown-velordo-user.json`: clone di `x86_64-unknown-none`

@@ -29,6 +29,19 @@ pub struct ChanRights {
     subtree: String,
 }
 
+impl ChanRights {
+    /// Entry nuova: `ops` effettive e `subtree` ereditato (S3.4 subtree).
+    pub fn new(ops: u32, subtree: alloc::string::String) -> Self {
+        Self { ops, subtree }
+    }
+
+    /// Sostituisce il subtree (dopo un DROP: e' gia' validato dentro il
+    /// corrente).
+    pub fn set_subtree(&mut self, subtree: alloc::string::String) {
+        self.subtree = subtree;
+    }
+}
+
 /// Mask ops effettiva (default ALL a entry assente).
 pub fn rights_ops(rights: &BTreeMap<u64, ChanRights>, chan: u64) -> u32 {
     rights.get(&chan).map_or(civis::RIGHTS_ALL, |r| r.ops)

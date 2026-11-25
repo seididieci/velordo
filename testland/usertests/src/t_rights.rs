@@ -291,6 +291,31 @@ pub fn t_spawn_rights() -> bool {
         pass = false;
     }
 
+    // (8) subtree ereditario: il padre restringe il proprio canale a `tmp`,
+    // spawna un figlio che **eredita** il prefisso per attestazione: dentro
+    // `tmp` legge, fuori no (prima della fase, il figlio aveva root).
+    if let Some(img) = civis::load_file("/test/subtreehelper.bin") {
+        let _ = civis::fs::rights::rights_execute_verdict(b"tst", b"test/subtreehelper.bin");
+        match civis::SpawnMeta::new("subtreehelper", 16, &[])
+            .map(|m| civis::spawn_image(&img, &m))
+        {
+            Some(Ok(chan)) => match helpers::wait_exit(chan as u64) {
+                Some((0, _)) => {}
+                other => {
+                    println!("[usertests] t77: subtree helper {:?} (atteso 0)", other);
+                    pass = false;
+                }
+            },
+            _ => {
+                println!("[usertests] t77: spawn subtreehelper fallito");
+                pass = false;
+            }
+        }
+    } else {
+        println!("[usertests] t77: subtreehelper non caricabile");
+        pass = false;
+    }
+
     // (7) init (System) continua a spawnare `tst`/`usr`/`sys`: questa suite
     // stessa ne e' la prova (gira e ha eseguito i punti sopra).
 

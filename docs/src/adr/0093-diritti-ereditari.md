@@ -98,6 +98,28 @@ sono l'unica codifica, condivisa da kernel e `civis`.
   i binari embedded (spawn dal kernel, `parent = None`) non passano dal
   controllo.
 
+### Subtree ereditario (path, oltre classe e ops)
+
+La maschera ops non basta: il **prefisso di path** (`subtree`, `ChanRights` in
+cardo) era per-canale e **self-restriction only**, non ereditato. Un padre che
+restringeva il proprio canale a `/tmp` e spawnava un figlio lasciava al figlio
+il subtree **root** (default della sua identità): il figlio riapriva ciò che il
+padre aveva chiuso.
+
+Ora cardo mantiene `pid → subtree` (aggiornata all'handshake e a
+`R_RIGHTS_DROP`, purgata su `EXIT_NOTIFY`) e all'handshake di un nuovo canale
+**risale i padri** con `ps_info(pid).parent` (bound 16) fino al primo pid con
+un subtree noto: lo applica come default al canale del figlio. È
+**attestazione** (la catena la dice il kernel), non trasferimento: un processo
+non può fingersi figlio di un altro. `R_RIGHTS_DROP` continua a permettere solo
+il restringimento (il figlio può scendere a `/tmp/x`, mai risalire a `/`). Il
+subtree resta una stringa di cardo: il kernel non interpreta i path (ADR-0005).
+
+**Trappola pagata**: aggiungere l'handshake al loop di cardo ha **sfondato lo
+stack di 16 KiB** (LTO fonde i frame: `#PF` user-mode sotto la guardia). Gli
+helper `register_client`/`drop_rights`/`inherited_subtree` sono `#[inline(never)]`
+(firewall), come i livelli btree/volume.
+
 ### Vie di creazione: nessuna senza controllo
 
 | Via | Prima | Dopo S3.4a |
@@ -137,6 +159,10 @@ non quello dell'**autenticità**.
 - **`usr/bin/floorprobe`** (fuori gate, `scripts/run-rights-tests.sh`): la
   shell nativa lo lancia con floor `ThirdParty`; il probe verifica che
   `Untrusted` è rifiutato, `ThirdParty` ammesso, `exec` di `Untrusted` negato.
+- **`subtreehelper` + `subtreechild`** (in `t77`): il padre crea
+  `tmp/subtree.txt`, restringe il proprio canale a `tmp` con `R_RIGHTS_DROP`,
+  spawna il figlio che **eredita** `tmp`: dentro legge, fuori (`hello.txt`) è
+  negato. Prova l'eredità del prefisso di path (attestazione via `ps_info`).
 
 ## Trappole
 
@@ -156,6 +182,7 @@ non quello dell'**autenticità**.
 
 ## Fuori scope (dichiarato)
 
-Attenuazione del **subtree dei path** (qui solo la maschera ops; il subtree per
-canale è già in cardo, ereditarlo è il passo dopo), capability di sessione
-(S3.3c), cifratura dei bucket, TTL/rotazione del token.
+Capability di sessione (S3.3c), cifratura dei bucket, TTL/rotazione del token.
+Il **subtree** dei path è ereditato (sezione sopra); resta fuori l'eredità del
+subtree **attraverso mount/symlink** (il check è sul path normalizzato, non
+risolve i link).
