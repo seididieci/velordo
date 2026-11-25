@@ -347,11 +347,12 @@ impl Term {
 
     // ── Tile (D8e) ───────────────────────────────────────────────────
 
-    /// Il bordo che spetta a un rect: niente bordo se copre lo schermo (una
-    /// tile sola, boot identico a D8d, e zoom: tmux `-Z` non borda).
-    fn border_for(&self, rect: musivum::Rect) -> u32 {
+    /// Il bordo che spetta a un rect: il bordo c'e' sempre (anche con una
+    /// singola tile); la griglia sta gia' dentro il bordo, quindi non copre
+    /// il testo. Zero solo se la superficie non e' ancora pronta.
+    fn border_for(&self, _rect: musivum::Rect) -> u32 {
         let (sw, sh) = self.surface.pixel_size();
-        if sw == 0 || sh == 0 || (rect.w >= sw && rect.h >= sh) {
+        if sw == 0 || sh == 0 {
             0
         } else {
             TILE_BORDER
@@ -866,10 +867,11 @@ impl Term {
         //    (il primo FLUSH, senza questo, arriverebbe al primo tasto:
         //    schermo nero fino a li').
         self.build_bg_layer();
-        if self.tiles.len() > 1 && self.tile_owner != 0 {
-            // D8e: con N tile il layout lo decide il DE — gli si dice che il
-            // display e' cambiato e lui rilancia `TILE_SET`/`TILE_COMMIT`. Il
-            // server non si auto-adatta (le tile non sono sue).
+        if self.tile_owner != 0 {
+            // D8e: il DE (se c'è) decide il layout — gli si dice che il
+            // display e' cambiato e lui rilancia `TILE_SET`/`TILE_COMMIT`.
+            // Con una sola tile il DE esiste comunque (D8f), quindi va
+            // avvisato anche lui; altrimenti il resize non si propaga.
             let _ = civis::send_async(
                 self.tile_owner,
                 civis::TILE_SCREEN,
@@ -877,7 +879,7 @@ impl Term {
                 0,
             );
         } else {
-            // Una tile sola: e' lo schermo, si adatta da sola (D4/D8c1).
+            // Nessun DE: una tile sola e' lo schermo, si adatta da sola (D4/D8c1).
             self.ensure_screen_tile();
         }
         self.render();

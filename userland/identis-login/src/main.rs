@@ -53,6 +53,11 @@ fn console_write(data: &[u8]) {
 
 /// Entry: fa il self-test, poi chiede credenziali.
 fn real_main(_sp: u64) -> ! {
+    // Pulisce la sessione 0: il login non deve lasciare i messaggi di una
+    // sessione precedente (es. dopo un logout) sullo schermo quando riparte.
+    // out_screen non entra nel mirror seriale: solo lo schermo si pulisce.
+    let _ = civis::sess::out_screen(b"\x1b[2J\x1b[H");
+
     // Registra il servizio: serve a **init** per supervisionarlo (e'
     // l'unico modo per entrare nel sistema: se il login fallisce, init lo
     // riavvia come un getty). Nessuno lo risolve per nome.

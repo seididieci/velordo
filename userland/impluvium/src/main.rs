@@ -380,6 +380,9 @@ fn real_main(sp: u64) -> ! {
     }
     // 3. La shell della **tile 0** (D8f): prima la avviava il login; ora la
     //    sessione e' del DE, che la riempie come fa per ogni tile nuova.
+    //    Pulisce la sessione 0: i messaggi del login e di impluvium non devono
+    //    restare sullo schermo quando la shell disegna il prompt.
+    let _ = civis::sess::out_screen(b"\x1b[2J\x1b[H");
     if !de.spawn_shell(0) {
         println!("[impluvium] shell iniziale NON avviata");
     }
