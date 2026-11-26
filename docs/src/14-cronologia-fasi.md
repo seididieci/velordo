@@ -5192,3 +5192,21 @@ video" resta, i test ci contano).
 nuovi: "un tasto = un frame piccolo in una feed", 34 byte / 1 chunk, e "il primo
 frame è intero, i successivi differenziali", 1564 → 34); unit host **213**; gate
 invariato.
+
+**Quinto giro (il primo frame non si vedeva)**: `fullscreen` partiva a schermo
+vuoto e si popolava solo al primo tasto. Causa: `feed_session` della console
+tratta ogni feed **> 256 B** come output di un comando (`bulk`) e ne differisce
+render+flush ogni 8 write (T4: lo scroll di un blocco si ricompone invece di
+spostare i pixel). Il primo frame di un'app a schermo intero è 1564 B → restava
+nel modello, invisibile, finché non arrivava la write successiva (il tasto) a
+fare il flush.
+
+Fix di una riga: il throttle vale **solo per il testo** (`mirror && len > 256`);
+un feed `screen_only` (`SESS_WRITE.w1 = 1`) è un frame, non un blocco di output:
+si rende subito. Regola generale scritta nell'addendum ADR-0098: *il differimento
+è una politica per il testo che scorre, mai per il disegno*.
+
+Check nuovo in `run-tui-tests.sh` (**18**): dopo `[fullscreen] start`, uno
+**screendump** e i pixel del colore del bordo devono essere > 400 — prova che il
+frame è a video **senza** aver premuto niente (il modo giusto di provarlo: la
+"non-visibilità" non lascia marker).

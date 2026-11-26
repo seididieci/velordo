@@ -654,7 +654,13 @@ impl Term {
         }
         // T4: un feed lungo e' output di un comando (blocco): lo scroll
         // ricompone invece di spostare i pixel (vedi `scroll_session`).
-        let bulk = bytes.len() > BULK_FEED_BYTES;
+        //
+        // **Solo il testo**, pero': un feed `screen_only` (`w1 = 1`) e' il
+        // **frame di un'app a schermo intero** (ADR-0098 addendum), non
+        // output di un comando. Differirlo lo lascerebbe invisibile finche'
+        // non arriva la write successiva (il primo tasto!): misurato con
+        // `fullscreen`, che restava senza frame fino alla prima pressione.
+        let bulk = mirror && bytes.len() > BULK_FEED_BYTES;
         let mut cps = match self.sessions.get_mut(idx) {
             Some(s) => {
                 s.bulk_feed = bulk;

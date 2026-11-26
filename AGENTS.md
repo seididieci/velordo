@@ -689,7 +689,10 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   per cella — un bordo disegnato cella per cella erano ~660 render+flush per
   tasto e il frame si vedeva arrivare a pezzi (il "lampeggio" di `fullscreen`;
   ora 1 IPC / ~33 B). Una cella = un carattere: la larghezza di un glifo la sa
-  solo il font, non una tabella nel canvas.
+  solo il font, non una tabella nel canvas. E il throttle **bulk** di
+  `feed_session` (> 256 B = output di un comando, render differito) vale solo
+  per il testo: un feed `screen_only` (`w1 = 1`) e' un frame e va reso subito
+  (senza, il primo frame di un'app resta invisibile fino al primo tasto).
   Demo `usr/bin/fullscreen` + `scripts/run-tui-tests.sh` (fuori dal gate: prova
   alt screen, tasti, toppa, modeset→riadattamento 127x36→102x34, ritorno al
   prompt) + **GTUI** `usr/bin/gtui` (log con i rami disegnati in pixel, barra,

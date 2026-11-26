@@ -72,8 +72,12 @@ wait_for() {
 
 rm -f "$LOG" "$MON"
 echo "[tui] boot (log $LOG)"
+# `FB_WINDOW=1`: senza la VGA il terminale e' la superficie virtio-gpu, e lo
+# **screendump** del monitor prende quella. Con la VGA presente il dump prende
+# la VGA (l'altra console, "morta" nel path pixel) e i check sui pixel di questa
+# suite guarderebbero lo schermo sbagliato.
 RUN_TESTS=0 SERIAL="file:$LOG" MONITOR="unix:$MON,server=on,wait=off" \
-    DISPLAY=none ./run.sh >/dev/null 2>&1 &
+    FB_WINDOW=1 DISPLAY=none ./run.sh >/dev/null 2>&1 &
 QEMU_PID=$!
 trap 'kill "$QEMU_PID" 2>/dev/null || true' EXIT
 
@@ -95,6 +99,45 @@ fi
 SIZE="$(grep -aF '[fullscreen] start' "$LOG" | tail -1 | sed 's/.*start //' || true)"
 echo "[tui] tela: $SIZE"
 sleep 1
+
+# 1b. Il primo frame deve essere **a video senza premere tasti**: il feed di
+#     una tela (`SESS_WRITE.w1 = 1`) non e' "bulk" (output di un comando), e il
+#     server non deve differirne il render. Differito, lo schermo resta vuoto
+#     fino alla write successiva: misurato con `fullscreen` (bug pagato).
+SHOT="${TUI_SHOT:-/tmp/tui-first-frame.ppm}"
+rm -f "$SHOT"
+send_mon "screendump $SHOT"
+sleep 2
+# Il frame disegnato lascia pixel chiari nella fascia in alto a sinistra
+# (bordo + titolo); senza frame quella fascia e' wallpaper scuro (misurato: 0).
+# Cercare un colore esatto non funziona: i glifi sono antialiasati sul fondo.
+TITLE_PX="$(python3 - "$SHOT" <<'PY'
+import sys
+
+try:
+    d = open(sys.argv[1], "rb").read()
+except OSError:
+    print(0)
+    raise SystemExit
+parts = d.split(b"\n", 3)
+if parts[0] != b"P6":
+    print(0)
+    raise SystemExit
+w, h = (int(x) for x in parts[1].split())
+px = parts[3]
+# Luminanza (Rec.601) dei pixel nella fascia; soglia bassa: il wallpaper in
+# alto a sinistra e' quasi nero (11,13,20).
+n = 0
+for y in range(5, min(h, 70)):
+    for x in range(0, min(w, 640)):
+        o = (y * w + x) * 3
+        r, g, b = px[o], px[o + 1], px[o + 2]
+        if (r * 299 + g * 587 + b * 114) // 1000 >= 120:
+            n += 1
+print(n)
+PY
+)"
+echo "[tui] primo frame a video: ${TITLE_PX:-0} pixel chiari in alto a sinistra (senza tasti)"
 
 # 2. I tasti arrivano (la stella si muove: lo dicono i marker sul seriale).
 send_mon 'sendkey l'
@@ -245,6 +288,8 @@ check() {
 # `if`, non `cmd; check $?`: con `set -e` un grep che non trova abortisce.
 if [ -n "$END_POS" ] && [ "$START_POS" != "$END_POS" ]; then ok=1; else ok=0; fi
 check "i tasti muovono la stella ($START_POS -> $END_POS)" "$ok"
+if [ -n "$TITLE_PX" ] && [ "$TITLE_PX" -gt 300 ] 2>/dev/null; then ok=1; else ok=0; fi
+check "il primo frame e' a video senza tasti ($TITLE_PX pixel chiari in alto a sinistra)" "$ok"
 if [ -n "$FRAME_BYTES" ] && [ "$FRAME_BYTES" -lt 200 ] 2>/dev/null && [ "$FRAME_CHUNKS" = "1" ]; then ok=1; else ok=0; fi
 check "un tasto = un frame piccolo in una feed ($FRAME_BYTES byte, $FRAME_CHUNKS chunk)" "$ok"
 if [ -n "$FIRST_BYTES" ] && [ -n "$FRAME_BYTES" ] && [ "$FIRST_BYTES" -gt "$FRAME_BYTES" ] 2>/dev/null; then ok=1; else ok=0; fi

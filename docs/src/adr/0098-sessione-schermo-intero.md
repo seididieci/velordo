@@ -146,12 +146,32 @@ contano).
   un'app di testo, non una tela; se il repaint desse fastidio si bufferizza
   anche lì (debito dichiarato, non un difetto del meccanismo).
 
+### Trappola pagata: il throttle "bulk" del server
+
+Il frame **non si vedeva finché non si premeva un tasto**. `feed_session` nella
+console tratta ogni feed **> 256 B** come output di un comando (`bulk`) e ne
+**differisce** render+flush ogni 8 write, perché lo scroll di un blocco si
+ricompone invece di spostare i pixel (T4). Il primo frame di un'app a schermo
+intero è 1564 B: finiva nel modello e restava invisibile finché non arrivava la
+write *successiva* (il primo tasto) a fare il flush.
+
+Fix: il throttle vale **solo per il testo** (`mirror`), non per un feed
+`screen_only` (`SESS_WRITE.w1 = 1`): una tela manda un frame, non un blocco di
+output, e non ha nessun "prompt" che lo flushi dopo. Regola generale: **il
+differimento è una politica per il testo che scorre, mai per il disegno.**
+
 ### Test
 
 - `libs/tabula` (host, 12): primo frame intero, nessun cambio → zero byte, fette
   consecutive in un solo `CUP`, celle non adiacenti (il cursore che si sposta),
   riga che si accorcia, `clear`, fuori tela, testo che si ferma al bordo, UTF-8
   (bordo e frecce), `resize` che riparte da zero, `fill`, misure minime.
-- `scripts/run-tui-tests.sh`: due check nuovi — "un tasto = un frame piccolo in
-  una feed" (`< 200` byte, `1` chunk) e "il primo frame è intero, i successivi
-  differenziali" (misurati dai marker `[fullscreen] frame bytes=N chunks=M`).
+- `scripts/run-tui-tests.sh` (**18 check**): "un tasto = un frame piccolo in una
+  feed" (`< 200` byte, `1` chunk), "il primo frame è intero, i successivi
+  differenziali" (marker `[fullscreen] frame bytes=N chunks=M`) e "**il primo
+  frame è a video senza tasti**" — quest'ultimo con uno **screendump**: la
+  fascia in alto a sinistra deve avere pixel chiari (bordo + titolo; senza frame
+  è wallpaper, 0). Due trappole di misura: il colore del bordo **non** si può
+  cercare esatto (i glifi sono antialiasati sul fondo) e lo screendump va preso
+  sulla superficie virtio-gpu (`FB_WINDOW=1`), o prende la VGA — l'altra console,
+  "morta" nel path pixel.
