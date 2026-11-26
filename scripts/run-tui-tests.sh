@@ -59,6 +59,26 @@ PY
     sleep 0.3
 }
 
+# `send_many <n> <key>`: N tasti in una connessione (per arrivare al bordo
+# senza un secondo di attesa per tasto).
+send_many() {
+    python3 - "$MON" "$1" "$2" <<'PY'
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sys.argv[1])
+n, key = int(sys.argv[2]), sys.argv[3]
+for _ in range(n):
+    s.sendall(("sendkey %s\n" % key).encode())
+    time.sleep(0.05)
+try:
+    s.recv(4096)
+except Exception:
+    pass
+s.close()
+PY
+    sleep 1
+}
+
 wait_for() {
     local what="$1" limit="$2" start=$SECONDS
     while ! grep -aqF "$what" "$LOG" 2>/dev/null; do
@@ -153,7 +173,7 @@ FIRST_FRAME="$(printf '%s\n' "$FRAMES" | head -1)"
 LAST_FRAME="$(printf '%s\n' "$FRAMES" | tail -1)"
 FIRST_BYTES="$(printf '%s' "$FIRST_FRAME" | sed 's/.*bytes=//; s/ .*//')"
 FRAME_BYTES="$(printf '%s' "$LAST_FRAME" | sed 's/.*bytes=//; s/ .*//')"
-FRAME_CHUNKS="$(printf '%s' "$LAST_FRAME" | sed 's/.*chunks=//')"
+FRAME_CHUNKS="$(printf '%s' "$LAST_FRAME" | sed 's/.*chunks=\([0-9]*\).*/\1/')"
 echo "[tui] frame: intero=${FIRST_BYTES:-?} byte, dopo i tasti=${FRAME_BYTES:-?} byte in ${FRAME_CHUNKS:-?} chunk"
 
 # 2b. Toppa di pixel (ADR-0099): barra+linea disegnate **sotto** le celle.
@@ -271,6 +291,86 @@ wait_for '[gtui] exit' 20 || true
 sleep 1
 OUTSIDE="$(grep -acF '[console] toppa fuori dalla tile' "$LOG" || true)"
 
+# 7. **Tile spostata** (origine > 0): il fondo di una cella ridisegnata
+#    singolarmente — il cursore dell'app lascia ogni cella dove ha scritto uno
+#    spazio, cioe' la scia della stella — deve venire dal **wallpaper**. Prima
+#    l'origine della tile si applicava con `saturating_sub`: per una tile a
+#    destra (o sotto) l'inizio dell'immagine l'offset saturava a 0 e l'immagine
+#    **ripartiva dall'angolo della tile** (banda scura al posto del fondo, solo
+#    nelle celle del cursore e solo nella tile spostata).
+#
+#    La prova non guarda i colori: chiede alla console un **repaint completo**
+#    (`r`) e confronta — il frame raggiunto per differenziale deve essere
+#    **identico** a quello di un repaint da zero (T4/t64).
+send_text $'fullscreen\n'
+if ! wait_for '[fullscreen] start' 60; then
+    echo "[tui] FAIL: fullscreen non parte nella tile spostata" >&2
+    exit 1
+fi
+sleep 2
+STAR0="$(grep -aF '[fullscreen] frame bytes=' "$LOG" | tail -1 | grep -ao 'star=([0-9]*,[0-9]*)' || true)"
+TRAIL_PPM="${SHOT%%.ppm}-trail.ppm"
+REPAINT_PPM="${SHOT%%.ppm}-repaint.ppm"
+rm -f "$TRAIL_PPM" "$REPAINT_PPM"
+send_mon "screendump $TRAIL_PPM"
+sleep 1
+# Un passo = **una** cella, e la stella si ferma al bordo (clamp nel modello).
+send_mon 'sendkey h'
+sleep 1
+STAR1="$(grep -aF '[fullscreen] frame bytes=' "$LOG" | tail -1 | grep -ao 'star=([0-9]*,[0-9]*)' || true)"
+send_many 40 h
+sleep 1
+STAR_EDGE="$(grep -aF '[fullscreen] frame bytes=' "$LOG" | tail -1 | grep -ao 'star=([0-9]*,[0-9]*)' || true)"
+# Il frame incrementale (con la scia della stella) e quello di un repaint da zero.
+sleep 1
+send_mon "screendump $TRAIL_PPM"
+sleep 1
+send_mon 'sendkey r'
+if ! wait_for '[fullscreen] repaint' 30; then
+    echo "[tui] FAIL: repaint non richiesto" >&2
+    exit 1
+fi
+sleep 2
+send_mon "screendump $REPAINT_PPM"
+send_mon 'sendkey q'
+wait_for '[fullscreen] exit' 20 || true
+sleep 1
+echo "[tui] tile spostata: stella $STAR0 -> $STAR1 -> $STAR_EDGE (bordo)"
+
+TRAIL_DIFF="$(python3 - "$TRAIL_PPM" "$REPAINT_PPM" <<'PY'
+import sys
+
+def load(path):
+    d = open(path, "rb").read()
+    parts = d.split(b"\n", 3)
+    if parts[0] != b"P6":
+        return None
+    w, h = (int(x) for x in parts[1].split())
+    return w, h, parts[3]
+
+a = load(sys.argv[1])
+b = load(sys.argv[2])
+if a is None or b is None:
+    print(-1)
+    raise SystemExit
+w, h, pa = a
+_, _, pb = b
+# Solo la tile di **destra** (la seconda), lontano dai bordi: la tile di
+# sinistra ha il prompt della shell, il cui orologio avanza.
+x0, x1 = w // 2 + 8, w - 8
+y0, y1 = 8, h - 8
+n = 0
+for y in range(y0, y1):
+    base = y * w * 3
+    for x in range(x0, x1):
+        o = base + x * 3
+        if pa[o:o + 3] != pb[o:o + 3]:
+            n += 1
+print(n)
+PY
+)"
+echo "[tui] incrementale vs repaint nella tile spostata: ${TRAIL_DIFF:-?} pixel diversi"
+
 kill "$QEMU_PID" 2>/dev/null || true
 wait "$QEMU_PID" 2>/dev/null || true
 trap - EXIT
@@ -322,6 +422,25 @@ if [ -n "$GTUI2_K" ] && [ "$GTUI2_K" -gt 0 ] 2>/dev/null; then ok=1; else ok=0; 
 check "gtui nella seconda tile: grafica disegnata ($GTUI2_K byte)" "$ok"
 if [ "${OUTSIDE:-0}" = "0" ]; then ok=1; else ok=0; fi
 check "nessuna toppa fuori dalla tile ($OUTSIDE avvisi)" "$ok"
+# La stella: **un passo = una cella** (era 2 in orizzontale e 2 in basso contro
+# 1 in alto) e il clamp e' nel modello (dal bordo la prima pressione inversa
+# stacca subito, invece di "memorizzare" righe fuori dallo schermo).
+STEP="$(python3 - "$STAR0" "$STAR1" <<'PY'
+import re, sys
+def xy(s):
+    m = re.search(r"star=\((\d+),(\d+)\)", s or "")
+    return (int(m.group(1)), int(m.group(2))) if m else None
+a, b = xy(sys.argv[1]), xy(sys.argv[2])
+print(1 if a and b and b == (a[0] - 1, a[1]) else 0)
+PY
+)"
+if [ "$STEP" = "1" ]; then ok=1; else ok=0; fi
+check "un passo sinistra = una cella ($STAR0 -> $STAR1)" "$ok"
+EDGE_X="$(printf '%s' "$STAR_EDGE" | sed 's/.*star=(//; s/,.*//')"
+if [ "${EDGE_X:-0}" = "2" ]; then ok=1; else ok=0; fi
+check "la stella si ferma al bordo senza 'memorizzare' ($STAR_EDGE)" "$ok"
+if [ "${TRAIL_DIFF:-1}" = "0" ]; then ok=1; else ok=0; fi
+check "nella tile spostata il fondo ridisegnato e' quello del wallpaper (incrementale == repaint)" "$ok"
 if grep -aqF '[fullscreen] exit' "$LOG"; then ok=1; else ok=0; fi
 check "uscita dalla tela" "$ok"
 # Dopo l'uscita la shell torna a scrivere: la principale era messa da parte,

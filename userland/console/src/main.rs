@@ -1798,6 +1798,23 @@ impl Term {
         ));
         // T3: background gia' corretto dalla banda -> solo inchiostro.
         // Copre anche `cp == 0` (la banda ha gia' messo il fondo giusto).
+        //
+        // Se la banda **non** e' stata copiata (cursore, percorsi per-cella) il
+        // fondo si prende **comunque dal wallpaper**: e' lo stesso pixel che la
+        // banda darebbe (pagina + immagine), senza offsets da traslare. Prima
+        // si andava nel percorso legacy `pagina + layer0`, che trasla l'origine
+        // della tile con `saturating_sub`: per una tile che comincia *sotto* o
+        // *a destra* dell'inizio dell'immagine l'offset saturava a 0 e
+        // l'immagine **ripartiva dall'angolo della tile** -> il fondo sbagliato
+        // (visto come una banda scura al posto del wallpaper, esattamente nelle
+        // celle del cursore, cioe' dove l'app scrive gli spazi lasciati dalla
+        // stella).
+        let mut l0_data = l0_data;
+        let mut bg_ready = bg_ready;
+        if !bg_ready && cell.bg == color::BLACK && self.restore_cell_from_bg(t, start, row, span) {
+            bg_ready = true;
+            l0_data = None;
+        }
         if bg_ready && cell.bg == color::BLACK {
             match self.tile_view(t) {
                 Some(mut view) => {
@@ -1916,6 +1933,30 @@ impl Term {
     /// di pagina su tutta la zona (cancella il carattere precedente e i
     /// margini fuori dall'immagine), poi l'overlap del BMP composto con il
     /// suo alpha.
+    /// Copia una cella (o uno span) dal **wallpaper** (bg layer): il fondo di
+    /// una tile ha una sola fonte, la bg layer, letta in coordinate **schermo**
+    /// (`copy_from` scrive nella superficie, non nella vista). `false` se non
+    /// c'e' una bg layer pixel (fallback VGA): allora resta il percorso legacy
+    /// pagina + layer 0.
+    fn restore_cell_from_bg(&mut self, t: usize, col: usize, row: usize, span: usize) -> bool {
+        let geom = self.tile_geom(t);
+        let Some(wp) = self.comp.wallpaper() else {
+            return false;
+        };
+        let (ptr, len, stride) = (wp.data().as_ptr(), wp.data().len(), wp.stride());
+        let x = geom.origin_x + (col as u32) * geom.cell_w;
+        let y = geom.origin_y + (row as u32) * geom.cell_h;
+        let w = geom.cell_w * span.max(1) as u32;
+        match &mut self.surface {
+            Surface::Pixel(p) => {
+                let bg = unsafe { core::slice::from_raw_parts(ptr, len) };
+                p.copy_from(bg, stride, x, y, w, geom.cell_h);
+                true
+            }
+            Surface::VgaText(_) => false,
+        }
+    }
+
     fn restore_layer0_cell(
         &mut self,
         t: usize,

@@ -693,6 +693,13 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   `feed_session` (> 256 B = output di un comando, render differito) vale solo
   per il testo: un feed `screen_only` (`w1 = 1`) e' un frame e va reso subito
   (senza, il primo frame di un'app resta invisibile fino al primo tasto).
+  **Il fondo di una cella ha una sola fonte, la bg layer**: anche fuori dalla
+  banda (cursore, percorsi per-cella) si copia la cella dal **wallpaper** in
+  coordinate schermo; il percorso legacy `pagina + layer 0` traslava l'origine
+  della tile con `saturating_sub` e per una tile spostata (a destra o sotto
+  l'inizio dell'immagine) **ripartiva dall'angolo della tile** (scia scura al
+  posto del fondo). Prova d'invarianza: frame per differenziale == repaint da
+  zero (`CONSOLE_REPAINT`).
   Demo `usr/bin/fullscreen` + `scripts/run-tui-tests.sh` (fuori dal gate: prova
   alt screen, tasti, toppa, modeset→riadattamento 127x36→102x34, ritorno al
   prompt) + **GTUI** `usr/bin/gtui` (log con i rami disegnati in pixel, barra,

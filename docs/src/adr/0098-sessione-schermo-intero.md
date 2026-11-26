@@ -175,3 +175,45 @@ differimento è una politica per il testo che scorre, mai per il disegno.**
   cercare esatto (i glifi sono antialiasati sul fondo) e lo screendump va preso
   sulla superficie virtio-gpu (`FB_WINDOW=1`), o prende la VGA — l'altra console,
   "morta" nel path pixel.
+
+### Trappola pagata: il fondo di una cella ridisegnata da sola
+
+In una tile **spostata** (a destra o sotto l'inizio dell'immagine), le celle che
+l'app lasciava dietro di sé — la **scia della stella** in `fullscreen` —
+mostravano il **colore di pagina** invece del wallpaper.
+
+Il percorso: ogni scrittura dell'app muove il cursore della sessione, e
+`render_cursor` ridisegna la cella vecchia e quella nuova con `bg_ready = false`,
+cioè dal percorso **legacy** `pagina + layer 0`. Lì l'origine della tile si
+applica così:
+
+```rust
+let ox = ox.saturating_sub(rx);   // rx = tile.rect.x
+let oy = oy.saturating_sub(ry);   // ry = tile.rect.y
+```
+
+L'immagine è centrata sullo **schermo** (es. `oy = 29`), la tile in basso
+comincia a `ry = 494`: `29 - 494` è **negativo** e `saturating_sub` lo porta a
+`0`. L'immagine non "continua dall'alto": **riparte dall'angolo della tile**, e
+alla riga del cursore si vedeva la sua zona scura — indistinguibile dalla
+pagina. Funzionava solo con la tile in `(0, 0)`: la terza volta, in questo
+progetto, che un'origine applicata con l'aritmetica sbagliata produce lo stesso
+genere di difetto.
+
+**Decisione (non solo fix): il fondo di una cella ha una sola fonte, la bg
+layer.** `draw_cell_at`, quando la banda non è già stata copiata e il fondo è
+quello di default (`bg == BLACK`), copia **la cella dal wallpaper**
+(`restore_cell_from_bg`, coordinate schermo) e prosegue come se la banda ci
+fosse: `disegno inchiostro`. Il percorso `pagina + layer 0` resta solo dove non
+c'è una bg layer pixel (fallback VGA) e per i `bg` espliciti con alpha (dove la
+composizione dell'alpha del colore è l'unica cosa che sa il risultato). Così
+spariscono gli offset da traslare — la classe di bug, non l'istanza.
+
+**Prova d'invarianza** (T4, come t64): il frame raggiunto **per differenziale**
+deve essere *identico* a quello di un **repaint da zero**. `fullscreen` ha un
+hook `r` (`CONSOLE_REPAINT`, non conta come tasto e non cambia il frame), lo
+script fa due screendump e confronta i pixel della tile: `0` diversi. La stessa
+prova in `run-tui-tests.sh` (fuori dal gate), più i due check sulla stella:
+**un passo = una cella** e il **clamp nel modello** (dal bordo non si
+"memorizzano" righe: prima `j` scendeva di 2 e `k` di 1, e la posizione vera
+usciva dalla tela mentre il disegno restava incollato al bordo).

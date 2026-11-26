@@ -5210,3 +5210,36 @@ Check nuovo in `run-tui-tests.sh` (**18**): dopo `[fullscreen] start`, uno
 **screendump** e i pixel del colore del bordo devono essere > 400 — prova che il
 frame è a video **senza** aver premuto niente (il modo giusto di provarlo: la
 "non-visibilità" non lascia marker).
+
+**Sesto giro (la scia della stella e il fondo della tile)**: due difetti visti a
+schermo con `fullscreen` in una tile splittata.
+
+1. **La stella**: `j` scendeva di **2** righe e `k` di 1 (refuso, asimmetrico) e
+   la posizione veniva clampata **solo al disegno**; il modello continuava a
+   uscire dalla tela, quindi il disegno restava incollato al bordo e servivano
+   più pressioni per staccarlo. Fix: un passo = **una** cella in tutte le
+   direzioni, clamp **nel modello** a ogni movimento (e al resize), e il marker
+   del frame porta la stella (`star=(x,y)`) così il test la legge dal seriale.
+2. **Il fondo delle celle lasciate dalla stella** era il **colore di pagina**
+   invece del wallpaper — solo nella tile spostata. Causa: ogni scrittura muove
+   il cursore della sessione, e `render_cursor` ridisegna la cella con
+   `bg_ready = false`, cioè dal percorso legacy `pagina + layer 0`, dove
+   l'origine della tile si applica con `saturating_sub`: con l'immagine che
+   comincia **sopra** la tile (`oy = 29`, `ry = 494`) l'offset saturava a `0` e
+   l'immagine **ripartiva dall'angolo della tile**. Funzionava solo con la tile
+   in `(0,0)`: terza volta in questo progetto che un'origine con l'aritmetica
+   sbagliata dà lo stesso genere di difetto.
+
+   Fix (decisione, non istanza): **il fondo di una cella ha una sola fonte, la
+   bg layer** — `draw_cell_at` copia la cella dal wallpaper in coordinate
+   schermo (`restore_cell_from_bg`) e prosegue a solo inchiostro; il percorso
+   pagina+layer 0 resta solo senza bg layer pixel (VGA) e per i `bg` con alpha.
+
+   Diagnosi senza indovinare: un **oracolo** sui pixel (i cambi fra due
+   screendump cercati dentro il wallpaper ricostruito) e poi una **prova
+   d'invarianza**: il frame raggiunto per differenziale deve essere identico a
+   un **repaint da zero**. Misurato: **0 pixel** diversi; prima del fix, la
+   banda della scia era esattamente `(11,13,20)` = colore di pagina.
+
+`run-tui-tests.sh` **21 check** (3 nuovi: un passo = una cella, clamp al bordo,
+incrementale == repaint nella tile spostata). Gate invariato.

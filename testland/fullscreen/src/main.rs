@@ -139,6 +139,22 @@ fn set_mode((w, h): (u16, u16)) -> bool {
 /// Compone il frame **nel canvas** (celle, nessuna IPC) e manda il
 /// differenziale: un tasto tocca due celle (la stella vecchia e la nuova) piu'
 /// la riga di stato, non 660.
+/// I limiti della stella: dentro il bordo e sotto l'intestazione (colonne e
+/// righe **1-based**, come le sequenze ANSI).
+fn star_bounds(scr: &Screen) -> ((u16, u16), (u16, u16)) {
+    let (w, h) = scr.size();
+    let (right, bottom) = (w.saturating_sub(1), h.saturating_sub(1));
+    ((2, right.saturating_sub(1)), (4, bottom.saturating_sub(1)))
+}
+
+/// La stella **nel modello**: una posizione fuori dalla tela non esiste, non
+/// "si nasconde" (se il modello va oltre il bordo, il disegno resta incollato
+/// al bordo e le pressioni successive si perdono).
+fn clamp_star(star: (u16, u16), scr: &Screen) -> (u16, u16) {
+    let ((x0, x1), (y0, y1)) = star_bounds(scr);
+    (star.0.clamp(x0, x1.max(x0)), star.1.clamp(y0, y1.max(y0)))
+}
+
 fn draw(canvas: &mut Cells, scr: &mut Screen, star: (u16, u16), keys: u32) {
     let (w, h) = canvas.size();
     let (w, h) = (w as u16, h as u16);
@@ -168,10 +184,11 @@ fn draw(canvas: &mut Cells, scr: &mut Screen, star: (u16, u16), keys: u32) {
     canvas.text(2, 1, &title);
     let info: String = format!("tasti={}  stella=({},{})  q=esci", keys, star.0, star.1);
     canvas.text(2, 2, &info);
-    // La stella: si scrive **dove** dice la posizione, non dove capita.
-    let sx = star.0.clamp(2, right.saturating_sub(1));
-    let sy = star.1.clamp(4, bottom.saturating_sub(1));
-    canvas.set(sx.saturating_sub(1) as usize, sy.saturating_sub(1) as usize, '*');
+    // La stella: si scrive **dove** dice la posizione. Il clamp e' nel
+    // **modello** (`clamp_star`), non qui: clampare solo al disegno lascia la
+    // posizione vera fuori dallo schermo e servirebbero piu' pressioni per
+    // rientrare (difetto visto a schermo).
+    canvas.set(star.0.saturating_sub(1) as usize, star.1.saturating_sub(1) as usize, '*');
     // **Un frame, una feed** (ADR-0098 addendum): il costo si dichiara, cosi'
     // il lampeggio e' una misura e non un'impressione.
     let bytes = canvas.diff();
@@ -180,14 +197,31 @@ fn draw(canvas: &mut Cells, scr: &mut Screen, star: (u16, u16), keys: u32) {
         mark("frame ERRORE: scrittura rifiutata");
         return;
     }
-    frame_mark(scr, n);
+    frame_mark(scr, n, star);
+}
+
+/// Chiede alla console un **repaint completo** (`CONSOLE_REPAINT`, hook di
+/// test): il frame raggiunto per differenziale deve essere **identico** a quello
+/// di un repaint da zero (T4, t64) — e' cosi' che si prova che il percorso
+/// incrementale non dipinge un fondo sbagliato.
+fn repaint() {
+    match civis::service_lookup(civis::Service::Console) {
+        Ok(chan) => {
+            let _ = civis::send(chan as u64, civis::syscall_numbers::CONSOLE_REPAINT, 0, 0);
+            mark("repaint");
+        }
+        Err(_) => mark("repaint ERRORE: console non trovata"),
+    }
 }
 
 /// Manda il frame e riporta il costo sul seriale (`bytes` = il differenziale).
-fn frame_mark(scr: &mut Screen, bytes: usize) {
+fn frame_mark(scr: &mut Screen, bytes: usize, star: (u16, u16)) {
     let chunks = scr.chunks();
     match scr.present() {
-        Ok(_) => mark(&format!("frame bytes={} chunks={}", bytes, chunks)),
+        Ok(_) => mark(&format!(
+            "frame bytes={} chunks={} star=({},{})",
+            bytes, chunks, star.0, star.1
+        )),
         Err(_) => mark("frame ERRORE: non presentato"),
     }
 }
@@ -207,7 +241,7 @@ fn real_main(_sp: u64) -> ! {
     };
     let (w, h) = scr.size();
     let mut canvas = Cells::new(w as usize, h as usize);
-    let mut star = (w / 2, h / 2);
+    let mut star = clamp_star((w / 2, h / 2), &scr);
     // Il frame va **solo sullo schermo** (`write_screen`): il mirror seriale
     // resta il transcript dell'output, non dei ridisegni (D8c2). Per questo i
     // marker di stato viaggiano sul seriale (`print_string`), non dal frame.
@@ -228,7 +262,7 @@ fn real_main(_sp: u64) -> ! {
             if scr.poll_resize() {
                 let (w, h) = scr.size();
                 mark(&format!("resized {}x{}", w, h));
-                star = (w / 2, h / 2);
+                star = clamp_star((w / 2, h / 2), &scr);
                 // Il canvas scarta le due copie: dopo un resize si ridisegna.
                 canvas.resize(w as usize, h as usize);
                 draw(&mut canvas, &mut scr, star, keys);
@@ -237,13 +271,23 @@ fn real_main(_sp: u64) -> ! {
         }
         let mut quit = false;
         for &b in &buf[..n] {
+            // `r` e' un **hook di test**, non un tasto: non si conta e non
+            // deve cambiare il frame. Cosi' il confronto "incrementale vs
+            // repaint" misura il disegno, non il proprio rumore.
+            if b == b'r' {
+                repaint();
+                continue;
+            }
             keys += 1;
             match b {
                 b'q' | b'Q' => quit = true,
-                b'h' => star.0 = star.0.saturating_sub(2),
-                b'l' => star.0 = star.0.saturating_add(2),
-                b'k' => star.1 = star.1.saturating_sub(1),
-                b'j' => star.1 = star.1.saturating_add(2),
+                // Un passo = **una** cella (era 2 in orizzontale e 2 in basso
+                // contro 1 in alto: asimmetrico e sbagliato), e il clamp e'
+                // nel modello.
+                b'h' => star = clamp_star((star.0.saturating_sub(1), star.1), &scr),
+                b'l' => star = clamp_star((star.0.saturating_add(1), star.1), &scr),
+                b'k' => star = clamp_star((star.0, star.1.saturating_sub(1)), &scr),
+                b'j' => star = clamp_star((star.0, star.1.saturating_add(1)), &scr),
                 // `m`: modeset **chiesto dall'app** (il caso peggiore: la
                 // tela cambia misura mentre l'app la occupa).
                 b'm' => {
@@ -252,6 +296,7 @@ fn real_main(_sp: u64) -> ! {
                 b'p' => {
                     let _ = draw_patch(&scr);
                 }
+                b'r' => repaint(),
                 _ => {}
             }
         }
