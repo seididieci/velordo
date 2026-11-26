@@ -163,6 +163,42 @@ echo "[tui] gtui: patches k0=${GTUI_K0:-?} dopo40=${GTUI_KEEP:-?} oltre=${GTUI_G
 send_mon 'sendkey q'
 wait_for '[gtui] exit' 20 || true
 
+# 6. **Seconda tile** (Super+% = split): la grafica deve uscire anche li'. Il
+#    bug del primo giro era esattamente qui: coordinate schermo su una vista
+#    locale -> la toppa cadeva fuori e il clip la buttava via in silenzio.
+send_mon 'sendkey meta_l-shift-5'
+if ! wait_for '[impluvium] split' 40; then
+    echo "[tui] FAIL: split non avvenuto" >&2
+    exit 1
+fi
+GTUI_BEFORE="$(grep -acF '[gtui] log' "$LOG" || true)"
+sleep 1
+send_text $'gtui\n'
+# Il secondo giro: la tile ha un'altra sessione, quindi altri marker.
+START2=$SECONDS
+while [ "$(grep -acF '[gtui] log' "$LOG" || true)" -le "${GTUI_BEFORE:-0}" ]; do
+    if [ $((SECONDS - START2)) -ge 60 ]; then
+        echo "[tui] FAIL: gtui non e' partito nella seconda tile" >&2
+        exit 1
+    fi
+    sleep 1
+done
+# Aspetta che finisca (scroll lungo) e chiudi.
+START2=$SECONDS
+while [ "$(grep -acF '[gtui] oltre la cronologia' "$LOG" || true)" -lt 2 ]; do
+    if [ $((SECONDS - START2)) -ge 120 ]; then
+        echo "[tui] FAIL: gtui della seconda tile non ha finito" >&2
+        exit 1
+    fi
+    sleep 1
+done
+GTUI2="$(grep -aF '[gtui] log' "$LOG" | tail -1 || true)"
+echo "[tui] seconda tile: $GTUI2"
+send_mon 'sendkey q'
+wait_for '[gtui] exit' 20 || true
+sleep 1
+OUTSIDE="$(grep -acF '[console] toppa fuori dalla tile' "$LOG" || true)"
+
 kill "$QEMU_PID" 2>/dev/null || true
 wait "$QEMU_PID" 2>/dev/null || true
 trap - EXIT
@@ -199,6 +235,13 @@ if [ -n "$GTUI_KEEP" ] && [ "$GTUI_KEEP" -gt 0 ] 2>/dev/null; then ok=1; else ok
 check "gtui: le toppe restano nella cronologia ($GTUI_KEEP byte)" "$ok"
 if [ "$GTUI_GONE" = "0" ]; then ok=1; else ok=0; fi
 check "gtui: le toppe muoiono con le loro righe ($GTUI_GONE byte)" "$ok"
+# Seconda tile: la grafica si vede anche li' (stessi byte) e **nessuna** toppa
+# e' mai caduta fuori dalla vista (la guardia del traduttore di coordinate).
+GTUI2_K="$(printf '%s' "${GTUI2:-}" | sed 's/.*patches=//; s/ .*//')"
+if [ -n "$GTUI2_K" ] && [ "$GTUI2_K" -gt 0 ] 2>/dev/null; then ok=1; else ok=0; fi
+check "gtui nella seconda tile: grafica disegnata ($GTUI2_K byte)" "$ok"
+if [ "${OUTSIDE:-0}" = "0" ]; then ok=1; else ok=0; fi
+check "nessuna toppa fuori dalla tile ($OUTSIDE avvisi)" "$ok"
 if grep -aqF '[fullscreen] exit' "$LOG"; then ok=1; else ok=0; fi
 check "uscita dalla tela" "$ok"
 # Dopo l'uscita la shell torna a scrivere: la principale era messa da parte,

@@ -112,7 +112,20 @@ del server si basa su quel numero (il tetto si controlla all'ingresso).
   lo sa). È l'unico posto in cui "perdere" è la risposta giusta.
 - `Cell` resta `Copy`: la toppa è un vicino di riga, non un campo della cella.
 
-## Trappole pagate (2b)
+## Trappole pagate (2b, secondo giro)
+
+- **Due spazi di coordinate, come per il testo.** Il disegno passa dalla
+  **vista** della tile (`Pixel::view`, base `rect.x/rect.y`, geometria
+  **locale**) e quindi va in coordinate locali; il **danno** è in coordinate
+  **schermo** (il compositore ragiona assoluto). Il primo giro usava `tile.geom`
+  (schermo) per disegnare su una vista locale: nella tile in `(0,0)` i due
+  spazi coincidono, in una tile a `x=640` la toppa finiva a `x+640`, fuori dalla
+  vista, e il `blit` la scartava **in silenzio**. Sintomo: grafica nella prima
+  tile, solo testo nella seconda. Guardia: `[console] toppa fuori dalla tile`
+  (una volta sola) + check in `run-tui-tests.sh` che non compaia.
+  **Invariante**: il modello parla solo di celle; ogni percorso di disegno
+  traduce con `geom_local` e disegna *attraverso la vista*; chi disegna con
+  coordinate schermo su una vista locale ha già sbagliato.
 
 - **La cella vuota ridipingeva il fondo sopra la toppa.** Il render disegna il
   fondo (banda), poi le toppe, poi le celle: una cella *vuota* ripassava il suo

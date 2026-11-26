@@ -298,6 +298,9 @@ struct Term {
     /// T4 (solo test): bg layer uniforme (senza immagine) per esercitare lo
     /// shift anche con il wallpaper presente.
     test_uniform_bg: bool,
+    /// Avviso gia' dato: una toppa che non sta nella vista e' un bug di
+    /// coordinate (ADR-0099). Una riga, non una per frame.
+    patch_outside_warned: bool,
     /// Lo slot DMA del framebuffer corrente (D4: il riadattamento alloca
     /// l'altro slot e libera questo solo dopo che il nuovo e' presentato —
     /// un riadattamento fallito non deve lasciare la surface su un buffer
@@ -1585,30 +1588,46 @@ impl Term {
         let Some(mut view) = self.tile_view(t) else {
             return;
         };
-        let geom = match self.tiles.get(t) {
-            Some(tile) => tile.geom,
+        // **Due spazi, come per il testo** (vedi `draw_cell_at`): si disegna in
+        // coordinate **locali** alla tile (la vista porta gia' l'origine, e
+        // `geom_local` e' 0-based dentro il rect), il **danno** e' in
+        // coordinate **schermo** (il compositore ragiona assoluto). Usare
+        // `geom` per disegnare su una vista locale funziona solo nella tile in
+        // (0,0) — nelle altre la toppa cade fuori e il clip la butta via.
+        let (local, screen) = match self.tiles.get(t) {
+            Some(tile) => (tile.geom_local, tile.geom),
             None => return,
         };
-        // Le toppe della riga: prestito immutabile dal modello, copiato prima
-        // del prestito mutabile della surface.
-        let mut patches: alloc::vec::Vec<(u32, u32, u32, u32)> = alloc::vec::Vec::new();
+        let mut damages: alloc::vec::Vec<(u32, u32, u32, u32)> = alloc::vec::Vec::new();
+        let mut outside = false;
         if let Some(s) = self.sessions.get(sid) {
             for seg in s.grid.segments_at(row) {
-                let x = geom.origin_x + (seg.col as u32) * geom.cell_w;
-                let y = geom.origin_y + (row as u32) * geom.cell_h;
-                view.blit(
-                    &seg.bitmap,
-                    (seg.px_w * 4) as u32,
-                    x,
-                    y,
-                    seg.px_w as u32,
-                    seg.px_h as u32,
-                );
-                patches.push((x, y, seg.px_w as u32, seg.px_h as u32));
+                let (w, h) = (seg.px_w as u32, seg.px_h as u32);
+                let lx = local.origin_x + (seg.col as u32) * local.cell_w;
+                let ly = local.origin_y + (row as u32) * local.cell_h;
+                if lx + w > view.width || ly + h > view.height {
+                    // Non ci sta: qualcuno ha saltato il traduttore. Fail-loud
+                    // una volta sola (non a ogni frame).
+                    outside = true;
+                    continue;
+                }
+                view.blit(&seg.bitmap, (seg.px_w * 4) as u32, lx, ly, w, h);
+                damages.push((
+                    screen.origin_x + (seg.col as u32) * screen.cell_w,
+                    screen.origin_y + (row as u32) * screen.cell_h,
+                    w,
+                    h,
+                ));
             }
         }
-        for (x, y, w, h) in patches {
+        for (x, y, w, h) in damages {
             self.comp.add_damage(musivum::Rect::new(x, y, w, h));
+        }
+        if outside && !self.patch_outside_warned {
+            self.patch_outside_warned = true;
+            let _ = civis::print_string(
+                b"[console] toppa fuori dalla tile (coordinate schermo su una vista locale?)\n",
+            );
         }
     }
 
@@ -2070,6 +2089,7 @@ fn real_main(_sp: u64) -> ! {
         bg_rows_equal: false,
         no_shift: NO_SHIFT,
         test_uniform_bg: false,
+        patch_outside_warned: false,
         fb_slot: civis::DMA_SLOT_DEVICE,
         // T0: statistica (ADR-0066).
         stat_renders: 0, stat_cells: 0, stat_flushes: 0,

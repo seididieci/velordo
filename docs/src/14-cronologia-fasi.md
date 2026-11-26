@@ -5106,3 +5106,25 @@ con le loro righe).
 framebuffer via CRC, toppe nella cronologia, toppe che muoiono con le righe);
 gate invariato. Verifica visiva one-off con screendump: blu (barra/gauge),
 verde (sparkline/nodo), giallo e viola (nodi) tutti presenti nei pixel.
+
+**Secondo giro (bug trovati guardando lo schermo)**: tre cose.
+
+1. **Grafica assente nella seconda tile.** `blit_row_segments` prendeva
+   `tile.geom` (coordinate **schermo**) e lo dava alla **vista** della tile
+   (base `rect.x/y`, geometria **locale**): nella tile in (0,0) i due spazi
+   coincidono, in una tile a x=640 la toppa cadeva fuori e il clip la scartava
+   in silenzio. Fix: disegno con `geom_local` attraverso la vista, danno con
+   `geom` — **la stessa regola di `draw_cell_at`**. Guardia:
+   `[console] toppa fuori dalla tile` (una volta sola) + check nello script.
+   E' l'invariante da ricordare: il modello parla solo di celle, la traduzione
+   è della console (locale per disegnare, schermo per il danno).
+2. **Grafo allineato**: corsie a passo costante (`step = cw/n`, stessa x in
+   ogni riga), **diagonale di merge** dal nodo precedente quando la corsia
+   cambia, nodi a ~1/3 di cella.
+3. **"La stella non c'è"**: non era un bug — la stella è di `fullscreen`
+   (ADR-0098), `gtui` disegna il log. Le istruzioni le avevano mescolate.
+
+`run-tui-tests.sh` ora copre anche il caso a **due tile** (split + `gtui` nella
+seconda): grafica disegnata (119 KB) e **zero** avvisi di toppa fuori dalla
+vista. Verifica visiva con screendump della metà destra: blu/verde/giallo/viola
+tutti presenti.

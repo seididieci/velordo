@@ -695,7 +695,10 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   all'ingresso), alt-text nel dump, `SESS_STATS.w1` le misura; render
   fondo → toppe → glifi con `blank_over_patch` (una cella vuota **non**
   ridipinge il fondo sopra la toppa); resize = toppe scartate (il reflow
-  sposta le celle). Il "terminale come app" resta una migrazione possibile
+  sposta le celle). **Coordinate**: il disegno passa dalla **vista** della tile
+  (`Pixel::view` + `geom_local`, locali), il **danno** usa `geom` (schermo) —
+  come `draw_cell_at`; sbagliarlo funziona solo nella tile in (0,0) e la
+  guardia `[console] toppa fuori dalla tile` (una volta) lo dice. Il "terminale come app" resta una migrazione possibile
   perche' `littera` e' indipendente dal display.
 - **Niente identita' in ambiente (S3.3d, ADR-0095)**: `USER` non esiste piu'.
   `identis-login` spawma il DE e `impluvium` spawma le shell **senza env**;

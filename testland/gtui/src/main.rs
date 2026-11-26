@@ -83,12 +83,22 @@ fn row_crc(row: u16) -> u32 {
 }
 
 /// Il grafo dei rami di una riga di log: `lanes` corsie, il nodo del commit
-/// nella sua corsia, le linee delle corsie attive. Disegnato in pixel (non con
-/// i caratteri `|`/`├`): e' il punto della toppa.
-fn graph_row(cw: usize, ch: usize, lanes: &[bool], node: usize, color: u32) -> Canvas {
+/// nella sua corsia, le linee delle corsie attive, e la **diagonale** che
+/// collega il nodo della riga precedente a questo (`prev`) quando la corsia
+/// cambia. Disegnato in pixel (non con i caratteri `|`/`├`): e' il punto della
+/// toppa.
+fn graph_row(cw: usize, ch: usize, lanes: &[bool], prev: usize, node: usize, color: u32) -> Canvas {
     let mut c = Canvas::new(cw, ch, BG);
-    let lane_x = |i: usize| -> usize { (cw * (2 * i + 1)) / (2 * lanes.len().max(1)) };
+    // Corsie a **passo costante**: la stessa corsia sta alla stessa x in ogni
+    // riga, o il grafo sembra disallineato.
+    let n = lanes.len().max(1);
+    let step = cw / n;
+    let lane_x = |i: usize| -> usize { step / 2 + i * step };
     let mid = ch / 2;
+    // Le diagonali del merge, sotto le linee: dal nodo precedente a questo.
+    if prev != node {
+        c.line(lane_x(prev), 0, lane_x(node), mid, 2, color);
+    }
     // Le corsie attive: linea verticale.
     for (i, &on) in lanes.iter().enumerate() {
         if on {
@@ -96,11 +106,17 @@ fn graph_row(cw: usize, ch: usize, lanes: &[bool], node: usize, color: u32) -> C
             c.vline(x, 0, ch, FRAME);
         }
     }
-    // Il nodo: un quadratino pieno (a 10×22 px dev'essere visibile: ~1/3
-    // dell'altezza della cella).
+    // Il nodo: un quadratino pieno (~1/3 dell'altezza della cella, ben visibile
+    // a 10×22 px).
     let nx = lane_x(node);
     let r = (ch / 3).max(3);
-    c.fill(nx.saturating_sub(r / 2), mid.saturating_sub(r / 2), r.max(2), r.max(2), color);
+    c.fill(
+        nx.saturating_sub(r / 2),
+        mid.saturating_sub(r / 2),
+        r,
+        r,
+        color,
+    );
     c
 }
 
@@ -122,9 +138,19 @@ fn spark_row(cw: usize, ch: usize, values: &[u64], color: u32) -> Canvas {
 /// Il cursore e' a inizio riga: la riga `row` e' quella in cui scriveremo.
 /// La toppa va messa **prima** del testo (sta sotto i glifi) e le celle che
 /// copre restano spazi, cosi' si vede.
-fn draw_log_line(cols: usize, cw: usize, ch: usize, row: u16, lanes: &[bool], node: usize, color: u32, text: &str) -> bool {
+fn draw_log_line(
+    cols: usize,
+    cw: usize,
+    ch: usize,
+    row: u16,
+    lanes: &[bool],
+    prev: usize,
+    node: usize,
+    color: u32,
+    text: &str,
+) -> bool {
     let lanes_w = 5u16.min(cols as u16);
-    let canvas = graph_row(lanes_w as usize * cw, ch, lanes, node, color);
+    let canvas = graph_row(lanes_w as usize * cw, ch, lanes, prev, node, color);
     let ok = patch(0, row, lanes_w, 1, &canvas, b"graph");
     // Il testo comincia dopo la toppa: celle vuote (il glifo ' ' non copre).
     let mut line = Vec::with_capacity(lanes_w as usize + text.len());
@@ -162,11 +188,13 @@ fn draw_pretty(cw: usize, ch: usize, cols: usize, rows: usize) -> (usize, u32, u
         ("3f2e17d", "login: capo-sessione (D8f)", &[true, false, false][..], 0, SLATE),
     ];
     let mut drawn = 0usize;
+    let mut prev = 0usize;
     for (sha, msg, lanes, node, color) in commits.iter() {
         let text = format!("{}  {}", sha, msg);
-        if draw_log_line(cols, cw, ch, row, lanes, *node, *color, &text) {
+        if draw_log_line(cols, cw, ch, row, lanes, prev, *node, *color, &text) {
             drawn += 1;
         }
+        prev = *node;
         row += 1;
         if (row as usize) >= rows.saturating_sub(4) {
             break;
