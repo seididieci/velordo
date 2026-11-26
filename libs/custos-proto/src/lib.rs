@@ -93,10 +93,10 @@ pub fn build_authz(id_lo: u64, id_hi: u64, kind: u64, arg: u64) -> Vec<u8> {
 }
 
 /// Payload di consenso (scrittura): magic + versione + op=WRITE +
-/// token + nome_len + nome + id_lo + id_hi + decision.
-/// Il token e' richiesto per autorizzare la scrittura (session owner o root).
+/// nome_len + nome + id_lo + id_hi + decision.
+/// (S3.3c: il token di sessione non esiste piu'; l'identita' e' del
+/// chiamante, risolta da Custos via `SESS_AUTH`.)
 pub fn build_consent_write(
-    token: u64,
     user: &str,
     id_lo: u64,
     id_hi: u64,
@@ -105,7 +105,6 @@ pub fn build_consent_write(
     let name = user.as_bytes();
     let mut v = build_base(MAGIC_ACNS, &[
         CONSENT_WRITE as u64,
-        token,
         name.len() as u64,
         id_lo,
         id_hi,
@@ -142,36 +141,33 @@ pub fn parse_authz(buf: &[u8]) -> Result<(u64, u64, u64, u64), &'static str> {
     Ok((lo, hi, kind, arg))
 }
 
-/// `(op, token?, nome, id_lo, id_hi, decision?)` per ACNS.
-/// `token` e' `Some` solo per `CONSENT_WRITE`; `decision` e' `Some` solo per
-/// `CONSENT_WRITE`.
+/// `(op, nome, id_lo, id_hi, decision?)` per ACNS.
+/// `decision` e' `Some` solo per `CONSENT_WRITE`.
 ///
 /// Layout (i campi stanno tutti **prima** del nome, come li scrivono i
 /// costruttori qui sopra: il nome e' l'ultimo pezzo, di lunghezza `name_len`):
 ///
 /// ```text
-/// offset:  0        4     8    16      24        32      40      48     56
-/// WRITE: [ACNS][ver:4][op:8][token:8][name_len:8][id_lo:8][id_hi:8][dec:8][nome]
+/// offset:  0        4     8     16      24      32      40
+/// WRITE: [ACNS][ver:4][op:8][name_len:8][id_lo:8][id_hi:8][dec:8][nome]
 /// READ:  [ACNS][ver:4][op:8][name_len:8][id_lo:8][id_hi:8][nome]
 /// ```
 pub fn parse_consent(
     buf: &[u8],
-) -> Result<(u64, Option<u64>, String, u64, u64, Option<bool>), &'static str> {
+) -> Result<(u64, String, u64, u64, Option<bool>), &'static str> {
     if buf.len() < 16 || &buf[0..4] != MAGIC_ACNS {
         return Err("magic non riconosciuto");
     }
     let op = u64_at(buf, 8)?;
-    let (token, name_len, id_lo, id_hi, decision, name_off) = match op {
+    let (name_len, id_lo, id_hi, decision, name_off) = match op {
         CONSENT_WRITE => (
-            Some(u64_at(buf, 16)?),
-            u64_at(buf, 24)? as usize,
+            u64_at(buf, 16)? as usize,
+            u64_at(buf, 24)?,
             u64_at(buf, 32)?,
-            u64_at(buf, 40)?,
-            Some(u64_at(buf, 48)?),
-            8 + 6 * 8,
+            Some(u64_at(buf, 40)?),
+            8 + 5 * 8,
         ),
         CONSENT_READ => (
-            None,
             u64_at(buf, 16)? as usize,
             u64_at(buf, 24)?,
             u64_at(buf, 32)?,
@@ -190,9 +186,9 @@ pub fn parse_consent(
         if d > 1 {
             return Err("decisione non valida");
         }
-        return Ok((op, token, name, id_lo, id_hi, Some(d == 1)));
+        return Ok((op, name, id_lo, id_hi, Some(d == 1)));
     }
-    Ok((op, token, name, id_lo, id_hi, None))
+    Ok((op, name, id_lo, id_hi, None))
 }
 
 // ── Codici di risposta (w0) ────────────────────────────────────────────────
@@ -201,8 +197,8 @@ pub fn parse_consent(
 pub const R_OK: u64 = 0;
 /// Nessuna capability (query) / decisione negata.
 pub const R_FAIL: u64 = 1;
-/// Token di sessione assente, sconosciuto o scaduto.
-pub const R_TOKEN_INVALID: u64 = 2;
+/// Chiamante senza identita' attestata (nessuna sessione autenticata).
+pub const R_NO_IDENTITY: u64 = 2;
 /// Errore FS (persistenza di `sys:caps`).
 pub const R_FS_ERROR: u64 = 5;
 /// Sessione valida ma senza l'autorita' richiesta.
@@ -230,7 +226,7 @@ impl Reply {
         match self.w0 {
             R_OK => "OK",
             R_FAIL => "capability negata",
-            R_TOKEN_INVALID => "token di sessione non valido",
+            R_NO_IDENTITY => "chiamante senza identita' attestata",
             R_FS_ERROR => "errore filesystem",
             R_UNAUTHORIZED => "non autorizzato",
             R_BUSY => "servizio occupato",
@@ -257,10 +253,11 @@ pub fn build_query(id_lo: u64, id_hi: u64, kind: u64, arg: u64) -> Vec<u8> {
     v
 }
 
-/// Payload di grant: magic + versione + token + identita' + capability +
+/// Payload di grant: magic + versione + identita' + capability +
 /// decisione (`1` concede, `0` revoca).
+/// (S3.3c: il token di sessione non esiste piu'; l'identita' e' del
+/// chiamante, attestata dal kernel via `SESS_AUTH` / `IDENTIS_WHOAMI` con pid.)
 pub fn build_grant(
-    token: u64,
     id_lo: u64,
     id_hi: u64,
     kind: u64,
@@ -270,7 +267,6 @@ pub fn build_grant(
     let mut v = Vec::new();
     v.extend_from_slice(MAGIC_GRANT);
     v.extend_from_slice(&PROTO_VERSION.to_le_bytes());
-    push_u64(&mut v, token);
     push_u64(&mut v, id_lo);
     push_u64(&mut v, id_hi);
     push_u64(&mut v, kind);
@@ -305,24 +301,23 @@ pub fn parse_query(buf: &[u8]) -> Result<(u64, u64, u64, u64), &'static str> {
     Ok((lo, hi, kind, arg))
 }
 
-/// `(token, id_lo, id_hi, kind, arg, decision)`.
-pub fn parse_grant(buf: &[u8]) -> Result<(u64, u64, u64, u64, u64, bool), &'static str> {
+/// `(id_lo, id_hi, kind, arg, decision)`.
+pub fn parse_grant(buf: &[u8]) -> Result<(u64, u64, u64, u64, bool), &'static str> {
     if buf.len() < 16 || &buf[0..4] != MAGIC_GRANT {
         return Err("magic non riconosciuto");
     }
-    let token = u64_at(buf, 8)?;
-    let lo = u64_at(buf, 16)?;
-    let hi = u64_at(buf, 24)?;
-    let kind = u64_at(buf, 32)?;
-    let arg = u64_at(buf, 40)?;
-    let decision = u64_at(buf, 48)?;
+    let lo = u64_at(buf, 8)?;
+    let hi = u64_at(buf, 16)?;
+    let kind = u64_at(buf, 24)?;
+    let arg = u64_at(buf, 32)?;
+    let decision = u64_at(buf, 40)?;
     if !valid_kind(kind) {
         return Err("capability sconosciuta");
     }
     if decision > 1 {
         return Err("decisione non valida");
     }
-    Ok((token, lo, hi, kind, arg, decision == 1))
+    Ok((lo, hi, kind, arg, decision == 1))
 }
 
 // ── Lato client: invio chunked + retry su BUSY ────────────────────────────
@@ -412,19 +407,18 @@ pub fn authorize(
 }
 
 /// Scrive una riga di consenso per `(user, id_lo, id_hi)`: `decision`
-/// `true` = consente, `false` = nega. `token` e' il token di sessione del
-/// chiamante (richiesto: solo session owner o root possono scrivere).
+/// `true` = consente, `false` = nega. L'identita' e' quella del **chiamante**
+/// (attestata dal kernel): Custos la risolve per pid, nessun token viaggia.
 /// Ritorna `true` se Custos ha accettato la scrittura (persistenza prima
 /// della RAM).
 pub fn consent_write(
     chan: u64,
-    token: u64,
     user: &str,
     id_lo: u64,
     id_hi: u64,
     decision: bool,
 ) -> bool {
-    let payload = build_consent_write(token, user, id_lo, id_hi, decision);
+    let payload = build_consent_write(user, id_lo, id_hi, decision);
     match send_payload(chan, civis::CUSTOS_CONSENT, &payload) {
         Ok(r) => r.w0 == R_OK,
         Err(_) => false,

@@ -4882,3 +4882,71 @@ di 16 KiB** (LTO fonde i frame: `#PF` write a `0x40001fffbff8`, sotto la
 guardia). Gli helper `register_client`/`drop_rights`/`inherited_subtree` sono
 `#[inline(never)]` (firewall), come i livelli btree/volume. Diagnosi: il `#PF`
 compariva **dopo** il log dell'handshake, con `rip` nel codice ma `cr3` user.
+
+## S3.3c — Identità di sessione per attestazione, niente token (ADR-0094)
+
+Chiude il debito (c) di ADR-0055 §5: il **token bearer** non esiste più. Da D8f
+il token stava nel server (`SESS_TOKEN_SET`/`SESS_TOKEN`, 0xAD/0xAE) e ogni
+programma lo leggeva per attestazione del pid — ma restava un **valore
+trasferibile**: chi lo leggeva agiva come l'utente, il DE lo *copiva* sulle
+tile nuove, e la scadenza a 300 s costringeva la shell a rifare il login a metà
+comando.
+
+**La decisione**: l'identità non viaggia. Un processo è chi dice il **kernel**
+(pid), in una sessione che dice **autenticata** il server (nome). Due fonti, in
+ordine: (1) **credenziale locale** in Identis — un `VERIFY` riuscito lega il
+pid al nome, mai trasmessa, purgata su `EXIT_NOTIFY` (serve ai client che si
+autenticano da soli e ai test, che girano prima del login); (2) **sessione
+autenticata** — è la via normale: il login scrive il nome sulla 0, il DE lo
+propaga alle tile che crea, e ogni processo che ci gira dentro la eredita per
+attestazione (la catena dei padri la dà il kernel).
+
+**ABI**: `SESS_AUTH_SET` (0xAF, `w0` = len del nome nella metà OUT, sulla
+sessione **attaccata**, solo `System`, `len = 0` = deautentica) e `SESS_AUTH`
+(0xB7, `w0` = pid, `0` = la sessione attaccata → `w0` = 1/0, `w1` = len nella
+metà IN, solo `System`). **`0xAD`/`0xAE` ritirati**, numeri non riusati.
+`littera::Session.token: u64` → `auth_user: [u8; 32]` + `auth_len` + `auth_by`;
+`purge_pid` pulisce anche le identità che il morto aveva stabilito.
+
+**Servizi**: `IDENTIS_ADD_USER` perde il campo token (il chiamante è il canale,
+il pid lo dà il kernel); `IDENTIS_WHOAMI` prende il **pid** in `w1`
+(0 = il chiamante, un altro pid solo `System`); `IDENTIS_LIST` perde il token.
+`R_TOKEN_INVALID` → `R_NO_IDENTITY` (valore 2 invariato). `Custos` perde il
+token da `GRANT`/`CONSENT`: `do_grant`/`do_consent` ricevono il pid del
+chiamante (catturato all'apertura della transazione, `TXN_PID`) e risolvono i
+ruoli con `IDENTIS_WHOAMI {w1 = pid}`. `interpres` non tiene più un
+`session_token`: `create-user`/`consent` chiedono e, su `R_NO_IDENTITY`,
+offrono di (ri)autenticarsi. `users`/`create-user` non leggono nulla.
+
+**Bug pagato (console `#PF` a `0x805`)**: il primo `SESS_AUTH` scriveva la
+risposta con l'**id della shm** (`ensure_mailbox` → `u32`) usato come
+puntatore: `2048 + 5` = `0x805`, scrittura user-mode → il server è morto e
+init l'ha riavviato, azzerando lo stato delle sessioni (la shell scriveva sul
+seriale per fallback e `help`/`users` sparivano). La mailbox si legge dal
+**puntatore mappato** (`sess_mb`), e `ensure_mailbox` serve solo a crearla:
+`if sess_mb(chan).is_none() { ensure_mailbox(...) }` poi `sess_mb`.
+
+**Trappole**: (a) il fallback di **sessione** in Identis non è opzionale — la
+prima versione risolveva solo la credenziale locale, ma la shell non fa mai
+`VERIFY`, quindi `create-user` rispondeva `R_NO_IDENTITY`; le due fonti vanno
+nell'ordine credenziale → sessione, mai una sola. (b) In `impluvium::split` la
+propagazione deve leggere la 0, attaccarsi alla tile **e poi** scrivere
+l'utente, prima che `focus_session()` sposti di nuovo il canale: invertendo,
+l'identità finisce sulla tile sbagliata. (c) `auth_by` non è decorativo: senza
+la purga su morte, un login ucciso lascerebbe la sessione 0 autenticata per il
+getty successivo (accesso senza password). (d) I test privilegiati devono
+**cambiare identità** con `login(...)` invece di tenere due token: `t69` fa
+`login(root)` → `login(t69admin)` → `login(root)` → `login(t69user)` → ... e
+una `VERIFY` errata **non** cambia l'identità già stabilita.
+
+**Test** (gate invariato nei numeri): unit host `littera::identita_di_sessione`
+(184 totali); `identistest` 11/11 con t2 = `WHOAMI` senza identità →
+`R_NO_IDENTITY`, t4 = verifica errata che non cambia l'identità, t10 =
+un'identità non-root non crea utenti; `usertests` 72/72 (t69/t70 riscritti sulla
+sequenza di login, `t74` + `SESS_AUTH_SET`/`SESS_AUTH` negati a `Untrusted`);
+shell nativa 33/33 (banner + `users`/`create-user` con l'identità propagata dal
+DE alla tile 0).
+
+**Fuori scope dichiarato**: `su`/cambio utente (fase separata), timeout della
+sessione remota, provenienza del consenso (`usr:<nome>:consent` porta un nome
+che il client dichiara: non decide nulla, i ruoli attestati decidono).

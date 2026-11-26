@@ -1,10 +1,11 @@
 //! identistest — gate di regressione del servizio Identis (ADR-0055,
 //! Fase 3.1).
 //!
-//! Verifica il protocollo IPC di autenticazione e creazione utenti:
-//! sessione (token), verifica credenziali, creazione utente, duplicati,
-//! nomi non conformi, autorizzazione (token non root), elenco utenti e
-//! contenuto del bucket `identis:config`.
+//! Verifica il protocollo IPC di autenticazione e creazione utenti (S3.3c:
+//! nessun token, l'identita' e' del pid attestato dal kernel): WHOAMI senza
+//! identita', verifica credenziali, creazione utente, duplicati, nomi non
+//! conformi, autorizzazione (identita' non root), elenco utenti e contenuto
+//! del bucket `identis:config`.
 //!
 //! Il volume ArcaFS viene ricreato a ogni run (`scripts/arca-tool.sh`), quindi
 //! il bucket parte pulito: l'utente `alice` creato qui non collide con run
@@ -55,52 +56,42 @@ fn real_main(_sp: u64) -> ! {
         }
     };
 
-    // t2: credenziali giuste -> SUCCESS + token di sessione.
+    // t2: WHOAMI senza identita' -> R_NO_IDENTITY. Il test non ha fatto
+    // nessun VERIFY e non e' in una sessione autenticata (gira prima del
+    // login): la risposta e' "nessuna identita'", non un errore opaco.
+    let r = civis::ipc::send(chan, civis::IDENTIS_WHOAMI, 0, 0);
+    all_ok &= check(
+        2,
+        "whoami senza identita'",
+        matches!(r, Ok(r) if r.w0 == proto::R_NO_IDENTITY),
+    );
+
+    // t3: credenziali giuste -> SUCCESS (l'identita' e' legata al pid).
     let root_hash = blake2s(ROOT_PWD.as_bytes());
     let payload = proto::build_verify(ROOT_USER, &root_hash);
-    let token = match proto::send_payload_retry(chan, civis::IDENTIS_VERIFY, &payload, RETRIES) {
-        Ok(r) if r.ok() && r.w1 != 0 => {
-            println!("[identistest] t2: verify root/root: PASS (sessione emessa)");
-            r.w1
-        }
-        Ok(r) => {
-            println!("[identistest] t2: verify root/root: FAIL ({})", r.describe());
-            all_ok = false;
-            0
-        }
-        Err(_) => {
-            println!("[identistest] t2: verify root/root: FAIL (IPC)");
-            all_ok = false;
-            0
-        }
-    };
+    let r = proto::send_payload_retry(chan, civis::IDENTIS_VERIFY, &payload, RETRIES);
+    all_ok &= check(3, "verify root/root", matches!(r, Ok(r) if r.ok()));
 
-    // t3: password sbagliata -> FAIL.
+    // t4: password sbagliata -> FAIL, **senza** cambiare l'identita' gia'
+    // stabilita: un tentativo fallito non deautentica ne' eleva.
     let bad_hash = blake2s(b"password-sbagliata");
     let payload = proto::build_verify(ROOT_USER, &bad_hash);
     let r = proto::send_payload_retry(chan, civis::IDENTIS_VERIFY, &payload, RETRIES);
-    all_ok &= check(3, "verify con password errata", match r {
-        Ok(r) => r.w0 == proto::R_FAIL,
-        Err(_) => false,
-    });
-
-    // t4: creazione utente SENZA token -> rifiutata.
-    let hash = blake2s(NEW_PWD.as_bytes());
-    let payload = proto::build_add_user(0, NEW_USER, &hash, proto::ROLE_USER);
-    let r = proto::send_payload_retry(chan, civis::IDENTIS_ADD_USER, &payload, RETRIES);
-    all_ok &= check(
-        4,
-        "add_user senza token",
-        matches!(r, Ok(r) if r.w0 == proto::R_TOKEN_INVALID),
+    let failed_ok = matches!(r, Ok(r) if r.w0 == proto::R_FAIL);
+    let still_root = matches!(
+        civis::ipc::send(chan, civis::IDENTIS_WHOAMI, 0, 0),
+        Ok(r) if r.w0 == proto::R_OK && r.w1 & proto::ROLE_ROOT != 0
     );
+    all_ok &= check(4, "verify errata non cambia l'identita'", failed_ok && still_root);
 
-    // t5: creazione utente con token valido -> OK.
-    let payload = proto::build_add_user(token, NEW_USER, &hash, proto::ROLE_USER);
+    // t5: creazione utente con identita' root -> OK.
+    let hash = blake2s(NEW_PWD.as_bytes());
+    let payload = proto::build_add_user(NEW_USER, &hash, proto::ROLE_USER);
     let r = proto::send_payload_retry(chan, civis::IDENTIS_ADD_USER, &payload, RETRIES);
     all_ok &= check(5, "add_user alice", matches!(r, Ok(r) if r.ok()));
 
     // t6: stesso nome di nuovo -> gia' esistente.
-    let payload = proto::build_add_user(token, NEW_USER, &hash, proto::ROLE_USER);
+    let payload = proto::build_add_user(NEW_USER, &hash, proto::ROLE_USER);
     let r = proto::send_payload_retry(chan, civis::IDENTIS_ADD_USER, &payload, RETRIES);
     all_ok &= check(
         6,
@@ -109,7 +100,7 @@ fn real_main(_sp: u64) -> ! {
     );
 
     // t7: nome non conforme (maiuscole e caratteri fuori charset).
-    let payload = proto::build_add_user(token, "Bob!", &hash, proto::ROLE_USER);
+    let payload = proto::build_add_user("Bob!", &hash, proto::ROLE_USER);
     let r = proto::send_payload_retry(chan, civis::IDENTIS_ADD_USER, &payload, RETRIES);
     all_ok &= check(
         7,
@@ -118,7 +109,7 @@ fn real_main(_sp: u64) -> ! {
     );
 
     // t8: nome vuoto -> non valido.
-    let payload = proto::build_add_user(token, "", &hash, proto::ROLE_USER);
+    let payload = proto::build_add_user("", &hash, proto::ROLE_USER);
     let r = proto::send_payload_retry(chan, civis::IDENTIS_ADD_USER, &payload, RETRIES);
     all_ok &= check(
         8,
@@ -126,7 +117,7 @@ fn real_main(_sp: u64) -> ! {
         matches!(r, Ok(r) if r.w0 == proto::R_NAME_INVALID),
     );
 
-    // t9: il nuovo utente puo' autenticarsi con la password scelta.
+    // t9: il nuovo utente puo' autenticarsi e diventa l'identita' del pid.
     let payload = proto::build_verify(NEW_USER, &hash);
     let r = proto::send_payload_retry(chan, civis::IDENTIS_VERIFY, &payload, RETRIES);
     all_ok &= check(
@@ -135,24 +126,21 @@ fn real_main(_sp: u64) -> ! {
         matches!(r, Ok(r) if r.ok()),
     );
 
-    // t10: elenco utenti (LIST) coerente.
-    let r = civis::ipc::send(chan, civis::IDENTIS_LIST, 0, token);
+    // t10: un'identita' non root non crea utenti (l'autorita' e' live).
+    let payload = proto::build_add_user("t10boss", &hash, proto::ROLE_USER);
+    let r = proto::send_payload_retry(chan, civis::IDENTIS_ADD_USER, &payload, RETRIES);
     all_ok &= check(
         10,
-        "list utenti",
-        matches!(r, Ok(r) if r.w0 == proto::R_OK && r.w1 >= 2),
+        "add_user da identita' non root",
+        matches!(r, Ok(r) if r.w0 == proto::R_UNAUTHORIZED),
     );
 
-    // t11: il bucket contiene la riga dell'utente nuovo nel formato atteso.
-    // NOTA: legge diretta del bucket — valida finche' il bucket non e'
-    // protetto (debito dichiarato in ADR-0056, chiusura Fase 3.3: da li'
-    // questo caso passa per LIST).
-    // Formato ADR-0080 fase 5: la riga porta anche i ruoli.
-    let expected = format!("{}:{}:{}", NEW_USER, hex::encode(&hash), proto::format_roles(proto::ROLE_USER));
+    // t11: elenco utenti (LIST) coerente: l'identita' e' attestata.
+    let r = civis::ipc::send(chan, civis::IDENTIS_LIST, 0, 0);
     all_ok &= check(
         11,
-        "bucket contiene alice",
-        bucket_contains(&expected),
+        "list utenti",
+        matches!(r, Ok(r) if r.w0 == proto::R_OK && r.w1 >= 2),
     );
 
     if all_ok {

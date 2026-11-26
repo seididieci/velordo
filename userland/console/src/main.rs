@@ -29,7 +29,7 @@ use term::font::Font;
 use term::grid::{color, Cell};
 use term::surface::{self, Geom, Pixel, Surface, VgaText};
 
-use littera::{Sessions, Step};
+use littera::{Sessions, Step, AUTH_USER_MAX};
 use musivum;
 
 // Tag delle finestre del DE (D8b, ADR-0088): il servizio console le gestisce
@@ -37,9 +37,9 @@ use musivum;
 use civis::{WIN_CLOSE, WIN_COMMIT, WIN_OPEN, WIN_RAISE, WIN_SET_RECT, WIN_SET_SURFACE, WIN_STATS};
 // Tag delle sessioni di terminale (D8c1, ADR-0089).
 use civis::{
-    SESS_ATTACH, SESS_ATTACH_DEFAULT, SESS_BIND, SESS_CLOSE, SESS_CREATE, SESS_DUMP, SESS_ECHO,
-    SESS_FOCUS, SESS_INFO, SESS_INPUT, SESS_READ, SESS_RESIZE, SESS_STATE, SESS_STATS,
-    SESS_TEST_INPUT, SESS_TOKEN, SESS_TOKEN_SET, SESS_WHOAMI, SESS_WRITE,
+    SESS_ATTACH, SESS_ATTACH_DEFAULT, SESS_AUTH, SESS_AUTH_SET, SESS_BIND, SESS_CLOSE, SESS_CREATE,
+    SESS_DUMP, SESS_ECHO, SESS_FOCUS, SESS_INFO, SESS_INPUT, SESS_READ, SESS_RESIZE, SESS_STATE,
+    SESS_STATS, SESS_TEST_INPUT, SESS_WHOAMI, SESS_WRITE,
 };
 
 /// Valore di errore IPC.
@@ -2626,51 +2626,93 @@ fn real_main(_sp: u64) -> ! {
                         let _ = civis::reply(SESS_ECHO, 0, 0);
                     }
 
-                    SESS_TOKEN_SET => {
-                        // w0 = token (D8f): l'**identita' della sessione** vive
-                        // nel server, non in una variabile d'ambiente. Solo
-                        // `System` (il login sulla 0, il DE sulla tile dove
-                        // propaga) e solo sulla sessione **attaccata** al
-                        // canale — implicita, come `SESS_RESIZE`.
+                    SESS_AUTH_SET => {
+                        // w0 = len del nome nella meta' OUT (S3.3c): scrive
+                        // l'**utente autenticato** sulla sessione **attaccata**
+                        // al canale (implicita, come `SESS_RESIZE`). Solo
+                        // `System` (il login sulla 0, il DE sulle tile nuove);
+                        // `len = 0` = deautentica (fine sessione).
                         let sid = match term.sessions.attached(msg.channel) {
                             Some(id) => id,
                             None => {
-                                let _ = civis::reply(SESS_TOKEN_SET, !0, 0);
+                                let _ = civis::reply(SESS_AUTH_SET, !0, 0);
                                 continue;
                             }
                         };
                         if !matches!(term.peer_class(msg.channel), civis::ImageClass::System) {
-                            let _ = civis::reply(SESS_TOKEN_SET, !0, 0);
+                            let _ = civis::reply(SESS_AUTH_SET, !0, 0);
                             continue;
                         }
+                        let len = msg.w0 as usize;
+                        let Some(mb) = term.sess_mb(msg.channel) else {
+                            let _ = civis::reply(SESS_AUTH_SET, !0, 0);
+                            continue;
+                        };
+                        if len > AUTH_USER_MAX || !sess_proto::fits(len) {
+                            let _ = civis::reply(SESS_AUTH_SET, !0, 0);
+                            continue;
+                        }
+                        let mut name = [0u8; AUTH_USER_MAX];
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                (mb as *const u8).add(sess_proto::OUT_OFF),
+                                name.as_mut_ptr(),
+                                len,
+                            );
+                        }
+                        let by = civis::peer_pid(msg.channel).unwrap_or(-1);
                         let ok = match term.sessions.get_mut(sid) {
-                            Some(s) => {
-                                s.token = msg.w0;
-                                true
-                            }
+                            Some(s) => s.set_auth(&name[..len], by),
                             None => false,
                         };
-                        let _ = civis::reply(SESS_TOKEN_SET, if ok { 0 } else { !0 }, 0);
+                        let _ = civis::reply(SESS_AUTH_SET, if ok { 0 } else { !0 }, 0);
                     }
 
-                    SESS_TOKEN => {
-                        // Il token della sessione **attaccata**: l'attachment
-                        // e' la prova (lo stabilisce `SESS_WHOAMI`, che risale i
-                        // padri), quindi un processo di una tile non legge
-                        // quello di un'altra. `0` = sessione anonima.
-                        let tok = term
-                            .sessions
-                            .attached(msg.channel)
-                            .and_then(|sid| term.sessions.get(sid))
-                            .map(|s| s.token);
-                        match tok {
-                            Some(t) => {
-                                let _ = civis::reply(SESS_TOKEN, t, 0);
+                    SESS_AUTH => {
+                        // w0 = pid (0 = la sessione attaccata al canale).
+                        // `w0` della reply = 1/0 (autenticata), `w1` = len del
+                        // nome nella meta' IN. Solo `System`: il kernel da' il
+                        // pid, il server dice la sessione e l'utente — un
+                        // programma non legge l'identita' di un'altra tile.
+                        if !matches!(term.peer_class(msg.channel), civis::ImageClass::System) {
+                            let _ = civis::reply(SESS_AUTH, !0, 0);
+                            continue;
+                        }
+                        let sid = if msg.w0 == 0 {
+                            term.sessions.attached(msg.channel)
+                        } else {
+                            term.session_of_process(msg.w0 as i64)
+                        };
+                        let pid = civis::peer_pid(msg.channel).unwrap_or(-1);
+                        // La mailbox del canale: si crea al primo uso, poi si
+                        // scrive la meta' IN attraverso il **puntatore**
+                        // mappato (`sess_mb`), mai con l'id della shm.
+                        if term.sess_mb(msg.channel).is_none() && pid >= 0 {
+                            let _ = term.ensure_mailbox(msg.channel, pid);
+                        }
+                        let Some(mb) = term.sess_mb(msg.channel) else {
+                            let _ = civis::reply(SESS_AUTH, !0, 0);
+                            continue;
+                        };
+                        let (authenticated, len, name) = match sid.and_then(|id| term.sessions.get(id)) {
+                            Some(s) => {
+                                let mut buf = [0u8; AUTH_USER_MAX];
+                                let len = s.auth().len();
+                                buf[..len].copy_from_slice(s.auth());
+                                (!s.auth().is_empty(), len, buf)
                             }
-                            None => {
-                                let _ = civis::reply(SESS_TOKEN, !0, 0);
+                            None => (false, 0, [0u8; AUTH_USER_MAX]),
+                        };
+                        if len > 0 {
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    name.as_ptr(),
+                                    (mb as *mut u8).add(sess_proto::IN_OFF),
+                                    len,
+                                );
                             }
                         }
+                        let _ = civis::reply(SESS_AUTH, authenticated as u64, len as u64);
                     }
 
                     SESS_FOCUS => {

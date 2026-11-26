@@ -449,12 +449,16 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   risoluzione **risale i padri** (`ps_info.parent`, max 16) — un comando
   lanciato in una tile parla con *quella* tile (prima finiva sulla 0) e resta
   attestazione (la catena la dice il kernel); `SESS_BIND` (≥ `ThirdParty`) per il DE;
-  **D8f passo 2**: il token di sessione vive nel **server**
-  (`SESS_TOKEN_SET` 0xAD, solo `System`, sulla sessione **attaccata**;
-  `SESS_TOKEN` 0xAE in lettura): `VELORDO_SESSION` non esiste piu', login
-  scrive il token sulla 0, `interpres`/`users`/`create-user` leggono
-  `civis::sess::token()` (niente fallback env) e l'unica variabile che resta
-  e' `USER` (un nome);
+  **D8f passo 2** (poi S3.3c/ADR-0094): l'**utente autenticato** vive nel
+  **server** (`SESS_AUTH_SET` 0xAF, solo `System`, sulla sessione
+  **attaccata**; `SESS_AUTH` 0xB7 in lettura per pid, solo `System`). I tag
+  `0xAD`/`0xAE` (`SESS_TOKEN_SET`/`SESS_TOKEN`) sono **ritirati** (i numeri
+  non si riusano): nessun token, nessun segreto che viaggia. `VELORDO_SESSION`
+  non esiste, login scrive il **nome** sulla 0, il DE lo propaga alle tile
+  nuove, `interpres`/`users`/`create-user` non leggono nulla: Identis/Custos
+  risolvono il **pid** del chiamante (credenziale locale da `VERIFY`, oppure
+  la sessione autenticata via `SESS_AUTH`); l'unica variabile che resta e'
+  `USER` (un nome);
   `EXIT_NOTIFY` purga binding/sessioni del morto (mai la 0) con `munmap` **a
   pagina prima** di `shm_destroy`. `/dev/console` e' un **adattatore sulla
   sessione 0** (`DEV_WRITE` → `feed_session(0)`, `CONSOLE_*` → focus): il
@@ -542,7 +546,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   identico** (t64). Unit host 176 (+ `Geom::for_rect`/`view`, rect impacchettato).
 - **Il DE esiste (D8e2, ADR-0092)**: `impluvium` (`sys/bin/impluvium.bin`) e'
   un processo. **D8f**: non e' piu' un servizio di boot — lo spawana il
-  **login**, dentro la sessione autenticata (`USER` in env, token nel server),
+  **login**, dentro la sessione autenticata (`USER` in env, identita' nel server),
   ed e' il login a essere sorvegliato da init. Non registra un servizio,
   `Service::Impluvium` **non esiste**, kernel intatto.
   Possiede: **albero** (`libs/impluvium-tree`, `Leaf`/`Split{dir,ratio}`,
@@ -578,21 +582,27 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   (`userland/identis`, `Service::Identis = 11`) detiene **da solo** il bucket
   `identis:config` (`nome:hash_hex` per riga) e parla col protocollo
   condiviso `libs/identis-proto` (framing chunked, magic `ACLI`/`ACUS`,
-  codici `R_*`). Al login riuscito emette un **token di sessione** (bearer,
-  TTL 300 s): `IDENTIS_ADD_USER` (0x71) lo richiede nel payload e **solo una
-  sessione root** crea utenti. La **password non transita mai in chiaro**: il
-  client hasha in locale (BLAKE2s-256) e manda solo l'hash. La transazione
-  IPC e' **legata al canale**: un secondo client riceve `R_BUSY` e ritenta
-  (non corrompe il buffer altrui). **Debiti dichiarati** (chiusura S3.3): il
-  bucket `identis:config` non e' ancora protetto in cardo, il token e' un
-  bearer in env (`VELORDO_SESSION`), il bucket home `usr:<nome>` non esiste
-  ancora, e `create-user` non e' lanciato da nessuno (manca la shell nativa).
+  codici `R_*`). **S3.3c (ADR-0094)**: **niente token**. `VERIFY` riuscito
+  lega il **pid chiamante** all'utente (credenziale locale in RAM, mai
+  trasmessa, purgata su `EXIT_NOTIFY`); le altre operazioni risolvono il
+  chiamante per pid — credenziale locale **oppure** sessione autenticata
+  (`SESS_AUTH` al server `console`, che risale i padri via `ps_info.parent`).
+  `IDENTIS_WHOAMI` prende `w1` = pid (0 = il chiamante; un altro pid solo
+  `System`): cosi' `Custos` risolve i ruoli del richiedente. `ADD_USER`
+  richiede autorita' dell'identita' attestata (root per `root`). La
+  **password non transita mai in chiaro**: il client hasha in locale
+  (BLAKE2s-256) e manda solo l'hash. La transazione IPC e' **legata al
+  canale**: un secondo client riceve `R_BUSY` e ritenta (non corrompe il
+  buffer altrui). **Debiti dichiarati**: il bucket `identis:config` non e'
+  ancora protetto in cardo, la provenienza del consenso (`usr:<nome>:consent`)
+  porta un nome che il client dichiara (non decide nulla), manca `su`/cambio
+  utente e il bucket home `usr:<nome>`.
 - **Il login e' il gate (ADR-0062, D5)**: `userland/identis-login` prova 3
   volte e **la shell parte solo dopo l'autenticazione** (prima partiva
   comunque: login fallito = shell aperta). **D8f**: il login e' il
-  **capo-sessione** — dopo l'autenticazione scrive il token nella sessione 0,
-  spawma il DE con `USER`, aspetta la sua morte (= fine sessione), azzera il
-  token ed esce 0. `init` lo supervisiona come un **getty**
+  **capo-sessione** — dopo l'autenticazione scrive il **nome** nella sessione 0
+  (`SESS_AUTH_SET`), spawma il DE con `USER`, aspetta la sua morte (= fine
+  sessione), azzera l'identita' (`SESS_AUTH_SET` vuoto) ed esce 0. `init` lo supervisiona come un **getty**
   (`Service::Login = 13`, `OnDeath::LoginGate`): **uscita 0 = sessione
   conclusa → prompt subito** (contatore fallimenti azzerato); **uscita != 0 =
   accesso negato → backoff e tetto ai riavvii**. Il boot finisce quindi al
@@ -628,6 +638,30 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   riapre la falla in silenzio; su cardo l'handshake con `ps_info` va in una
   funzione `#[inline(never)]` (firewall), o LTO sfonda lo stack di 16 KiB
   (`#PF` user-mode sotto la guardia).
+- **Identita' di sessione per attestazione (S3.3c, ADR-0094)**: il **token
+  bearer non esiste piu'**. I tag `0xAD`/`0xAE` sono **ritirati** (numeri non
+  riusati); al loro posto `SESS_AUTH_SET` (0xAF: `w0` = len del nome nella
+  meta' OUT, scrive l'utente sulla sessione **attaccata**, solo `System`,
+  `len = 0` = deautentica) e `SESS_AUTH` (0xB7: `w0` = pid, `0` = la sessione
+  attaccata → `w0` = 1/0, `w1` = len nella meta' IN, solo `System`).
+  `littera::Session` ha `auth_user`/`auth_len`/`auth_by` (chi l'ha stabilita:
+  alla sua morte l'identita' sparisce) e `purge_pid` la pulisce. **Due fonti,
+  in ordine**: (1) credenziale locale in Identis (`VERIFY` riuscito lega il
+  pid, mai trasmessa, purgata su `EXIT_NOTIFY`); (2) sessione autenticata
+  (`SESS_AUTH`, che risale i padri) — la via normale: login scrive il nome
+  sulla 0, il DE lo propaga alle tile, i comandi lo ereditano per
+  attestazione. `IDENTIS_ADD_USER`/`LIST` perdono il token; `IDENTIS_WHOAMI`
+  prende il **pid** in `w1` (0 = il chiamante, un altro pid solo `System`);
+  `CUSTOS_GRANT`/`CONSENT` pure (Custos ricava il pid da `TXN_PID` e chiede i
+  ruoli a Identis). `R_TOKEN_INVALID` → `R_NO_IDENTITY` (valore 2). Il gate
+  resta 72/72 + 33/33 (negativi dentro `identistest` t2/t4/t10 e `t74`).
+  **Trappole**: il fallback di **sessione** in Identis non e' opzionale (la
+  shell non fa mai `VERIFY`: solo credenziale ⇒ `create-user` risponde
+  `R_NO_IDENTITY`); in `impluvium::split` prima si legge la 0, poi ci si
+  attacca alla tile e **poi** si scrive l'utente (invertendo finisce sulla
+  tile sbagliata); `ensure_mailbox` ritorna l'**id della shm**, non un
+  puntatore (usarlo come puntatore = `#PF` a `0x805` e il server muore:
+  `sess_mb` e' il puntatore, `ensure_mailbox` serve solo a creare).
 
 ## Important Notes
 
@@ -763,7 +797,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   negano ogni endpoint a `Untrusted` (`peer_info_class`) — nessuna tabella
   può riaprirlo, il broker è l'unica strada. **Consenso per immagine**:
   `CUSTOS_AUTHORIZE=0x83` (`policy admin ∩ consenso`), `CUSTOS_CONSENT=0x84`
-  (scrittura solo con token di sessione), `usr:consent` (tabella autorevole,
+  (scrittura solo con identita' attestata), `usr:consent` (tabella autorevole,
   carve-out `consent_writer` in cardo) + `usr:<nome>:consent` (provenienza);
   shell nativa `consent <prog> on|off`; t70, `usertests 66/66`. I probe
   che parlano con `net` in diretta (`nettcp`, `tlsprobe`, `posixsock`) sono

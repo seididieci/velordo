@@ -3,16 +3,17 @@
 //! Detiene il bucket ArcaFS `identis:config` (una riga per utente:
 //! `nome:hash_hex_bLAKE2s256:ruolo[,ruolo...]`). Espone quattro operazioni:
 //!
-//! - `IDENTIS_VERIFY` (0x70): verifica le credenziali; se tornano giuste
-//!   **emette un token di sessione** (w1 della reply) legato all'utente.
-//! - `IDENTIS_ADD_USER` (0x71): crea un utente con i suoi ruoli. Richiede
-//!   una sessione con autorita' sufficiente (root, oppure un amministratore
-//!   per i ruoli che possiede); la password non transita mai in chiaro: il
+//! - `IDENTIS_VERIFY` (0x70): verifica le credenziali; se tornano giuste,
+//!   **lega il pid chiamante** all'utente (credenziale locale, mai trasmessa,
+//!   purgata su `EXIT_NOTIFY`). La password non transita mai in chiaro: il
 //!   client calcola l'hash BLAKE2s-256 in locale.
-//! - `IDENTIS_LIST` (0x72): numero utenti registrati (w1 della reply).
-//! - `IDENTIS_WHOAMI` (0x73): ruoli **correnti** dell'utente del token.
-//!   La sessione porta solo l'identita': i ruoli si risolvono live, quindi
-//!   cambiarli non richiede un nuovo login (ADR-0080, fase 5).
+//! - `IDENTIS_ADD_USER` (0x71): crea un utente con i suoi ruoli. L'autorita'
+//!   e' quella dell'identita' attestata del chiamante (il pid che ha fatto
+//!   un `VERIFY` riuscito, oppure il login/DE via sessione autenticata).
+//! - `IDENTIS_LIST` (0x72): numero utenti registrati.
+//! - `IDENTIS_WHOAMI` (0x73): ruoli **correnti** dell'utente del chiamante.
+//!   I ruoli si leggono **live** da `identis:config`: cambiarli ha effetto
+//!   senza rifare il login (ADR-0080, fase 5).
 //!
 //! Il framing dei payload e' condiviso (`libs/identis-proto`): qui il
 //! framing e' lato server (stato, validazione, scrittura del bucket).
@@ -51,10 +52,8 @@ const DEFAULT_HASH_HEX: &str = "0cb8a879dc5d94ed67eb49cc7a4d3052d6a346f2e28fcd9e
 const MAX_PAYLOAD: usize = 4096;
 /// Timeout di inattivita' durante una trasmissione (tick PIT 100 Hz = 5 s).
 const TIMEOUT_TICKS: u64 = 500;
-/// Slot di sessione contemporanee.
-const MAX_SESSIONS: usize = 8;
-/// TTL della sessione (300 s = 30.000 tick a 100 Hz).
-const SESSION_TTL_TICKS: u64 = 30_000;
+/// Credenziali per pid contemporanee (S3.3c: identita' attestata, non bearer).
+const MAX_CREDENTIALS: usize = 8;
 
 // ── Stato della transazione in corso ───────────────────────────────────────
 
@@ -66,25 +65,23 @@ static mut TXN_BUF: [u8; MAX_PAYLOAD] = [0; MAX_PAYLOAD];
 static mut TXN_LEN: usize = 0;
 static mut TXN_TICK: u64 = 0;
 
-// ── Tabella delle sessioni ─────────────────────────────────────────────────
+// ── Credenziali per pid (S3.3c: identita' attestata, mai trasmessa) ──────────────────────
 
-/// Una sessione attiva: token -> utente. Bearer token (chi lo possiede agisce
-/// come l'utente): la capability per-canale e' Fase 3.3 (debito dichiarato
-/// in ADR-0056).
+/// Credenziale di un processo: il pid che ha fatto `VERIFY` riuscito è legato
+/// all'utente autenticato. Mai trasmessa: il kernel dà il pid, Identis lo
+/// risolve. Purgata su `EXIT_NOTIFY` (niente buco di riuso di pid).
 #[derive(Clone, Copy)]
-struct Session {
-    token: u64,
+struct Credential {
+    pid: i64,
     name: [u8; proto::MAX_NAME],
     name_len: usize,
-    issued: u64,
 }
 
-static mut SESSIONS: [Session; MAX_SESSIONS] = [Session {
-    token: 0,
+static mut CREDENTIALS: [Credential; MAX_CREDENTIALS] = [Credential {
+    pid: 0,
     name: [0; proto::MAX_NAME],
     name_len: 0,
-    issued: 0,
-}; MAX_SESSIONS];
+}; MAX_CREDENTIALS];
 
 // ── Entry ──────────────────────────────────────────────────────────────────
 
@@ -141,11 +138,14 @@ fn handle_msg(m: civis::IpcMsg) {
         civis::IDENTIS_WHOAMI => handle_whoami(m),
         civis::EXIT_NOTIFY => {
             // Morte di un peer: se era il client della transazione, scatta.
+            // Sempre: purga la sua credenziale (mai un pid riusato con
+            // l'identita' di un altro).
             unsafe {
                 if TXN_ACTIVE && TXN_CHAN == m.channel {
                     civis::println!("[identis] client morto, scatto transazione");
                     reset_txn();
                 }
+                purge_credential(m.w1 as i64);
             }
         }
         _ => {}
@@ -220,14 +220,19 @@ fn handle_chunked(m: civis::IpcMsg) {
 /// Elabora il payload completo e restituisce (codice, w1 della reply).
 fn dispatch_payload(tag: u64, buf: &[u8]) -> (u64, u64) {
     match tag {
-        civis::IDENTIS_VERIFY => do_verify(buf),
+        civis::IDENTIS_VERIFY => {
+            let pid = unsafe { civis::peer_pid(TXN_CHAN).unwrap_or(-1) };
+            do_verify(buf, pid)
+        }
         civis::IDENTIS_ADD_USER => do_add_user(buf),
         _ => (proto::R_PROTOCOL, 0),
     }
 }
 
-/// Verifica le credenziali e, se tornano giuste, emette un token di sessione.
-fn do_verify(buf: &[u8]) -> (u64, u64) {
+/// Verifica le credenziali e, se tornano giuste, **lega il pid chiamante**
+/// all'utente (credenziale locale, mai trasmessa). Nessun token: la prova e'
+/// l'attestazione del kernel sul pid.
+fn do_verify(buf: &[u8], pid: i64) -> (u64, u64) {
     let (name, hash) = match proto::parse_verify(buf) {
         Ok(v) => v,
         Err(_) => return (proto::R_PROTOCOL, 0),
@@ -245,36 +250,37 @@ fn do_verify(buf: &[u8]) -> (u64, u64) {
         return (proto::R_FAIL, 0);
     }
 
-    let token = session_issue(&name);
-    civis::println!("[identis] verifica utente '{}': SUCCESS", name);
-    (proto::R_OK, token)
+    if pid < 0 {
+        return (proto::R_UNAUTHORIZED, 0);
+    }
+    bind_credential(pid, &name);
+    civis::println!("[identis] verifica utente '{}': SUCCESS (pid={})", name, pid);
+    (proto::R_OK, 0)
 }
 
-/// Crea un utente: sessione autorizzata + nome valido + nome non gia' preso.
+/// Crea un utente: identita' del chiamante + nome valido + nome non gia' preso.
 fn do_add_user(buf: &[u8]) -> (u64, u64) {
-    let (token, name, hash, roles) = match proto::parse_add_user(buf) {
+    let (name, hash, roles) = match proto::parse_add_user(buf) {
         Ok(v) => v,
         Err(_) => return (proto::R_PROTOCOL, 0),
     };
 
-    // 1. Token di sessione valido?
-    let user = match session_lookup(token) {
-        Some(u) => u,
-        None => {
-            civis::println!("[identis] add_user '{}': token non valido", name);
-            return (proto::R_TOKEN_INVALID, 0);
-        }
+    // 1. Identita' del chiamante (nessun token: il pid lo da' il kernel).
+    let pid = unsafe { civis::peer_pid(TXN_CHAN).unwrap_or(-1) };
+    let Some(user) = caller_user(pid) else {
+        civis::println!("[identis] add_user '{}': chiamante senza identita' (pid={})", name, pid);
+        return (proto::R_NO_IDENTITY, 0);
     };
 
     // 2. Autorita' AL MOMENTO della chiamata: i ruoli del chiamante si
-    //    leggono live dal bucket (la sessione non li copia). `min(richiesta,
-    //    ruoli del chiamante)`: un `user` non crea nessuno, un `net-admin`
-    //    non crea `root` (ADR-0080, fase 5).
+    //    leggono live dal bucket. `min(richiesta, ruoli del chiamante)`:
+    //    un `user` non crea nessuno, un `net-admin` non crea `root`
+    //    (ADR-0080, fase 5).
     let requester = roles_of(&user).unwrap_or(proto::ROLE_USER);
     if !proto::can_grant_roles(requester, roles) {
         civis::println!(
-            "[identis] add_user '{}': sessione di '{}' senza autorita' per i ruoli richiesti",
-            name, user
+            "[identis] add_user '{}': identita' di '{}' (pid={}) senza autorita' per i ruoli richiesti",
+            name, user, pid
         );
         return (proto::R_UNAUTHORIZED, 0);
     }
@@ -295,8 +301,10 @@ fn do_add_user(buf: &[u8]) -> (u64, u64) {
     match append_bucket_entry(&name, &hex::encode(&hash), roles) {
         Ok(()) => {
             civis::println!(
-                "[identis] utente '{}' creato (ruoli: {})",
+                "[identis] utente '{}' creato da '{}' (pid={}, ruoli: {})",
                 name,
+                user,
+                pid,
                 proto::format_roles(roles)
             );
             (proto::R_OK, 0)
@@ -308,7 +316,9 @@ fn do_add_user(buf: &[u8]) -> (u64, u64) {
     }
 }
 
-/// WHOAMI: ruoli correnti dell'utente del token (letti live dal bucket).
+/// WHOAMI: ruoli correnti dell'identita' del chiamante (letti live dal bucket).
+///
+/// `w1` = pid (0 = il chiamante; un altro pid solo `System`).
 fn handle_whoami(m: civis::IpcMsg) {
     unsafe {
         if TXN_ACTIVE {
@@ -316,17 +326,29 @@ fn handle_whoami(m: civis::IpcMsg) {
             return;
         }
     }
-    let Some(user) = session_lookup(m.w1) else {
-        reply(m.tag, proto::R_TOKEN_INVALID, 0);
+    let pid = if m.w1 == 0 {
+        civis::peer_pid(m.channel).unwrap_or(-1)
+    } else {
+        // Un altro pid e' lecito solo a `System` (servizi di controllo).
+        let class = civis::peer_info_class(m.channel)
+            .map(|(_, c)| c)
+            .unwrap_or(civis::ImageClass::Untrusted);
+        if class != civis::ImageClass::System {
+            reply(m.tag, proto::R_UNAUTHORIZED, 0);
+            return;
+        }
+        m.w1 as i64
+    };
+    let Some(user) = caller_user(pid) else {
+        reply(m.tag, proto::R_NO_IDENTITY, 0);
         return;
     };
     let roles = roles_of(&user).unwrap_or(proto::ROLE_USER);
     reply(m.tag, proto::R_OK, roles);
 }
 
-// ── Operazione LIST ───────────────────────────────────────────────────────
-
-/// LIST: numero utenti registrati. Richiede un token di sessione valido (w1).
+/// LIST: numero utenti registrati. Richiede un'identita' attestata del
+/// chiamante (nessun token: il pid lo da' il kernel).
 fn handle_list(m: civis::IpcMsg) {
     unsafe {
         if TXN_ACTIVE {
@@ -334,114 +356,93 @@ fn handle_list(m: civis::IpcMsg) {
             return;
         }
     }
-    if session_lookup(m.w1).is_none() {
-        reply(m.tag, proto::R_TOKEN_INVALID, 0);
+    let pid = civis::peer_pid(m.channel).unwrap_or(-1);
+    if caller_user(pid).is_none() {
+        reply(m.tag, proto::R_NO_IDENTITY, 0);
         return;
     }
     let n = count_users();
     reply(m.tag, proto::R_OK, n as u64);
 }
 
-// ── Sessioni ───────────────────────────────────────────────────────────────
+// ── Credenziali per pid (S3.3c: identita' attestata, mai trasmessa) ───────────────────────
 
-/// Emette un token di sessione per `name` (slot libero, o il piu' vecchio).
-fn session_issue(name: &str) -> u64 {
-    let token = rand_token();
-    let now = now_tick();
-    let bytes = name.as_bytes();
-    let n = bytes.len().min(proto::MAX_NAME);
-
+/// Lega `pid` all'utente `name` (credenziale stabilita da `VERIFY` riuscito).
+fn bind_credential(pid: i64, name: &str) {
     unsafe {
-        let mut target = usize::MAX;
-        for i in 0..MAX_SESSIONS {
-            if SESSIONS[i].token == 0 {
-                target = i;
+        // Sostituisci un'eventuale credenziale precedente dello stesso pid.
+        let mut target: Option<usize> = None;
+        for i in 0..MAX_CREDENTIALS {
+            if CREDENTIALS[i].pid == pid {
+                target = Some(i);
+                break;
+            }
+            if CREDENTIALS[i].pid == 0 {
+                target = Some(i);
                 break;
             }
         }
-        if target == usize::MAX {
-            // Nessuno slot libero: si sostituisce la sessione piu' vecchia.
-            target = 0;
-            for i in 1..MAX_SESSIONS {
-                if SESSIONS[i].issued < SESSIONS[target].issued {
-                    target = i;
-                }
-            }
-        }
-        SESSIONS[target].token = token;
-        SESSIONS[target].name_len = n;
-        SESSIONS[target].name[..n].copy_from_slice(&bytes[..n]);
-        SESSIONS[target].issued = now;
+        let i = target.unwrap_or(0);
+        let bytes = name.as_bytes();
+        let n = bytes.len().min(proto::MAX_NAME);
+        CREDENTIALS[i].pid = pid;
+        CREDENTIALS[i].name_len = n;
+        CREDENTIALS[i].name[..n].copy_from_slice(&bytes[..n]);
     }
-    token
 }
 
-/// Cerca la sessione di un token: `Some(utente)` se valida e non scaduta.
-fn session_lookup(token: u64) -> Option<String> {
-    if token == 0 {
+/// Cerca l'utente di `pid`: `Some(nome)` se ha un'identita' attestata.
+fn lookup_credential(pid: i64) -> Option<String> {
+    if pid <= 0 {
         return None;
     }
-    let now = now_tick();
     unsafe {
-        for i in 0..MAX_SESSIONS {
-            let s = SESSIONS[i];
-            if s.token != token {
-                continue;
+        for i in 0..MAX_CREDENTIALS {
+            if CREDENTIALS[i].pid == pid {
+                return core::str::from_utf8(&CREDENTIALS[i].name[..CREDENTIALS[i].name_len])
+                    .ok()
+                    .map(String::from);
             }
-            if now.saturating_sub(s.issued) > SESSION_TTL_TICKS {
-                return None;
-            }
-            return core::str::from_utf8(&s.name[..s.name_len])
-                .ok()
-                .map(String::from);
         }
     }
     None
 }
 
-// ── Casualita' del token ──────────────────────────────────────────────────
-
-/// Token casuale a 64 bit. RDRAND quando la CPU lo espone e funziona,
-/// altrimenti fallback xorshift64* seminato da rdtsc+ticks+pid (NON e'
-/// crypto-grade: sotto TCG l'istruzione RDRAND non funziona mai — vedi la
-/// nota nel PAL, S2.5d). Il token 0 e' riservato (mai emesso).
-fn rand_token() -> u64 {
-    for _ in 0..10 {
-        unsafe {
-            let mut v = 0u64;
-            if core::arch::x86_64::_rdrand64_step(&mut v) == 1 && v != 0 {
-                return v;
+/// Toglie la credenziale di `pid` (morte del processo: niente buco di riuso).
+fn purge_credential(pid: i64) {
+    if pid <= 0 {
+        return;
+    }
+    unsafe {
+        for i in 0..MAX_CREDENTIALS {
+            if CREDENTIALS[i].pid == pid {
+                CREDENTIALS[i].pid = 0;
+                CREDENTIALS[i].name_len = 0;
             }
         }
     }
-    let mut s = seed_value();
-    s ^= s >> 12;
-    s ^= s << 25;
-    s ^= s >> 27;
-    let v = s.wrapping_mul(0x2545F4914F6CDD1D);
-    if v == 0 { 1 } else { v }
 }
 
-/// Seme del fallback: rdtsc ^ ticks ^ pid.
-fn seed_value() -> u64 {
-    let lo: u32;
-    let hi: u32;
-    unsafe {
-        core::arch::asm!(
-            "rdtsc",
-            out("eax") lo,
-            out("edx") hi,
-            options(nomem, nostack, preserves_flags)
-        );
+/// L'utente del processo `pid`, da due fonti in ordine:
+///
+/// 1. la **credenziale locale** (un `VERIFY` riuscito di quel processo: e' la
+///    via dei client che si autenticano da soli e dei test);
+/// 2. la **sessione autenticata** (`SESS_AUTH` al server `console`, S3.3c):
+///    e' la via normale, perche' il login lega il nome alla sessione e ogni
+///    processo che ci gira dentro la eredita per **attestazione del pid**
+///    (la catena dei padri la da' il kernel). Identis e' `System`, quindi
+///    puo' chiedere l'identita' di un pid.
+///
+/// Nessuna delle due e' un valore che il chiamante puo' dichiarare: il pid lo
+/// da' il kernel, il nome lo dice il server o un `VERIFY` validato.
+fn caller_user(pid: i64) -> Option<String> {
+    if let Some(u) = lookup_credential(pid) {
+        return Some(u);
     }
-    let tsc = ((hi as u64) << 32) | lo as u64;
-    let ticks = now_tick();
-    let pid = civis::getpid() as u64;
-    let mut s = tsc ^ ticks.rotate_left(17) ^ pid.wrapping_mul(0x9E3779B97F4A7C15);
-    if s == 0 {
-        s = 0x243F6A8885A308D3;
+    match civis::sess::auth_of(pid) {
+        Ok(a) if a.is_authenticated() => Some(String::from(a.as_str())),
+        _ => None,
     }
-    s
 }
 
 // ── Bucket `identis:config` ───────────────────────────────────────────────

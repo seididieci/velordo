@@ -11,20 +11,30 @@
 //! header: tag=OP, w0=total_len, w1=0            (annuncia la dimensione)
 //! chunk:  tag=OP, w0=offset,   w1=4 byte payload (little-endian, 1-4 byte)
 //! EOF:    tag=OP, w0=0xFFFFFFFF, w1=0            (fine trasmissione)
-//! reply:  tag=OP, w0=codice,   w1=token (solo VERIFY ok: w1 = sessione)
+//! reply:  tag=OP, w0=codice,   w1=0
 //! ```
 //!
 //! Ogni chunk e' un round trip (il protocollo e' sincrono: `send` attende la
 //! reply). Il tag identifica l'operazione: `IDENTIS_VERIFY`, `IDENTIS_ADD_USER`
 //! (chunked) e `IDENTIS_LIST` (una sola richiesta, risposta in w1).
 //!
+//! # Identita' (S3.3c: niente token)
+//!
+//! `VERIFY` riuscita **lega il pid chiamante** all'utente (il pid lo da' il
+//! kernel, non il payload). Le operazioni successive risolvono il chiamante
+//! per pid: il servizio chiede al pid la sua identita' (credenziale locale
+//! stabilita da un `VERIFY`, oppure la sessione autenticata via `console`).
+//! Nessun segreto viaggia e nessun valore si puo' copiare in un altro
+//! processo.
+//!
 //! # Codici di risposta (w0)
 //!
-//! `R_OK` ok · `R_FAIL` credenziali errate (VERIFY) · `R_TOKEN_INVALID`
-//! token assente/sconosciuto/scaduto · `R_NAME_INVALID` nome utente non
+//! `R_OK` ok · `R_FAIL` credenziali errate (VERIFY) · `R_NO_IDENTITY`
+//! chiamante senza identita' attestata · `R_NAME_INVALID` nome utente non
 //! conforme · `R_EXISTS` utente gia' presente · `R_FS_ERROR` errore FS
-//! (bucket) · `R_UNAUTHORIZED` sessione valida ma non root · `R_BUSY`
-//! transazione in corso (un altro client) · `R_PROTOCOL` richiesta malformata.
+//! (bucket) · `R_UNAUTHORIZED` identita' valida ma senza l'autorita' ·
+//! `R_BUSY` transazione in corso (un altro client) · `R_PROTOCOL` richiesta
+//! malformata.
 
 #![no_std]
 
@@ -163,8 +173,9 @@ pub fn can_grant_roles(requester: u64, requested: u64) -> bool {
 pub const R_OK: u64 = 0;
 /// Credenziali non valide (VERIFY).
 pub const R_FAIL: u64 = 1;
-/// Token di sessione assente, sconosciuto o scaduto.
-pub const R_TOKEN_INVALID: u64 = 2;
+/// Chiamante senza identita' attestata (nessun `VERIFY` riuscito, nessuna
+/// sessione autenticata).
+pub const R_NO_IDENTITY: u64 = 2;
 /// Nome utente non conforme (lunghezza o caratteri).
 pub const R_NAME_INVALID: u64 = 3;
 /// Utente gia' presente.
@@ -178,7 +189,7 @@ pub const R_BUSY: u64 = 7;
 /// Richiesta malformata (protocollo).
 pub const R_PROTOCOL: u64 = 8;
 
-/// Risposta finale del server (w0 = codice, w1 = token per VERIFY ok).
+/// Risposta finale del server (w0 = codice, w1 = extra).
 #[derive(Clone, Copy, Debug)]
 pub struct Reply {
     pub w0: u64,
@@ -196,7 +207,7 @@ impl Reply {
         match self.w0 {
             R_OK => "OK",
             R_FAIL => "credenziali non valide",
-            R_TOKEN_INVALID => "token di sessione non valido",
+            R_NO_IDENTITY => "chiamante senza identita' attestata",
             R_NAME_INVALID => "nome utente non valido",
             R_EXISTS => "utente gia' esistente",
             R_FS_ERROR => "errore filesystem",
@@ -221,12 +232,11 @@ pub fn build_verify(name: &str, hash: &[u8; HASH_LEN]) -> Vec<u8> {
     v
 }
 
-/// Payload di creazione utente: magic + versione + token + nome + hash + ruoli.
-pub fn build_add_user(token: u64, name: &str, hash: &[u8; HASH_LEN], roles: u64) -> Vec<u8> {
+/// Payload di creazione utente: magic + versione + nome + hash + ruoli.
+pub fn build_add_user(name: &str, hash: &[u8; HASH_LEN], roles: u64) -> Vec<u8> {
     let mut v = Vec::new();
     v.extend_from_slice(MAGIC_ADD_USER);
     v.extend_from_slice(&PROTO_VERSION.to_le_bytes());
-    v.extend_from_slice(&token.to_le_bytes());
     v.extend_from_slice(&(name.len() as u32).to_le_bytes());
     v.extend_from_slice(name.as_bytes());
     v.extend_from_slice(&(hash.len() as u32).to_le_bytes());
@@ -281,14 +291,15 @@ pub fn parse_verify(buf: &[u8]) -> Result<(String, [u8; HASH_LEN]), &'static str
     Ok((name, hash))
 }
 
-/// Estrae token + nome + hash + ruoli da un payload di creazione utente.
+/// Estrae nome + hash + ruoli da un payload di creazione utente.
 /// Senza il campo ruoli (payload storico) il nuovo utente e' `ROLE_USER`.
-pub fn parse_add_user(buf: &[u8]) -> Result<(u64, String, [u8; HASH_LEN], u64), &'static str> {
-    if buf.len() < 16 || &buf[0..4] != MAGIC_ADD_USER {
+/// (S3.3c: il token di sessione non esiste piu'; l'identita' e' del pid
+/// chiamante, attestato dal kernel.)
+pub fn parse_add_user(buf: &[u8]) -> Result<(String, [u8; HASH_LEN], u64), &'static str> {
+    if buf.len() < 8 || &buf[0..4] != MAGIC_ADD_USER {
         return Err("magic non riconosciuto");
     }
-    let token = u64_at(buf, 8)?;
-    let mut off = 16usize;
+    let mut off = 8usize;
     let name_len = u32_at(buf, off)? as usize;
     off += 4;
     if off + name_len > buf.len() {
@@ -309,7 +320,7 @@ pub fn parse_add_user(buf: &[u8]) -> Result<(u64, String, [u8; HASH_LEN], u64), 
         Ok(_) => return Err("ruoli non validi"),
         Err(_) => ROLE_USER,
     };
-    Ok((token, name, hash, roles))
+    Ok((name, hash, roles))
 }
 
 // ── Validazione del nome utente (server-side, autorevole) ─────────────────
@@ -328,7 +339,7 @@ pub fn valid_name(name: &str) -> bool {
 // ── Lato client: invio chunked + retry su BUSY ────────────────────────────
 
 /// Invia `payload` a `chan` col framing chunked e attende la reply finale.
-/// Restituisce il codice `w0` e il `w1` (token, per VERIFY ok). Un codice
+/// Restituisce il codice `w0` e il `w1`. Un codice
 /// diverso da `R_OK` **prima** dell'EOF significa "richiesta non accettata"
 /// (BUSY o protocollo): in quel caso la transazione e' stata abbandonata e
 /// va ritentata per intero.

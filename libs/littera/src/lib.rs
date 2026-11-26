@@ -45,6 +45,9 @@ pub const SESSION_SCROLLBACK: usize = 256;
 /// un buffer di servizio, non un archivio — oltre si scarta il piu' vecchio.
 pub const INPUT_MAX: usize = 1024;
 
+/// Lunghezza massima del nome utente autenticato in una sessione.
+pub const AUTH_USER_MAX: usize = 32;
+
 /// Esito di un codepoint per chi disegna.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Step {
@@ -100,11 +103,16 @@ pub struct Session {
     pub echo: bool,
     /// pid che possiede la sessione (attestazione), `None` = non legata.
     pub owner: Option<i64>,
-    /// Token di sessione (D8f): l'**identita'** della sessione vive qui, non
-    /// in una variabile d'ambiente. `0` = sessione anonima (nessun login).
-    /// Lo scrive il login (`SESS_TOKEN_SET`) e lo legge chi e' attaccato
-    /// (`SESS_TOKEN`); muore con la sessione.
-    pub token: u64,
+    /// Utente **autenticato** della sessione (S3.3c): l'identita' e' della
+    /// sessione, non un valore che viaggia. Lo scrive il login
+    /// (`SESS_AUTH_SET`) e lo risolve chi ne ha diritto (`SESS_AUTH`); la
+    /// morte della sessione (o il logout) lo azzera.
+    pub auth_user: [u8; AUTH_USER_MAX],
+    /// Lunghezza di `auth_user` (0 = sessione anonima).
+    auth_len: u8,
+    /// pid che ha **stabilito** l'identita' (login sulla 0, DE sulle tile):
+    /// alla sua morte l'identita' sparisce anche se la sessione resta viva.
+    pub auth_by: i64,
     resume: Resume,
 }
 
@@ -126,9 +134,47 @@ impl Session {
             input: VecDeque::new(),
             echo: true,
             owner,
-            token: 0,
+            auth_user: [0u8; AUTH_USER_MAX],
+            auth_len: 0,
+            auth_by: 0,
             resume: Resume::None,
         }
+    }
+
+    /// L'utente autenticato della sessione (`b""` = anonima).
+    pub fn auth(&self) -> &[u8] {
+        &self.auth_user[..self.auth_len as usize]
+    }
+
+    /// `true` se la sessione ha un'identita' (login riuscito).
+    pub fn is_authenticated(&self) -> bool {
+        self.auth_len != 0
+    }
+
+    /// Scrive (o azzera, con `user` vuoto) l'identita' della sessione.
+    /// `by` = pid che l'ha stabilita (login sulla 0, DE sulle tile): alla sua
+    /// morte l'identita' sparisce. `false` = nome troppo lungo o non UTF-8
+    /// (fail-loud: il server risponde `!0`, non tronca in silenzio).
+    pub fn set_auth(&mut self, user: &[u8], by: i64) -> bool {
+        if user.len() > AUTH_USER_MAX {
+            return false;
+        }
+        if !user.is_empty() && core::str::from_utf8(user).is_err() {
+            return false;
+        }
+        self.auth_user = [0u8; AUTH_USER_MAX];
+        self.auth_user[..user.len()].copy_from_slice(user);
+        self.auth_len = user.len() as u8;
+        self.auth_by = if user.is_empty() { 0 } else { by };
+        true
+    }
+
+    /// Toglie l'identita' se l'ha stabilita `pid` (morte del login o del DE).
+    pub fn drop_auth_of(&mut self, pid: i64) -> bool {
+        if self.auth_by != pid || pid == 0 {
+            return false;
+        }
+        self.set_auth(b"", 0)
     }
 
     /// Decodifica i byte in codepoint. Il buffer e' **ceduto** al chiamante
@@ -634,11 +680,15 @@ impl Sessions {
         self.readers.retain(|&(_, c)| c != chan);
     }
 
-    /// Purga le tracce di un processo morto: bindings e le sessioni di cui
-    /// era **owner** (mai la 0). Ritorna gli id delle sessioni da chiudere
-    /// (il server ne libera la mailbox).
+    /// Purga le tracce di un processo morto: bindings, sessioni di cui era
+    /// **owner** (mai la 0) e identita' che aveva **stabilito** (S3.3c: la
+    /// morte del login/DE non lascia una sessione autenticata). Ritorna gli id
+    /// delle sessioni da chiudere (il server ne libera la mailbox).
     pub fn purge_pid(&mut self, pid: i64) -> Vec<usize> {
         self.bindings.retain(|&(p, _)| p != pid);
+        for slot in self.slots.iter_mut().flatten() {
+            let _ = slot.drop_auth_of(pid);
+        }
         let owned: Vec<usize> = (1..self.slots.len())
             .filter(|&i| {
                 self.slots
@@ -828,6 +878,28 @@ mod tests {
         assert!(t.get(a).is_none() && t.get(b).is_none());
         assert!(t.get(c).is_some(), "le sessioni degli altri restano");
         assert!(t.get(0).is_some(), "la sessione 0 non si tocca mai");
+    }
+
+    #[test]
+    fn identita_di_sessione() {
+        let mut t = Sessions::new(20, 4);
+        let s = t.get_mut(0).unwrap();
+        assert!(!s.is_authenticated());
+        assert!(s.set_auth(b"root", 7));
+        assert_eq!(t.get(0).unwrap().auth(), b"root");
+        assert!(t.get(0).unwrap().is_authenticated());
+        // Un nome non UTF-8 o troppo lungo e' rifiutato (mai troncato).
+        assert!(!t.get_mut(0).unwrap().set_auth(&[0xFF], 7));
+        assert!(!t.get_mut(0).unwrap().set_auth(&[b'a'; AUTH_USER_MAX + 1], 7));
+        // La morte di chi l'ha stabilita la toglie; un altro pid no.
+        assert!(!t.get_mut(0).unwrap().drop_auth_of(8));
+        t.purge_pid(7);
+        assert_eq!(t.get(0).unwrap().auth(), b"");
+        // Deautenticazione esplicita.
+        assert!(t.get_mut(0).unwrap().set_auth(b"alice", 9));
+        assert!(t.get_mut(0).unwrap().set_auth(b"", 0));
+        assert!(!t.get(0).unwrap().is_authenticated());
+        assert_eq!(t.get(0).unwrap().auth_by, 0);
     }
 
     #[test]

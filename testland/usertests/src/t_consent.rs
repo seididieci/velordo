@@ -10,15 +10,17 @@
 //!
 //! Casi verificati (tutti senza `net=1` tranne l'ultimo blocco):
 //!  1. `AUTHORIZE` di un'immagine con grant ma **senza** consenso → negato.
-//!  2. `CONSENT` write **senza** token → rifiutata (`R_TOKEN_INVALID`).
-//!  3. `CONSENT` write con token valido → la riga appare in `usr:consent`
-//!     (persistenza) e `AUTHORIZE` diventa vero.
-//!  4. `CONSENT` revoke (`off`) → `AUTHORIZE` torna falso.
-//!  5. Un'immagine **senza** grant admin resta negata anche col consenso:
+//!  2. `CONSENT` write con identita' attestata → la riga appare in
+//!     `usr:consent` (persistenza) e `AUTHORIZE` diventa vero.
+//!     (Il caso negativo "senza identita' → `R_NO_IDENTITY`" vive in
+//!     `identistest`, che gira in un processo nuovo senza `VERIFY`: qui il
+//!     pid ha gia' l'identita' lasciata da t69.)
+//!  3. `CONSENT` revoke (`off`) → `AUTHORIZE` torna falso.
+//!  4. Un'immagine **senza** grant admin resta negata anche col consenso:
 //!     il consenso non crea privilegio dal nulla.
-//!  6. `usr:consent` e' scrivibile solo da Custos/init: la suite (che ha
+//!  5. `usr:consent` e' scrivibile solo da Custos/init: la suite (che ha
 //!     `RIGHTS_ALL`) non lo scrive.
-//!  7. Solo con `net=1` (run di rete): `net` e `siit` negano l'endpoint
+//!  6. Solo con `net=1` (run di rete): `net` e `siit` negano l'endpoint
 //!     diretto a `Untrusted` (gate di classe) e il **broker** lo serve.
 
 use super::*;
@@ -34,13 +36,14 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
-/// Login di root e token di sessione (Custos lo richiede per scrivere).
-fn login(chan: u64, user: &str, pwd: &str) -> Option<u64> {
+/// Login: se le credenziali tornano, Identis lega il **pid chiamante**
+/// all'utente (S3.3c: nessun token). `true` = ora sono `user`.
+fn login(chan: u64, user: &str, pwd: &str) -> bool {
     let hash = blake2s(pwd.as_bytes());
     let payload = identis::build_verify(user, &hash);
     match identis::send_payload_retry(chan, civis::IDENTIS_VERIFY, &payload, RETRIES) {
-        Ok(r) if r.ok() => Some(r.w1),
-        _ => None,
+        Ok(r) => r.ok(),
+        Err(_) => false,
     }
 }
 
@@ -62,10 +65,10 @@ pub fn t_consent() -> bool {
             return false;
         }
     };
-    let Some(root_token) = login(identis_chan, "root", "root") else {
+    if !login(identis_chan, "root", "root") {
         println!("[usertests] t70: login root fallito");
         return false;
-    };
+    }
 
     // L'immagine di prova e' `netecho` (seedato in `/bin`, grant 7/8 dal
     // build): cosi' la sola variabile tra i casi e' il consenso.
@@ -85,16 +88,11 @@ pub fn t_consent() -> bool {
         pass = false;
     }
 
-    // (2) Consenso senza token: rifiutato. Il consenso e' una decisione
-    // dell'utente, non un'operazione anonima.
-    if custos::consent_write(custos_chan, 0xDEAD_BEEF, "root", id.lo, id.hi, true) {
-        println!("[usertests] t70: consenso scritto senza token valido (atteso rifiuto)");
-        pass = false;
-    }
-
-    // (3) Consenso con token: applicato e persistito.
-    if !custos::consent_write(custos_chan, root_token, "root", id.lo, id.hi, true) {
-        println!("[usertests] t70: consenso con token rifiutato (atteso OK)");
+    // (2) Consenso con identita' attestata: applicato e persistito. La
+    // negazione "senza identita'" vive in `identistest` (processo nuovo,
+    // nessun VERIFY): qui il pid ha gia' un'identita' da t69.
+    if !custos::consent_write(custos_chan, "root", id.lo, id.hi, true) {
+        println!("[usertests] t70: consenso con identita' rifiutato (atteso OK)");
         pass = false;
     }
     if !custos::authorize(custos_chan, id.lo, id.hi, custos::CAP_NET_BIND, 7) {
@@ -128,7 +126,7 @@ pub fn t_consent() -> bool {
     }
 
     // (4) Revoca: torna negato.
-    if !custos::consent_write(custos_chan, root_token, "root", id.lo, id.hi, false) {
+    if !custos::consent_write(custos_chan, "root", id.lo, id.hi, false) {
         println!("[usertests] t70: revoca rifiutata (atteso OK)");
         pass = false;
     }
@@ -140,7 +138,7 @@ pub fn t_consent() -> bool {
     // (5) Il consenso non crea privilegio: un'identita' senza grant admin
     // resta negata anche dopo il consenso.
     let other = civis::ImageId::new(0x0123_4567_89AB_CDEF, 0xFEDC_BA98_7654_3210);
-    if !custos::consent_write(custos_chan, root_token, "root", other.lo, other.hi, true) {
+    if !custos::consent_write(custos_chan, "root", other.lo, other.hi, true) {
         println!("[usertests] t70: consenso su identita' senza grant rifiutato (atteso OK)");
         pass = false;
     }
@@ -148,7 +146,7 @@ pub fn t_consent() -> bool {
         println!("[usertests] t70: consenso ha creato privilegio senza grant admin");
         pass = false;
     }
-    let _ = custos::consent_write(custos_chan, root_token, "root", other.lo, other.hi, false);
+    let _ = custos::consent_write(custos_chan, "root", other.lo, other.hi, false);
 
     // (6) `usr:consent` e' un dato di Custos: la suite (ALL) non lo scrive.
     match civis::obj_put(b"usr", b"consent", b"tampered\n") {

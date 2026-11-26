@@ -11,10 +11,10 @@ ricompilare se stesso. Ordina le priorita' (storage veloce prima, servizi
 fuori dal kernel poi, personalita' per software reale dopo) senza pianificare
 nulla da solo.
 
-## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b + D8c1 + D8c2 + D8d + D8e + D8f + S3.4)
+## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b + D8c1 + D8c2 + D8d + D8e + D8f + S3.3c + S3.4)
 
 Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` +
-`[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 70/70` +
+`[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 72/72` +
 `[threadtest] PASS 12/12` + `[shell-native] PASS 33/33` (la shell nativa gira
 nella stessa QEMU: login via `sendkey`, `--attach-pid`), zero FAIL/PANIC/FAULT;
 `./run-tests.sh` stampa `[gate] PASS/FAIL` ed esce `!= 0`. La suite FAT32 e'
@@ -550,16 +550,21 @@ Voci con scope e vittoria dichiarati (non date).
       collisione, la root mai, la policy esplicita vince), (c) la
       **discovery by-label** (USB: una chiavetta con la sua etichetta). E'
       il prerequisito del supporto USB.
-- [ ] **S3.3 — Hardening utenti** (debiti dichiarati in ADR-0058): (a)
+- [x] **S3.3 — Hardening utenti** (debiti dichiarati in ADR-0058): (a)
       **proteggere il bucket `identis:config`** in cardo (path protetto ->
       solo il canale del servizio Identis: i channel id sono simmetrici,
       basta `service_lookup(Service::Identis)` + confronto `m.channel`);
       (b) ACL per utente sul bucket home `usr:<nome>` (grant runtime
       Identis -> cardo: "il canale Y e' la sessione di alice"); (c) token
-      bearer -> **capability per-canale** (il token non viaggia piu' in env);
-      (d) bucket home `usr:<nome>` (layout: chiave file vs dir emergente);
-      (e) cifratura del bucket utente (rinviata). Vittoria: nessun processo
-      fuori da Identis puo' aprire o scrivere le credenziali.
+      bearer -> **attestazione per pid/sessione** (ADR-0094, **fatta**):
+      `SESS_AUTH_SET` 0xAF / `SESS_AUTH` 0xB7 (solo `System`), `0xAD`/`0xAE`
+      ritirati; Identis lega il pid a un `VERIFY` riuscito e risolve per
+      sessione (`SESS_AUTH` + ancestry), Custos risolve i ruoli via
+      `IDENTIS_WHOAMI {w1 = pid}`; nessun segreto viaggia; (d) bucket home
+      `usr:<nome>` (layout: chiave file vs dir emergente); (e) cifratura del
+      bucket utente (rinviata). Restano aperte (b), (d), (e) e `su`/cambio
+      utente; Vittoria di (c): nessuna identita' copiabile, il login/DE
+      propagano un **nome** e la morte loro (o della sessione) la porta via.
 - [ ] **ArcaFS/object-store** (dopo T0/Fase 49): filesystem avanzato stile
       btrfs/zfs — snapshot, niente partizionamento, layout adattivo per tipo
       di device (hdd/ssd/emmc), raid avanzato, monitoring (SMART), COW su

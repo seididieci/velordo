@@ -8,12 +8,12 @@
 //! Output sulla **sessione di terminale** (`civis::sess::out`, D8c2: il
 //! mirror seriale lo fa il server), input dalla sessione (D8d).
 //!
-//! **D8f — il login e' il capo-sessione**: dopo l'autenticazione il token va
-//! nel **server** (`SESS_TOKEN_SET`, sulla sessione 0) e il login spawma il
+//! **D8f — il login e' il capo-sessione**: dopo l'autenticazione il nome va
+//! nel **server** (`SESS_AUTH_SET`, sulla sessione 0) e il login spawma il
 //! DE (`impluvium`) dentro la sessione, con il solo `USER` in ambiente. Resta
-//! vivo in `recv` finche' il DE non muore (= fine sessione), poi azzera il
-//! token della 0 ed esce 0: `init` (politica `LoginGate`) riapre subito il
-//! prompt. Non e' piu' un lanciatore one-shot e il token non viaggia in env.
+//! vivo in `recv` finche' il DE non muore (= fine sessione), poi azzera
+//! l'identita' della 0 ed esce 0: `init` (politica `LoginGate`) riapre subito
+//! il prompt. Non e' piu' un lanciatore one-shot e il token non viaggia in env.
 //!
 //! Il framing del protocollo e' condiviso (`libs/identis-proto`): qui c'e'
 //! solo il lato client.
@@ -126,24 +126,25 @@ fn real_main(_sp: u64) -> ! {
 
         match proto::send_payload_retry(chan, civis::IDENTIS_VERIFY, &payload, RETRIES) {
             Ok(r) if r.ok() => {
-                // Il token vive nel server (D8f): niente statico, niente env.
-                let token = r.w1;
+                // Il nome utente vive nel server (S3.3c): niente bearer, ma il
+                // nome serve anche al DE (prompt). Lo salva qui e lo passa in
+                // ambiente (un nome, non un segreto).
+                let name_bytes = name.as_bytes();
                 unsafe {
-                    // Salva il nome utente per il DE/shell (prompt Nerd Font).
-                    let bytes = name.as_bytes();
-                    LOGIN_USER_LEN = bytes.len().min(31) as u8;
-                    for i in 0..LOGIN_USER_LEN as usize {
-                        LOGIN_USER[i] = bytes[i];
+                    let n = name_bytes.len().min(31);
+                    LOGIN_USER_LEN = n as u8;
+                    for i in 0..n {
+                        LOGIN_USER[i] = name_bytes[i];
                     }
                 }
                 console_write(b"[login] SUCCESS\n");
                 // D8f — l'identita' e' della **sessione**, non dell'ambiente:
-                // il token va nel server, sulla sessione a cui il login e'
+                // il nome va nel server, sulla sessione a cui il login e'
                 // attaccato (la 0). Da qui in poi `users`/`create-user` lo
-                // leggono con `SESS_TOKEN` (attestazione), non da una
+                // leggono con `SESS_AUTH` (attestazione), non da una
                 // variabile d'ambiente che chiunque puo' leggere o perdere.
-                if civis::sess::set_token(token).is_err() {
-                    console_write(b"[login] ERRORE: token di sessione non registrato\n");
+                if civis::sess::set_auth(name_bytes).is_err() {
+                    console_write(b"[login] ERRORE: identita' di sessione non registrata\n");
                 }
                 // Il login e' il **capo-sessione**: lancia il DE dentro la
                 // sessione e resta vivo. Non avvia piu' la shell: e' il DE a
@@ -151,9 +152,9 @@ fn real_main(_sp: u64) -> ! {
                 match spawn_de() {
                     Some((_chan, pid)) => {
                         wait_session_end(pid);
-                        // Fine sessione: il token muore con lei (niente
+                        // Fine sessione: l'identita' muore con lei (niente
                         // identita' stantia alla prossima autenticazione).
-                        let _ = civis::sess::set_token(0);
+                        let _ = civis::sess::set_auth(b"");
                         console_write(b"[login] Sessione conclusa\n");
                         civis::exit(0);
                     }

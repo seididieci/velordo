@@ -366,12 +366,12 @@ nuova):
 
 | Tag | Nome | Semantica |
 |-----|------|-----------|
-| 0x73 | `IDENTIS_WHOAMI` | `w1` = token → `w0` = codice, `w1` = maschera ruoli **live** |
+| 0x73 | `IDENTIS_WHOAMI` | `w1` = pid (`0` = il chiamante; un altro pid solo `System`) → `w0` = codice, `w1` = maschera ruoli **live** |
 | 0x80 | `CUSTOS_QUERY` | identità + capability → `w0` = OK, `w1` = `1/0` (solo `sys:caps`) |
-| 0x81 | `CUSTOS_GRANT` | token + identità + capability + decisione → `w0` = codice |
+| 0x81 | `CUSTOS_GRANT` | identità + capability + decisione → `w0` = codice (il chiamante è attestato dal kernel) |
 | 0x82 | `CUSTOS_STATUS` | diagnostica → `w1` = numero di voci in `sys:caps` |
 | 0x83 | `CUSTOS_AUTHORIZE` | identità + capability → `w0` = OK, `w1` = `1/0`: **grant admin ∩ consenso** |
-| 0x84 | `CUSTOS_CONSENT` | op READ/WRITE + token + utente + identità (+ decisione) |
+| 0x84 | `CUSTOS_CONSENT` | op READ/WRITE + utente + identità (+ decisione); il chiamante è attestato dal kernel (ADR-0094) |
 
 `net` usa `CUSTOS_QUERY` per il bind delle porte note (cache per identità +
 porta, fail-closed: errore IPC = negato). `Custos` è l'unico writer di
@@ -450,17 +450,20 @@ stdout: sessione attestata → default → seriale).
 | 0xAC | `SESS_INPUT` | `w0` = len (byte in OUT) → accoda nel **buffer di input** della sessione attaccata (tasti, ≠ `SESS_WRITE` che è testo) e manda l'hint al lettore |
 | 0xA9 | `SESS_TEST_INPUT` | `w0` = len (byte in OUT) — **solo test**: inietta input come la tastiera (stesso percorso + hint) |
 | 0xAA | `SESS_INPUT_EVENT` | console → **lettore dichiarato**, fire-and-forget: c'è input nella coda. Hint coalescente (E2): la coda è la verità |
-| 0xAD | `SESS_TOKEN_SET` | `w0` = token → lo scrive sulla sessione **attaccata** al canale (implicita, come `SESS_RESIZE`); solo `System`. L'identità della sessione vive nel server (D8f) |
-| 0xAE | `SESS_TOKEN` | → `w0` = token della sessione **attaccata** (`0` = anonima): l'attachment è la prova, quindi una tile non legge il token di un'altra (D8f) |
+| 0xAF | `SESS_AUTH_SET` | `w0` = len del nome (byte in OUT) → scrive l'**utente autenticato** sulla sessione **attaccata** al canale (implicita, come `SESS_RESIZE`); `len = 0` = deautentica; solo `System` (S3.3c, ADR-0094) |
+| 0xB7 | `SESS_AUTH` | `w0` = pid (`0` = la sessione attaccata) → `w0` = 1/0 (autenticata), `w1` = len del nome nella meta' IN; solo `System`. Il kernel dà il pid, il server dice sessione e utente (S3.3c, ADR-0094) |
 
 Nessuna syscall nuova e nessun `Service` nuovo (`SERVICE_COUNT` resta 20). La
 sessione di un processo si trova per **attestazione del pid**, mai con un
 handle passato allo spawn o un'ambiente da fidarsi; `EXIT_NOTIFY` purga
 binding, sessioni di cui il morto era owner (mai la 0) **e le mailbox dei suoi
-attachment**. Il **token di sessione** sta nel server (D8f): `SESS_TOKEN_SET`
-sulla sessione attaccata (solo `System`) e `SESS_TOKEN` in lettura — non è più
-un bearer in `VELORDO_SESSION` (l'unica variabile d'ambiente che resta è `USER`,
-un nome). Il **mirror seriale** della sessione in focus è del server
+attachment**. L'**identità di sessione** sta nel server (ADR-0094): il nome
+dell'utente autenticato lo scrive chi ne ha titolo (`SESS_AUTH_SET`, solo
+`System`: il login sulla 0, il DE sulle tile nuove) e lo risolve chi deve
+attribuire una richiesta (`SESS_AUTH`, solo `System`, per pid). **Nessun token
+e nessun segreto viaggia**: gli identificatori `0xAD`/`0xAE` (`SESS_TOKEN_SET`/
+`SESS_TOKEN`) sono **ritirati** e i numeri non si riusano; l'unica variabile
+d'ambiente che resta è `USER` (un nome, per il prompt). Il **mirror seriale** della sessione in focus è del server
 (formato nudo, `MIRROR_SESSION_MAX` 1 MiB per sessione come rete di sicurezza;
 il budget per comando resta del client che sa cos'è un comando).
 

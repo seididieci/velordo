@@ -121,3 +121,4 @@
 - [ADR-0091: I tasti sono della sessione — input come capability (D8d)](./adr/0091-input-sessione-come-capability.md)
 - [ADR-0092: Tile nel server e `impluvium` — il DE esiste (D8e)](./adr/0092-tile-e-impluvium.md)
 - [ADR-0093: Diritti ereditari all'avvio — il figlio non ha più diritti del padre (S3.4)](./adr/0093-diritti-ereditari.md)
+- [ADR-0094: Identità di sessione per attestazione — niente bearer token (S3.3c)](./adr/0094-identita-sessione-attestata.md)

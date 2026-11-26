@@ -821,17 +821,19 @@ pub const SESS_ATTACH: u64 = 0xAB;
 /// sessione attaccata (tasti, non testo: ≠ `SESS_WRITE`) e manda l'hint al
 /// lettore dichiarato. D8e: la tastiera passa al DE.
 pub const SESS_INPUT: u64 = 0xAC;
-/// `SESS_TOKEN_SET {token}` -> 0 / `!0` (D8f): l'**identita' della sessione**
-/// vive nel server, non in una variabile d'ambiente. Scrive il token sulla
-/// sessione **attaccata** al canale (implicita, come `SESS_RESIZE`); solo
-/// immagini >= `System` (il login sulla 0, il DE sulla tile dove propaga).
-/// `0` = sessione anonima. La morte della sessione porta via il token.
-pub const SESS_TOKEN_SET: u64 = 0xAD;
-/// `SESS_TOKEN` -> `w0` = token / `!0` (D8f): il token della sessione
-/// **attaccata** al canale. L'attachment e' la prova (lo stabilisce
-/// `SESS_WHOAMI`, che risale i padri): un processo di una tile non legge il
-/// token di un'altra. `0` = sessione anonima.
-pub const SESS_TOKEN: u64 = 0xAE;
+// 0xAD e 0xAE sono **ritirati** (erano `SESS_TOKEN_SET`/`SESS_TOKEN`, D8f):
+// l'identita' non e' piu' un valore che viaggia. I numeri non si riusano.
+/// `SESS_AUTH_SET {len}` -> 0 / `!0` (S3.3c): scrive l'**utente autenticato**
+/// sulla sessione **attaccata** al canale (implicita, come `SESS_RESIZE`); il
+/// nome (max 32 byte) e' nella meta' OUT della mailbox. Solo immagini >=
+/// `System` (il login sulla 0, il DE sulle tile nuove). `len = 0` =
+/// deautentica (fine sessione). La morte della sessione porta via l'utente.
+pub const SESS_AUTH_SET: u64 = 0xAF;
+/// `SESS_AUTH {pid}` -> `w0` = 1/0 (autenticata), `w1` = len del nome nella
+/// meta' IN della mailbox. Solo immagini >= `System`: il kernel da' il pid, il
+/// server dice la sessione e l'utente. `pid = 0` = la sessione **attaccata**
+/// al canale del chiamante (il DE legge la 0 prima di propagare).
+pub const SESS_AUTH: u64 = 0xB7;
 
 // ── Tile del DE (D8e, ADR-0092) ─────────────────────────────────────
 // La console disegna le **sessioni** in rettangoli (tile). Il layout lo decide
@@ -968,14 +970,18 @@ pub const EXIT_NOTIFY: u64 = 0x7C;
 /// Il payload di `VERIFY` e `ADD_USER` e' **chunked** (framing condiviso in
 /// `libs/identis-proto`): header `w0=total_len`/`w1=0`, chunk
 /// `w0=offset`/`w1=4 byte`, EOF `w0=0xFFFFFFFF`. Il reply porta il codice in
-/// `w0` (vedi `identis_proto::R_*`); per `VERIFY` ok, `w1` = **token di
-/// sessione** (bearer, TTL 300 s).
-pub const IDENTIS_VERIFY: u64 = 0x70;   // verify credenziali -> w0=0 OK (w1=token) / 1 FAIL
-pub const IDENTIS_ADD_USER: u64 = 0x71; // crea utente (token root nel payload) -> w0=0 OK / 2..8 errore
-pub const IDENTIS_LIST: u64 = 0x72;     // w1=token -> w1=numero utenti (elenco dei nomi: multi-frame, Fase 3.2)
-/// `w1` = token di sessione -> `w0` = codice, `w1` = maschera dei ruoli
-/// correnti dell'utente (ADR-0080, fase 5). I ruoli si leggono **live** da
-/// `identis:config`: cambiarli ha effetto senza rifare il login.
+/// `w0` (vedi `identis_proto::R_*`).
+///
+/// S3.3c: nessun token. `VERIFY` riuscita **lega il pid chiamante** all'utente
+/// (attestazione del kernel: il pid non viaggia); le altre operazioni
+/// risolvono il chiamante per pid, o la sua sessione (servizi `System`).
+pub const IDENTIS_VERIFY: u64 = 0x70;   // verify credenziali -> w0=0 OK / 1 FAIL (lega il pid)
+pub const IDENTIS_ADD_USER: u64 = 0x71; // crea utente (chiamante attestato) -> w0=0 OK / 2..8 errore
+pub const IDENTIS_LIST: u64 = 0x72;     // w1=0 -> w1=numero utenti (chiamante attestato)
+/// `w1` = pid (0 = il chiamante; un altro pid solo `System`) -> `w0` = codice,
+/// `w1` = maschera dei ruoli correnti dell'utente (ADR-0080, fase 5). I ruoli
+/// si leggono **live** da `identis:config`: cambiarli ha effetto senza rifare
+/// il login.
 pub const IDENTIS_WHOAMI: u64 = 0x73;
 
 // ── Protocollo Custos (ADR-0080, fase 5) ──────────────────────────────
@@ -983,7 +989,7 @@ pub const IDENTIS_WHOAMI: u64 = 0x73;
 // (`libs/custos-proto`), `STATUS` e' un frame singolo. Nessuna syscall nuova:
 // il kernel non conosce le capability, le decide un servizio.
 pub const CUSTOS_QUERY: u64 = 0x80;  // query capability (payload) -> w0=0 OK, w1=1/0
-pub const CUSTOS_GRANT: u64 = 0x81;  // grant/revoca (payload, token) -> w0=codice
+pub const CUSTOS_GRANT: u64 = 0x81;  // grant/revoca (payload, chiamante attestato) -> w0=codice
 pub const CUSTOS_STATUS: u64 = 0x82; // diagnostica -> w0=0 OK, w1=numero grant
 pub const CUSTOS_AUTHORIZE: u64 = 0x83; // autorizza (identita' + consenso) -> w0=0 OK, w1=1/0
 pub const CUSTOS_CONSENT: u64 = 0x84;   // scrivi/legge consenso usr:<nome>:consent -> w0=codice

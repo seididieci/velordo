@@ -2,11 +2,10 @@
 //! Identis via IPC di accodare l'hash della password nel bucket
 //! `identis:config`.
 //!
-//! - Il **token di sessione** arriva dalla **sessione** (`SESS_TOKEN`, D8f):
-//!   e' la capability concessa dal login, custodita dal server e risolta per
-//!   attestazione del pid (mai in una variabile d'ambiente). Senza, il
-//!   programma non puo' fare nulla (Identis rifiuta comunque, ma falliamo
-//!   subito e pulito).
+//! - L'**identita'** e' quella del chiamante, attestata dal kernel: Identis
+//!   risolve il pid (credenziale locale o sessione autenticata). Nessun
+//!   token viaggia: senza identita' Identis risponde `R_NO_IDENTITY` e il
+//!   programma lo riporta.
 //! - Il **nome utente** arriva da argv (`create-user alice`) o e' chiesto
 //!   alla tastiera.
 //! - I **ruoli** (ADR-0080, fase 5) arrivano da argv[2] come
@@ -42,18 +41,8 @@ fn console_write(data: &[u8]) {
     }
 }
 
-/// Entry: token di sessione, nome utente, password, richiesta a Identis.
+/// Entry: nome utente, password, richiesta a Identis (identita' attestata).
 fn real_main(sp: u64) -> ! {
-    // Console per l'output.
-    // Token di sessione: senza, niente da fare.
-    let token = match civis::sess::token() {
-        Ok(t) if t != 0 => t,
-        _ => {
-            console_write(b"[create-user] ERRORE: nessuna sessione attiva (login richiesto)\n");
-            civis::exit(1);
-        }
-    };
-
     // Nome utente: da argv, altrimenti chiesto.
     let name = match argv_name(sp) {
         Some(n) => n,
@@ -99,7 +88,7 @@ fn real_main(sp: u64) -> ! {
 
     // L'hash si calcola qui: la password non lascia mai il processo.
     let hash = blake2s(pwd.as_bytes());
-    let payload = proto::build_add_user(token, &name, &hash, roles);
+    let payload = proto::build_add_user(&name, &hash, roles);
 
     let chan = match resolve_identis() {
         Ok(c) => c,

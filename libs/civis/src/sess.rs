@@ -21,11 +21,11 @@ use core::ptr;
 
 use crate::sys::{munmap, shm_map};
 use crate::{
-    send, Service, SESS_ATTACH, SESS_ATTACH_DEFAULT, SESS_BIND, SESS_CLOSE, SESS_CREATE,
-    SESS_DUMP, SESS_ECHO, SESS_FOCUS, SESS_INFO, SESS_INPUT, SESS_READ, SESS_RESIZE, SESS_STATE,
-    SESS_STATS, SESS_TEST_INPUT, SESS_TOKEN, SESS_TOKEN_SET, SESS_WHOAMI, SESS_WRITE,
+    send, Service, SESS_ATTACH, SESS_ATTACH_DEFAULT, SESS_AUTH, SESS_AUTH_SET, SESS_BIND,
+    SESS_CLOSE, SESS_CREATE, SESS_DUMP, SESS_ECHO, SESS_FOCUS, SESS_INFO, SESS_INPUT, SESS_READ,
+    SESS_RESIZE, SESS_STATE, SESS_STATS, SESS_TEST_INPUT, SESS_WHOAMI, SESS_WRITE,
 };
-use sess_proto::{IN_OFF, MAILBOX_BYTES, MAX_CHUNK, OUT_OFF};
+use sess_proto::{AUTH_NAME_MAX, IN_OFF, MAILBOX_BYTES, MAX_CHUNK, OUT_OFF};
 
 /// Esito di un'operazione sulla sessione.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +52,31 @@ pub struct Info {
     pub echo: bool,
     /// La sessione e' quella disegnata (in focus).
     pub focus: bool,
+}
+
+/// L'**utente autenticato** di una sessione (S3.3c). Non e' un segreto e non
+/// viaggia: e' un fatto che il server conserva e risolve per attestazione.
+#[derive(Clone, Copy)]
+pub struct Auth {
+    name: [u8; AUTH_NAME_MAX],
+    len: usize,
+}
+
+impl Auth {
+    /// Nome utente (vuoto = sessione anonima).
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.name[..self.len]
+    }
+
+    /// Nome utente come `str` (il server valida UTF-8).
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(self.as_bytes()).unwrap_or("")
+    }
+
+    /// `true` se c'e' un'identita'.
+    pub fn is_authenticated(&self) -> bool {
+        self.len != 0
+    }
 }
 
 /// La capability verso una sessione: id stabile + mailbox mappata in RW.
@@ -185,24 +210,27 @@ impl Session {
         Ok(())
     }
 
-    /// Il **token della sessione** (D8f): l'identita' vive nel server, non in
-    /// una variabile d'ambiente. La richiesta viaggia sulla sessione
-    /// **attaccata** al canale (l'id non si passa, come `resize`/`echo`):
-    /// l'attachment e' la prova, quindi un processo di una tile non legge il
-    /// token di un'altra. `0` = sessione anonima.
-    pub fn token(&self) -> Result<u64, SessError> {
-        let r = send(service_chan()?, SESS_TOKEN, 0, 0).map_err(|_| SessError::Ipc)?;
-        if r.w0 == !0u64 {
-            return Err(SessError::NotAttached);
-        }
-        Ok(r.w0)
+    /// L'**utente autenticato** della sessione (S3.3c): si chiede al server
+    /// sulla sessione **attaccata** al canale (l'id non si passa, come
+    /// `resize`/`echo`). Solo immagini >= `System`: l'identita' non e' un
+    /// valore che un programma qualsiasi puo' leggere da un'altra sessione.
+    pub fn auth(&self) -> Result<Auth, SessError> {
+        auth_request(self.va, 0)
     }
 
-    /// Scrive il token sulla sessione attaccata (solo immagini >= `System`:
-    /// il login sulla 0, il DE quando propaga a una tile nuova). `0` =
-    /// sessione anonima. La morte della sessione porta via il token.
-    pub fn set_token(&self, token: u64) -> Result<(), SessError> {
-        let r = send(service_chan()?, SESS_TOKEN_SET, token, 0).map_err(|_| SessError::Ipc)?;
+    /// Scrive l'**utente autenticato** sulla sessione attaccata (solo immagini
+    /// >= `System`: il login sulla 0, il DE quando propaga a una tile nuova).
+    /// `user` vuoto = deautentica (fine sessione). La morte di chi l'ha
+    /// stabilita porta via l'identita'.
+    pub fn set_auth(&self, user: &[u8]) -> Result<(), SessError> {
+        if user.len() > AUTH_NAME_MAX {
+            return Err(SessError::Denied);
+        }
+        unsafe {
+            ptr::copy_nonoverlapping(user.as_ptr(), (self.va + OUT_OFF) as *mut u8, user.len());
+        }
+        let r = send(service_chan()?, SESS_AUTH_SET, user.len() as u64, 0)
+            .map_err(|_| SessError::Ipc)?;
         if r.w0 == !0u64 {
             return Err(SessError::Denied);
         }
@@ -426,19 +454,51 @@ fn out_impl(bytes: &[u8], screen_only: bool) -> bool {
     s.write_with(bytes, screen_only).is_ok()
 }
 
-/// Il **token della sessione del processo** (D8f): l'identita' sta nel server,
-/// non in una variabile d'ambiente. `Ok(0)` = sessione anonima (nessun login),
-/// `Err(NotAttached)` = nessuna sessione raggiungibile. E' il rimpiazzo del
-/// bearer `VELORDO_SESSION` per `interpres`/`users`/`create-user`.
-pub fn token() -> Result<u64, SessError> {
-    current().ok_or(SessError::NotAttached)?.token()
+/// L'**utente autenticato della sessione del processo** (S3.3c). Solo immagini
+/// >= `System`: l'identita' non si legge da un'altra sessione.
+pub fn auth() -> Result<Auth, SessError> {
+    current().ok_or(SessError::NotAttached)?.auth()
 }
 
-/// Scrive il token sulla **sessione del processo** (il login, sulla 0). Il DE
-/// che propaga a una tile nuova usa invece [`Session::set_token`] sulla
-/// sessione a cui si e' appena attaccato.
-pub fn set_token(token: u64) -> Result<(), SessError> {
-    current().ok_or(SessError::NotAttached)?.set_token(token)
+/// Scrive l'**utente autenticato** sulla **sessione del processo** (il login,
+/// sulla 0). Il DE che propaga a una tile nuova usa invece
+/// [`Session::set_auth`] sulla sessione a cui si e' appena attaccato.
+pub fn set_auth(user: &[u8]) -> Result<(), SessError> {
+    current().ok_or(SessError::NotAttached)?.set_auth(user)
+}
+
+/// L'utente autenticato della sessione del processo `pid` (S3.3c): il kernel
+/// da' il pid, il server risale i padri (attestazione) e dice la sessione.
+/// Serve ai servizi `System` che devono attribuire una richiesta (Identis).
+/// La mailbox e' quella del canale del chiamante (`current`, creata al primo
+/// uso); una cache stantia si butta e si riprova una volta.
+pub fn auth_of(pid: i64) -> Result<Auth, SessError> {
+    if let Some(s) = current() {
+        if let Ok(a) = auth_request(s.va, pid) {
+            return Ok(a);
+        }
+        forget_current();
+    }
+    let s = current().ok_or(SessError::NotAttached)?;
+    auth_request(s.va, pid)
+}
+
+/// `SESS_AUTH {pid}`: leggermente diversa dalle altre, perche' la risposta
+/// **non** e' un errore quando la sessione e' anonima (`w0 = 0`, `w1 = len`).
+fn auth_request(va: usize, pid: i64) -> Result<Auth, SessError> {
+    let r = send(service_chan()?, SESS_AUTH, pid as u64, 0).map_err(|_| SessError::Ipc)?;
+    if r.w0 == !0u64 {
+        return Err(SessError::Denied);
+    }
+    let mut name = [0u8; AUTH_NAME_MAX];
+    if r.w0 == 0 {
+        return Ok(Auth { name, len: 0 });
+    }
+    let len = (r.w1 as usize).min(AUTH_NAME_MAX);
+    unsafe {
+        ptr::copy_nonoverlapping((va + IN_OFF) as *const u8, name.as_mut_ptr(), len);
+    }
+    Ok(Auth { name, len })
 }
 
 /// Risolve il canale del servizio `console`.

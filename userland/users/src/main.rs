@@ -1,8 +1,8 @@
 //! users — elenca gli utenti registrati (Fase 1, ADR-0055).
 //!
 //! Programma esterno estratto dalla shell nativa. Output testuale sulla
-//! sessione di terminale. Richiede una sessione attiva: il token lo legge dal
-//! **server** (D8f, `SESS_TOKEN` + ancestry), non dall'ambiente.
+//! sessione di terminale. Richiede un'identita' attestata: il **server** la
+//! risolve per pid (`SESS_AUTH` + ancestry, S3.3c), non dall'ambiente.
 
 #![no_std]
 #![no_main]
@@ -37,7 +37,8 @@ fn resolve_identis() -> Result<u64, &'static str> {
 }
 
 /// Modalita' testuale: output su console (comportamento originale).
-fn run_text_mode(token: u64) {
+/// Nessun token: Identis risolve il chiamante per pid.
+fn run_text_mode() {
     let chan = match resolve_identis() {
         Ok(c) => c,
         Err(_) => {
@@ -46,8 +47,9 @@ fn run_text_mode(token: u64) {
         }
     };
 
-    // LIST: w0 = 0 (nessun payload), w1 = token. Reply: w0 = codice, w1 = conteggio.
-    match civis::ipc::send(chan, civis::IDENTIS_LIST, 0, token) {
+    // LIST: w0 = 0 (nessun payload), w1 = 0 (il chiamante). Reply: w0 =
+    // codice, w1 = conteggio. L'identita' la risolve Identis per pid.
+    match civis::ipc::send(chan, civis::IDENTIS_LIST, 0, 0) {
         Ok(r) if r.w0 == proto::R_OK => {
             let n = r.w1 as usize;
             console_write(b"Utenti registrati (");
@@ -96,8 +98,8 @@ fn run_text_mode(token: u64) {
                 }
             }
         }
-        Ok(r) if r.w0 == proto::R_TOKEN_INVALID => {
-            console_write(b"ERRORE: token di sessione scaduto\n");
+        Ok(r) if r.w0 == proto::R_NO_IDENTITY => {
+            console_write(b"ERRORE: nessuna sessione attiva (login richiesto)\n");
         }
         Ok(r) => {
             console_write(b"ERRORE LIST: ");
@@ -110,18 +112,10 @@ fn run_text_mode(token: u64) {
     }
 }
 
-/// Entry: legge il token dalla **sessione** (D8f: vive nel server, risolto
-/// per attestazione del pid) e elenca gli utenti.
+/// Entry: elenca gli utenti. L'identita' e' attestata dal kernel (S3.3c:
+/// nessun token): Identis risolve il chiamante per pid.
 fn real_main(_sp: u64) -> ! {
-    let token = match civis::sess::token() {
-        Ok(t) if t != 0 => t,
-        _ => {
-            console_write(b"ERRORE: nessuna sessione attiva (login richiesto)\n");
-            civis::exit(1);
-        }
-    };
-
-    run_text_mode(token);
+    run_text_mode();
     civis::exit(0);
 }
 

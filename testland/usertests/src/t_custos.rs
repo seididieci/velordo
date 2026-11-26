@@ -33,37 +33,39 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
-/// Verifica credenziali e ritorna il token di sessione.
-fn login(chan: u64, user: &str, pwd: &str) -> Option<u64> {
+/// Verifica credenziali: se tornano giuste Identis lega il **pid chiamante**
+/// all'utente (S3.3c: nessun token). `true` = ora sono `user`.
+fn login(chan: u64, user: &str, pwd: &str) -> bool {
     let hash = blake2s(pwd.as_bytes());
     let payload = identis::build_verify(user, &hash);
     match identis::send_payload_retry(chan, civis::IDENTIS_VERIFY, &payload, RETRIES) {
-        Ok(r) if r.ok() => Some(r.w1),
-        _ => None,
+        Ok(r) => r.ok(),
+        Err(_) => false,
     }
 }
 
-/// Ruoli correnti di una sessione (`None` se token non valido).
-fn whoami(chan: u64, token: u64) -> Option<u64> {
-    match civis::send(chan, civis::IDENTIS_WHOAMI, 0, token) {
+/// Ruoli correnti dell'identita' del chiamante (`w1 = 0`: il mio pid).
+fn whoami(chan: u64) -> Option<u64> {
+    match civis::send(chan, civis::IDENTIS_WHOAMI, 0, 0) {
         Ok(r) if r.w0 == identis::R_OK => Some(r.w1),
         _ => None,
     }
 }
 
-/// Crea un utente con i ruoli dati; `true` se Identis accetta.
-fn add_user(chan: u64, token: u64, name: &str, pwd: &str, roles: u64) -> bool {
+/// Crea un utente con i ruoli dati; `true` se Identis accetta (l'autorita' e'
+/// quella dell'identita' attestata del chiamante).
+fn add_user(chan: u64, name: &str, pwd: &str, roles: u64) -> bool {
     let hash = blake2s(pwd.as_bytes());
-    let payload = identis::build_add_user(token, name, &hash, roles);
+    let payload = identis::build_add_user(name, &hash, roles);
     match identis::send_payload_retry(chan, civis::IDENTIS_ADD_USER, &payload, RETRIES) {
         Ok(r) => r.ok(),
         Err(_) => false,
     }
 }
 
-/// `GRANT`/revoca via Custos.
-fn grant(chan: u64, token: u64, kind: u64, arg: u64, decision: bool) -> u64 {
-    let payload = custos::build_grant(token, FAKE_LO, FAKE_HI, kind, arg, decision);
+/// `GRANT`/revoca via Custos (l'identita' e' il mio pid attestato).
+fn grant(chan: u64, kind: u64, arg: u64, decision: bool) -> u64 {
+    let payload = custos::build_grant(FAKE_LO, FAKE_HI, kind, arg, decision);
     match custos::send_payload_retry(chan, civis::CUSTOS_GRANT, &payload, RETRIES) {
         Ok(r) => r.w0,
         Err(_) => u64::MAX,
@@ -119,12 +121,12 @@ pub fn t_custos() -> bool {
         pass = false;
     }
 
-    // (3) Sessione root + ruoli live.
-    let Some(root_token) = login(identis_chan, "root", "root") else {
+    // (3) Identita' root + ruoli live.
+    if !login(identis_chan, "root", "root") {
         println!("[usertests] t69: login root fallito");
         return false;
-    };
-    match whoami(identis_chan, root_token) {
+    }
+    match whoami(identis_chan) {
         Some(m) if m & identis::ROLE_ROOT != 0 => {}
         other => {
             println!("[usertests] t69: WHOAMI root {:?} (atteso bit root)", other);
@@ -134,36 +136,36 @@ pub fn t_custos() -> bool {
 
     // (4) Ruoli multipli: net-admin + user.
     let admin_roles = identis::ROLE_NET_ADMIN | identis::ROLE_USER;
-    if !add_user(identis_chan, root_token, "t69admin", "segreto69", admin_roles) {
+    if !add_user(identis_chan, "t69admin", "segreto69", admin_roles) {
         println!("[usertests] t69: creazione t69admin fallita");
         pass = false;
     }
-    let admin_token = match login(identis_chan, "t69admin", "segreto69") {
-        Some(t) => t,
-        None => {
-            println!("[usertests] t69: login t69admin fallito");
-            return false;
-        }
-    };
-    match whoami(identis_chan, admin_token) {
+    if !login(identis_chan, "t69admin", "segreto69") {
+        println!("[usertests] t69: login t69admin fallito");
+        return false;
+    }
+    match whoami(identis_chan) {
         Some(m) if m == admin_roles => {}
         other => {
             println!("[usertests] t69: WHOAMI t69admin {:?} (attesi {:?})", other, admin_roles);
             pass = false;
         }
     }
-    if !add_user(identis_chan, root_token, "t69user", "segreto69", identis::ROLE_USER) {
+    // Serve root per creare l'utente semplice (un solo pid, un'identita'):
+    // si rientra come root, si crea, poi si entra come t69user.
+    if !login(identis_chan, "root", "root") {
+        println!("[usertests] t69: re-login root fallito");
+        return false;
+    }
+    if !add_user(identis_chan, "t69user", "segreto69", identis::ROLE_USER) {
         println!("[usertests] t69: creazione t69user fallita");
         pass = false;
     }
-    let user_token = match login(identis_chan, "t69user", "segreto69") {
-        Some(t) => t,
-        None => {
-            println!("[usertests] t69: login t69user fallito");
-            return false;
-        }
-    };
-    match whoami(identis_chan, user_token) {
+    if !login(identis_chan, "t69user", "segreto69") {
+        println!("[usertests] t69: login t69user fallito");
+        return false;
+    }
+    match whoami(identis_chan) {
         Some(m) if m == identis::ROLE_USER => {}
         other => {
             println!("[usertests] t69: WHOAMI t69user {:?} (atteso user)", other);
@@ -174,7 +176,7 @@ pub fn t_custos() -> bool {
     // (5) Autorita' di concessione.
     // Un `user` non crea utenti.
     let hash = blake2s(b"x");
-    let payload = identis::build_add_user(user_token, "t69boss", &hash, identis::ROLE_USER);
+    let payload = identis::build_add_user("t69boss", &hash, identis::ROLE_USER);
     match identis::send_payload_retry(identis_chan, civis::IDENTIS_ADD_USER, &payload, RETRIES) {
         Ok(r) if r.w0 == identis::R_UNAUTHORIZED => {}
         other => {
@@ -183,18 +185,22 @@ pub fn t_custos() -> bool {
         }
     }
     // Un `user` non fa GRANT.
-    let code = grant(custos_chan, user_token, custos::CAP_NET_BIND, 4242, true);
+    let code = grant(custos_chan, custos::CAP_NET_BIND, 4242, true);
     if code != custos::R_UNAUTHORIZED {
         println!("[usertests] t69: GRANT da user -> {} (atteso UNAUTHORIZED)", code);
         pass = false;
     }
     // Un `net-admin` concede rete ma non hardware.
-    let code = grant(custos_chan, admin_token, custos::CAP_NET_BIND, 4242, true);
+    if !login(identis_chan, "t69admin", "segreto69") {
+        println!("[usertests] t69: re-login t69admin fallito");
+        return false;
+    }
+    let code = grant(custos_chan, custos::CAP_NET_BIND, 4242, true);
     if code != custos::R_OK {
         println!("[usertests] t69: GRANT net-admin rete -> {} (atteso OK)", code);
         pass = false;
     }
-    let code = grant(custos_chan, admin_token, custos::CAP_HW_MMIO, 0, true);
+    let code = grant(custos_chan, custos::CAP_HW_MMIO, 0, true);
     if code != custos::R_UNAUTHORIZED {
         println!("[usertests] t69: GRANT net-admin hardware -> {} (atteso UNAUTHORIZED)", code);
         pass = false;
@@ -227,7 +233,11 @@ pub fn t_custos() -> bool {
     }
 
     // Revoca con root: la decisione torna negata ovunque.
-    let code = grant(custos_chan, root_token, custos::CAP_NET_BIND, 4242, false);
+    if !login(identis_chan, "root", "root") {
+        println!("[usertests] t69: re-login root per la revoca fallito");
+        return false;
+    }
+    let code = grant(custos_chan, custos::CAP_NET_BIND, 4242, false);
     if code != custos::R_OK {
         println!("[usertests] t69: revoca root -> {} (atteso OK)", code);
         pass = false;

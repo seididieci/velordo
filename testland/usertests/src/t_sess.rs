@@ -138,6 +138,15 @@ fn run(console: u64) -> Result<(), &'static str> {
         return Err("bind accettato da un'immagine Untrusted");
     }
 
+    // 9b. S3.3c — l'identita' di sessione e' del server e si tocca solo da
+    //     `System`: da `tst` (Untrusted) ne' scriverla ne' leggerla.
+    if sess.set_auth(b"root").is_ok() {
+        return Err("SESS_AUTH_SET accettato da un'immagine Untrusted");
+    }
+    if sess.auth().is_ok() {
+        return Err("SESS_AUTH accettato da un'immagine Untrusted");
+    }
+
     // 10. Focus su una sessione diversa dalla 0: negato. `focus(0)` riesce e
     //     non cambia un pixel (la 0 e' gia' quella disegnata).
     if civis::sess::focus(sess.id).is_ok() {
@@ -217,7 +226,7 @@ pub fn t_session_endpoint() -> bool {
     };
     match run(console) {
         Ok(()) => {
-            println!("[t74] sessioni: create/whoami/feed/out/resize/eco/focus/close/ritiro");
+            println!("[t74] sessioni: create/whoami/feed/out/resize/eco/focus/close/ritiro/auth");
             true
         }
         Err(why) => {

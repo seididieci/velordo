@@ -284,8 +284,9 @@ usertests 17/17, shell 3/3.
   **provenienza** (chi ha acconsentito, per utente). L'autorizzazione è
   `sys:caps ∩ usr:consent`: il consenso non crea privilegio dove manca il
   grant, e il grant non basta senza consenso (assente = negato, fail-closed).
-  La scrittura richiede un token di sessione valido (session owner o root):
-  senza, il prompt sarebbe teatro.
+  La scrittura richiede un'**identità attestata** del chiamante (S3.3c,
+  ADR-0094: il kernel dà il pid, Custos lo fa risolvere a Identis — nessun
+  token): senza, il prompt sarebbe teatro.
 
 ## Contratto di durabilita' (Fase 52, P3)
 

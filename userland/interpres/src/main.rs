@@ -8,7 +8,7 @@
 //!
 //! Comandi S3.2a:
 //!   `help`           mostra i comandi disponibili
-//!   `create-user [nome] [ruoli]`  crea un utente (token VELORDO_SESSION richiesto)
+//!   `create-user [nome] [ruoli]`  crea un utente (identita' attestata richiesta)
 //!   `exit`           chiude la shell
 //!
 //! Comandi S3.2b — esecuzione esterna da bucket `binary`:
@@ -27,9 +27,10 @@
 //! D8c2: il mirror seriale lo fa il server), input dalla sessione (D8d).
 //! La password non transita mai in chiaro: hash BLAKE2s-256 in locale.
 //!
-//! **Refresh del token**: quando un comando autenticato riceve `R_TOKEN_INVALID`
-//! (scadenza TTL 300s), la shell richiede nuovamente nome+password e ottiene
-//! un nuovo token da Identis — l'utente non perde mai il contesto.
+//! **Identita' (S3.3c)**: nessun token. Un comando che richiede identita'
+//! (`create-user`, `consent`) la ottiene dal **pid** attestato dal kernel:
+//! Identis/Custos risolvono il chiamante. Se manca, la shell chiede di
+//! (ri)autenticarsi (`IDENTIS_VERIFY` lega il pid all'utente).
 //!
 //! **Fase X (ADR-0065)**: interprete Rust-like con `let`, assegnamento, blocchi,
 //! `if/else`, operatori binari, chiamate funzione e builtin (`dump`, `type`).
@@ -409,7 +410,7 @@ fn console_write_str(s: &str) {
     console_write(s.as_bytes());
 }
 
-/// Entry: apre console, legge il token di sessione, entra nel loop REPL.
+/// Entry: apre console, risolve l'identita' della sessione, entra nel REPL.
 fn real_main(_sp: u64) -> ! {
     // Salva lo stack pointer per la lettura dell'env (USER).
     unsafe { SHELL_SP = _sp; }
@@ -418,16 +419,18 @@ fn real_main(_sp: u64) -> ! {
     // vivi (utile se init ci supervisionasse in futuro).
     civis::signal_ready(1);
 
-    // D8f — il token viene dalla **sessione** (il server lo custodisce, il
-    // login l'ha scritto con `SESS_TOKEN_SET`), non dall'ambiente: `SESS_TOKEN`
-    // risolve per attestazione del pid (whoami + ancestry). `0` = sessione
+    // S3.3c — l'identita' e' della **sessione** (il server la custodisce, il
+    // login l'ha scritta con `SESS_AUTH_SET`), non dell'ambiente: `SESS_AUTH`
+    // risolve per attestazione del pid (whoami + ancestry). `false` = sessione
     // anonima (nessun login): i comandi che ne hanno bisogno lo dicono.
-    let mut session_token = civis::sess::token().ok().filter(|&t| t != 0);
+    let mut session_auth = civis::sess::auth()
+        .map(|a| a.is_authenticated())
+        .unwrap_or(false);
 
     console_write_str("\n[shell] Velordo shell nativa (S3.2a)\n");
-    match session_token {
-        Some(_) => console_write_str("[shell] Sessione attiva: `users` e `create-user` disponibili\n"),
-        None => console_write_str("[shell] Nessuna sessione: `users` e `create-user` bloccati\n"),
+    match session_auth {
+        true => console_write_str("[shell] Sessione attiva: `users` e `create-user` disponibili\n"),
+        false => console_write_str("[shell] Nessuna sessione: `users` e `create-user` bloccati\n"),
     }
     console_write_str("[shell] Scrivi `help` per i comandi.\n");
 
@@ -525,24 +528,25 @@ fn real_main(_sp: u64) -> ! {
         let cmd = parts.first().copied().unwrap_or("");
         let args: Vec<&str> = parts[1..].to_vec();
 
-        // Se un comando autenticato fallisce per token scaduto, il loop
-        // chiede all'utente di reinserire le credenziali e poi ritenta.
+        // Un comando che richiede identita' (create-user, consent) e'
+        // rifiutato da Identis/Custos se il chiamante non e' autenticato
+        // (nessun token: il pid lo da' il kernel). Il loop puo' chiedere di
+        // (ri)autenticarsi.
         last_exit = 0; // reset su successo (default)
         if interpreted {
             // L'interprete ha gestito la riga — nessun comando built-in.
         } else {
-            match execute_command(cmd, &args, session_token) {
+            match execute_command(cmd, &args, session_auth) {
                 CmdResult::Ok => { last_exit = 0; }
-                CmdResult::TokenExpired => {
-                    console_write_str("Token scaduto, reinserire le credenziali\n");
-                    match auth_and_get_token() {
-                        Some(t) => {
-                            session_token = Some(t);
-                            // D8f — il token nuovo va **anche nel server**: i
-                            // figli lo leggono con `SESS_TOKEN`, non da env.
-                            let _ = civis::sess::set_token(t);
+                CmdResult::NeedAuth => {
+                    console_write_str("Identita' richiesta: (ri)autenticati\n");
+                    match authenticate() {
+                        Ok(()) => {
+                            session_auth = true;
+                            // L'identita' e' ora del pid (VERIFY l'ha legata
+                            // al chiamante): nessun valore viaggia.
                         }
-                        None => { last_exit = 1; } // auth failed
+                        Err(()) => { last_exit = 1; } // auth failed
                     }
                 }
             }
@@ -567,15 +571,16 @@ fn looks_like_expression(line: &str) -> bool {
     line.contains('=') || line.contains('(')
 }
 
-/// Risultato di un comando: successo o token scaduto (retryable).
+/// Risultato di un comando: successo o identita' richiesta (retryable).
 enum CmdResult {
     Ok,
-    TokenExpired,
+    NeedAuth,
 }
 
-/// Esegue un comando con il token corrente. `TokenExpired` = Identis ha rifiutato
-/// per scadenza sessione — il chiamante può aggiornare il token e ritentare.
-fn execute_command(cmd: &str, args: &[&str], session_token: Option<u64>) -> CmdResult {
+/// Esegue un comando con l'identita' del chiamante (attestata dal kernel).
+/// `NeedAuth` = il chiamante non ha un'identita' attestata (nessun VERIFY
+/// riuscito): il chiamante puo' (ri)autenticarsi e ritentare.
+fn execute_command(cmd: &str, args: &[&str], session_auth: bool) -> CmdResult {
     match cmd {
         "help" => { cmd_help(); CmdResult::Ok }
         "exit" => {
@@ -583,11 +588,19 @@ fn execute_command(cmd: &str, args: &[&str], session_token: Option<u64>) -> CmdR
             civis::exit(0);
         }
         "create-user" => {
+            if !session_auth {
+                return CmdResult::NeedAuth;
+            }
             let name = args.first().copied();
             let roles = args.get(1).copied();
-            cmd_create_user(session_token, name, roles)
+            cmd_create_user(name, roles)
         }
-        "consent" => cmd_consent(session_token, &args),
+        "consent" => {
+            if !session_auth {
+                return CmdResult::NeedAuth;
+            }
+            cmd_consent(&args)
+        }
         "logout" => {
             // Il programma esterno stampa il messaggio; il bounce lo fa la
             // shell, che e' figlia di init (`INIT_BOUNCE` va sul canale di
@@ -623,19 +636,12 @@ fn cmd_help() {
 }
 
 /// Crea un nuovo utente (ruoli opzionali: `create-user alice net-admin,user`).
+/// L'identita' e' quella del chiamante (attestata dal kernel): nessun token
+/// viaggia, Identis risolve il pid.
 fn cmd_create_user(
-    session_token: Option<u64>,
     name_arg: Option<&str>,
     roles_arg: Option<&str>,
 ) -> CmdResult {
-    let token = match session_token {
-        Some(t) => t,
-        None => {
-            console_write_str("ERRORE: nessuna sessione attiva (login richiesto)\n");
-            return CmdResult::Ok;
-        }
-    };
-
     // Nome utente: da arg o chiesto alla tastiera.
     let name = match name_arg {
         Some(n) if !n.is_empty() => String::from(n),
@@ -688,7 +694,7 @@ fn cmd_create_user(
 
     // L'hash si calcola qui: la password non lascia mai il processo.
     let hash = blake2s(pwd.as_bytes());
-    let payload = proto::build_add_user(token, &name, &hash, roles);
+    let payload = proto::build_add_user(&name, &hash, roles);
 
     let chan = match resolve_identis() {
         Ok(c) => c,
@@ -704,7 +710,7 @@ fn cmd_create_user(
             console_write_str(&name);
             console_write_str("' creato\n");
         }
-        Ok(r) if r.w0 == proto::R_TOKEN_INVALID => return CmdResult::TokenExpired,
+        Ok(r) if r.w0 == proto::R_NO_IDENTITY => return CmdResult::NeedAuth,
         Ok(r) => {
             console_write_str("ERRORE: ");
             console_write_str(r.describe());
@@ -718,8 +724,9 @@ fn cmd_create_user(
 /// `consent <prog> on|off` (ADR-0080, fase 6): registra il consenso di rete
 /// dell'utente corrente per un'**immagine** (il contenuto del binario, non il
 /// nome). Il consenso si somma al grant admin (`sys:caps`): senza uno dei due
-/// il broker nega le destinazioni globali.
-fn cmd_consent(session_token: Option<u64>, args: &[&str]) -> CmdResult {
+/// il broker nega le destinazioni globali. L'identita' e' quella del
+/// chiamante (attestata dal kernel via `SESS_AUTH`): nessun token viaggia.
+fn cmd_consent(args: &[&str]) -> CmdResult {
     let Some(prog) = args.first().copied() else {
         console_write_str("uso: consent <prog> on|off\n");
         return CmdResult::Ok;
@@ -729,13 +736,6 @@ fn cmd_consent(session_token: Option<u64>, args: &[&str]) -> CmdResult {
         Some("off") => false,
         _ => {
             console_write_str("uso: consent <prog> on|off\n");
-            return CmdResult::Ok;
-        }
-    };
-    let token = match session_token {
-        Some(t) => t,
-        None => {
-            console_write_str("ERRORE: nessuna sessione attiva (login richiesto)\n");
             return CmdResult::Ok;
         }
     };
@@ -755,7 +755,7 @@ fn cmd_consent(session_token: Option<u64>, args: &[&str]) -> CmdResult {
         }
     };
     let user = read_user();
-    if custos_proto::consent_write(chan, token, user, id.lo, id.hi, decision) {
+    if custos_proto::consent_write(chan, user, id.lo, id.hi, decision) {
         console_write_str("consenso ");
         console_write_str(if decision { "ON " } else { "OFF " });
         console_write_str(prog);
@@ -763,8 +763,8 @@ fn cmd_consent(session_token: Option<u64>, args: &[&str]) -> CmdResult {
         console_write_str(&alloc::format!("{:016x}{:016x}", id.hi, id.lo));
         console_write_str(")\n");
     } else {
-        console_write_str("ERRORE: consenso rifiutato (sessione scaduta?)\n");
-        return CmdResult::TokenExpired;
+        console_write_str("ERRORE: consenso rifiutato (identita' non valida?)\n");
+        return CmdResult::NeedAuth;
     }
     CmdResult::Ok
 }
@@ -888,7 +888,7 @@ fn try_execute_external(program: &str, args: &[&str]) -> bool {
 
         // 6. Esegui l'immagine con spawn_image, passando argv. Niente env: il
         // token non viaggia piu' qui (D8f) — i figli lo leggono dalla
-        // **sessione** (`SESS_TOKEN` + ancestry), che il kernel attesta.
+        // **sessione** (`SESS_AUTH` + ancestry), che il kernel attesta.
         let mut argv: Vec<&[u8]> = Vec::with_capacity(args.len() + 1);
         argv.push(key_bytes);
         for a in args {
@@ -949,16 +949,18 @@ fn try_execute_external(program: &str, args: &[&str]) -> bool {
 }
 
 /// Autenticazione completa: chiede nome+password, calcola hash BLAKE2s in
-/// locale, invia IDENTIS_VERIFY a Identis. Ritorna il nuovo token (u64) o
-/// `None` se l'autenticazione e' fallita.
-fn auth_and_get_token() -> Option<u64> {
+/// locale, invia IDENTIS_VERIFY a Identis. Se riuscito, Identis lega il pid
+/// chiamante all'utente (credenziale locale): nessun token restituito, nessun
+/// valore che viaggi. Ritorna `Ok(())` se l'autenticazione e' riuscita,
+/// `Err(())` altrimenti.
+fn authenticate() -> Result<(), ()> {
     console_write_str("Nome utente: ");
     let name = read_line_from_keyboard(false);
     console_write_str("\n");
     let name = trim_str(&name);
     if name.is_empty() {
         console_write_str("ERRORE: nome vuoto\n");
-        return None;
+        return Err(());
     }
 
     console_write_str("Password: ");
@@ -973,24 +975,24 @@ fn auth_and_get_token() -> Option<u64> {
         Ok(c) => c,
         Err(_) => {
             console_write_str("ERRORE: servizio Identis non disponibile\n");
-            return None;
+            return Err(());
         }
     };
 
     match proto::send_payload_retry(chan, civis::IDENTIS_VERIFY, &payload, RETRIES) {
         Ok(r) if r.ok() => {
-            console_write_str("Nuova sessione ottenuta\n");
-            Some(r.w1) // w1 = token emesso da Identis
+            console_write_str("Autenticazione riuscita\n");
+            Ok(())
         }
         Ok(r) => {
             console_write_str("Autenticazione fallita: ");
             console_write_str(r.describe());
             console_write_str("\n");
-            None
+            Err(())
         }
         Err(_) => {
             console_write_str("ERRORE IPC\n");
-            None
+            Err(())
         }
     }
 }

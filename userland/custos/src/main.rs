@@ -82,6 +82,7 @@ static mut CAPS_N: usize = 0;
 static mut TXN_ACTIVE: bool = false;
 static mut TXN_TAG: u64 = 0;
 static mut TXN_CHAN: u64 = 0;
+static mut TXN_PID: i64 = -1;
 static mut TXN_TOTAL: u64 = 0;
 static mut TXN_BUF: [u8; MAX_PAYLOAD] = [0; MAX_PAYLOAD];
 static mut TXN_LEN: usize = 0;
@@ -210,6 +211,7 @@ fn handle_chunked(m: civis::IpcMsg) {
             TXN_ACTIVE = true;
             TXN_TAG = m.tag;
             TXN_CHAN = m.channel;
+            TXN_PID = civis::peer_pid(m.channel).unwrap_or(-1);
             TXN_TOTAL = m.w0;
             TXN_LEN = 0;
             TXN_TICK = now_tick();
@@ -230,7 +232,8 @@ fn handle_chunked(m: civis::IpcMsg) {
         if m.w0 == proto::MSG_EOF {
             let tag = TXN_TAG;
             let len = TXN_LEN;
-            let (code, extra) = dispatch_payload(tag, &TXN_BUF[..len]);
+            let pid = TXN_PID;
+            let (code, extra) = dispatch_payload(tag, &TXN_BUF[..len], pid);
             reset_txn();
             reply(tag, code, extra);
             return;
@@ -254,12 +257,12 @@ fn handle_chunked(m: civis::IpcMsg) {
     }
 }
 
-fn dispatch_payload(tag: u64, buf: &[u8]) -> (u64, u64) {
+fn dispatch_payload(tag: u64, buf: &[u8], pid: i64) -> (u64, u64) {
     match tag {
         civis::CUSTOS_QUERY => do_query(buf),
-        civis::CUSTOS_GRANT => do_grant(buf),
+        civis::CUSTOS_GRANT => do_grant(buf, pid),
         civis::CUSTOS_AUTHORIZE => do_authorize(buf),
-        civis::CUSTOS_CONSENT => do_consent(buf),
+        civis::CUSTOS_CONSENT => do_consent(buf, pid),
         _ => (proto::R_PROTOCOL, 0),
     }
 }
@@ -276,14 +279,16 @@ fn do_query(buf: &[u8]) -> (u64, u64) {
     (proto::R_OK, granted as u64)
 }
 
-/// Grant/revoca: sessione con autorita' per la capability, poi persistenza.
-fn do_grant(buf: &[u8]) -> (u64, u64) {
-    let (token, id_lo, id_hi, kind, arg, decision) = match proto::parse_grant(buf) {
+/// Grant/revoca: identita' con autorita' per la capability, poi persistenza.
+/// `pid` = il chiamante attestato dal kernel (nessun token: l'identita' non
+/// viaggia).
+fn do_grant(buf: &[u8], pid: i64) -> (u64, u64) {
+    let (id_lo, id_hi, kind, arg, decision) = match proto::parse_grant(buf) {
         Ok(v) => v,
         Err(_) => return (proto::R_PROTOCOL, 0),
     };
 
-    let roles = match whoami(token) {
+    let roles = match whoami(pid) {
         Ok(r) => r,
         Err(code) => return (code, 0),
     };
@@ -358,11 +363,12 @@ fn do_authorize(buf: &[u8]) -> (u64, u64) {
 
 /// Consenso: lettura e scrittura delle righe per immagine.
 ///
-/// Reply `(R_OK, decisione|0)`. La scrittura richiede un token di sessione
-/// valido (session owner o root): senza, il consenso sarebbe scrivibile da
-/// chiunque e il prompt all'avvio sarebbe teatro.
-fn do_consent(buf: &[u8]) -> (u64, u64) {
-    let (op, token_opt, user, id_lo, id_hi, decision_opt) = match proto::parse_consent(buf) {
+/// Reply `(R_OK, decisione|0)`. La scrittura richiede un'**identita'
+/// attestata** del chiamante (nessun token: il kernel da' il pid): senza, il
+/// consenso sarebbe scrivibile da chiunque e il prompt all'avvio sarebbe
+/// teatro.
+fn do_consent(buf: &[u8], pid: i64) -> (u64, u64) {
+    let (op, user, id_lo, id_hi, decision_opt) = match proto::parse_consent(buf) {
         Ok(v) => v,
         Err(_) => return (proto::R_PROTOCOL, 0),
     };
@@ -370,12 +376,9 @@ fn do_consent(buf: &[u8]) -> (u64, u64) {
     match op {
         proto::CONSENT_READ => (proto::R_OK, consent_allowed(id_lo, id_hi) as u64),
         proto::CONSENT_WRITE => {
-            let Some(token) = token_opt else {
-                return (proto::R_PROTOCOL, 0);
-            };
-            // Sessione valida obbligatoria (Identis decide chi e' vivo).
-            if let Err(code) = whoami(token) {
-                civis::println!("[custos] consent {}: sessione non valida ({})", user, code);
+            // Identita' attestata obbligatoria (Identis decide chi e' vivo).
+            if let Err(code) = whoami(pid) {
+                civis::println!("[custos] consent {}: identita' non valida ({})", user, code);
                 return (code, 0);
             }
             let decision = decision_opt.unwrap_or(false);
@@ -598,17 +601,23 @@ fn persist_with(id_lo: u64, id_hi: u64, kind: u64, arg: u64, allowed: bool) -> R
 
 // ── Identis: ruoli live di una sessione ───────────────────────────────────
 
-/// Interroga Identis: `Ok(maschera ruoli)` o `Err(codice da rispondere)`.
+/// Interroga Identis per il pid `pid`: `Ok(maschera ruoli)` o
+/// `Err(codice da rispondere)`.
 ///
 /// Fail-closed: se Identis non risponde, la richiesta non e' autorizzata
-/// (`R_UNAUTHORIZED`); un token invalido resta `R_TOKEN_INVALID`.
-fn whoami(token: u64) -> Result<u64, u64> {
+/// (`R_UNAUTHORIZED`); un pid senza identita' resta `R_NO_IDENTITY`.
+fn whoami(pid: i64) -> Result<u64, u64> {
     for _ in 0..50 {
         if let Ok(chan) = civis::service_lookup(civis::Service::Identis) {
             if chan > 0 {
-                return match civis::ipc::send(chan as u64, civis::IDENTIS_WHOAMI, 0, token) {
+                return match civis::ipc::send(
+                    chan as u64,
+                    civis::IDENTIS_WHOAMI,
+                    0,
+                    pid as u64,
+                ) {
                     Ok(r) if r.w0 == identis::R_OK => Ok(r.w1),
-                    Ok(r) if r.w0 == identis::R_TOKEN_INVALID => Err(proto::R_TOKEN_INVALID),
+                    Ok(r) if r.w0 == identis::R_NO_IDENTITY => Err(proto::R_NO_IDENTITY),
                     Ok(_) => Err(proto::R_UNAUTHORIZED),
                     Err(_) => Err(proto::R_UNAUTHORIZED),
                 };
@@ -632,6 +641,7 @@ fn reset_txn() {
         TXN_ACTIVE = false;
         TXN_TAG = 0;
         TXN_CHAN = 0;
+        TXN_PID = -1;
         TXN_TOTAL = 0;
         TXN_LEN = 0;
         TXN_TICK = 0;

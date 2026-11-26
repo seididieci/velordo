@@ -190,17 +190,28 @@ impl De {
         // shell che stiamo per avviare (che si spegne l'eco da sola, in
         // `input::attach`). Fino ad allora niente tasti a schermo.
         let _ = sess.echo(false);
-        // D8f: copia il token dalla sessione 0 (dove il login lo ha messo con
-        // SESS_TOKEN_SET) sulla sessione della nuova tile, prima di spawnare.
-        // Sessione 0: il token c'e' gia'. `Session::set_token` scrive sulla
-        // sessione a cui e' attaccato il canale, quindi si attacca prima a 0
-        // (per leggere) e poi a `sid` (per scrivere).
+        // S3.3c: propaga l'**utente autenticato** dalla sessione 0 (dove il
+        // login l'ha scritto con `SESS_AUTH_SET`) alla sessione della nuova
+        // tile, prima di spawnare. Nessun segreto: e' un nome, lo decide il
+        // server, e la tile lo riceve una volta sola (il DE e' `System`).
+        // `Session::set_auth` scrive sulla sessione a cui e' attaccato il
+        // canale, quindi ci si attacca prima a 0 (per leggere) e poi a `sid`
+        // (per scrivere).
         if sid != 0 {
-            let token = civis::sess::attach_to_session(0)
-                .and_then(|s| s.token())
-                .unwrap_or(0);
+            let user = civis::sess::attach_to_session(0)
+                .and_then(|s| s.auth())
+                .ok();
             if let Ok(s) = civis::sess::attach_to_session(sid as u32) {
-                let _ = s.set_token(token);
+                match &user {
+                    Some(a) => {
+                        let _ = s.set_auth(a.as_bytes());
+                    }
+                    None => {
+                        // La 0 non e' autenticata: la tile nasce anonima
+                        // (fail-loud: nessuna identita' inventata).
+                        let _ = s.set_auth(b"");
+                    }
+                }
             }
             // `s` viene drop qui (smunmap della sua mailbox); il canale resta
             // attaccato a `sid`, serve per SESS_INPUT del DE.
@@ -225,8 +236,8 @@ impl De {
     /// Avvia una **shell nella sessione `sid`** (una tile = una sessione = un
     /// programma).
     ///
-    /// Il token e' gia' stato copiato sulla sessione `sid` dal chiamante
-    /// (`split` lo copia dalla sessione 0; la sessione 0 lo ha già dal login).
+    /// L'identita' e' gia' stata copiata sulla sessione `sid` dal chiamante
+    /// (`split` la copia dalla sessione 0; la sessione 0 l'ha gia' dal login).
     ///
     /// Ordine che chiude la razza: `spawn_image` (come fa `login`, fail-closed
     /// sulla firma) -> **`suspend`** del figlio -> `SESS_BIND(sid, pid)` ->
@@ -256,8 +267,8 @@ impl De {
         let Some(meta) = civis::SpawnMeta::new("interpres", 16, &[]) else {
             return false;
         };
-        // D8f — `USER` alla shell (il token invece e' gia' nella sessione, e
-        // la shell lo legge dal server per attestazione). L'env block deve
+        // D8f — `USER` alla shell (l'identita' invece e' gia' nella sessione,
+        // e la shell la legge dal server per attestazione). L'env block deve
         // restare vivo fino a dopo lo spawn (il kernel lo copia nella
         // syscall).
         let user_env = format!("USER={}", self.user);
