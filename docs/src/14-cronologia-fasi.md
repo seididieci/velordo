@@ -5243,3 +5243,19 @@ schermo con `fullscreen` in una tile splittata.
 
 `run-tui-tests.sh` **21 check** (3 nuovi: un passo = una cella, clamp al bordo,
 incrementale == repaint nella tile spostata). Gate invariato.
+
+**Settimo giro (il prompt dopo `fullscreen`)**: uscendo dall'app il prompt
+tornava **in cima** alla tela, sopra il banner: le righe successive
+("fullscreen: uscita", "[run] Processo terminato", il prompt) sovrascrivevano
+il testo dall'alto.
+
+Causa, in `littera::enter_alt`: il cursore salvato era letto **dopo** il
+`core::mem::replace` della griglia, quindi era sempre quello della griglia
+**nuova**, `(0,0)` (e `cursor_visible` era `true` per decreto). Regola: si salva
+lo stato *prima* di sostituirlo.
+
+Fix di tre righe + unit test `uscire_dalla_tela_riprende_dal_cursore_di_prima`:
+dopo `ESC[?1049l` il primo byte **continua** la riga di prima (`due` → `due!`).
+Verifica visiva con screendump nella tile: il transcript torna nell'ordine
+giusto (banner → prompt → `fullscreen` → messaggi → uscita → prompt **sotto**).
+Unit host **214**; gate invariato.

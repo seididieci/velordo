@@ -693,7 +693,10 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   `feed_session` (> 256 B = output di un comando, render differito) vale solo
   per il testo: un feed `screen_only` (`w1 = 1`) e' un frame e va reso subito
   (senza, il primo frame di un'app resta invisibile fino al primo tasto).
-  **Il fondo di una cella ha una sola fonte, la bg layer**: anche fuori dalla
+  **Alt screen: lo stato si salva *prima* di sostituirlo** — `enter_alt` legge
+  cursore e `cursor_visible` dalla griglia vecchia (leggerli dopo il `replace`
+  salva sempre `(0,0)`: all'uscita il prompt tornava in cima invece che sotto
+  l'ultimo comando). **Il fondo di una cella ha una sola fonte, la bg layer**: anche fuori dalla
   banda (cursore, percorsi per-cella) si copia la cella dal **wallpaper** in
   coordinate schermo; il percorso legacy `pagina + layer 0` traslava l'origine
   della tile con `saturating_sub` e per una tile spostata (a destra o sotto
@@ -1007,7 +1010,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
 ./scripts/run-desktop-tests.sh   # tileprobe + keybinding del DE via monitor
 
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), pictura + tabula (toppe e canvas a celle), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, syscall-numbers, impluvium-tree, blake2s, sig, tls: 213 test
+./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), pictura + tabula (toppe e canvas a celle), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, syscall-numbers, impluvium-tree, blake2s, sig, tls: 214 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh

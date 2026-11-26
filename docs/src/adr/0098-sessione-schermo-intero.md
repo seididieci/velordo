@@ -176,6 +176,31 @@ differimento è una politica per il testo che scorre, mai per il disegno.**
   sulla superficie virtio-gpu (`FB_WINDOW=1`), o prende la VGA — l'altra console,
   "morta" nel path pixel.
 
+### Trappola pagata: il cursore salvato era quello della tela nuova
+
+Uscendo da `fullscreen` il prompt tornava **in cima** alla tela, sopra il
+banner, invece che sotto l'ultimo comando. In `enter_alt`:
+
+```rust
+let old = core::mem::replace(&mut self.grid, fresh);
+self.saved = Some(SavedScreen {
+    grid: old,
+    cursor: self.grid.cursor,   // <-- dopo il replace: la griglia NUOVA, (0,0)
+    ...
+});
+```
+
+Il cursore veniva letto **dopo** aver sostituito la griglia: si salvava sempre
+`(0,0)`. All'uscita il testo tornava al suo posto ma il cursore no, e le righe
+successive ("uscita", "[run] Processo terminato", il prompt) sovrascrivevano il
+banner dall'alto.
+
+Regola: **si salva lo stato *prima* di sostituirlo** — cursore e visibilità del
+cursore (anche `cursor_visible` era `true` per decreto) vanno letti prima del
+`replace`. Unit test `uscire_dalla_tela_riprende_dal_cursore_di_prima`: dopo
+`ESC[?1049l` il primo byte **continua** la riga di prima (`due` → `due!`), non
+la sovrascrive.
+
 ### Trappola pagata: il fondo di una cella ridisegnata da sola
 
 In una tile **spostata** (a destra o sotto l'inizio dell'immagine), le celle che

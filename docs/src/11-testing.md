@@ -384,7 +384,7 @@ log seriale.
   linea con spessore) e `libs/tabula` (canvas a celle con **copia ombra**:
   primo frame intero, nessun cambio = zero byte, fette consecutive in un solo
   `CUP`, celle non adiacenti, riga che si accorcia, resize che riparte da zero)
-  (**213 test** in tutto;
+  (**214 test** in tutto;
   `libs/net` ne ha 54, 23 dei quali sulla macchina a stati TCP e sul wiring, 2
   sul framing RFC 7858). Girano da una
   **directory neutra**: il `.cargo/config.toml` del repo impone

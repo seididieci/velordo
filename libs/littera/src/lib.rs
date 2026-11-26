@@ -514,12 +514,18 @@ impl Session {
             return;
         }
         let (cols, rows) = (self.grid.cols(), self.grid.rows());
+        // Il cursore va letto **prima** di sostituire la griglia: dopo il
+        // `replace` `self.grid` e' quella nuova (vuota) e il cursore salvato
+        // sarebbe `(0,0)` — all'uscita il prompt sarebbe tornato in cima alla
+        // tela invece che dopo l'ultimo comando (bug visto a schermo).
+        let cursor = self.grid.cursor;
+        let cursor_visible = self.grid.cursor_visible;
         let fresh = Grid::new_with_scrollback(cols, rows, 0);
         let old = core::mem::replace(&mut self.grid, fresh);
         self.saved = Some(SavedScreen {
             grid: old,
-            cursor: self.grid.cursor,
-            cursor_visible: true,
+            cursor,
+            cursor_visible,
         });
         self.alt = true;
         self.grid.mark_all();
@@ -1238,6 +1244,24 @@ mod tests {
         feed(&mut s, "x");
         feed(&mut s, "\x1b[?1049l\x1b[?1049l");
         assert_eq!(dump(&s), before);
+    }
+
+    #[test]
+    fn uscire_dalla_tela_riprende_dal_cursore_di_prima() {
+        let mut s = Session::new(20, 4, 8, None);
+        feed(&mut s, "uno\ndue");
+        let before = dump(&s);
+        assert_eq!(s.grid.cursor, (3, 1));
+        feed(&mut s, "\x1b[?1049h");
+        feed(&mut s, "altra\x1b[3;5Hx");
+        feed(&mut s, "\x1b[?1049l");
+        assert_eq!(dump(&s), before, "la principale torna com'era");
+        assert_eq!(s.grid.cursor, (3, 1), "il cursore e' quello di prima");
+        // Il primo byte dopo l'uscita **continua** la riga: se il cursore
+        // tornasse in alto il testo di prima verrebbe sovrascritto (era il
+        // difetto: il prompt troppo in alto, sopra l'ultimo comando).
+        feed(&mut s, "!");
+        assert!(dump(&s).contains("due!"), "il cursore riprende dove era");
     }
 
     #[test]
