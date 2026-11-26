@@ -122,3 +122,4 @@
 - [ADR-0092: Tile nel server e `impluvium` — il DE esiste (D8e)](./adr/0092-tile-e-impluvium.md)
 - [ADR-0093: Diritti ereditari all'avvio — il figlio non ha più diritti del padre (S3.4)](./adr/0093-diritti-ereditari.md)
 - [ADR-0094: Identità di sessione per attestazione — niente bearer token (S3.3c)](./adr/0094-identita-sessione-attestata.md)
+- [ADR-0095: L'identità del terminale non è un ambiente — il prompt la chiede alla sessione (S3.3d)](./adr/0095-identita-senza-ambiente.md)

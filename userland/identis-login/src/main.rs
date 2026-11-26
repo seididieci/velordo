@@ -10,10 +10,10 @@
 //!
 //! **D8f — il login e' il capo-sessione**: dopo l'autenticazione il nome va
 //! nel **server** (`SESS_AUTH_SET`, sulla sessione 0) e il login spawma il
-//! DE (`impluvium`) dentro la sessione, con il solo `USER` in ambiente. Resta
-//! vivo in `recv` finche' il DE non muore (= fine sessione), poi azzera
-//! l'identita' della 0 ed esce 0: `init` (politica `LoginGate`) riapre subito
-//! il prompt. Non e' piu' un lanciatore one-shot e il token non viaggia in env.
+//! DE (`impluvium`) dentro la sessione, **senza ambiente** (S3.3d/ADR-0095:
+//! l'identita' sta nel server, non in una variabile). Resta vivo in `recv`
+//! finche' il DE non muore (= fine sessione), poi azzera l'identita' della 0
+//! ed esce 0: `init` (politica `LoginGate`) riapre subito il prompt.
 //!
 //! Il framing del protocollo e' condiviso (`libs/identis-proto`): qui c'e'
 //! solo il lato client.
@@ -31,15 +31,6 @@ use civis;
 use identis_proto as proto;
 
 civis::entry!(real_main);
-
-/// Nome utente dell'ultimo login riuscito. Passato al DE come `USER` (un
-/// nome, non un segreto: il prompt con glifi Nerd Font lo mostra).
-#[allow(dead_code)]
-static mut LOGIN_USER: [u8; 32] = [0u8; 32];
-
-/// Lunghezza del nome utente salvato (0 = non impostato).
-#[allow(dead_code)]
-static mut LOGIN_USER_LEN: u8 = 0;
 
 /// Scrive sul terminale: la **sessione** del processo (`civis::sess::out`,
 /// D8c2). Il mirror seriale lo fa il server; se la sessione non e'
@@ -126,17 +117,7 @@ fn real_main(_sp: u64) -> ! {
 
         match proto::send_payload_retry(chan, civis::IDENTIS_VERIFY, &payload, RETRIES) {
             Ok(r) if r.ok() => {
-                // Il nome utente vive nel server (S3.3c): niente bearer, ma il
-                // nome serve anche al DE (prompt). Lo salva qui e lo passa in
-                // ambiente (un nome, non un segreto).
                 let name_bytes = name.as_bytes();
-                unsafe {
-                    let n = name_bytes.len().min(31);
-                    LOGIN_USER_LEN = n as u8;
-                    for i in 0..n {
-                        LOGIN_USER[i] = name_bytes[i];
-                    }
-                }
                 console_write(b"[login] SUCCESS\n");
                 // D8f — l'identita' e' della **sessione**, non dell'ambiente:
                 // il nome va nel server, sulla sessione a cui il login e'
@@ -187,8 +168,8 @@ fn real_main(_sp: u64) -> ! {
 const MAX_ATTEMPTS: u32 = 3;
 
 /// Spawna il **DE** (`impluvium`) dall'oggetto ArcaFS
-/// (`sys:bin/impluvium.bin`), dentro la sessione autenticata: passa solo
-/// `USER` (il token e' gia' nel server, sulla sessione 0). Ritorna
+/// (`sys:bin/impluvium.bin`), dentro la sessione autenticata e **senza
+/// ambiente**: l'identita' e' nel server, sulla sessione 0. Ritorna
 /// `(canale, pid)`; `None` = non avviato (motivo gia' scritto sul terminale).
 ///
 /// **Verifica prima dello spawn** (ADR-0078/0079, come `init`): la classe di
@@ -223,10 +204,7 @@ fn spawn_de() -> Option<(i64, i64)> {
         }
     };
 
-    let user_bytes = unsafe { &LOGIN_USER[..LOGIN_USER_LEN as usize] };
-    let user_str = core::str::from_utf8(user_bytes).unwrap_or("");
-
-    let mut meta = match civis::SpawnMeta::new("impluvium", 16, &[]) {
+    let meta = match civis::SpawnMeta::new("impluvium", 16, &[]) {
         Some(m) => m,
         None => {
             console_write(b"[login] SpawnMeta non valido\n");
@@ -234,14 +212,10 @@ fn spawn_de() -> Option<(i64, i64)> {
         }
     };
 
-    // Env: solo `USER` (un nome, non un segreto). Il token sta nel server.
-    let user_env = alloc::format!("USER={}", user_str);
-    let Some(packed) = civis::pack_args(&[], &[&user_env.as_bytes()]) else {
-        console_write(b"[login] DE: env non impacchettabile\n");
-        return None;
-    };
-    meta = meta.argv(&packed);
-
+    // Niente ambiente (S3.3d, ADR-0095): l'identita' e' nel **server**, sulla
+    // sessione 0 (`SESS_AUTH_SET` fatto sopra). Il DE la chiede alla sessione
+    // quando gli serve — un nome in env sarebbe una copia da tenere
+    // aggiornata, e l'ultima che avevamo.
     let chan = match civis::spawn_image(&img, &meta) {
         Ok(c) => c,
         Err(_) => {

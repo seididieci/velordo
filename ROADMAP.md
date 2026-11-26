@@ -11,7 +11,7 @@ ricompilare se stesso. Ordina le priorita' (storage veloce prima, servizi
 fuori dal kernel poi, personalita' per software reale dopo) senza pianificare
 nulla da solo.
 
-## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b + D8c1 + D8c2 + D8d + D8e + D8f + S3.3c + S3.4)
+## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b + D8c1 + D8c2 + D8d + D8e + D8f + S3.3c + S3.3d + S3.4)
 
 Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` +
 `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 72/72` +
@@ -565,6 +565,14 @@ Voci con scope e vittoria dichiarati (non date).
       bucket utente (rinviata). Restano aperte (b), (d), (e) e `su`/cambio
       utente; Vittoria di (c): nessuna identita' copiabile, il login/DE
       propagano un **nome** e la morte loro (o della sessione) la porta via.
+      **(f) S3.3d — niente identita' in ambiente** (ADR-0095, **fatta**):
+      `USER` sparisce da login/DE/shell, il prompt chiede il nome alla
+      sessione (`civis::sess::auth`), il DE non ricorda piu' l'utente. `su`
+      come shell annidata **valutato e scartato** (Le tre esigenze — scalare,
+      seconda sessione, declassare — sono coperte da consenso per azione,
+      tile-sessione e classe dell'immagine); la forma utile
+      (`runas <utente> -- prog`, identita' per albero di processi) e'
+      parcheggiata con i suoi trigger.
 - [ ] **ArcaFS/object-store** (dopo T0/Fase 49): filesystem avanzato stile
       btrfs/zfs — snapshot, niente partizionamento, layout adattivo per tipo
       di device (hdd/ssd/emmc), raid avanzato, monitoring (SMART), COW su
@@ -1420,6 +1428,13 @@ Idee senza trigger (non date, solo su pressione reale).
       **S3.3(c)** token → capability per-canale (senza, il consenso sarebbe
       rubabile col bearer). Fino ad allora la decisione resta statica per ruolo
       (fase 6).
+- [ ] **`runas <utente> -- prog`** (identita' per albero di processi, ADR-0094
+      §per-pid): verifica credenziali, `SESS_AUTH_SET` sul **proprio** pid,
+      `exec` del programma. Niente shell annidata, niente `exit` da
+      reinventare. Trigger: (a) far girare un tool/build come utente non-root;
+      (b) il DE apre una tile come un altro utente (che pero' e' identita' di
+      **sessione**, gia' possibile). `su` (nested shell) **non** va fatto:
+      vedi ADR-0095 §Alternative.
 - [ ] audio AC97+CBS (primo client servizio PCI, chiude ADR-0007 davvero)
 - [ ] server-run async block (quando l'overlap DMA lo richiede)
 - [ ] Strato 3 credenziali

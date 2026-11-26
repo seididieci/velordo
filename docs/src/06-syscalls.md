@@ -462,8 +462,9 @@ dell'utente autenticato lo scrive chi ne ha titolo (`SESS_AUTH_SET`, solo
 `System`: il login sulla 0, il DE sulle tile nuove) e lo risolve chi deve
 attribuire una richiesta (`SESS_AUTH`, solo `System`, per pid). **Nessun token
 e nessun segreto viaggia**: gli identificatori `0xAD`/`0xAE` (`SESS_TOKEN_SET`/
-`SESS_TOKEN`) sono **ritirati** e i numeri non si riusano; l'unica variabile
-d'ambiente che resta è `USER` (un nome, per il prompt). Il **mirror seriale** della sessione in focus è del server
+`SESS_TOKEN`) sono **ritirati** e i numeri non si riusano. **Nessuna variabile
+d'ambiente** (S3.3d, ADR-0095): il prompt e i comandi chiedono l'identità al
+server, nessun nome viaggia in `env`. Il **mirror seriale** della sessione in focus è del server
 (formato nudo, `MIRROR_SESSION_MAX` 1 MiB per sessione come rete di sicurezza;
 il budget per comando resta del client che sa cos'è un comando).
 

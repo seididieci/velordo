@@ -457,8 +457,9 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   non esiste, login scrive il **nome** sulla 0, il DE lo propaga alle tile
   nuove, `interpres`/`users`/`create-user` non leggono nulla: Identis/Custos
   risolvono il **pid** del chiamante (credenziale locale da `VERIFY`, oppure
-  la sessione autenticata via `SESS_AUTH`); l'unica variabile che resta e'
-  `USER` (un nome);
+  la sessione autenticata via `SESS_AUTH`); **nessuna variabile d'ambiente**
+  (S3.3d/ADR-0095: il prompt la chiede al server, `impluvium`/`login` non
+  passano piu' `USER`);
   `EXIT_NOTIFY` purga binding/sessioni del morto (mai la 0) con `munmap` **a
   pagina prima** di `shm_destroy`. `/dev/console` e' un **adattatore sulla
   sessione 0** (`DEV_WRITE` → `feed_session(0)`, `CONSOLE_*` → focus): il
@@ -546,7 +547,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   identico** (t64). Unit host 176 (+ `Geom::for_rect`/`view`, rect impacchettato).
 - **Il DE esiste (D8e2, ADR-0092)**: `impluvium` (`sys/bin/impluvium.bin`) e'
   un processo. **D8f**: non e' piu' un servizio di boot — lo spawana il
-  **login**, dentro la sessione autenticata (`USER` in env, identita' nel server),
+  **login**, dentro la sessione autenticata (identita' nel server, niente env),
   ed e' il login a essere sorvegliato da init. Non registra un servizio,
   `Service::Impluvium` **non esiste**, kernel intatto.
   Possiede: **albero** (`libs/impluvium-tree`, `Leaf`/`Split{dir,ratio}`,
@@ -601,7 +602,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   volte e **la shell parte solo dopo l'autenticazione** (prima partiva
   comunque: login fallito = shell aperta). **D8f**: il login e' il
   **capo-sessione** — dopo l'autenticazione scrive il **nome** nella sessione 0
-  (`SESS_AUTH_SET`), spawma il DE con `USER`, aspetta la sua morte (= fine
+  (`SESS_AUTH_SET`), spawma il DE **senza ambiente**, aspetta la sua morte (= fine
   sessione), azzera l'identita' (`SESS_AUTH_SET` vuoto) ed esce 0. `init` lo supervisiona come un **getty**
   (`Service::Login = 13`, `OnDeath::LoginGate`): **uscita 0 = sessione
   conclusa → prompt subito** (contatore fallimenti azzerato); **uscita != 0 =
@@ -662,6 +663,16 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   tile sbagliata); `ensure_mailbox` ritorna l'**id della shm**, non un
   puntatore (usarlo come puntatore = `#PF` a `0x805` e il server muore:
   `sess_mb` e' il puntatore, `ensure_mailbox` serve solo a creare).
+- **Niente identita' in ambiente (S3.3d, ADR-0095)**: `USER` non esiste piu'.
+  `identis-login` spawma il DE e `impluvium` spawma le shell **senza env**;
+  il prompt chiede il nome a ogni riga (`civis::sess::auth()` →
+  `SESS_AUTH(0)`), senza cache, con `forget_current` + un tentativo su errore
+  (console ripartita). Costo: una IPC per prompt (CPU al prompt invariata). Il
+  **nome** ora ha una sola fonte (il server): chi cambia l'identita' non deve
+  inseguire copie. `su` come shell annidata **scartato** (ADR-0095
+  §Alternative: consenso per azione, tile-sessione e classe dell'immagine
+  coprono le tre esigenze); `runas` (identita' per albero + `exec`, niente
+  shell) e' parcheggiato in ROADMAP con i suoi trigger.
 
 ## Important Notes
 

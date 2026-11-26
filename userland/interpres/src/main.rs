@@ -388,17 +388,11 @@ mod env;
 
 civis::entry!(real_main);
 
-/// Variabile d'ambiente con il nome utente.
-const ENV_USER: &str = "USER";
-
 /// Tentativi in caso di servizio occupato (`R_BUSY`).
 const RETRIES: u32 = 20;
 
 /// Tentativi di risoluzione del servizio Identis.
 const IDENTIS_RESOLVE_RETRIES: u32 = 50;
-
-/// Stack pointer iniziale (per leggere USER dall'env).
-static mut SHELL_SP: u64 = 0;
 
 fn console_write(data: &[u8]) {
     if !civis::sess::out(data) {
@@ -412,9 +406,6 @@ fn console_write_str(s: &str) {
 
 /// Entry: apre console, risolve l'identita' della sessione, entra nel REPL.
 fn real_main(_sp: u64) -> ! {
-    // Salva lo stack pointer per la lettura dell'env (USER).
-    unsafe { SHELL_SP = _sp; }
-
     // READY a init: il login ha gia' fatto il suo, noi segnaliamo di essere
     // vivi (utile se init ci supervisionasse in futuro).
     civis::signal_ready(1);
@@ -997,29 +988,40 @@ fn authenticate() -> Result<(), ()> {
     }
 }
 
-/// Legge il nome utente dall'ambiente (`USER`). Ritorna `""` se non
-/// presente. Il nome viene copiato in un buffer statico (max 32 byte).
+/// L'utente del terminale: l'**identità della sessione**, chiesta al server
+/// (S3.3d, ADR-0095). Non c'è nessuna variabile d'ambiente da leggere né da
+/// fidarsi: il login ha scritto il nome sulla sessione (`SESS_AUTH_SET`) e il
+/// kernel dice di che pid siamo. `""` = sessione anonima (nessun login) o
+/// server non raggiungibile: il prompt resta senza nome, l'output non si perde.
+///
+/// Si chiede **a ogni prompt** (una IPC in più per riga): il nome è un fatto
+/// del server, non una copia da tenere aggiornata.
 fn read_user() -> &'static str {
-    // Buffer statico per il nome utente — sicuro: un solo processo shell alla volta.
     static mut USER: [u8; 33] = [0u8; 33];
     static mut LEN: usize = 0;
 
-    if unsafe { LEN == 0 } {
-        let sp = unsafe { SHELL_SP };
-        if let Some(env) = civis::env_from_stack(sp) {
-            if let Some(data) = env.get(ENV_USER) {
-                let n = data.len().min(32);
-                unsafe {
-                    USER[..n].copy_from_slice(&data[..n]);
-                    USER[n] = 0;
-                    LEN = n;
-                }
-            }
-        }
+    let mut auth = civis::sess::auth();
+    if auth.is_err() {
+        // Cache stantia (la console è ripartita): una risoluzione, un tentativo.
+        civis::sess::forget_current();
+        auth = civis::sess::auth();
     }
+    let name = auth.ok().filter(|a| a.is_authenticated());
 
     unsafe {
-        if LEN == 0 { "" } else {
+        match name {
+            Some(a) => {
+                let bytes = a.as_bytes();
+                let n = bytes.len().min(32);
+                USER[..n].copy_from_slice(&bytes[..n]);
+                USER[n] = 0;
+                LEN = n;
+            }
+            None => LEN = 0,
+        }
+        if LEN == 0 {
+            ""
+        } else {
             core::str::from_utf8(&USER[..LEN]).unwrap_or("")
         }
     }

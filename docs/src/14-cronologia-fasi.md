@@ -4950,3 +4950,34 @@ DE alla tile 0).
 **Fuori scope dichiarato**: `su`/cambio utente (fase separata), timeout della
 sessione remota, provenienza del consenso (`usr:<nome>:consent` porta un nome
 che il client dichiara: non decide nulla, i ruoli attestati decidono).
+
+## S3.3d — L'identità del terminale non è un ambiente (ADR-0095)
+
+Residuo di S3.3c: il token era sparito, ma il **nome** arrivava ancora per
+ambiente (`identis-login` → `USER` al DE → `USER` a ogni shell → `env_from_stack`
+nella shell, con un buffer statico in cache). Un'identità *dichiarata*, una
+copia da tenere allineata, e l'ultimo valore che assomigliava al bearer.
+
+**La decisione**: nessuna variabile d'ambiente. Il nome ha una sola fonte — la
+sessione — e chi lo mostra lo **chiede**: `read_user()` = `civis::sess::auth()`
+a ogni prompt (una IPC per riga; su errore `forget_current` + un tentativo, e
+in caso di fallimento il prompt resta senza nome invece di inventarlo).
+`identis-login` spawma il DE e `impluvium` spawma le shell **senza env**;
+spariscono `LOGIN_USER`, `user: String`, `read_user(sp)`, `pack_env` e lo
+`SHELL_SP`.
+
+**`su` valutato e scartato** (non per difficoltà, per inutilità): le tre
+esigenze che copre in Unix qui sono già coperte meglio — **consenso per
+azione** per scalare (ADR-0080 fase 7), **una tile = una sessione** per una
+sessione come un altro utente, **classe dell'immagine + floor/ops** per
+declassare un programma. In Unix `su` esiste perché l'uid è del kernel
+(`setuid` + shell); qui l'identità è un fatto del server, e una shell annidata
+ricomprerebbe la complessità appena tolta (lettore, history, `exit` con due
+significati, identità per pid) insegnando «diventi root e ci resti». La forma
+che avrebbe senso — `runas <utente> -- prog`, identità per albero + `exec`,
+niente shell — è parcheggiata con i trigger dichiarati (ADR-0095 §Alternative).
+
+**Test**: gate invariato (`[shell-native] 33/33`, il prompt continua a
+mostrare `⚡ root@velordo …` ma il nome viene dalla sessione); desktop PASS
+(le due shell mostrano l'identità propagata dal DE); `rg '"USER"|USER='` su
+`userland libs` → zero.

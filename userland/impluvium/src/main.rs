@@ -25,8 +25,6 @@
 
 extern crate alloc;
 
-use alloc::format;
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use civis::println;
@@ -53,9 +51,6 @@ struct De {
     /// I figli avviati per le foglie: `(pid, sessione)`. Serve a togliere la
     /// tile quando la shell esce.
     children: Vec<(i64, usize)>,
-    /// Nome utente del login (D8f): passato alle shell come `USER` (un nome,
-    /// non un segreto). Vuoto = nessun nome (prompt senza utente).
-    user: String,
 }
 
 impl De {
@@ -68,7 +63,6 @@ impl De {
             stream: Vec::new(),
             injector: None,
             children: Vec::new(),
-            user: String::new(),
         }
     }
 
@@ -267,15 +261,10 @@ impl De {
         let Some(meta) = civis::SpawnMeta::new("interpres", 16, &[]) else {
             return false;
         };
-        // D8f — `USER` alla shell (l'identita' invece e' gia' nella sessione,
-        // e la shell la legge dal server per attestazione). L'env block deve
-        // restare vivo fino a dopo lo spawn (il kernel lo copia nella
-        // syscall).
-        let user_env = format!("USER={}", self.user);
-        let meta = match civis::pack_args(&[], &[&user_env.as_bytes()]) {
-            Some(packed) => meta.argv(&packed),
-            None => meta,
-        };
+        // Niente ambiente (S3.3d, ADR-0095): l'identita' e' gia' nella
+        // **sessione** (propagata qui con `SESS_AUTH_SET`), e la shell la
+        // legge dal server per attestazione. Un nome in env sarebbe una copia
+        // da tenere aggiornata — l'ultima che avevamo.
         let Ok(chan) = civis::spawn_image(&img, &meta.detached()) else {
             println!("[impluvium] spawn della shell fallito");
             return false;
@@ -340,22 +329,9 @@ fn next_key(rest: &[u8]) -> Option<(u8, usize)> {
     Some((0, n + 1))
 }
 
-/// Il nome utente del login, dall'ambiente del DE (`USER`, D8f). Un nome —
-/// non un segreto: il DE lo copia nell'ambiente delle shell per il prompt.
-fn read_user(sp: u64) -> String {
-    let Some(env) = civis::env_from_stack(sp) else {
-        return String::new();
-    };
-    match env.get("USER") {
-        Some(v) => core::str::from_utf8(v).unwrap_or("").into(),
-        None => String::new(),
-    }
-}
-
-fn real_main(sp: u64) -> ! {
+fn real_main(_sp: u64) -> ! {
     println!("[impluvium] partenza");
     let mut de = De::new();
-    de.user = read_user(sp);
     // 1. La console c'e' (init la spawna prima): misura e primo layout.
     for _ in 0..200 {
         if de.measure() {
