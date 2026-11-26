@@ -376,8 +376,10 @@ log seriale.
   tetto), `libs/broker-proto`, `libs/littera` (sessioni di terminale D8c1:
   ANSI/scroll/wrap/SGR/backspace, eco e coda di input, dump con coda
   allineata ai confini UTF-8, resize con reflow, tabella con
-  creazione/focus/binding/attachment/purge e tetto a 8) e `libs/sess-proto`
-  (layout della mailbox: OUT/IN, `MAX_CHUNK`, `fits`) (**171 test** in tutto;
+  creazione/focus/binding/attachment/purge e tetto a 8, identità di sessione:
+  set/clear, UTF-8 e lunghezza fail-loud, purga per `auth_by`; S3.3c) e
+  `libs/sess-proto` (layout della mailbox: OUT/IN, `MAX_CHUNK`, `fits`)
+  (**184 test** in tutto;
   `libs/net` ne ha 54, 23 dei quali sulla macchina a stati TCP e sul wiring, 2
   sul framing RFC 7858). Girano da una
   **directory neutra**: il `.cargo/config.toml` del repo impone
