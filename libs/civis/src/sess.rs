@@ -52,6 +52,8 @@ pub struct Info {
     pub echo: bool,
     /// La sessione e' quella disegnata (in focus).
     pub focus: bool,
+    /// La geometria e' cambiata dall'ultima `info()` (il server la consuma).
+    pub resized: bool,
 }
 
 /// L'**utente autenticato** di una sessione (S3.3c). Non e' un segreto e non
@@ -176,6 +178,7 @@ impl Session {
             rows: (g & 0xFFFF) as u16,
             echo: (r.w1 & 1) != 0,
             focus: (r.w1 & 2) != 0,
+            resized: (r.w1 & 4) != 0,
         })
     }
 
@@ -288,6 +291,116 @@ impl Session {
         }
         Ok(())
     }
+}
+
+/// Un'applicazione a **schermo intero** (ADR-0098): la tela alternativa, il
+/// cursore posizionabile, le cancellazioni e la misura.
+///
+/// Non e' un secondo modello: sono le sequenze ANSI che un terminale vero
+/// capisce (`ESC[?1049h`, `ESC[2J`, `ESC[H`…) scritte sulla **sessione del
+/// processo** ([`current`]). La sessione ha gia' tutto (scrollback, danno,
+/// mirror seriale); l'app prende il controllo finche' non chiama [`Screen::close`],
+/// e allora il testo di prima torna com'era.
+pub struct Screen {
+    cols: u16,
+    rows: u16,
+}
+
+impl Screen {
+    /// Entra nella tela alternativa: lettore dichiarato, eco spento, cursore
+    /// nascosto, schermo pulito. Da qui in poi l'app disegna con [`Screen::at`].
+    pub fn open() -> Result<Screen, SessError> {
+        let s = current().ok_or(SessError::NotAttached)?;
+        let _ = s.echo(false);
+        s.write_screen(b"\x1b[?1049h\x1b[?25l\x1b[2J").map(|_| ())?;
+        let info = s.info()?;
+        Ok(Screen { cols: info.cols, rows: info.rows })
+    }
+
+    /// La misura della tela (celle).
+    pub fn size(&self) -> (u16, u16) {
+        (self.cols, self.rows)
+    }
+
+    /// Rilegge la misura e ritorna `true` se e' cambiata (consuma il flag nel
+    /// server): l'app riadatta il disegno invece di aspettare un tasto.
+    pub fn poll_resize(&mut self) -> bool {
+        let Some(s) = current() else {
+            return false;
+        };
+        match s.info() {
+            Ok(i) => {
+                let changed = i.cols != self.cols || i.rows != self.rows || i.resized;
+                self.cols = i.cols;
+                self.rows = i.rows;
+                changed
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Porta il cursore in `(col, row)` (1-based, come il CUP): il prossimo
+    /// byte si scrive li'.
+    pub fn at(&self, col: u16, row: u16) -> Result<(), SessError> {
+        let mut buf = [0u8; 24];
+        let n = format_cup(&mut buf, col, row);
+        self.write(&buf[..n])
+    }
+
+    /// Cancella lo schermo (il cursore non si muove).
+    pub fn clear(&self) -> Result<(), SessError> {
+        self.write(b"\x1b[2J")
+    }
+
+    /// Mostra/nasconde il cursore.
+    pub fn cursor(&self, visible: bool) -> Result<(), SessError> {
+        self.write(if visible { b"\x1b[?25h" } else { b"\x1b[?25l" })
+    }
+
+    /// Scrive byte nella tela (testo o sequenze).
+    pub fn write(&self, bytes: &[u8]) -> Result<(), SessError> {
+        let s = current().ok_or(SessError::NotAttached)?;
+        s.write_screen(bytes).map(|_| ())
+    }
+
+    /// Lascia la tela: cursore e schermata principale tornano come prima.
+    pub fn close(self) -> Result<(), SessError> {
+        let s = current().ok_or(SessError::NotAttached)?;
+        s.write_screen(b"\x1b[?25h\x1b[?1049l").map(|_| ())
+    }
+}
+
+/// `ESC[<row>;<col>H` in un buffer fisso (`col`/`row` 1-based).
+fn format_cup(buf: &mut [u8; 24], col: u16, row: u16) -> usize {
+    let mut n = 0usize;
+    buf[n] = 0x1B;
+    buf[n + 1] = b'[';
+    n += 2;
+    n += write_u16(&mut buf[n..], row.max(1));
+    buf[n] = b';';
+    n += 1;
+    n += write_u16(&mut buf[n..], col.max(1));
+    buf[n] = b'H';
+    n + 1
+}
+
+/// Scrive un `u16` in decimale, ritorna i byte scritti (niente `format!`:
+/// questo sta nel percorso di disegno).
+fn write_u16(dst: &mut [u8], mut v: u16) -> usize {
+    let mut tmp = [0u8; 5];
+    let mut n = 0usize;
+    loop {
+        tmp[n] = b'0' + (v % 10) as u8;
+        n += 1;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    for i in 0..n {
+        dst[i] = tmp[n - 1 - i];
+    }
+    n
 }
 
 impl Drop for Session {

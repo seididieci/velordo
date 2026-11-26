@@ -5015,3 +5015,55 @@ gate era **verde lo stesso**: i check guardavano il contenuto, non la forma.
 Fix: il totale viaggia nel primo reply (`w1` = totale << 32 | 4 byte) e il
 client sa quanti byte sono validi nell'ultimo blocco; guardia in t11 (l'elenco
 non contiene NUL e finisce con `\n`).
+
+## Passo 1 — Sessione a schermo intero (ADR-0098) e modello grafico (ADR-0097)
+
+Primo passo dei desiderata: la sessione diventa una **tela** che un programma
+puo' prendere. Prima era un terminale a flusso: `ESC[D`/`ESC[C` muovevano di
+**una** cella ignorando i parametri, `ESC[2J` non esisteva, `ESC[?25l` stampava
+`25l` a schermo (il `?` cadeva nel ramo "finale sconosciuto" e i parametri
+diventavano testo), e nessuno diceva all'app che la geometria era cambiata.
+
+**Parser** (`littera`, tutto host-testabile): conteggi `A/B/C/D/E/F`, `G`/`d`,
+`H`/`f`, `J`/`K` con modo 0/1/2, modi privati `?25` (cursore) e `?1049`
+(schermata alternativa **senza scrollback**, la principale torna com'era —
+testo, cronologia e cursore — e si riadatta anche mentre e' da parte).
+
+**Resize come notifica**: `Session::resize` alza il flag solo se la misura
+cambia davvero; `SESS_INFO.w1` bit 2 lo riporta e lo **consuma**; l'hint
+`SESS_INPUT_EVENT.w1 = 1` sveglia il lettore ed e' mandato a ogni cambio di
+misura (modeset, `TILE_COMMIT`, `SESS_RESIZE`). Nessun tag nuovo, nessun
+polling, un hint perso non perde il resize.
+
+**Base client**: `civis::sess::Screen` (`open`/`size`/`poll_resize`/`at`/
+`clear`/`cursor`/`write`/`close`) — sono le sequenze ANSI scritte sulla
+sessione, non un secondo modello.
+
+**Trappole pagate**: (a) `J`/`K` prendono un **modo** (default 0), non un
+conteggio (default 1): col default sbagliato `ESC[K` cancellava dall'inizio
+della riga e il test storico della shell ("non cancella niente col cursore a
+fine riga") e' stato il primo a dirlo; (b) `hint_resized` va chiamato in
+`commit_tiles` (dove le sessioni prendono la misura delle tile), non solo nel
+reset del DE: senza, l'app resta ferma a disegnare la misura vecchia finche'
+non arriva un tasto; (c) il frame di un'app va **solo schermo**
+(`write_screen`): nel mirror il transcript sarebbe pieno di ridisegni, e i
+marker di stato di un test vanno sul seriale (`print_string`).
+
+**Modello grafico** (ADR-0097, decisione di direzione per i passi 2-4): la tile
+e' una **superficie di pixel**; il testo e' una **vista derivata** a celle
+(`Geom::for_rect`), una cella contiene un glifo **o** una toppa di pixel
+(ancorata alle celle, quindi **scorre**); una GUI usa il rect intero senza
+griglia ne' padding; la libreria di disegno produce **bitmap** (una sola, con
+`text` a due teste: cella in testo, font proporzionale in GUI); il compositing
+e' **annidato** (app → sessione → compositore), non duplicato; niente toolkit
+di widget unificato (il livello condivisibile e' il disegno, non layout/focus/
+eventi); toppe con **budget**, **fuori dallo scrollback** e con **alt-text**
+(mirror e copia-incolla); la porta per il "terminale come app" resta aperta
+perche' `littera` e' indipendente dal display — con la regola: nessuna feature
+nuova nel server di sessione che non regga il giorno in cui la sessione sara'
+un'app.
+
+**Test**: unit host `littera` 17 → **21**; `scripts/run-tui-tests.sh` (fuori dal
+gate) PASS: alt screen 127x36, tasti, **modeset chiesto dall'app** →
+riadattamento a 102x34 da solo, `q` → la shell ridisegna il prompt. Gate
+invariato.

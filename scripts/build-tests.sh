@@ -61,6 +61,10 @@ build_one testland/dns testland/dns/src/dns.ld dnsprobe.bin dnsprobe
 build_one testland/posixsock testland/posixsock/src/posixsock.ld posixsock.bin posixsock
 build_one testland/tileprobe testland/tileprobe/src/tileprobe.ld tileprobe.bin tileprobe
 build_one testland/floorprobe testland/floorprobe/src/floorprobe.ld floorprobe.bin floorprobe
+# App a schermo intero (ADR-0098): prende la tela della sessione, si riadatta
+# al resize ed esce lasciando il testo di prima. Fuori dal gate
+# (`scripts/run-tui-tests.sh`: prende il terminale).
+build_one testland/fullscreen testland/fullscreen/src/fullscreen.ld fullscreen.bin fullscreen
 # Helper per il tetto ops ereditato (S3.4b): legge (ok) e scrive (negato).
 build_one testland/rightshelper testland/rightshelper/src/rightshelper.ld rightshelper.bin rightshelper
 # Helper per l'eredita' del subtree (S3.4): padre restringe + figlio prova i path.

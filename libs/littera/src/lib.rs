@@ -74,6 +74,14 @@ enum Resume {
 }
 
 /// Una sessione di terminale: modello + parser + input. Nessun display.
+/// La schermata **principale** messa da parte mentre e' attiva quella
+/// alternativa (`ESC[?1049`): griglia, cursore e visibilita' del cursore.
+struct SavedScreen {
+    grid: Grid,
+    cursor: (usize, usize),
+    cursor_visible: bool,
+}
+
 pub struct Session {
     /// Il modello a celle (pubblico: chi disegna ne legge celle e cursore).
     pub grid: Grid,
@@ -83,6 +91,13 @@ pub struct Session {
     esc: u8,
     /// Parametri CSI accumulati (es. `"38;2;255;0;0"`).
     csi_params: Vec<u8>,
+    /// La sequenza CSI e' privata (`ESC[?…h/l`: modi del terminale).
+    csi_private: bool,
+    /// Schermata alternativa attiva (`ESC[?1049h`): la principale e' in
+    /// `saved` con il suo cursore. L'alternativa **non** ha scrollback: e'
+    /// una tela, non una cronologia (ADR-0097).
+    alt: bool,
+    saved: Option<SavedScreen>,
     /// Colore foreground corrente (RGBA packed).
     pub fg: u32,
     /// Colore background corrente (RGBA packed).
@@ -113,6 +128,10 @@ pub struct Session {
     /// pid che ha **stabilito** l'identita' (login sulla 0, DE sulle tile):
     /// alla sua morte l'identita' sparisce anche se la sessione resta viva.
     pub auth_by: i64,
+    /// La geometria e' cambiata dall'ultima volta che il client l'ha chiesta
+    /// (`SESS_INFO` la consuma). Serve alle app a schermo intero: il resize
+    /// arriva dal display o dal DE, non da loro (ADR-0098).
+    pub resized: bool,
     resume: Resume,
 }
 
@@ -125,6 +144,9 @@ impl Session {
             pending: Vec::new(),
             esc: 0,
             csi_params: Vec::new(),
+            csi_private: false,
+            alt: false,
+            saved: None,
             fg: color::DEFAULT_FG,
             bg: color::DEFAULT_BG,
             cursor_drawn: (0, 0),
@@ -137,6 +159,7 @@ impl Session {
             auth_user: [0u8; AUTH_USER_MAX],
             auth_len: 0,
             auth_by: 0,
+            resized: false,
             resume: Resume::None,
         }
     }
@@ -213,25 +236,20 @@ impl Session {
                     self.csi_params.push(c);
                     return Step::Done;
                 }
+                // `?` = modo privato (`ESC[?25h`): i parametri si accumulano
+                // lo stesso, il finale `h`/`l` decide.
+                if c == b'?' {
+                    self.csi_private = true;
+                    return Step::Done;
+                }
                 self.esc = 0;
                 let params = core::mem::take(&mut self.csi_params);
-                match c {
-                    b'D' => {
-                        let back = self.grid.span_back(self.grid.cursor.0, self.grid.cursor.1);
-                        self.grid.cursor.0 -= back;
-                    }
-                    b'C' => {
-                        if self.grid.cursor.0 + 1 < self.grid.cols() {
-                            self.grid.cursor.0 += 1;
-                        }
-                    }
-                    b'K' => {
-                        let (col, row) = self.grid.cursor;
-                        self.grid.erase_from(col, row, self.fg, self.bg);
-                    }
-                    b'm' => self.handle_sgr(&params),
-                    _ => {}
+                if self.csi_private {
+                    self.csi_private = false;
+                    self.handle_mode(c, &params);
+                    return Step::Done;
                 }
+                self.handle_csi(c, &params);
                 return Step::Done;
             }
             _ => {}
@@ -284,6 +302,189 @@ impl Session {
             }
         }
         Step::Done
+    }
+
+    /// i-esimo parametro numerico (0 = il primo). Vuoto o assente =
+    /// `default`. `ESC[5D` → `param(0,1) == 5`; `ESC[D` → `1`.
+    fn param(&self, params: &[u8], i: usize, default: usize) -> usize {
+        let mut n = 0usize;
+        for part in params.split(|&b| b == b';') {
+            if n == i {
+                if part.is_empty() {
+                    return default;
+                }
+                let mut v = 0usize;
+                for &b in part {
+                    if b.is_ascii_digit() {
+                        v = v.saturating_mul(10).saturating_add((b - b'0') as usize);
+                    }
+                }
+                return if v == 0 { default } else { v };
+            }
+            n += 1;
+        }
+        default
+    }
+
+    /// CSI non privata: movimento del cursore, cancellazione, SGR.
+    fn handle_csi(&mut self, c: u8, params: &[u8]) {
+        let n = self.param(params, 0, 1);
+        let (cols, rows) = (self.grid.cols(), self.grid.rows());
+        if cols == 0 || rows == 0 {
+            return;
+        }
+        let (mut col, mut row) = self.grid.cursor;
+        match c {
+            b'A' => row = row.saturating_sub(n),
+            b'B' => row = (row + n).min(rows - 1),
+            b'C' => col = (col + n).min(cols - 1),
+            // Indietro: di span in span (un glifo largo non si attraversa).
+            b'D' => {
+                for _ in 0..n {
+                    col -= self.grid.span_back(col, row);
+                }
+            }
+            b'E' => {
+                col = 0;
+                row = (row + n).min(rows - 1);
+            }
+            b'F' => {
+                col = 0;
+                row = row.saturating_sub(n);
+            }
+            // Colonna / riga assoluta (1-based, come il CUP).
+            b'G' => col = (n - 1).min(cols - 1),
+            b'd' => row = (n - 1).min(rows - 1),
+            b'H' | b'f' => {
+                row = (self.param(params, 0, 1) - 1).min(rows - 1);
+                col = (self.param(params, 1, 1) - 1).min(cols - 1);
+            }
+            // `J`/`K` prendono un **modo**, non un conteggio: senza
+            // parametro vale 0 (dal cursore in poi), non 1.
+            b'J' => self.erase_display(self.param(params, 0, 0)),
+            b'K' => self.erase_line(self.param(params, 0, 0)),
+            b'm' => self.handle_sgr(params),
+            _ => {}
+        }
+        self.grid.cursor = (col, row);
+    }
+
+    /// `ESC[<n>J`: 0 = dal cursore a fine schermo, 1 = dall'inizio al cursore,
+    /// 2 = tutto (il cursore **non** si muove: e' cosi' in un terminale vero).
+    fn erase_line_from(&mut self, row: usize, from: usize, to: usize) {
+        let cols = self.grid.cols();
+        if cols == 0 || from > to {
+            return;
+        }
+        let mut c = from.min(cols - 1);
+        let to = to.min(cols - 1);
+        while c <= to {
+            self.grid.put_wide(c, row, b' ' as u32, 1, self.fg, self.bg);
+            c += 1;
+        }
+        self.grid.mark_rect(from.min(cols - 1), row, to, row);
+    }
+
+    fn erase_display(&mut self, mode: usize) {
+        let (col, row) = self.grid.cursor;
+        let (cols, rows) = (self.grid.cols(), self.grid.rows());
+        if cols == 0 || rows == 0 {
+            return;
+        }
+        match mode {
+            2 => {
+                // Tutto: la griglia si svuota ma il cursore resta dov'era.
+                self.grid.clear();
+                self.grid.cursor = (col, row);
+            }
+            1 => {
+                for r in 0..row {
+                    self.erase_line_from(r, 0, cols - 1);
+                }
+                self.erase_line_from(row, 0, col);
+                self.grid.mark_rect(0, 0, cols - 1, row);
+            }
+            _ => {
+                for r in row..rows {
+                    self.erase_line_from(r, 0, cols - 1);
+                }
+                self.grid.mark_rect(0, row, cols - 1, rows - 1);
+            }
+        }
+    }
+
+    /// `ESC[<n>K`: 0 = dal cursore a fine riga, 1 = dall'inizio al cursore,
+    /// 2 = tutta la riga.
+    fn erase_line(&mut self, mode: usize) {
+        let (col, row) = self.grid.cursor;
+        let cols = self.grid.cols();
+        match mode {
+            2 => self.erase_line_from(row, 0, cols - 1),
+            1 => self.erase_line_from(row, 0, col),
+            _ => {
+                let (c0, r) = (col, row);
+                self.grid.erase_from(c0, r, self.fg, self.bg);
+                self.grid.mark_rect(c0.min(cols.saturating_sub(1)), r, cols - 1, r);
+            }
+        }
+    }
+
+    /// `ESC[?<n>h/l`: modi del terminale. Solo quelli che servono a
+    /// un'applicazione a schermo intero; gli altri si ignorano (un terminale
+    /// che rifiuta un modo ignoto non e' un terminale).
+    fn handle_mode(&mut self, c: u8, params: &[u8]) {
+        let n = self.param(params, 0, 1);
+        let on = c == b'h';
+        match (n, c) {
+            (25, b'h') => self.grid.cursor_visible = true,
+            (25, b'l') => self.grid.cursor_visible = false,
+            (1049, b'h') => self.enter_alt(),
+            (1049, b'l') => self.exit_alt(),
+            _ => {}
+        }
+        let _ = on;
+    }
+
+    /// Entra nella schermata **alternativa**: la principale (con il suo
+    /// scrollback) va da parte, si parte da una tela vuota **senza**
+    /// scrollback. Ripetere l'ingresso non azzera quella gia' attiva.
+    fn enter_alt(&mut self) {
+        if self.alt {
+            return;
+        }
+        let (cols, rows) = (self.grid.cols(), self.grid.rows());
+        let fresh = Grid::new_with_scrollback(cols, rows, 0);
+        let old = core::mem::replace(&mut self.grid, fresh);
+        self.saved = Some(SavedScreen {
+            grid: old,
+            cursor: self.grid.cursor,
+            cursor_visible: true,
+        });
+        self.alt = true;
+        self.grid.mark_all();
+        self.cursor_drawn = (usize::MAX, usize::MAX);
+    }
+
+    /// Torna alla schermata principale: il testo che c'era e' ancora li'
+    /// (scrollback compreso), il cursore alla sua posizione.
+    fn exit_alt(&mut self) {
+        if !self.alt {
+            return;
+        }
+        if let Some(saved) = self.saved.take() {
+            self.grid = saved.grid;
+            self.grid.cursor = saved.cursor;
+            self.grid.cursor_visible = saved.cursor_visible;
+            self.grid.mark_all();
+        }
+        self.alt = false;
+        self.cursor_drawn = (usize::MAX, usize::MAX);
+    }
+
+    /// `true` se la schermata alternativa e' attiva (per chi disegna e per i
+    /// test).
+    pub fn alt_screen(&self) -> bool {
+        self.alt
     }
 
     /// Completa l'azione che aveva richiesto lo scroll (il modello ha gia'
@@ -485,8 +686,21 @@ impl Session {
 
     /// Ridimensiona il modello (reflow + scrollback, D4).
     pub fn resize(&mut self, cols: usize, rows: usize) {
+        if cols == self.grid.cols() && rows == self.grid.rows() {
+            return;
+        }
         self.grid.resize(cols, rows);
         self.cursor_drawn = (usize::MAX, usize::MAX);
+        self.resized = true;
+        if let Some(saved) = self.saved.as_mut() {
+            saved.grid.resize(cols, rows);
+        }
+    }
+
+    /// Consuma il flag "geometria cambiata" (`SESS_INFO`): la prossima
+    /// risposta non lo riporta finche' non cambia di nuovo.
+    pub fn take_resized(&mut self) -> bool {
+        core::mem::take(&mut self.resized)
     }
 
     /// Sessione "sporca" di cose da ridisegnare?
@@ -774,6 +988,87 @@ mod tests {
         assert_eq!(row_str(&s, 0), "abX");
         feed(&mut s, "\x1b[K");
         assert_eq!(row_str(&s, 0), "abX");
+    }
+
+    #[test]
+    fn csi_conteggi_e_posizione() {
+        let mut s = Session::new(20, 4, 8, None);
+        feed(&mut s, "abcdef\x1b[3D");
+        assert_eq!(s.grid.cursor.0, 3, "ESC[3D torna di 3 celle");
+        feed(&mut s, "\x1b[2C");
+        assert_eq!(s.grid.cursor.0, 5);
+        feed(&mut s, "\x1b[3;10H");
+        assert_eq!(s.grid.cursor, (9, 2));
+        feed(&mut s, "X");
+        assert_eq!(row_str(&s, 2), "         X", "CUP scrive dove dice (riga 3)");
+        // `ESC[D` senza parametro = 1 cella (comportamento storico).
+        feed(&mut s, "\x1b[D");
+        assert_eq!(s.grid.cursor.0, 9);
+        // Mai fuori griglia.
+        feed(&mut s, "\x1b[999;999H");
+        assert_eq!(s.grid.cursor, (19, 3)); // clip all'ultima riga (4 righe: 0..3)
+    }
+
+    #[test]
+    fn ed_el_e_cursore_nascosto() {
+        let mut s = Session::new(10, 3, 8, None);
+        feed(&mut s, "aaaa\nbbbb\ncccc");
+        // EL 0: dal cursore a fine riga (cursore a fine di "cccc").
+        feed(&mut s, "\x1b[2;2H\x1b[K");
+        assert_eq!(row_str(&s, 1), "b", "ESC[K cancella dal cursore in poi");
+        // ED 2: tutto, cursore fermo dov'era (un terminale vero non lo muove).
+        feed(&mut s, "\x1b[3;3H\x1b[2J");
+        assert_eq!(s.grid.cursor, (2, 2));
+        assert_eq!(dump(&s).trim(), "", "ED 2 svuota lo schermo");
+        // Cursore nascosto/visibile: il `?` non deve finire a schermo.
+        feed(&mut s, "\x1b[?25l");
+        assert!(!s.grid.cursor_visible);
+        assert!(!dump(&s).contains("25l"), "il modo privato non e' testo");
+        feed(&mut s, "\x1b[?25h");
+        assert!(s.grid.cursor_visible);
+    }
+
+    #[test]
+    fn schermo_alternativo_conserva_la_principale() {
+        let mut s = Session::new(12, 3, 8, None);
+        feed(&mut s, "principale");
+        let before = dump(&s);
+        feed(&mut s, "\x1b[?1049h");
+        assert!(s.alt_screen());
+        assert_eq!(dump(&s).trim(), "", "la tela alternativa parte vuota");
+        feed(&mut s, "tela\x1b[2;3H*");
+        assert!(dump(&s).contains("tela"));
+        feed(&mut s, "\x1b[?1049l");
+        assert!(!s.alt_screen());
+        assert_eq!(dump(&s), before, "la principale torna com'era");
+        // Entrare due volte non azzera la tela gia' attiva; uscire due volte
+        // non scala la principale.
+        feed(&mut s, "\x1b[?1049h\x1b[?1049h");
+        feed(&mut s, "x");
+        feed(&mut s, "\x1b[?1049l\x1b[?1049l");
+        assert_eq!(dump(&s), before);
+    }
+
+    #[test]
+    fn resize_segnala_il_cambiamento_una_volta() {
+        let mut s = Session::new(20, 4, 8, None);
+        assert!(!s.take_resized(), "nessun resize all'inizio");
+        // Stessa misura: nessun segnale (il display che si riadatta uguale
+        // non deve svegliare nessuno).
+        s.resize(20, 4);
+        assert!(!s.take_resized());
+        s.resize(30, 8);
+        assert!(s.take_resized(), "la misura e' cambiata");
+        assert!(!s.take_resized(), "il flag si consuma");
+        assert_eq!((s.grid.cols(), s.grid.rows()), (30, 8));
+        // Anche la schermata principale messa da parte si riadatta: uscendo
+        // dalla tela si trova la misura giusta, non quella di prima.
+        feed(&mut s, "principale\x1b[?1049h");
+        s.resize(24, 6);
+        assert!(s.take_resized());
+        feed(&mut s, "\x1b[?1049l");
+        assert_eq!((s.grid.cols(), s.grid.rows()), (24, 6));
+        assert!(dump(&s).contains("principale"));
     }
 
     #[test]

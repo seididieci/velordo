@@ -673,6 +673,23 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   si perderebbe (coda 8 slot). `users` non apre piu' il bucket. Test:
   `identistest` 12/12 (t11 elenco senza hash, t12 lettura negata) +
   `foreign` bit8 (t57 → 511). Pattern riusabile da S3.2b.
+- **Sessione a schermo intero (ADR-0098, ADR-0097)**: `littera` onora i
+  parametri CSI (`ESC[nA/B/C/D`, `E/F`, `G/d`, `H/f`, `J`/`K` con **modo** di
+  default 0, non conteggio), i modi privati (`?25h/l` cursore, `?1049h/l`
+  **schermata alternativa senza scrollback**) e segnala il resize:
+  `Session::resize` alza `resized`, `SESS_INFO.w1` bit 2 lo riporta e lo
+  consuma, l'hint `SESS_INPUT_EVENT.w1 = 1` sveglia il lettore (mandato su
+  modeset, `TILE_COMMIT` e `SESS_RESIZE`). `civis::sess::Screen` e'
+  la base per un'app (alt screen, `at`, `clear`, `cursor`, `poll_resize`); il
+  frame va **solo schermo** (`write_screen`), il mirror resta il transcript.
+  Demo `usr/bin/fullscreen` + `scripts/run-tui-tests.sh` (fuori dal gate: prova
+  alt screen, tasti, modeset→riadattamento 127x36→102x34, ritorno al prompt).
+  Modello grafico (ADR-0097): la tile e' una **superficie di pixel**, il testo
+  e' una vista a celle (`Geom::for_rect`), una cella contiene glifo **o**
+  toppa; la libreria di disegno produce bitmap (una sola, `text` a due teste:
+  cella vs font proporzionale); niente toolkit unificato; toppe con budget,
+  **fuori dallo scrollback** e con alt-text; il "terminale come app" resta una
+  migrazione possibile perche' `littera` e' indipendente dal display.
 - **Niente identita' in ambiente (S3.3d, ADR-0095)**: `USER` non esiste piu'.
   `identis-login` spawma il DE e `impluvium` spawma le shell **senza env**;
   il prompt chiede il nome a ogni riga (`civis::sess::auth()` →
@@ -959,7 +976,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
 ./scripts/run-desktop-tests.sh   # tileprobe + keybinding del DE via monitor
 
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, syscall-numbers, impluvium-tree, blake2s, sig, tls: 184 test
+./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, syscall-numbers, impluvium-tree, blake2s, sig, tls: 188 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh

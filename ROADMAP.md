@@ -1425,11 +1425,12 @@ Voci con scope e vittoria dichiarati (non date).
 Direzione scelta, non ancora pianificata riga per riga. Le voci qui sotto
 hanno un ordine concordato ma **non** una data: si prendono in quest'ordine.
 
-1. **Sessione a schermo intero** — un programma prende la sessione (alt-screen,
-   cursore posizionabile, `ESC[nD`, ED/EL, resize notificato) e all'uscita lo
-   scrollback torna com'era. Base per un editor stile neovim e per il monitor.
-   `littera` ha gia' il parser CSI tokenizzato (i parametri vanno onorati), il
-   resto e' API in `civis::sess` + una demo.
+1. **Sessione a schermo intero** — **fatta** (ADR-0098): alt-screen senza
+   scrollback, CSI con parametri (conteggi, CUP, ED/EL, cursore), `SESS_INFO`
+   bit 2 = "geometria cambiata" e hint `w1 = 1`; `civis::sess::Screen` e
+   `usr/bin/fullscreen` provato da `scripts/run-tui-tests.sh` (modeset chiesto
+   dall'app → 127x36 → 102x34, riadattamento da solo). Base per editor e
+   monitor.
 2. **Canvas di testo** — libreria **pura** (client) che *genera celle*:
    box/hline, alberi, barre, sparkline, braille. Separata dal **disegno** a
    schermo, che resta della console (responsabilita' diverse: chi produce le
@@ -1438,7 +1439,9 @@ hanno un ordine concordato ma **non** una data: si prendono in quest'ordine.
    gia' tutti: `ps_info` porta i **tick CPU per processo** (`ticks_used`),
    `SYS_MEMINFO`, `CBS_GET_INFO`, stats di block/gpu/net. **Zero kernel.**
 4. **Base grafica (analisi prima)** — cursore, widget, componenti, rendering.
-   Architettura dichiarata:
+   Architettura dichiarata in **ADR-0097** (superficie a pixel, cella =
+   glifo|toppa, compositing annidato, niente toolkit unificato, la porta per il
+   "terminale come app" resta aperta):
    - **una tile grafica e' una superficie di pixel confinata al rect della
      tile**: niente griglia, niente scroll — il testo e la grafica sono due
      modalita' della stessa tile, e lo spazio e' quello del rect (musivum ha

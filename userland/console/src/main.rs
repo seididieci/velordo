@@ -612,6 +612,7 @@ impl Term {
         // le celle: con una tile il bordo non c'e' (login a tutto schermo).
         let (w, h) = self.surface.pixel_size();
         self.repaint_tile_area(musivum::Rect::new(0, 0, w, h));
+        self.hint_resized();
         self.flush_display_full();
     }
 
@@ -625,6 +626,10 @@ impl Term {
         for (sid, rect) in pending {
             self.apply_tile(sid, rect);
         }
+        // Le sessioni hanno preso la misura delle tile: chi le disegna (un'app
+        // a schermo intero) va **svegliato**, o resta fermo a disegnare la
+        // misura vecchia finche' non arriva un tasto (ADR-0098).
+        self.hint_resized();
         let (sw, sh) = self.surface.pixel_size();
         if sw > 0 && sh > 0 {
             self.repaint_tile_area(musivum::Rect::new(0, 0, sw, sh));
@@ -755,9 +760,28 @@ impl Term {
     /// se il canale e' morto il ruolo si libera e il prossimo che legge si
     /// ridichiara.
     fn hint_reader(&mut self, sid: usize, queued: usize) {
+        // `w1` = 1: la geometria e' cambiata. Lo stesso hint sveglia chi legge
+        // — un'app a schermo intero deve riadattarsi **subito**, non al tasto
+        // successivo (ADR-0098). Il flag resta finche' non lo consuma
+        // `SESS_INFO`: un hint perso non perde il resize (come per i tasti).
+        let resized = self.sessions.get(sid).map(|s| s.resized).unwrap_or(false);
         if let Some(chan) = self.sessions.reader_of(sid) {
-            if civis::send_async(chan, civis::SESS_INPUT_EVENT, queued as u64, 0).is_err() {
+            if civis::send_async(chan, civis::SESS_INPUT_EVENT, queued as u64, resized as u64)
+                .is_err()
+            {
                 self.sessions.clear_reader(chan);
+            }
+        }
+    }
+
+    /// Sveglia i lettori delle sessioni che hanno cambiato geometria: dopo un
+    /// modeset o un `TILE_SET` il client non sa nulla, e senza questo hint
+    /// resterebbe fermo a disegnare la misura vecchia.
+    fn hint_resized(&mut self) {
+        for sid in 0..littera::MAX_SESSIONS {
+            let resized = self.sessions.get(sid).map(|s| s.resized).unwrap_or(false);
+            if resized {
+                self.hint_reader(sid, 0);
             }
         }
     }
@@ -915,6 +939,9 @@ impl Term {
         } else {
             // Nessun DE: una tile sola e' lo schermo, si adatta da sola (D4/D8c1).
             self.ensure_screen_tile();
+            // Chi disegna (un'app a schermo intero) deve saperlo subito: il
+            // resize non lo ha chiesto lui.
+            self.hint_resized();
         }
         self.render();
         self.flush_display_full();
@@ -2609,6 +2636,7 @@ fn real_main(_sp: u64) -> ! {
                         if let Some(s) = term.sessions.get_mut(sid) {
                             s.resize(cols, rows);
                         }
+                        term.hint_resized();
                         let _ = civis::reply(SESS_RESIZE, 0, 0);
                     }
 
@@ -2781,8 +2809,16 @@ fn real_main(_sp: u64) -> ! {
                             let _ = civis::reply(SESS_INFO, !0, 0);
                             continue;
                         }
-                        let (cols, rows, echo) = match term.sessions.get(sid) {
-                            Some(s) => (s.grid.cols(), s.grid.rows(), s.echo),
+                        let (cols, rows, echo, resized) = match term.sessions.get_mut(sid) {
+                            Some(s) => (
+                                s.grid.cols(),
+                                s.grid.rows(),
+                                s.echo,
+                                // Bit 2: la geometria e' cambiata dall'ultima
+                                // domanda. Si consuma qui: chi chiede misure
+                                // le vuole fresche una volta (ADR-0098).
+                                s.take_resized(),
+                            ),
                             None => {
                                 let _ = civis::reply(SESS_INFO, !0, 0);
                                 continue;
@@ -2790,7 +2826,7 @@ fn real_main(_sp: u64) -> ! {
                         };
                         let focus = term.sessions.focus == sid;
                         let g = ((cols as u64) << 16) | rows as u64;
-                        let flags = (echo as u64) | ((focus as u64) << 1);
+                        let flags = (echo as u64) | ((focus as u64) << 1) | ((resized as u64) << 2);
                         let _ = civis::reply(SESS_INFO, g, flags);
                     }
 

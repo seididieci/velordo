@@ -124,3 +124,5 @@
 - [ADR-0094: Identità di sessione per attestazione — niente bearer token (S3.3c)](./adr/0094-identita-sessione-attestata.md)
 - [ADR-0095: L'identità del terminale non è un ambiente — il prompt la chiede alla sessione (S3.3d)](./adr/0095-identita-senza-ambiente.md)
 - [ADR-0096: `sys:identis` — credenziali riservate, elenco servito dal servizio](./adr/0096-sys-identis-riservato.md)
+- [ADR-0097: Superficie, celle e toppe — il modello grafico del terminale](./adr/0097-modello-grafico-terminale.md)
+- [ADR-0098: Sessione a schermo intero — alt screen, CSI con parametri, resize notificato](./adr/0098-sessione-schermo-intero.md)
