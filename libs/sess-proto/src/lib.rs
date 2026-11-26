@@ -35,6 +35,10 @@ pub const MAX_CHUNK: usize = HALF;
 /// di pagina: si mappa/smappa `MAILBOX_BYTES`).
 pub const MAILBOX_PAGES: usize = 1;
 
+/// Lunghezza massima dell'**alt-text** di una toppa (ADR-0099): sta nel
+/// byte alto di `SESS_PATCH_BEGIN.w1`.
+pub const ALT_MAX: usize = 255;
+
 /// Lunghezza massima del **nome utente autenticato** di una sessione
 /// (S3.3c, `SESS_AUTH_SET`/`SESS_AUTH`). Deve combaciare con
 /// `littera::AUTH_USER_MAX` (il modello rifiuta oltre, il client prende la

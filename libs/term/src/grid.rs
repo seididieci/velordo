@@ -171,6 +171,44 @@ impl Dirty {
     }
 }
 
+/// Una **toppa** di pixel ancorata a un rect di celle (ADR-0099): il bitmap e'
+/// disegnato **sotto** i glifi delle celle che copre, quindi una cella vuota
+/// mostra la toppa e un glifo la copre.
+///
+/// La griglia **non conosce le metriche del font**: `px_w`/`px_h` sono dati
+/// opachi (li valida chi ha il font, la console). `cells` e' la larghezza in
+/// celle, che serve alla griglia per il dump e per il clipping.
+#[derive(Clone)]
+pub struct Segment {
+    /// Colonna di partenza (celle).
+    pub col: usize,
+    /// Larghezza in celle.
+    pub cells: usize,
+    /// Larghezza in pixel (BGRA, `px_w*4` byte per riga).
+    pub px_w: usize,
+    /// Altezza in pixel (una fetta di riga: `cell_h`).
+    pub px_h: usize,
+    /// I pixel, `px_w * px_h * 4` byte BGRA.
+    pub bitmap: Vec<u8>,
+    /// Forma testuale (dump e copia-incolla): resa al posto delle celle.
+    pub alt: Vec<u8>,
+}
+
+impl Segment {
+    /// Byte occupati (per il conteggio della sessione).
+    pub fn bytes(&self) -> usize {
+        self.bitmap.len()
+    }
+}
+
+/// Una riga uscita dalla griglia: le celle **e le sue toppe**. La toppa vive
+/// quanto la riga che la contiene (nessuna eviction separata): quando la
+/// cronologia scarta la riga, scarta anche i pixel.
+struct Row {
+    cells: Vec<Cell>,
+    segments: Vec<Segment>,
+}
+
 /// La griglia del terminale: le celle, il cursore, lo scrollback, la zona
 /// sporca.
 pub struct Grid {
@@ -181,7 +219,7 @@ pub struct Grid {
     /// `VecDeque`: `pop_front` e' O(1) — con `Vec::remove(0)` ogni scroll
     /// spostava fino a 1000 righe (un `hexdump` da 5 MB = ~650 GB di
     /// memmove).
-    scrollback: VecDeque<Vec<Cell>>,
+    scrollback: VecDeque<Row>,
     /// Tetto dello scrollback di **questa** griglia (D8c1: le sessioni del
     /// DE ne chiedono meno: N terminali non devono costare 1000 righe l'uno).
     scrollback_max: usize,
@@ -189,6 +227,12 @@ pub struct Grid {
     pub cursor: (usize, usize),
     /// Cursore visibile.
     pub cursor_visible: bool,
+    /// Le toppe, una lista per riga (parallela alle celle): la riga le porta
+    /// con se' nello scroll. Vuota = nessuna toppa (il caso normale).
+    segments: Vec<Vec<Segment>>,
+    /// Byte occupati dalle toppe (griglia + cronologia): e' la **misura** che
+    /// il server usa per il tetto solo-rifiuto, mai per evincere.
+    patch_bytes: usize,
     dirty: Dirty,
 }
 
@@ -215,6 +259,8 @@ impl Grid {
             scrollback_max: scrollback_max.max(1),
             cursor: (0, 0),
             cursor_visible: true,
+            segments: Vec::new(),
+            patch_bytes: 0,
             dirty: Dirty::none(),
         }
     }
@@ -375,6 +421,8 @@ impl Grid {
         for c in self.cells.iter_mut() {
             *c = Cell::default();
         }
+        self.segments.clear();
+        self.patch_bytes = 0;
         self.cursor = (0, 0);
         self.dirty.mark_all(self.cols, self.rows);
     }
@@ -424,15 +472,77 @@ impl Grid {
             return;
         }
         let first: Vec<Cell> = self.cells[..self.cols].to_vec();
-        self.scrollback.push_back(first);
+        let first_segments = self.take_row_segments(0);
+        self.scrollback.push_back(Row {
+            cells: first,
+            segments: first_segments,
+        });
         if self.scrollback.len() > self.scrollback_max {
-            self.scrollback.pop_front();
+            if let Some(old) = self.scrollback.pop_front() {
+                // La riga esce dalla cronologia: le sue toppe escono con lei.
+                // E' l'unico modo in cui una toppa muore (a parte un resize).
+                self.patch_bytes = self
+                    .patch_bytes
+                    .saturating_sub(old.segments.iter().map(|g| g.bytes()).sum::<usize>());
+            }
         }
         self.cells.copy_within(self.cols.., 0);
+        // Le toppe seguono la riga: quella uscita e' gia' nello scrollback,
+        // le altre salgono di una posizione e l'ultima riga resta senza.
+        if self.segments.len() == self.rows {
+            self.segments.rotate_left(1);
+            if let Some(last) = self.segments.last_mut() {
+                last.clear();
+            }
+        }
         let last = self.rows - 1;
         for col in 0..self.cols {
             self.cells[last * self.cols + col] = Cell::default();
         }
+    }
+
+    /// Estrae (e contabilizza) i segmenti della riga `row`, lasciandola vuota.
+    fn take_row_segments(&mut self, row: usize) -> Vec<Segment> {
+        if row >= self.segments.len() {
+            return Vec::new();
+        }
+        core::mem::take(&mut self.segments[row])
+    }
+
+    /// Mette una toppa nella riga `row` (in coda: l'ultima disegnata vince
+    /// dove si sovrappone) e marca la riga sporca. `false` = riga fuori
+    /// griglia o toppa piu' larga della griglia.
+    pub fn put_segment(&mut self, row: usize, seg: Segment) -> bool {
+        if row >= self.rows || seg.col + seg.cells > self.cols || seg.cells == 0 {
+            return false;
+        }
+        if self.segments.len() < self.rows {
+            self.segments.resize_with(self.rows, Vec::new);
+        }
+        self.patch_bytes += seg.bytes();
+        self.segments[row].push(seg);
+        self.dirty.mark(0, row);
+        self.dirty.mark(self.cols.saturating_sub(1), row);
+        true
+    }
+
+    /// Le toppe della riga `row` (vuoto se nessuna).
+    pub fn segments_at(&self, row: usize) -> &[Segment] {
+        self.segments.get(row).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Byte occupati dalle toppe (griglia + cronologia).
+    pub fn patch_bytes(&self) -> usize {
+        self.patch_bytes
+    }
+
+    /// Butta tutte le toppe (uscita dalla tela alternativa, resize).
+    pub fn clear_segments(&mut self) {
+        self.segments.clear();
+        for row in self.scrollback.iter_mut() {
+            row.segments.clear();
+        }
+        self.patch_bytes = 0;
     }
 
     /// C'e' una zona sporca da ridisegnare?
@@ -559,7 +669,7 @@ impl Grid {
         // 1) Le righe, dalla piu' vecchia: scrollback + griglia corrente.
         let mut lines: Vec<Vec<Cell>> = Vec::with_capacity(self.scrollback.len() + self.rows);
         for row in self.scrollback.iter() {
-            lines.push(trim_row(row));
+            lines.push(trim_row(&row.cells));
         }
         for r in 0..self.rows {
             lines.push(trim_row(&self.cells[r * self.cols..(r + 1) * self.cols]));
@@ -668,8 +778,14 @@ impl Grid {
         self.rows = new_rows;
         self.cells = cells;
         // Il contenuto ora e' nella griglia: lo scrollback si svuota (le righe
-        // piu' vecchie che non ci stanno sono perse).
+        // piu' vecchie che non ci stanno sono perse). Con lui se ne vanno le
+        // **toppe** (ADR-0099): il reflow sposta le celle di colonna e di
+        // riga, quindi un'ancora a celle non ha piu' senso — meglio perderle
+        // che disegnarle dove non c'entrano. Chi le ha fatte ridisegna (il
+        // resize e' notificato, ADR-0098).
         self.scrollback.clear();
+        self.segments.clear();
+        self.patch_bytes = 0;
         // Il cursore: stessa riga (dove il testo lo lascia), colonna seguita
         // nel reflow.
         self.cursor = (
@@ -1017,5 +1133,65 @@ mod tests {
         e.mark_rect(3, 3, 9, 9);
         let d = e.take_dirty();
         assert_eq!((d.min_col, d.min_row, d.max_col, d.max_row), (0, 0, 0, 0));
+    }
+
+    fn seg(col: usize, cells: usize, bytes: usize) -> Segment {
+        Segment {
+            col,
+            cells,
+            px_w: cells * 2,
+            px_h: 3,
+            bitmap: alloc::vec![0x7F; bytes],
+            alt: alloc::vec![b'#'],
+        }
+    }
+
+    #[test]
+    fn toppa_vive_quanto_la_sua_riga() {
+        // 4 righe, scrollback 2: la toppa segue la riga e muore con lei, non
+        // con un contatore separato (ADR-0099).
+        let mut g = Grid::new_with_scrollback(8, 4, 2);
+        assert!(g.put_segment(0, seg(1, 2, 24)));
+        assert_eq!(g.segments_at(0).len(), 1);
+        assert_eq!(g.patch_bytes(), 24);
+        // Scroll: la riga 0 va nello scrollback con la toppa.
+        g.scroll_up();
+        assert!(g.segments_at(0).is_empty(), "la riga 0 vecchia e' uscita");
+        assert!(g.segments_at(3).is_empty(), "l'ultima riga nasce vuota");
+        assert_eq!(g.patch_bytes(), 24, "la toppa e' viva nello scrollback");
+        // Due scroll: la cronologia (2 righe) scarta la riga con la toppa.
+        g.scroll_up();
+        g.scroll_up();
+        assert_eq!(g.patch_bytes(), 0, "la toppa muore con la sua riga");
+        // Riga fuori griglia o piu' larga: rifiutata, niente conteggio.
+        assert!(!g.put_segment(9, seg(0, 2, 8)));
+        assert!(!g.put_segment(0, seg(7, 2, 8)));
+        assert_eq!(g.patch_bytes(), 0);
+    }
+
+    #[test]
+    fn toppa_non_sopravvive_al_reflow() {
+        let mut g = Grid::new(8, 4);
+        assert!(g.put_segment(2, seg(0, 3, 16)));
+        assert_eq!(g.patch_bytes(), 16);
+        g.resize(12, 5);
+        assert_eq!(g.patch_bytes(), 0, "il reflow sposta le celle: via le toppe");
+        assert!(g.segments_at(2).is_empty());
+        // `clear` libera tutto (ESC[2J).
+        assert!(g.put_segment(0, seg(0, 2, 8)));
+        g.clear();
+        assert_eq!(g.patch_bytes(), 0);
+    }
+
+    #[test]
+    fn due_toppe_sulla_stessa_riga_e_ordine() {
+        let mut g = Grid::new(8, 2);
+        assert!(g.put_segment(1, seg(0, 2, 16)));
+        assert!(g.put_segment(1, seg(4, 3, 24)));
+        assert_eq!(g.segments_at(1).len(), 2);
+        assert_eq!(g.patch_bytes(), 40);
+        // L'ultima disegnata vince dove si sovrappone: la cerco dal fondo.
+        let segs = g.segments_at(1);
+        assert_eq!(segs.iter().rev().find(|s| 4 >= s.col && 4 < s.col + s.cells).map(|s| s.col), Some(4));
     }
 }

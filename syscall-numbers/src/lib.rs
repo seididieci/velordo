@@ -834,6 +834,21 @@ pub const SESS_AUTH_SET: u64 = 0xAF;
 /// server dice la sessione e l'utente. `pid = 0` = la sessione **attaccata**
 /// al canale del chiamante (il DE legge la 0 prima di propagare).
 pub const SESS_AUTH: u64 = 0xB7;
+/// `SESS_METRICS` -> `w0` = larghezza di una cella in pixel, `w1` = altezza
+/// (ADR-0099): il client non puo' indovinare i pixel di una cella, li conosce
+/// solo il font. Serve a dimensionare una toppa (`SESS_PATCH_BEGIN`).
+pub const SESS_METRICS: u64 = 0xB8;
+/// `SESS_PATCH_BEGIN {w0 = x | y<<16, w1 = cols | rows<<16 | alt_len<<32}`
+/// -> `0` / `!0` (ADR-0099): apre lo staging di una **toppa** (una per
+/// sessione); l'alt-text (max 255 byte) e' nella meta' OUT della mailbox.
+/// La toppa e' contenuto delle celle (sotto i glifi) e **vive quanto il suo
+/// testo**: nessuna eviction, nessun budget per posizione.
+pub const SESS_PATCH_BEGIN: u64 = 0xB9;
+/// `SESS_PATCH_DATA {w0 = offset, w1 = len}` (byte nella meta' OUT) ->
+/// `0` / `!0`: accumula il bitmap BGRA. Al completamento (`offset+len` uguale
+/// alla dimensione attesa) la toppa entra nella griglia. Offset fuori ordine
+/// o overflow = `!0` e staging scartato.
+pub const SESS_PATCH_DATA: u64 = 0xBA;
 
 // ── Tile del DE (D8e, ADR-0092) ─────────────────────────────────────
 // La console disegna le **sessioni** in rettangoli (tile). Il layout lo decide

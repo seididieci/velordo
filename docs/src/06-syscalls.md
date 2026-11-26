@@ -446,10 +446,13 @@ stdout: sessione attestata → default → seriale).
 | 0xA5 | `SESS_INFO` | `w0` = sess → `w0` = `cols<<16\|rows`, `w1` = eco \| focus<<1 \| **resized<<2** (la geometria è cambiata dall'ultima domanda: il flag si consuma qui — ADR-0098) |
 | 0xA6 | `SESS_STATE` | `w0` = sess, `w1` = limite → `(celle non vuote, CRC del testo)` |
 | 0xA7 | `SESS_DUMP` | `w0` = sess, `w1` = max → coda del testo visibile nella meta' IN |
-| 0xA8 | `SESS_STATS` | → `(sessioni vive, focus)` |
+| 0xA8 | `SESS_STATS` | → `w0` = sessioni vive, `w1` = focus (bit 0..8) \| **byte delle toppe** (bit 8.., ADR-0099) |
 | 0xAB | `SESS_ATTACH` | `w0` = sessione → `w1` = shm: mailbox su una sessione **nominata** (≥ `ThirdParty`, D8e). Non dichiara il lettore: serve a un **iniettore** (il DE) |
 | 0xAC | `SESS_INPUT` | `w0` = len (byte in OUT) → accoda nel **buffer di input** della sessione attaccata (tasti, ≠ `SESS_WRITE` che è testo) e manda l'hint al lettore |
 | 0xA9 | `SESS_TEST_INPUT` | `w0` = len (byte in OUT) — **solo test**: inietta input come la tastiera (stesso percorso + hint) |
+| 0xB8 | `SESS_METRICS` | → `w0` = larghezza di una cella in px, `w1` = altezza (la sa solo il font: serve a dimensionare una toppa) |
+| 0xB9 | `SESS_PATCH_BEGIN` | `w0 = x \| y<<16`, `w1 = cols \| rows<<16 \| alt_len<<32` (alt nella metà OUT) → `0`/`!0`: apre lo staging di una **toppa** di pixel, una per sessione (ADR-0099) |
+| 0xBA | `SESS_PATCH_DATA` | `w0` = offset, `w1` = len (byte nella metà OUT) → `0`/`!0`: accumula il bitmap BGRA; **commit implicito** a misura completa, offset fuori ordine = scartato |
 | 0xAA | `SESS_INPUT_EVENT` | console → **lettore dichiarato**, fire-and-forget: `w0` = byte in coda, `w1 = 1` se la geometria è cambiata. Hint coalescente (E2): la coda è la verità; il flag di resize resta finché `SESS_INFO` non lo consuma |
 | 0xAF | `SESS_AUTH_SET` | `w0` = len del nome (byte in OUT) → scrive l'**utente autenticato** sulla sessione **attaccata** al canale (implicita, come `SESS_RESIZE`); `len = 0` = deautentica; solo `System` (S3.3c, ADR-0094) |
 | 0xB7 | `SESS_AUTH` | `w0` = pid (`0` = la sessione attaccata) → `w0` = 1/0 (autenticata), `w1` = len del nome nella meta' IN; solo `System`. Il kernel dà il pid, il server dice sessione e utente (S3.3c, ADR-0094) |

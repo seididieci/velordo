@@ -38,8 +38,9 @@ use civis::{WIN_CLOSE, WIN_COMMIT, WIN_OPEN, WIN_RAISE, WIN_SET_RECT, WIN_SET_SU
 // Tag delle sessioni di terminale (D8c1, ADR-0089).
 use civis::{
     SESS_ATTACH, SESS_ATTACH_DEFAULT, SESS_AUTH, SESS_AUTH_SET, SESS_BIND, SESS_CLOSE, SESS_CREATE,
-    SESS_DUMP, SESS_ECHO, SESS_FOCUS, SESS_INFO, SESS_INPUT, SESS_READ, SESS_RESIZE, SESS_STATE,
-    SESS_STATS, SESS_TEST_INPUT, SESS_WHOAMI, SESS_WRITE,
+    SESS_DUMP, SESS_ECHO, SESS_FOCUS, SESS_INFO, SESS_INPUT, SESS_METRICS, SESS_PATCH_BEGIN,
+    SESS_PATCH_DATA, SESS_READ, SESS_RESIZE, SESS_STATE, SESS_STATS, SESS_TEST_INPUT,
+    SESS_WHOAMI, SESS_WRITE,
 };
 
 /// Valore di errore IPC.
@@ -1535,6 +1536,9 @@ impl Term {
                     p.copy_from(bg, bg_stride, x0, y0, bw, geom.cell_h);
                 }
                 self.comp.add_damage(musivum::Rect::new(x0, y0, bw, geom.cell_h));
+                // Le toppe **dopo** il fondo e **prima** dei glifi (ADR-0099):
+                // una cella vuota mostra la toppa, un glifo la copre.
+                self.blit_row_segments(t, sid, row);
                 for col in bc0..=bc1 {
                     // Le continuazioni le disegna la testa dello span.
                     if self.grid_cell_width(sid, col, row) == 0 {
@@ -1548,6 +1552,7 @@ impl Term {
         } else {
             // Fallback (VGA o bg layer non pronta): percorso per-cella.
             for row in r0..=r1 {
+                self.blit_row_segments(t, sid, row);
                 for col in c0..=c1 {
                     // Le continuazioni le disegna la **testa** dello span: qui
                     // non si ridipinge il background sopra il glifo largo (era
@@ -1560,6 +1565,44 @@ impl Term {
                     self.stat_cells += 1; // T0 (ADR-0066)
                 }
             }
+        }
+    }
+
+    /// Disegna le **toppe** della riga `row` della sessione `sid` nella tile
+    /// `t`, sotto i glifi (ADR-0099).
+    ///
+    /// Il blit usa la **vista** della tile (`Pixel::view`), quindi il clip e'
+    /// il rettangolo della tile: una toppa non puo' scrivere nella vicina. Se
+    /// la superficie e' VGA (niente pixel) le toppe non si disegnano: il
+    /// fallback testuale resta testo.
+    fn blit_row_segments(&mut self, t: usize, sid: usize, row: usize) {
+        let Some(mut view) = self.tile_view(t) else {
+            return;
+        };
+        let geom = match self.tiles.get(t) {
+            Some(tile) => tile.geom,
+            None => return,
+        };
+        // Le toppe della riga: prestito immutabile dal modello, copiato prima
+        // del prestito mutabile della surface.
+        let mut patches: alloc::vec::Vec<(u32, u32, u32, u32)> = alloc::vec::Vec::new();
+        if let Some(s) = self.sessions.get(sid) {
+            for seg in s.grid.segments_at(row) {
+                let x = geom.origin_x + (seg.col as u32) * geom.cell_w;
+                let y = geom.origin_y + (row as u32) * geom.cell_h;
+                view.blit(
+                    &seg.bitmap,
+                    (seg.px_w * 4) as u32,
+                    x,
+                    y,
+                    seg.px_w as u32,
+                    seg.px_h as u32,
+                );
+                patches.push((x, y, seg.px_w as u32, seg.px_h as u32));
+            }
+        }
+        for (x, y, w, h) in patches {
+            self.comp.add_damage(musivum::Rect::new(x, y, w, h));
         }
     }
 
@@ -2830,6 +2873,130 @@ fn real_main(_sp: u64) -> ! {
                         let _ = civis::reply(SESS_INFO, g, flags);
                     }
 
+                    SESS_METRICS => {
+                        // Dimensione di una cella in pixel (ADR-0099): il
+                        // client non puo' indovinarla, la sa solo il font.
+                        let m = term.font.as_ref().map(|f| f.metrics());
+                        match m {
+                            Some(m) => {
+                                let _ = civis::reply(SESS_METRICS, m.cell_w as u64, m.cell_h as u64);
+                            }
+                            None => {
+                                let _ = civis::reply(SESS_METRICS, 0, 0);
+                            }
+                        }
+                    }
+
+                    SESS_PATCH_BEGIN => {
+                        // w0 = x|y<<16, w1 = cols|rows<<16 | alt_len<<32; l'alt
+                        // e' nella meta' OUT. Il server **deriva** i pixel
+                        // dalle metriche: il client manda le celle, non i byte.
+                        let class = term.peer_class(msg.channel);
+                        let sid = match term.sessions.attached(msg.channel) {
+                            Some(id) => id,
+                            None => {
+                                let _ = civis::reply(SESS_PATCH_BEGIN, !0, 0);
+                                continue;
+                            }
+                        };
+                        if !term.sess_allowed(msg.channel, sid as u32, class) {
+                            let _ = civis::reply(SESS_PATCH_BEGIN, !0, 0);
+                            continue;
+                        }
+                        let metrics = match term.font.as_ref().map(|f| f.metrics()) {
+                            Some(m) => m,
+                            None => {
+                                let _ = civis::reply(SESS_PATCH_BEGIN, !0, 0);
+                                continue;
+                            }
+                        };
+                        let col = (msg.w0 & 0xFFFF) as usize;
+                        let row = ((msg.w0 >> 16) & 0xFFFF) as usize;
+                        let cells = (msg.w1 & 0xFFFF) as usize;
+                        let rows = ((msg.w1 >> 16) & 0xFFFF) as usize;
+                        let alt_len = ((msg.w1 >> 32) & 0xFF) as usize;
+                        let Some(mb) = term.sess_mb(msg.channel) else {
+                            let _ = civis::reply(SESS_PATCH_BEGIN, !0, 0);
+                            continue;
+                        };
+                        if alt_len > littera::PATCH_ALT_MAX || !sess_proto::fits(alt_len) {
+                            let _ = civis::reply(SESS_PATCH_BEGIN, !0, 0);
+                            continue;
+                        }
+                        let mut alt = [0u8; littera::PATCH_ALT_MAX];
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                (mb as *const u8).add(sess_proto::OUT_OFF),
+                                alt.as_mut_ptr(),
+                                alt_len,
+                            );
+                        }
+                        let ok = match term.sessions.get_mut(sid) {
+                            Some(s) => s.patch_begin(
+                                col,
+                                row,
+                                cells,
+                                rows,
+                                cells * metrics.cell_w as usize,
+                                rows * metrics.cell_h as usize,
+                                &alt[..alt_len],
+                            ),
+                            None => false,
+                        };
+                        let _ = civis::reply(SESS_PATCH_BEGIN, if ok { 0 } else { !0 }, 0);
+                    }
+
+                    SESS_PATCH_DATA => {
+                        // w0 = offset, w1 = len (byte nella meta' OUT).
+                        let sid = match term.sessions.attached(msg.channel) {
+                            Some(id) => id,
+                            None => {
+                                let _ = civis::reply(SESS_PATCH_DATA, !0, 0);
+                                continue;
+                            }
+                        };
+                        let len = msg.w1 as usize;
+                        if !sess_proto::fits(len) {
+                            let _ = civis::reply(SESS_PATCH_DATA, !0, 0);
+                            continue;
+                        }
+                        let Some(mb) = term.sess_mb(msg.channel) else {
+                            let _ = civis::reply(SESS_PATCH_DATA, !0, 0);
+                            continue;
+                        };
+                        let mut data = alloc::vec![0u8; len];
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                (mb as *const u8).add(sess_proto::OUT_OFF),
+                                data.as_mut_ptr(),
+                                len,
+                            );
+                        }
+                        // Il commit e' implicito: se il conteggio e' cambiato,
+                        // la toppa e' entrata nella griglia e va **disegnata**
+                        // subito (nessun altro evento la farebbe comparire).
+                        let before = term
+                            .sessions
+                            .get(sid)
+                            .map(|s| s.patch_bytes())
+                            .unwrap_or(0);
+                        let ok = match term.sessions.get_mut(sid) {
+                            Some(s) => s.patch_data(msg.w0 as usize, &data),
+                            None => false,
+                        };
+                        let committed = ok
+                            && term
+                                .sessions
+                                .get(sid)
+                                .map(|s| s.patch_bytes() != before)
+                                .unwrap_or(false);
+                        let _ = civis::reply(SESS_PATCH_DATA, if ok { 0 } else { !0 }, 0);
+                        if committed {
+                            term.render();
+                            term.flush_display();
+                        }
+                    }
+
                     SESS_STATE => {
                         // w0 = sessione, w1 = limite delle ultime celle.
                         let class = term.peer_class(msg.channel);
@@ -2879,11 +3046,16 @@ fn real_main(_sp: u64) -> ! {
                     }
 
                     SESS_STATS => {
-                        let _ = civis::reply(
-                            SESS_STATS,
-                            term.sessions.count() as u64,
-                            term.sessions.focus as u64,
-                        );
+                        // `w1` = focus (bit 0..8) | byte delle toppe (bit 8..):
+                        // la **misura** che rende verificabile il tetto, senza
+                        // una tag in piu' (ADR-0099).
+                        let bytes = term
+                            .sessions
+                            .focus_session()
+                            .map(|s| s.patch_bytes())
+                            .unwrap_or(0);
+                        let w1 = (term.sessions.focus as u64 & 0xFF) | ((bytes as u64) << 8);
+                        let _ = civis::reply(SESS_STATS, term.sessions.count() as u64, w1);
                     }
 
                     SESS_TEST_INPUT => {

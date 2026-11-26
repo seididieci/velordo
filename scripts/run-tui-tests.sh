@@ -102,6 +102,17 @@ send_mon 'sendkey l'
 send_mon 'sendkey j'
 sleep 1
 
+# 2b. Toppa di pixel (ADR-0099): barra+linea disegnate **sotto** le celle.
+send_mon 'sendkey p'
+if ! wait_for '[fullscreen] patch bytes=' 20; then
+    echo "[tui] FAIL: toppa non disegnata" >&2
+    exit 1
+fi
+PATCH_LINE="$(grep -aF '[fullscreen] patch bytes=' "$LOG" | tail -1 || true)"
+PATCH_BYTES="$(printf '%s' "$PATCH_LINE" | sed 's/.*bytes=//; s/ at=.*//')"
+PATCH_CRC="$(printf '%s' "$PATCH_LINE" | sed 's/.*crc=//')"
+echo "[tui] toppa: ${PATCH_BYTES:-0} byte, crc ${PATCH_CRC:-?}"
+
 # 3. Resize: l'app chiede un modeset e deve **riadattarsi** (la misura non la
 #    sceglie lei: arriva dal display, via DE, via hint).
 BEFORE_RESIZE="$(grep -aF '[fullscreen] start' "$LOG" | tail -1 | grep -ao '[0-9]\+x[0-9]\+' || true)"
@@ -142,6 +153,13 @@ check() {
 # `if`, non `cmd; check $?`: con `set -e` un grep che non trova abortisce.
 if [ -n "$END_POS" ] && [ "$START_POS" != "$END_POS" ]; then ok=1; else ok=0; fi
 check "i tasti muovono la stella ($START_POS -> $END_POS)" "$ok"
+if [ -n "$PATCH_BYTES" ] && [ "$PATCH_BYTES" -gt 0 ] 2>/dev/null; then ok=1; else ok=0; fi
+check "toppa di pixel disegnata ($PATCH_BYTES byte)" "$ok"
+# Il CRC della riga prima/dopo: i pixel sono arrivati al framebuffer e sono
+# **diversi** (una toppa che non disegna sarebbe indistinguibile).
+A="${PATCH_CRC%%/*}"; B="${PATCH_CRC##*/}"
+if [ -n "$A" ] && [ -n "$B" ] && [ "$A" != "$B" ]; then ok=1; else ok=0; fi
+check "la toppa cambia i pixel della riga (crc $PATCH_CRC)" "$ok"
 if [ -n "$RESIZED" ] && [ "$RESIZED" != "$BEFORE_RESIZE" ]; then ok=1; else ok=0; fi
 check "riadattamento dopo il modeset ($BEFORE_RESIZE -> $RESIZED)" "$ok"
 if grep -aqF '[fullscreen] exit' "$LOG"; then ok=1; else ok=0; fi

@@ -449,6 +449,35 @@ impl Pixel {
         }
     }
 
+    /// Copia una bitmap BGRA (`src`, `src_stride` byte per riga) in `(x, y)`
+    /// della surface, `w×h` pixel, **leggendo `src` da (0,0)**.
+    ///
+    /// E' il blit delle **toppe** (ADR-0099): la sorgente e' un'immagine a se',
+    /// non una banda della stessa superficie (per quello c'e' `copy_from`, che
+    /// legge alle stesse coordinate). Clippa alla vista (il rect della tile),
+    /// quindi una toppa non puo' scrivere fuori dalla sua tile.
+    pub fn blit(&mut self, src: &[u8], src_stride: u32, x: u32, y: u32, w: u32, h: u32) {
+        if x >= self.width || y >= self.height || w == 0 || h == 0 {
+            return;
+        }
+        let w = w.min(self.width - x);
+        let h = h.min(self.height - y);
+        let dst_stride = self.stride as usize;
+        let src_stride = src_stride as usize;
+        let bytes = w as usize * 4;
+        let ptr = self.ptr;
+        for rr in 0..h as usize {
+            let src_off = rr * src_stride;
+            if src_off + bytes > src.len() {
+                break;
+            }
+            let dst_off = (y as usize + rr) * dst_stride + x as usize * 4;
+            unsafe {
+                core::ptr::copy_nonoverlapping(src.as_ptr().add(src_off), ptr.add(dst_off), bytes);
+            }
+        }
+    }
+
     /// Sposta verso l'alto di `dy` pixel il rettangolo `(x, y, w, h)` della
     /// surface: la riga `y+dy+rr` va in `y+rr`. Le ultime `dy` righe restano
     /// invariate (le ripulisce il renderer, T4). Sorgente e destinazione

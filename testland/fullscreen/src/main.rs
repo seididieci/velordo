@@ -7,7 +7,8 @@
 //! la tela e il testo di prima torna com'era, scrollback compreso.
 //!
 //! Tasti: `hjkl` muovono la stella, `m` cambia risoluzione (per provare il
-//! riadattamento: il resize non lo chiede l'app), `q` esce.
+//! riadattamento: il resize non lo chiede l'app), `p` disegna una **toppa**
+//! (ADR-0099: barra + linea in pixel, sotto i glifi), `q` esce.
 //!
 //! Seedato in `usr/bin/fullscreen.bin` (uso manuale dalla shell) e provato da
 //! `scripts/run-tui-tests.sh`, fuori dal gate: prende il terminale, quindi non
@@ -23,6 +24,7 @@ use alloc::string::String;
 
 use civis;
 use civis::sess::Screen;
+use pictura::{rgb, Canvas};
 
 civis::entry!(real_main);
 
@@ -31,6 +33,77 @@ civis::entry!(real_main);
 fn mark(text: &str) {
     let line = format!("[fullscreen] {}\n", text);
     let _ = civis::print_string(line.as_bytes());
+}
+
+/// Disegna una **toppa**: 12 celle × 1 riga di pixel veri (una barra e una
+/// linea, non glifi) e ne verifica l'effetto sul conteggio del server.
+fn draw_patch(scr: &Screen) -> bool {
+    let Ok((cw, ch)) = civis::sess::metrics() else {
+        mark("patch ERRORE: metriche non disponibili");
+        return false;
+    };
+    let cells = 12u16;
+    let mut canvas = Canvas::new(cells as usize * cw as usize, ch as usize, rgb(24, 24, 24));
+    canvas.rect(
+        0,
+        0,
+        canvas.w,
+        canvas.h,
+        1,
+        rgb(141, 150, 168),
+    );
+    canvas.bar(
+        2,
+        2,
+        canvas.w.saturating_sub(4),
+        canvas.h.saturating_sub(4),
+        640,
+        rgb(24, 24, 24),
+        rgb(91, 124, 255),
+    );
+    canvas.line(2, canvas.h / 2, canvas.w - 3, canvas.h / 2, 1, rgb(255, 255, 255));
+    let Some(sess) = civis::sess::current() else {
+        mark("patch ERRORE: nessuna sessione");
+        return false;
+    };
+    let (_, rows) = scr.size();
+    let at = rows.saturating_sub(3);
+    // Prova visiva: il CRC della **riga di pixel** prima e dopo. Se i pixel
+    // della toppa arrivano al framebuffer, il CRC cambia (ADR-0099).
+    let crc0 = row_crc(at);
+    match sess.patch(2, at, cells, 1, canvas.bytes(), b"== bar ==") {
+        Ok(()) => {}
+        Err(_) => {
+            mark("patch ERRORE: rifiutata");
+            return false;
+        }
+    }
+    let bytes = civis::sess::patch_bytes().unwrap_or(0);
+    let crc1 = row_crc(at);
+    mark(&format!(
+        "patch bytes={} at={} crc={:x}/{:x}",
+        bytes,
+        at,
+        crc0.unwrap_or(0),
+        crc1.unwrap_or(0)
+    ));
+    true
+}
+
+/// CRC della riga di celle `row` (tag di test della console, T4).
+fn row_crc(row: u16) -> Option<u32> {
+    let console = civis::service_lookup(civis::Service::Console).ok()?;
+    let r = civis::send(
+        console as u64,
+        civis::syscall_numbers::CONSOLE_ROW_CRC,
+        row as u64,
+        0,
+    )
+    .ok()?;
+    if r.w1 == 0 {
+        return None;
+    }
+    Some(r.w0 as u32)
 }
 
 /// Chiede al compositore una risoluzione diversa (D4): l'host la segue, il DE
@@ -149,6 +222,9 @@ fn real_main(_sp: u64) -> ! {
                 // tela cambia misura mentre l'app la occupa).
                 b'm' => {
                     let _ = set_mode(if scr.size().0 > 110 { (1024, 768) } else { (1280, 800) });
+                }
+                b'p' => {
+                    let _ = draw_patch(&scr);
                 }
                 _ => {}
             }

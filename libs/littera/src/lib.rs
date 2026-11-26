@@ -29,7 +29,7 @@ extern crate alloc;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use term::grid::{color, Grid};
+use term::grid::{color, Grid, Segment};
 use term::utf8::Decoder;
 
 /// Il numero massimo di sessioni (sessione 0 compresa): bounded per
@@ -47,6 +47,16 @@ pub const INPUT_MAX: usize = 1024;
 
 /// Lunghezza massima del nome utente autenticato in una sessione.
 pub const AUTH_USER_MAX: usize = 32;
+
+/// Tetto dei byte di **toppe** per sessione (ADR-0099): si controlla
+/// **all'ingresso** di una toppa nuova e si rifiuta (`false`), mai si evince
+/// una toppa gia' presente. Il caso normale (un log con rami disegnati, una
+/// barra, un'icona) sta in poche centinaia di KB; 8 MiB lasciano spazio senza
+/// permettere a un `ThirdParty` di esaurire la memoria da un solo schermo.
+pub const PATCH_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Tetto dell'alt-text di una toppa (byte UTF-8): entra nel `w1` di
+/// `SESS_PATCH_BEGIN` (8 bit).
+pub const PATCH_ALT_MAX: usize = 255;
 
 /// Esito di un codepoint per chi disegna.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -132,7 +142,57 @@ pub struct Session {
     /// (`SESS_INFO` la consuma). Serve alle app a schermo intero: il resize
     /// arriva dal display o dal DE, non da loro (ADR-0098).
     pub resized: bool,
+    /// Staging di una **toppa** in arrivo (`SESS_PATCH_BEGIN`/`DATA`): una per
+    /// sessione, come la transazione di Identis. Il commit e' implicito.
+    patch_pending: Option<PendingPatch>,
     resume: Resume,
+}
+
+/// Una toppa in arrivo: geometria in celle, misura in pixel (la decide chi ha
+/// il font) e i byte accumulati finora.
+struct PendingPatch {
+    col: usize,
+    row: usize,
+    cells: usize,
+    rows: usize,
+    px_w: usize,
+    px_h: usize,
+    alt: [u8; PATCH_ALT_MAX],
+    alt_len: usize,
+    bytes: Vec<u8>,
+    total: usize,
+}
+
+/// L'ultima toppa che copre `col` (l'ultima disegnata vince).
+fn covering_segment<'a>(segs: &'a [Segment], col: usize) -> Option<&'a Segment> {
+    segs.iter()
+        .rev()
+        .find(|g| col >= g.col && col < g.col + g.cells)
+}
+
+/// Scrive l'alt-text di una toppa in `cells` celle: tronca al confine di
+/// carattere, poi imbottisce di spazi (una toppa occupa sempre lo spazio che
+/// copre, anche nel dump).
+fn push_alt(out: &mut Vec<u8>, alt: &[u8], cells: usize) {
+    let Ok(text) = core::str::from_utf8(alt) else {
+        for _ in 0..cells {
+            out.push(b' ');
+        }
+        return;
+    };
+    let mut used = 0usize;
+    for ch in text.chars() {
+        if used >= cells {
+            break;
+        }
+        let mut buf = [0u8; 4];
+        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+        used += 1;
+    }
+    while used < cells {
+        out.push(b' ');
+        used += 1;
+    }
 }
 
 impl Session {
@@ -160,6 +220,7 @@ impl Session {
             auth_len: 0,
             auth_by: 0,
             resized: false,
+            patch_pending: None,
             resume: Resume::None,
         }
     }
@@ -639,10 +700,14 @@ impl Session {
         // dump sarebbe fatta di righe vuote, non di testo.
         let mut last = self.grid.cursor.1.min(self.grid.rows().saturating_sub(1));
         for row in 0..self.grid.rows() {
-            if (0..self.grid.cols()).any(|col| {
-                let c = self.grid.cell(col, row);
-                !c.is_blank() || c.is_cont()
-            }) {
+            // Una riga con una toppa ha contenuto anche se le celle sono
+            // vuote: la toppa e' contenuto (ADR-0099).
+            if !self.grid.segments_at(row).is_empty()
+                || (0..self.grid.cols()).any(|col| {
+                    let c = self.grid.cell(col, row);
+                    !c.is_blank() || c.is_cont()
+                })
+            {
                 last = last.max(row);
             }
         }
@@ -657,15 +722,33 @@ impl Session {
                     break;
                 }
             }
-            for col in 0..end {
-                let c = self.grid.cell(col, row);
-                if c.is_cont() {
-                    continue;
+            for seg in self.grid.segments_at(row) {
+                end = end.max(seg.col + seg.cells);
+            }
+            // Le toppe: al posto delle celle coperte va il loro **alt-text**
+            // (una toppa non ha forma testuale propria; ADR-0097 §7).
+            let segs = self.grid.segments_at(row);
+            let mut col = 0usize;
+            while col < end {
+                match covering_segment(segs, col) {
+                    Some(seg) if seg.col == col => {
+                        push_alt(&mut all, &seg.alt, seg.cells);
+                        col += seg.cells;
+                    }
+                    Some(_) => col += 1, // dentro una toppa gia' resa
+                    None => {
+                        let c = self.grid.cell(col, row);
+                        if c.is_cont() {
+                            col += 1;
+                            continue;
+                        }
+                        let ch = char::from_u32(if c.cp == 0 { b' ' as u32 } else { c.cp })
+                            .unwrap_or('?');
+                        let mut buf = [0u8; 4];
+                        all.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                        col += 1;
+                    }
                 }
-                let ch = char::from_u32(if c.cp == 0 { b' ' as u32 } else { c.cp })
-                    .unwrap_or('?');
-                let mut buf = [0u8; 4];
-                all.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
             }
             all.push(b'\n');
         }
@@ -701,6 +784,114 @@ impl Session {
     /// risposta non lo riporta finche' non cambia di nuovo.
     pub fn take_resized(&mut self) -> bool {
         core::mem::take(&mut self.resized)
+    }
+
+    // ── Toppe di pixel (ADR-0099) ────────────────────────────────────
+
+    /// Apre lo staging di una toppa: `cells × rows` celle in `(col, row)`,
+    /// `px_w × px_h` pixel (li calcola chi ha le metriche del font), con
+    /// l'alt-text gia' presente.
+    ///
+    /// Rifiuta (`false`) se: c'e' gia' uno staging, la posizione esce dalla
+    /// griglia, la toppa e' vuota, o il **tetto** `PATCH_MAX_BYTES` verrebbe
+    /// superato. Il tetto si controlla qui e non tocca mai le toppe gia'
+    /// presenti: una toppa rifiutata e' un errore per il client, non una
+    /// perdita silenziosa per il log.
+    pub fn patch_begin(
+        &mut self,
+        col: usize,
+        row: usize,
+        cells: usize,
+        rows: usize,
+        px_w: usize,
+        px_h: usize,
+        alt: &[u8],
+    ) -> bool {
+        if self.patch_pending.is_some() || cells == 0 || rows == 0 {
+            return false;
+        }
+        if col + cells > self.grid.cols() || row + rows > self.grid.rows() {
+            return false;
+        }
+        let total = px_w * px_h * 4;
+        if total == 0 || px_h < rows {
+            return false;
+        }
+        if self.grid.patch_bytes().saturating_add(total) > PATCH_MAX_BYTES {
+            return false;
+        }
+        let n = alt.len().min(PATCH_ALT_MAX);
+        let mut buf = [0u8; PATCH_ALT_MAX];
+        buf[..n].copy_from_slice(&alt[..n]);
+        self.patch_pending = Some(PendingPatch {
+            col,
+            row,
+            cells,
+            rows,
+            px_w,
+            px_h,
+            alt: buf,
+            alt_len: n,
+            bytes: Vec::with_capacity(total),
+            total,
+        });
+        true
+    }
+
+    /// Accumula un blocco della toppa. `offset` deve essere esattamente la
+    /// lunghezza gia' ricevuta (il protocollo e' sequenziale: un buco e' un
+    /// bug del client, non qualcosa da interpretare). Al completamento la
+    /// toppa entra nella griglia (una fetta per riga) e lo staging si chiude.
+    pub fn patch_data(&mut self, offset: usize, data: &[u8]) -> bool {
+        let Some(p) = self.patch_pending.as_mut() else {
+            return false;
+        };
+        if offset != p.bytes.len() || p.bytes.len() + data.len() > p.total {
+            self.patch_pending = None;
+            return false;
+        }
+        p.bytes.extend_from_slice(data);
+        if p.bytes.len() < p.total {
+            return true;
+        }
+        // Commit: una fetta per riga (la toppa scorre con la sua riga).
+        let Some(p) = self.patch_pending.take() else {
+            return false;
+        };
+        let row_h = p.px_h / p.rows;
+        let row_bytes = p.px_w * row_h * 4;
+        let alt = &p.alt[..p.alt_len];
+        for r in 0..p.rows {
+            let from = r * row_bytes;
+            let to = from + row_bytes;
+            if to > p.bytes.len() {
+                break;
+            }
+            let seg = Segment {
+                col: p.col,
+                cells: p.cells,
+                px_w: p.px_w,
+                px_h: row_h,
+                bitmap: p.bytes[from..to].to_vec(),
+                // L'alt-text va sulla **prima** riga: le altre lo lascerebbero
+                // ripetere nel dump.
+                alt: if r == 0 { alt.to_vec() } else { Vec::new() },
+            };
+            if !self.grid.put_segment(p.row + r, seg) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Abbandona lo staging (errore del client o disconnessione).
+    pub fn patch_abort(&mut self) {
+        self.patch_pending = None;
+    }
+
+    /// Byte di toppe della sessione (griglia + cronologia).
+    pub fn patch_bytes(&self) -> usize {
+        self.grid.patch_bytes()
     }
 
     /// Sessione "sporca" di cose da ridisegnare?
@@ -1069,6 +1260,71 @@ mod tests {
         feed(&mut s, "\x1b[?1049l");
         assert_eq!((s.grid.cols(), s.grid.rows()), (24, 6));
         assert!(dump(&s).contains("principale"));
+    }
+
+    #[test]
+    fn toppa_staging_commit_e_tetto() {
+        let mut s = Session::new(12, 3, 8, None);
+        // 2 celle x 1 riga, 10x22 px per cella: 20x22 BGRA.
+        let (px_w, px_h) = (20, 22);
+        let total = px_w * px_h * 4;
+        assert!(s.patch_begin(1, 1, 2, 1, px_w, px_h, b"<>"));
+        // Uno staging alla volta.
+        assert!(!s.patch_begin(0, 0, 1, 1, 10, 22, b""));
+        // Offset fuori ordine: scarta lo staging, niente pixel a meta'.
+        assert!(!s.patch_data(4, &[0u8; 8]));
+        assert_eq!(s.patch_bytes(), 0);
+        // Commit a blocchi: la toppa entra solo quando e' completa.
+        assert!(s.patch_begin(1, 1, 2, 1, px_w, px_h, b"<>"));
+        let bitmap = alloc::vec![0x40u8; total];
+        let half = total / 2;
+        assert!(s.patch_data(0, &bitmap[..half]));
+        assert_eq!(s.patch_bytes(), 0, "incompleta: non e' ancora nella griglia");
+        assert!(s.patch_data(half, &bitmap[half..]));
+        assert_eq!(s.patch_bytes(), total);
+        // Il dump rende l'alt-text al posto delle celle.
+        let d = dump(&s);
+        assert!(d.contains("<>"), "dump senza alt-text: {:?}", d);
+        // Oltre griglia: rifiutata.
+        assert!(!s.patch_begin(11, 0, 2, 1, px_w, px_h, b""));
+        assert!(!s.patch_begin(0, 2, 1, 2, 10, 22, b""));
+    }
+
+    #[test]
+    fn toppa_tetto_solo_rifiuto() {
+        let mut s = Session::new(8, 2, 4, None);
+        // Due toppe che stanno: la prima grande (meta' del tetto), la seconda
+        // piccola. Il tetto **non** toglie quella gia' presente.
+        let big = PATCH_MAX_BYTES / 2;
+        // 1 cella, altezza 1 riga: px_w*px_h*4 = big  →  px misura inventata
+        // purche' coerente (il modello non conosce il font).
+        let px_w = 1024;
+        let px_h = big / (px_w * 4);
+        assert!(s.patch_begin(0, 0, 1, 1, px_w, px_h, b"A"));
+        assert!(s.patch_data(0, &alloc::vec![1u8; px_w * px_h * 4]));
+        let after_first = s.patch_bytes();
+        assert_eq!(after_first, px_w * px_h * 4);
+        // Una seconda toppa che sfonderebbe il tetto: rifiutata all'ingresso.
+        assert!(!s.patch_begin(1, 0, 1, 1, px_w, px_h * 2, b"B"));
+        // ...e la prima e' ancora li'.
+        assert_eq!(s.patch_bytes(), after_first);
+        assert!(dump(&s).contains('A'));
+    }
+
+    #[test]
+    fn toppa_scorre_e_muore_con_la_riga() {
+        let mut s = Session::new(10, 2, 4, None);
+        let (px_w, px_h) = (10, 22);
+        let total = px_w * px_h * 4;
+        assert!(s.patch_begin(0, 0, 1, 1, px_w, px_h, b"X"));
+        assert!(s.patch_data(0, &alloc::vec![9u8; total]));
+        assert_eq!(s.patch_bytes(), total);
+        // Lo schermo scorre: la toppa va nello scrollback (c'e' ancora).
+        s.grid.scroll_up();
+        assert_eq!(s.patch_bytes(), total);
+        // `ESC[2J` libera tutto.
+        feed(&mut s, "\x1b[2J");
+        assert_eq!(s.patch_bytes(), 0);
     }
 
     #[test]

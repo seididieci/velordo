@@ -22,10 +22,11 @@ use core::ptr;
 use crate::sys::{munmap, shm_map};
 use crate::{
     send, Service, SESS_ATTACH, SESS_ATTACH_DEFAULT, SESS_AUTH, SESS_AUTH_SET, SESS_BIND,
-    SESS_CLOSE, SESS_CREATE, SESS_DUMP, SESS_ECHO, SESS_FOCUS, SESS_INFO, SESS_INPUT, SESS_READ,
-    SESS_RESIZE, SESS_STATE, SESS_STATS, SESS_TEST_INPUT, SESS_WHOAMI, SESS_WRITE,
+    SESS_CLOSE, SESS_CREATE, SESS_DUMP, SESS_ECHO, SESS_FOCUS, SESS_INFO, SESS_INPUT,
+    SESS_METRICS, SESS_PATCH_BEGIN, SESS_PATCH_DATA, SESS_READ, SESS_RESIZE, SESS_STATE,
+    SESS_STATS, SESS_TEST_INPUT, SESS_WHOAMI, SESS_WRITE,
 };
-use sess_proto::{AUTH_NAME_MAX, IN_OFF, MAILBOX_BYTES, MAX_CHUNK, OUT_OFF};
+use sess_proto::{ALT_MAX, AUTH_NAME_MAX, IN_OFF, MAILBOX_BYTES, MAX_CHUNK, OUT_OFF};
 
 /// Esito di un'operazione sulla sessione.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,6 +239,55 @@ impl Session {
             return Err(SessError::Denied);
         }
         Ok(())
+    }
+
+    /// **Toppa di pixel** ancorata alle celle `(col,row)`..`(col+cells,
+    /// row+rows)` (ADR-0099): il bitmap e' `cells*cell_w × rows*cell_h` BGRA
+    /// (`metrics()`), disegnato **sotto** i glifi. `alt` = forma testuale
+    /// (dump e copia).
+    ///
+    /// Il bitmap viaggia in blocchi nella meta' OUT della mailbox; il commit e'
+    /// implicito, quindi una toppa o entra intera o non entra (un errore a
+    /// meta' la scarta: mai pixel a meta').
+    pub fn patch(
+        &self,
+        col: u16,
+        row: u16,
+        cells: u16,
+        rows: u16,
+        bitmap: &[u8],
+        alt: &[u8],
+    ) -> Result<(), SessError> {
+        let alt_len = alt.len().min(ALT_MAX);
+        unsafe {
+            ptr::copy_nonoverlapping(alt.as_ptr(), (self.va + OUT_OFF) as *mut u8, alt_len);
+        }
+        let w0 = (col as u64) | ((row as u64) << 16);
+        let w1 = (cells as u64) | ((rows as u64) << 16) | ((alt_len as u64) << 32);
+        let r = send(service_chan()?, SESS_PATCH_BEGIN, w0, w1).map_err(|_| SessError::Ipc)?;
+        if r.w0 == !0u64 {
+            return Err(SessError::Denied);
+        }
+        let mut off = 0usize;
+        loop {
+            let n = (bitmap.len() - off).min(MAX_CHUNK);
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    bitmap.as_ptr().add(off),
+                    (self.va + OUT_OFF) as *mut u8,
+                    n,
+                );
+            }
+            let r = send(service_chan()?, SESS_PATCH_DATA, off as u64, n as u64)
+                .map_err(|_| SessError::Ipc)?;
+            if r.w0 == !0u64 {
+                return Err(SessError::Denied);
+            }
+            off += n;
+            if off >= bitmap.len() {
+                return Ok(());
+            }
+        }
     }
 
     /// Chiude la sessione (mai la 0: il server nega). Il `Drop` smappa la
@@ -480,7 +530,23 @@ pub fn focus(id: u32) -> Result<(), SessError> {
 /// `(sessioni vive, sessione in focus)`.
 pub fn stats() -> Result<(usize, usize), SessError> {
     let r = send(service_chan()?, SESS_STATS, 0, 0).map_err(|_| SessError::Ipc)?;
-    Ok((r.w0 as usize, r.w1 as usize))
+    Ok((r.w0 as usize, (r.w1 & 0xFF) as usize))
+}
+
+/// Byte di **toppe** della sessione in focus (ADR-0099): la misura che rende
+/// verificabile che la cronologia le libera.
+pub fn patch_bytes() -> Result<usize, SessError> {
+    let r = send(service_chan()?, SESS_STATS, 0, 0).map_err(|_| SessError::Ipc)?;
+    Ok((r.w1 >> 8) as usize)
+}
+
+/// Dimensione di una cella in pixel `(w, h)`: la sa solo il font (ADR-0099).
+pub fn metrics() -> Result<(u32, u32), SessError> {
+    let r = send(service_chan()?, SESS_METRICS, 0, 0).map_err(|_| SessError::Ipc)?;
+    if r.w0 == 0 || r.w1 == 0 {
+        return Err(SessError::Denied);
+    }
+    Ok((r.w0 as u32, r.w1 as u32))
 }
 
 // ── La sessione del processo (D8c2/D8d) ──────────────────────────────
