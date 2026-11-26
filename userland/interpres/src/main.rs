@@ -18,7 +18,7 @@
 //!                  verifica EXECUTE con cardo, e lo esegue con spawn_image.
 //!
 //! `users`, `logout` e `dns-resolve` sono programmi esterni (ADR-0075), non
-//! built-in: la shell non conosce ne' `identis:config` ne' `init_bounce`.
+//! built-in: la shell non conosce ne' `sys:identis` ne' `init_bounce`.
 //!
 //! Se l'output di un comando non viene catturato in una variabile, il valore
 //! (futuro, S3.2b+) viene stampato serializzato.

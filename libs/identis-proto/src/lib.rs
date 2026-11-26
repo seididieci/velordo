@@ -11,12 +11,15 @@
 //! header: tag=OP, w0=total_len, w1=0            (annuncia la dimensione)
 //! chunk:  tag=OP, w0=offset,   w1=4 byte payload (little-endian, 1-4 byte)
 //! EOF:    tag=OP, w0=0xFFFFFFFF, w1=0            (fine trasmissione)
-//! reply:  tag=OP, w0=codice,   w1=0
+//! reply:  tag=OP, w0=codice,   w1=extra
 //! ```
 //!
 //! Ogni chunk e' un round trip (il protocollo e' sincrono: `send` attende la
 //! reply). Il tag identifica l'operazione: `IDENTIS_VERIFY`, `IDENTIS_ADD_USER`
-//! (chunked) e `IDENTIS_LIST` (una sola richiesta, risposta in w1).
+//! (chunked) e `IDENTIS_LIST` (**pull**: `w0` = offset, la reply porta 4 byte
+//! dell'elenco `nome:ruoli` in `w1`, `R_DONE` a fine elenco). Il pull evita di
+//! dipendere dalla profondita' della coda IPC (8 slot): una lista spinta in N
+//! messaggi si perderebbe a meta'.
 //!
 //! # Identita' (S3.3c: niente token)
 //!
@@ -70,7 +73,7 @@ pub const CHUNK: usize = 4;
 // ── Ruoli (ADR-0080, fase 5) ───────────────────────────────────────────────
 //
 // Un utente puo' avere PIU' ruoli. La maschera viaggia nel payload di
-// `ADD_USER` e nella reply di `WHOAMI`; nel bucket `identis:config` la terza
+// `ADD_USER` e nella reply di `WHOAMI`; nel dato `sys:identis` la terza
 // colonna e' `ruolo[,ruolo...]` (`nome:hash:ruolo[,ruolo...]`). Riga a due
 // campi (formato storico) = `ROLE_USER`.
 
@@ -188,6 +191,8 @@ pub const R_UNAUTHORIZED: u64 = 6;
 pub const R_BUSY: u64 = 7;
 /// Richiesta malformata (protocollo).
 pub const R_PROTOCOL: u64 = 8;
+/// Fine elenco (`IDENTIS_LIST` con `offset` oltre l'ultimo byte).
+pub const R_DONE: u64 = 9;
 
 /// Risposta finale del server (w0 = codice, w1 = extra).
 #[derive(Clone, Copy, Debug)]
@@ -213,6 +218,7 @@ impl Reply {
             R_FS_ERROR => "errore filesystem",
             R_UNAUTHORIZED => "non autorizzato (serve una sessione root)",
             R_BUSY => "servizio occupato",
+            R_DONE => "fine elenco",
             _ => "errore di protocollo",
         }
     }
@@ -334,6 +340,45 @@ pub fn valid_name(name: &str) -> bool {
     }
     name.bytes()
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+// ── Elenco nomi (pull a 4 byte) ───────────────────────────────────────────
+
+/// Elenco utenti (`nome:ruoli` per riga), tirato a blocchi da 4 byte.
+///
+/// `max` = tetto di sicurezza (un server impazzito non riempie la RAM del
+/// client). `None` = Identis non risponde o rifiuta. **Mai l'hash**: il
+/// formato dell'elenco e' deciso dal servizio, che e' l'unico a leggere le
+/// credenziali (ADR-0096).
+pub fn fetch_list(chan: u64, max: usize) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut total = usize::MAX; // arriva nel primo reply (bits 32..)
+    loop {
+        let r = civis::ipc::send(chan, civis::IDENTIS_LIST, out.len() as u64, 0).ok()?;
+        if r.w0 == R_DONE {
+            return Some(out); // fine elenco (o elenco vuoto)
+        }
+        if r.w0 != R_OK {
+            return None;
+        }
+        if total == usize::MAX {
+            // Il **totale** viaggia coi primi 4 byte: senza, l'ultimo blocco
+            // parziale si decodifica con 3 byte di padding e nasce una riga
+            // fantasma (NUL non e' spazio: `.trim()` non la toglie).
+            total = ((r.w1 >> 32) as usize).min(max);
+        }
+        let packed = r.w1 as u32;
+        let want = total.saturating_sub(out.len()).min(CHUNK);
+        for i in 0..want {
+            out.push(((packed >> (8 * i)) & 0xFF) as u8);
+        }
+        if out.len() >= total {
+            return Some(out);
+        }
+        if want == 0 {
+            return Some(out); // troncato a `max`: niente ciclo infinito
+        }
+    }
 }
 
 // ── Lato client: invio chunked + retry su BUSY ────────────────────────────

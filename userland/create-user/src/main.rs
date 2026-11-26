@@ -1,6 +1,6 @@
 //! create-user (ADR-0055, Fase 3.1): crea un nuovo utente chiedendo a
 //! Identis via IPC di accodare l'hash della password nel bucket
-//! `identis:config`.
+//! `sys:identis` (ADR-0096: lo legge solo Identis).
 //!
 //! - L'**identita'** e' quella del chiamante, attestata dal kernel: Identis
 //!   risolve il pid (credenziale locale o sessione autenticata). Nessun

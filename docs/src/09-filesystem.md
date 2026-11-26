@@ -276,6 +276,14 @@ usertests 17/17, shell 3/3.
   (`caps_writer`): solo `Custos` o init, **anche con `RIGHTS_ALL`** — il
   tetto ops non basta, perché `sys:caps` decide chi può bindare. `sys:policy`
   resta invece la tabella delle op FS di cardo (writer init).
+- **Credenziali** (ADR-0096): il dato è `sys:identis` nel bucket `sys`
+  (owner init), con il carve-out `identis_writer` — solo Identis o init, anche
+  con `RIGHTS_ALL`. In più ha una **guardia in lettura**
+  (`policy::read_allowed`, chiamata accanto a `write_allowed`): `R_OPEN` del
+  path e `R_OBJ_GET` di `(sys, identis)` solo Identis/init. La protezione dei
+  bucket, da sola, parla di **scritture**: senza questa, chiunque leggeva gli
+  hash (e `users` lo faceva per stampare i nomi — ora li serve
+  `IDENTIS_LIST` come `nome:ruoli`).
 - **Consenso per immagine** (ADR-0080 fase 6): due dati nel bucket `usr`,
   entrambi con writer unico `Custos` (carve-out `consent_writer`, come
   `caps_writer`: solo `Custos`/init **anche con `RIGHTS_ALL`**):

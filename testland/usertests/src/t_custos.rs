@@ -5,7 +5,7 @@
 //!     una porta non concessa -> concesso/negato.
 //!  2. Identita' sconosciuta -> negato (fail-closed).
 //!  3. Ruoli multipli: `WHOAMI` di root / net-admin / user rispecchia i bit
-//!     del bucket `identis:config` (risolti live).
+//!     del dato `sys:identis` (risolti live).
 //!  4. Autorita': un `user` non crea utenti e non fa `GRANT`; un `net-admin`
 //!     concede rete ma non hardware; root concede tutto.
 //!  5. `sys:caps` e' scrivibile solo da Custos/init: `obj_put` da usertests

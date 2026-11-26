@@ -366,6 +366,7 @@ nuova):
 
 | Tag | Nome | Semantica |
 |-----|------|-----------|
+| 0x72 | `IDENTIS_LIST` | `w0` = offset → `w0` = `R_OK`, `w1` = 4 byte dell'elenco `nome:ruoli` (pull: niente coda piena, niente hash), `R_DONE` a fine elenco (ADR-0096) |
 | 0x73 | `IDENTIS_WHOAMI` | `w1` = pid (`0` = il chiamante; un altro pid solo `System`) → `w0` = codice, `w1` = maschera ruoli **live** |
 | 0x80 | `CUSTOS_QUERY` | identità + capability → `w0` = OK, `w1` = `1/0` (solo `sys:caps`) |
 | 0x81 | `CUSTOS_GRANT` | identità + capability + decisione → `w0` = codice (il chiamante è attestato dal kernel) |

@@ -462,7 +462,7 @@ fn ceiling_base_for(chan: u64) -> u32 {
 // Il tetto di policy decide QUALI op un peer puo' fare; qui si decide SU COSA.
 // Senza questo guard `DEFAULT_UNKNOWN_OPS` (che include WRITE) lascia a
 // qualunque processo la riscrittura di `sys:ca.der`, dei binari in `usr`, del
-// namespace `ns` e di `identis:config`.
+// namespace `ns` e di `sys:identis` (ADR-0096).
 //
 // Tre regole (in ordine, vedi ADR-0077):
 //   1. op amministrative (snapshot/rollback/clone/delete): `ceiling == ALL`;
@@ -525,7 +525,8 @@ pub fn protected_bucket(bucket: &[u8]) -> Option<civis::Service> {
         b"vela" => Some(civis::Service::Init),
         // Bucket con un solo scrittore legittimo.
         b"log" => Some(civis::Service::Vestigia),
-        b"identis" => Some(civis::Service::Identis),
+        // `identis` non esiste piu': le credenziali stanno in `sys:identis`
+        // (ADR-0096), protetto da init con carve-out Identis.
         _ => None,
     }
 }
@@ -539,7 +540,9 @@ pub fn protected_path(path: &str) -> Option<civis::Service> {
     if p.starts_with("bin/") || p.starts_with("usr/bin/") || p.starts_with("test/") {
         return Some(civis::Service::Init);
     }
-    if p.starts_with("identis:") {
+    // Credenziali (ADR-0096): un dato del bucket `sys`, non piu' del
+    // namespace `ns`. Owner Identis: e' l'unico che lo legge e lo scrive.
+    if p == "sys:identis" {
         return Some(civis::Service::Identis);
     }
     None
@@ -554,10 +557,51 @@ fn caps_writer(trust: Trust) -> bool {
     matches!(trust, Trust::Init | Trust::Owner(civis::Service::Custos))
 }
 
+/// Scrittura di `sys:identis` (ADR-0096): solo init o Identis, **anche con
+/// `ceiling == RIGHTS_ALL`** — il tetto ops dice "puoi scrivere", non "questo
+/// dato e' tuo": le credenziali hanno un owner solo.
+fn identis_writer(trust: Trust) -> bool {
+    matches!(trust, Trust::Init | Trust::Owner(civis::Service::Identis))
+}
+
 /// Scrittura di `usr:<nome>:consent` (ADR-0080, fase 6): solo init o
 /// Custos (il service owner del consenso per immagine).
 fn consent_writer(trust: Trust) -> bool {
     matches!(trust, Trust::Init | Trust::Owner(civis::Service::Custos))
+}
+
+/// Lettura di un dato **riservato**: `sys:identis` lo legge solo chi lo
+/// possiede (Identis) o init.
+///
+/// Perche' una guardia separata da `write_allowed`: la protezione dei bucket
+/// dice chi **scrive**, e le credenziali avevano un buco in lettura — un
+/// programma qualsiasi apriva `identis:config` e leggeva gli hash di tutti
+/// (il test lo dichiarava: «valida finche' il bucket non e' protetto»).
+/// Ora che l'elenco lo serve `IDENTIS_LIST` (nomi e ruoli, mai l'hash), la
+/// lettura diretta non serve piu' a nessuno e si nega (ADR-0096).
+///
+/// Copre le due strade: apertura per path (`R_OPEN`, lettura o scrittura:
+/// entrambe passano di qui, il rifiuto e' piu' stretto) e API oggetti
+/// (`R_OBJ_GET` con bucket `sys` e chiave `identis`).
+pub fn read_allowed(op_tag: u32, payload: &[u8], trust: Trust) -> bool {
+    match op_tag {
+        civis::R_OPEN => {
+            let Ok(path) = core::str::from_utf8(payload) else {
+                return true; // malformato: lo rifiuta l'handler
+            };
+            if rights::normalize_sub_view(path) == "sys:identis" {
+                return identis_writer(trust);
+            }
+            true
+        }
+        civis::R_OBJ_GET => {
+            match arcafs::wire::parse_obj_prefix(payload) {
+                Some((b"sys", b"identis", _)) => identis_writer(trust),
+                _ => true,
+            }
+        }
+        _ => true,
+    }
 }
 
 /// Il peer puo' scrivere un target protetto di proprieta' `owner`?
@@ -609,6 +653,12 @@ pub fn write_allowed(
         if bucket == b"sys" && key == b"caps" {
             return caps_writer(trust);
         }
+        // Credenziali (ADR-0096): il bucket `sys` e' di init, ma il writer
+        // del dato e' Identis. Come `caps`/`consent`, non passa da
+        // `allowed()`: un ceiling ALL non basta.
+        if bucket == b"sys" && key == b"identis" {
+            return identis_writer(trust);
+        }
         // Consenso per immagine (ADR-0080, fase 6): `usr:consent` e' la
         // tabella autorevole (una riga per immagine), `usr:<nome>:consent` la
         // provenienza (chi ha acconsentito). Writer unico Custos. Il bucket
@@ -630,6 +680,9 @@ pub fn write_allowed(
             Some((path, _, _, _)) => {
                 if rights::normalize_sub_view(path) == "sys:caps" {
                     return caps_writer(trust);
+                }
+                if rights::normalize_sub_view(path) == "sys:identis" {
+                    return identis_writer(trust);
                 }
                 match protected_path(path) {
                     Some(owner) => allowed(owner, ceiling, trust),

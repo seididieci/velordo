@@ -13,7 +13,7 @@
 #   [testfs] PASS 5/5
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
-#   [identistest] PASS 11/11
+#   [identistest] PASS 12/12
 #   [usertests] PASS 70/70
 #   [threadtest] PASS 12/12
 #   [shell-native] PASS 33/33
@@ -104,7 +104,7 @@ if [ "$fail" -eq 0 ]; then
         '[testfs] PASS 5/5' \
         '[testsarca] PASS 64/64' \
         '[posixtests] PASS 4/4' \
-        '[identistest] PASS 11/11' \
+        '[identistest] PASS 12/12' \
         '[usertests] PASS 72/72' \
         '[threadtest] PASS 12/12'
     do

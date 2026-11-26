@@ -64,7 +64,7 @@ build_one userland/kbd     userland/kbd/src/kbd.ld         kbd.bin         kbd
 build_one userland/porta   userland/porta/src/porta.ld     porta.bin       porta
 build_one userland/uptime  userland/uptime/src/uptime.ld   useruptime.bin  useruptime
 # Servizio identita'/autenticazione utenti (ADR-0055): identis gestisce il
-# bucket `identis:config` (nome -> hash password). identis-login e' il primo
+# dato `sys:identis` (nome -> hash password). identis-login e' il primo
 # programma interattivo al posto della shell (chiede utente/password, stampa SUCCESS/FAIL).
 build_one userland/identis  userland/identis/src/identis.ld identis.bin   identis
 build_one userland/identis-login userland/identis-login/src/login.ld identis-login.bin identis-login

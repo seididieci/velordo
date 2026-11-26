@@ -502,12 +502,14 @@ if [ -n "${TLS_TEST_CA:-}" ]; then
     echo "[arca] + sys:tls.conf (sni ${TLS_TEST_SNI:-tls.test}, porta ${TLS_TEST_PORT:-8443}) + sys:ca.der"
 fi
 
-# Seed bucket Identis (ADR-0055): utente root con hash BLAKE2s-256 di "root".
+# Seed credenziali (ADR-0055): utente root con hash BLAKE2s-256 di "root".
 # Seedato sempre (gate inclusi): il volume parte con un utente valido.
+# ADR-0096: il dato sta nel bucket `sys` protetto (`sys:identis`), non piu'
+# nel namespace `ns`: lo leggono e scrivono solo Identis e init.
 IDENTIS_CFG="$(mktemp)"
 printf 'root:%s:root\n' "0cb8a879dc5d94ed67eb49cc7a4d3052d6a346f2e28fcd9e10e5822aba92eb39" > "$IDENTIS_CFG"
-SEED_NS+=( "ns:identis:config=$IDENTIS_CFG" )
-echo "[arca] + identis:config (root/root)"
+SEED_NS+=( "sys:identis=$IDENTIS_CFG" )
+echo "[arca] + sys:identis (root/root)"
 $TOOL_BIN seed "$OUT" "${SEED_NS[@]}"
 rm -f "$IDENTIS_CFG"
 echo "[arca] seed completato su $OUT"

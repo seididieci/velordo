@@ -806,7 +806,7 @@ const SVC_POSIX: SvcMeta = SvcMeta {
     prio: 16,
 };
 // Servizio identita'/autenticazione utenti (ADR-0055): identis gestisce il
-// bucket `identis:config` (nome -> hash password). identis-login e' il primo
+// dato `sys:identis` (nome -> hash password). identis-login e' il primo
 // programma interattivo (chiede utente/password, stampa SUCCESS/FAIL).
 const SVC_IDENTIS: SvcMeta = SvcMeta {
     bin: b"identis",

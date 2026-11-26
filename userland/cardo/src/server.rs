@@ -872,6 +872,13 @@ fn real_main(_sp: u64) -> ! {
             let _ = civis::reply(0, civis::ERR_DENIED, 0);
             continue;
         }
+        // Dati riservati (ADR-0096): `sys:identis` lo legge solo Identis/init.
+        // La protezione dei bucket copre le scritture; questa e' la lettura.
+        if !policy::read_allowed(op_tag as u32, payload, peer_trust) {
+            rings::resp_ring_write(civis::ERR_DENIED, 0, &[]);
+            let _ = civis::reply(0, civis::ERR_DENIED, 0);
+            continue;
+        }
 
         // Dispatch in base all'op_tag del ring. Ogni handler riceve gia' il
         // payload estratto: il frame e' stato interamente consumato sopra.

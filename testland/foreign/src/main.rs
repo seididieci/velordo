@@ -12,7 +12,7 @@
 //!   bit4 (16) open+read LECITI dopo i rifiuti (anti-wedge)
 //!   bit5 (32) `obj_put` nel bucket di sistema `sys` NEGATO (ADR-0077)
 //!   bit6 (64) `open` con TRUNC di un binario in `bin/` NEGATO (ADR-0077)
-//!   bit7 (128) `open` in scrittura di `identis:config` NEGATO (ADR-0077)
+//!   bit7 (128) `open` in scrittura di `sys:identis` NEGATO (ADR-0077)
 //!
 //! `T_DONE(1, 255)` atteso da `t_policy`.
 
@@ -72,9 +72,15 @@ fn real_main(_sp: u64) -> ! {
     if civis::open("/bin/vestigia.bin", civis::OPEN_TRUNC).is_err() {
         esiti |= 64;
     }
-    // bit7: il bucket delle credenziali ha un owner (Identis), non noi.
-    if civis::open("identis:config", civis::OPEN_CREATE).is_err() {
+    // bit7: il dato delle credenziali ha un owner (Identis), non noi.
+    if civis::open("sys:identis", civis::OPEN_CREATE).is_err() {
         esiti |= 128;
+    }
+    // bit8 (ADR-0096): e **non si legge**. Prima chiunque apriva il bucket
+    // delle credenziali in lettura e vedeva gli hash; ora e' riservato a
+    // Identis/init (i nomi li da' `IDENTIS_LIST`).
+    if civis::open("sys:identis", 0).is_err() && civis::obj_get(b"sys", b"identis").is_err() {
+        esiti |= 256;
     }
 
     let _ = civis::send(civis::CHANNEL_PARENT, T_DONE, 1, esiti);

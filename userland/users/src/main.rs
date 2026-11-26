@@ -37,7 +37,10 @@ fn resolve_identis() -> Result<u64, &'static str> {
 }
 
 /// Modalita' testuale: output su console (comportamento originale).
-/// Nessun token: Identis risolve il chiamante per pid.
+///
+/// L'elenco lo da' **Identis** (`IDENTIS_LIST`, pull a 4 byte): un
+/// `nome:ruoli` per riga, mai l'hash. Il bucket `sys:identis` e' protetto e
+/// il programma non lo apre (ADR-0096): chi elenca non vede le credenziali.
 fn run_text_mode() {
     let chan = match resolve_identis() {
         Ok(c) => c,
@@ -47,68 +50,25 @@ fn run_text_mode() {
         }
     };
 
-    // LIST: w0 = 0 (nessun payload), w1 = 0 (il chiamante). Reply: w0 =
-    // codice, w1 = conteggio. L'identita' la risolve Identis per pid.
-    match civis::ipc::send(chan, civis::IDENTIS_LIST, 0, 0) {
-        Ok(r) if r.w0 == proto::R_OK => {
-            let n = r.w1 as usize;
-            console_write(b"Utenti registrati (");
-            console_write_str(&alloc::format!("{}", n));
-            console_write(b"):\n");
+    let Some(list) = proto::fetch_list(chan, 4096) else {
+        console_write(b"ERRORE: elenco utenti non disponibile (sessione attiva?)\n");
+        return;
+    };
+    let text = core::str::from_utf8(&list).unwrap_or("");
+    let rows: alloc::vec::Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
 
-            // Legge i nomi direttamente dal bucket.
-            let fd = match civis::open("identis:config", 0) {
-                Ok(f) => f,
-                Err(_) => {
-                    console_write(b"ERRORE: impossibile leggere il bucket utenti\n");
-                    return;
-                }
-            };
-
-            let mut buf = [0u8; 4096];
-            let mut out = String::new();
-            loop {
-                let cap = buf.len();
-                let n = match civis::read_fs(fd, &mut buf, cap) {
-                    Ok(n) => n,
-                    Err(_) => break,
-                };
-                if n == 0 {
-                    break;
-                }
-                out.push_str(core::str::from_utf8(&buf[..n]).unwrap_or(""));
-            }
-            let _ = civis::close(fd);
-
-            for line in out.lines() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                // Formato `nome:hash:ruoli` (ADR-0080, fase 5).
-                let mut parts = line.splitn(3, ':');
-                if let Some(name) = parts.next() {
-                    let _hash = parts.next();
-                    let roles = parts.next().unwrap_or("user");
-                    console_write(b"  ");
-                    console_write(name.as_bytes());
-                    console_write(b"  [");
-                    console_write(roles.as_bytes());
-                    console_write(b"]\n");
-                }
-            }
-        }
-        Ok(r) if r.w0 == proto::R_NO_IDENTITY => {
-            console_write(b"ERRORE: nessuna sessione attiva (login richiesto)\n");
-        }
-        Ok(r) => {
-            console_write(b"ERRORE LIST: ");
-            match r.w0 {
-                proto::R_BUSY => console_write(b"servizio occupato\n"),
-                _ => console_write(b"errore di protocollo\n"),
-            }
-        }
-        Err(_) => console_write(b"ERRORE IPC\n"),
+    console_write(b"Utenti registrati (");
+    console_write_str(&alloc::format!("{}", rows.len()));
+    console_write(b"):\n");
+    for row in rows {
+        let mut parts = row.trim().splitn(2, ':');
+        let name = parts.next().unwrap_or("");
+        let roles = parts.next().unwrap_or("user");
+        console_write(b"  ");
+        console_write(name.as_bytes());
+        console_write(b"  [");
+        console_write(roles.as_bytes());
+        console_write(b"]\n");
     }
 }
 

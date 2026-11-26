@@ -123,3 +123,4 @@
 - [ADR-0093: Diritti ereditari all'avvio — il figlio non ha più diritti del padre (S3.4)](./adr/0093-diritti-ereditari.md)
 - [ADR-0094: Identità di sessione per attestazione — niente bearer token (S3.3c)](./adr/0094-identita-sessione-attestata.md)
 - [ADR-0095: L'identità del terminale non è un ambiente — il prompt la chiede alla sessione (S3.3d)](./adr/0095-identita-senza-ambiente.md)
+- [ADR-0096: `sys:identis` — credenziali riservate, elenco servito dal servizio](./adr/0096-sys-identis-riservato.md)

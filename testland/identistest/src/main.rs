@@ -4,8 +4,8 @@
 //! Verifica il protocollo IPC di autenticazione e creazione utenti (S3.3c:
 //! nessun token, l'identita' e' del pid attestato dal kernel): WHOAMI senza
 //! identita', verifica credenziali, creazione utente, duplicati, nomi non
-//! conformi, autorizzazione (identita' non root), elenco utenti e contenuto
-//! del bucket `identis:config`.
+//! conformi, autorizzazione (identita' non root), elenco utenti (nomi+ruoli,
+//! mai l'hash) e **riservatezza** del dato `sys:identis`.
 //!
 //! Il volume ArcaFS viene ricreato a ogni run (`scripts/arca-tool.sh`), quindi
 //! il bucket parte pulito: l'utente `alice` creato qui non collide con run
@@ -15,19 +15,17 @@
 #![no_main]
 
 extern crate alloc;
-use alloc::format;
-use alloc::string::String;
 
 use blake2s::blake2s;
 use civis;
-use civis::hex;
 use civis::println;
 use identis_proto as proto;
 
 civis::entry!(real_main);
 
-/// Bucket con le credenziali (letto dal test per verifica del formato).
-const BUCKET_PATH: &str = "identis:config";
+/// Dato delle credenziali (ADR-0096): riservato a Identis/init, il test ne
+/// verifica solo il **diniego** di lettura.
+const BUCKET_PATH: &str = "sys:identis";
 /// Utente di default (seed del volume).
 const ROOT_USER: &str = "root";
 /// Password dell'utente di default.
@@ -135,16 +133,34 @@ fn real_main(_sp: u64) -> ! {
         matches!(r, Ok(r) if r.w0 == proto::R_UNAUTHORIZED),
     );
 
-    // t11: elenco utenti (LIST) coerente: l'identita' e' attestata.
-    let r = civis::ipc::send(chan, civis::IDENTIS_LIST, 0, 0);
+    // t11: elenco utenti (`LIST`, pull a 4 byte): l'identita' e' attestata e
+    // i nomi+ruoli arrivano dal servizio, mai dal bucket (ADR-0096).
+    let list = proto::fetch_list(chan, 4096).unwrap_or_default();
+    let rows = core::str::from_utf8(&list)
+        .unwrap_or("")
+        .lines()
+        .filter(|l| !l.is_empty())
+        .count();
     all_ok &= check(
         11,
-        "list utenti",
-        matches!(r, Ok(r) if r.w0 == proto::R_OK && r.w1 >= 2),
+        "list utenti (nome:ruoli, mai l'hash)",
+        rows >= 2
+            && list.starts_with(b"root:root")
+            && list.ends_with(b"\n")
+            // Nessun NUL: il pull non deve inventare righe di padding.
+            && !list.contains(&0)
+            // Mai l'hash (nemmeno un prefisso): l'elenco e' nome:ruoli.
+            && !list.windows(4).any(|w| w == b"0cb8"),
     );
 
+    // t12: il dato delle credenziali e' **riservato**: un `tst` non lo apre.
+    // Prima lo leggeva chiunque (perfino `users`, per stampare i nomi): era
+    // il buco che ADR-0096 chiude.
+    let denied = civis::open(BUCKET_PATH, 0).is_err() && civis::obj_get(b"sys", b"identis").is_err();
+    all_ok &= check(12, "sys:identis riservato (lettura negata a tst)", denied);
+
     if all_ok {
-        println!("[identistest] PASS 11/11");
+        println!("[identistest] PASS 12/12");
     } else {
         println!("[identistest] FAIL");
     }
@@ -168,29 +184,6 @@ fn check(n: usize, name: &str, ok: bool) -> bool {
         println!("[identistest] t{}: {}: FAIL", n, name);
     }
     ok
-}
-
-/// Il bucket contiene la riga attesa?
-fn bucket_contains(expected: &str) -> bool {
-    let fd = match civis::open(BUCKET_PATH, 0) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    let mut buf = [0u8; 4096];
-    let mut out = String::new();
-    loop {
-        let cap = buf.len();
-        let n = match civis::read_fs(fd, &mut buf, cap) {
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        if n == 0 {
-            break;
-        }
-        out.push_str(core::str::from_utf8(&buf[..n]).unwrap_or(""));
-    }
-    let _ = civis::close(fd);
-    out.lines().any(|l| l == expected)
 }
 
 #[panic_handler]

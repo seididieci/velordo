@@ -175,7 +175,7 @@ velordo/
 
 ## Stato corrente
 
-Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 72/72` + `[threadtest] PASS 12/12` + `[shell-native] PASS 33/33` (la shell nativa gira nella **stessa** QEMU del gate: login via `sendkey` e `--attach-pid`, `scripts/test-shell-native.py`), zero FAIL/PANIC/FAULT; il gate stampa `[gate] PASS/FAIL` ed **esce != 0** (vedi `docs/src/11-testing.md`). Le fasi POSIX restano storiche dal login nativo (ADR-0062). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
+Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + `[posixtests] PASS 4/4` + `[identistest] PASS 12/12` + `[usertests] PASS 72/72` + `[threadtest] PASS 12/12` + `[shell-native] PASS 33/33` (la shell nativa gira nella **stessa** QEMU del gate: login via `sendkey` e `--attach-pid`, `scripts/test-shell-native.py`), zero FAIL/PANIC/FAULT; il gate stampa `[gate] PASS/FAIL` ed **esce != 0** (vedi `docs/src/11-testing.md`). Le fasi POSIX restano storiche dal login nativo (ADR-0062). La suite FAT32 e' **fuori dal gate** (ADR-0059): `scripts/run-fat-tests.sh`.
 
 - **Video (D3, ADR-0060)**: tre ruoli — `gpu` = **driver** (virtio-gpu:
   BAR/MSI-X/risorsa 2D/scanout; pubblica `/dev/display`), `console` =
@@ -663,6 +663,16 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   tile sbagliata); `ensure_mailbox` ritorna l'**id della shm**, non un
   puntatore (usarlo come puntatore = `#PF` a `0x805` e il server muore:
   `sess_mb` e' il puntatore, `ensure_mailbox` serve solo a creare).
+- **Credenziali riservate (ADR-0096)**: le credenziali sono il dato
+  `sys:identis` (bucket `sys`, non piu' `ns:identis:config`). Scrittura:
+  carve-out `identis_writer` (init o Identis, **anche con `RIGHTS_ALL`**).
+  Lettura: `policy::read_allowed` in `cardo/src/server.rs` — `R_OPEN` del path
+  e `R_OBJ_GET` di `(sys, identis)` solo Identis/init. Chi elenca usa
+  `IDENTIS_LIST` (**pull a 4 byte**: `w0` = offset → `w1` = 4 byte di
+  `nome:ruoli`, `R_DONE` 9 a fine elenco; mai l'hash): il push in N messaggi
+  si perderebbe (coda 8 slot). `users` non apre piu' il bucket. Test:
+  `identistest` 12/12 (t11 elenco senza hash, t12 lettura negata) +
+  `foreign` bit8 (t57 → 511). Pattern riusabile da S3.2b.
 - **Niente identita' in ambiente (S3.3d, ADR-0095)**: `USER` non esiste piu'.
   `identis-login` spawma il DE e `impluvium` spawma le shell **senza env**;
   il prompt chiede il nome a ogni riga (`civis::sess::auth()` →
@@ -984,7 +994,7 @@ rg '\[bench\]' /tmp/bench-run1.log /tmp/bench-run2.log /tmp/bench-run3.log
 #   [testfs] PASS 5/5
 #   [testsarca] PASS 64/64
 #   [posixtests] PASS 4/4
-#   [identistest] PASS 11/11
+#   [identistest] PASS 12/12
 #   [usertests] PASS 72/72
 #   [threadtest] PASS 12/12
 #   [shell-native] PASS 33/33

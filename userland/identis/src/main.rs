@@ -1,6 +1,6 @@
 //! Servizio Identis (ADR-0055, Fase 3.1): identita' e autenticazione utenti.
 //!
-//! Detiene il bucket ArcaFS `identis:config` (una riga per utente:
+//! Detiene il dato ArcaFS `sys:identis` (una riga per utente:
 //! `nome:hash_hex_bLAKE2s256:ruolo[,ruolo...]`). Espone quattro operazioni:
 //!
 //! - `IDENTIS_VERIFY` (0x70): verifica le credenziali; se tornano giuste,
@@ -12,7 +12,7 @@
 //!   un `VERIFY` riuscito, oppure il login/DE via sessione autenticata).
 //! - `IDENTIS_LIST` (0x72): numero utenti registrati.
 //! - `IDENTIS_WHOAMI` (0x73): ruoli **correnti** dell'utente del chiamante.
-//!   I ruoli si leggono **live** da `identis:config`: cambiarli ha effetto
+//!   I ruoli si leggono **live** da `sys:identis`: cambiarli ha effetto
 //!   senza rifare il login (ADR-0080, fase 5).
 //!
 //! Il framing dei payload e' condiviso (`libs/identis-proto`): qui il
@@ -41,8 +41,9 @@ use identis_proto as proto;
 
 civis::entry!(real_main);
 
-/// Bucket ArcaFS con le credenziali (nome -> hash hex).
-const BUCKET_PATH: &str = "identis:config";
+/// Dato ArcaFS con le credenziali (nome -> hash hex), nel bucket `sys`
+/// protetto (ADR-0096): l'unico che lo legge e scrive e' questo servizio.
+const BUCKET_PATH: &str = "sys:identis";
 /// Utente di default, creato col bucket se assente.
 const DEFAULT_USER: &str = "root";
 /// BLAKE2s-256("root") — l'utente di default ha la password "root".
@@ -347,8 +348,12 @@ fn handle_whoami(m: civis::IpcMsg) {
     reply(m.tag, proto::R_OK, roles);
 }
 
-/// LIST: numero utenti registrati. Richiede un'identita' attestata del
-/// chiamante (nessun token: il pid lo da' il kernel).
+/// LIST: elenco utenti (`nome:ruoli`), **a blocchi di 4 byte** (`w0` = offset).
+///
+/// Il pull ha due vantaggi: la risposta non dipende dalla profondita' della
+/// coda IPC (8 slot: una lista spinta in N messaggi si perderebbe a meta') e
+/// il dato **non** esce dal servizio (il bucket e' protetto, ADR-0096). La
+/// cache si ricostruisce a `offset == 0` e si invalida dopo ogni `ADD_USER`.
 fn handle_list(m: civis::IpcMsg) {
     unsafe {
         if TXN_ACTIVE {
@@ -361,8 +366,26 @@ fn handle_list(m: civis::IpcMsg) {
         reply(m.tag, proto::R_NO_IDENTITY, 0);
         return;
     }
-    let n = count_users();
-    reply(m.tag, proto::R_OK, n as u64);
+    let off = m.w0 as usize;
+    unsafe {
+        if off == 0 {
+            NAMES_LEN = build_list();
+        }
+        if off >= NAMES_LEN {
+            reply(m.tag, proto::R_DONE, 0);
+            return;
+        }
+        let mut packed: u32 = 0;
+        let n = (NAMES_LEN - off).min(proto::CHUNK);
+        for i in 0..n {
+            packed |= (NAMES[off + i] as u32) << (8 * i);
+        }
+        // `w1` = totale (bits 32..) | 4 byte (bits 0..32): il totale serve al
+        // client per non decodificare l'ultimo blocco parziale come se fosse
+        // pieno (3 byte di padding = una riga fantasma).
+        let w1 = ((NAMES_LEN as u64) << 32) | packed as u64;
+        reply(m.tag, proto::R_OK, w1);
+    }
 }
 
 // ── Credenziali per pid (S3.3c: identita' attestata, mai trasmessa) ───────────────────────
@@ -445,7 +468,7 @@ fn caller_user(pid: i64) -> Option<String> {
     }
 }
 
-// ── Bucket `identis:config` ───────────────────────────────────────────────
+// ── Dato `sys:identis` (bucket `sys`, riservato) ─────────────────────────
 
 /// Legge l'hash (hex) associato a un nome utente.
 fn load_bucket_entry(name: &str) -> Option<String> {
@@ -482,12 +505,50 @@ fn roles_of(name: &str) -> Option<u64> {
     None
 }
 
-/// Conta le righe del bucket (utenti registrati).
-fn count_users() -> usize {
-    match read_bucket_all() {
-        Ok(all) => all.lines().filter(|l| !l.trim().is_empty()).count(),
-        Err(_) => 0,
+/// Cache dell'elenco nomi (`nome\n` per riga) servita a `LIST`.
+/// Ricostruita a `offset == 0` e dopo ogni `ADD_USER`: il bucket e' letto una
+/// volta per elenco, non una volta per 4 byte.
+const NAMES_MAX: usize = 512;
+static mut NAMES: [u8; NAMES_MAX] = [0; NAMES_MAX];
+static mut NAMES_LEN: usize = 0;
+
+/// Costruisce l'elenco dal bucket: `nome:ruoli` per riga (**mai l'hash**).
+/// Il formato dell'elenco e' una decisione del servizio, non del bucket:
+/// cosi' chi elenca non vede le credenziali (ADR-0096). Una riga a due campi
+/// (formato storico) vale `ROLE_USER`. Tronca all'ultima riga intera che sta
+/// in `NAMES_MAX`.
+fn build_list() -> usize {
+    let Ok(all) = read_bucket_all() else {
+        return 0;
+    };
+    let mut len = 0usize;
+    for line in all.lines() {
+        let mut parts = line.trim().splitn(3, ':');
+        let name = parts.next().unwrap_or("").trim();
+        let _hash = parts.next();
+        if name.is_empty() {
+            continue;
+        }
+        let roles = match parts.next() {
+            Some(spec) => proto::parse_roles(spec).unwrap_or(proto::ROLE_USER),
+            None => proto::ROLE_USER,
+        };
+        let roles = proto::format_roles(roles);
+        let row_len = name.len() + 1 + roles.len() + 1;
+        if len + row_len > NAMES_MAX {
+            civis::println!("[identis] elenco utenti troncato a {} byte", NAMES_MAX);
+            break;
+        }
+        unsafe {
+            NAMES[len..len + name.len()].copy_from_slice(name.as_bytes());
+            NAMES[len + name.len()] = b':';
+            NAMES[len + name.len() + 1..len + name.len() + 1 + roles.len()]
+                .copy_from_slice(roles.as_bytes());
+            NAMES[len + row_len - 1] = b'\n';
+        }
+        len += row_len;
     }
+    len
 }
 
 /// Legge l'intero bucket in una String.

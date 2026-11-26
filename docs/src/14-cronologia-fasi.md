@@ -4981,3 +4981,37 @@ niente shell — è parcheggiata con i trigger dichiarati (ADR-0095 §Alternativ
 mostrare `⚡ root@velordo …` ma il nome viene dalla sessione); desktop PASS
 (le due shell mostrano l'identità propagata dal DE); `rg '"USER"|USER='` su
 `userland libs` → zero.
+
+## Passo 0 — `sys:identis`: credenziali riservate, elenco dal servizio (ADR-0096)
+
+Primo passo dell'ordine concordato per i desiderata (schermo intero → canvas →
+monitor → base grafica → config). Non era un rename: la protezione dei bucket
+parla di **scritture**, e le credenziali avevano un buco in **lettura** —
+`users` apriva `identis:config` e leggeva gli **hash** di tutti, perché `LIST`
+restituiva solo un conteggio e i nomi si potevano ottenere solo dal bucket. Il
+test lo dichiarava come debito («valida finché il bucket non è protetto»).
+
+**Decisione**: il dato va dove sono gli altri (`sys:*`) e chi elenca non lo
+legge.
+- `identis:config` → **`sys:identis`**; writer: carve-out `identis_writer`
+  (init o Identis, anche con `RIGHTS_ALL`).
+- **guardia in lettura** `policy::read_allowed` (accanto a `write_allowed` in
+  `cardo/src/server.rs`): `R_OPEN` del path e `R_OBJ_GET` di `(sys, identis)`
+  solo Identis/init.
+- `IDENTIS_LIST` restituisce l'elenco (`nome:ruoli`, **mai l'hash**) a **pull
+  da 4 byte**: `w0` = offset, reply `w1` = 4 byte, `R_DONE` (9) a fine elenco.
+  Il pull è obbligato: la coda IPC ha 8 slot, e una lista spinta in N messaggi
+  si perderebbe a metà (l'async reply si scarta a coda piena). Nessuna memoria
+  condivisa, nessuna coda profonda, e il formato lo decide il servizio.
+- `users` non apre più il bucket: tira l'elenco e stampa `nome  [ruoli]` come
+  prima.
+
+**Test**: `identistest` 12/12 (t11 elenco senza hash, t12 lettura negata a un
+`tst`), `foreign` bit8 (t57 passa a 511 = 9 bit), shell 33/33 invariata.
+**Trappola pagata**: il primo pull aggiungeva sempre 4 byte per blocco, anche
+all'ultimo parziale (57 → 60 byte con 3 NUL). `str::trim` non toglie i NUL (non
+sono spazio) ⇒ una riga fantasma, e `users` stampava un utente senza nome. Il
+gate era **verde lo stesso**: i check guardavano il contenuto, non la forma.
+Fix: il totale viaggia nel primo reply (`w1` = totale << 32 | 4 byte) e il
+client sa quanti byte sono validi nell'ultimo blocco; guardia in t11 (l'elenco
+non contiene NUL e finisce con `\n`).

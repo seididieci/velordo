@@ -977,10 +977,17 @@ pub const EXIT_NOTIFY: u64 = 0x7C;
 /// risolvono il chiamante per pid, o la sua sessione (servizi `System`).
 pub const IDENTIS_VERIFY: u64 = 0x70;   // verify credenziali -> w0=0 OK / 1 FAIL (lega il pid)
 pub const IDENTIS_ADD_USER: u64 = 0x71; // crea utente (chiamante attestato) -> w0=0 OK / 2..8 errore
-pub const IDENTIS_LIST: u64 = 0x72;     // w1=0 -> w1=numero utenti (chiamante attestato)
+/// `LIST {offset}` -> `w0 = R_OK`, `w1` = 4 byte dell'elenco nomi a
+/// `offset` (`nome\n` per utente), oppure `w0 = R_DONE` a fine elenco.
+/// **Pull**: 4 byte per richiesta, cosi' la risposta non dipende dalla
+/// profondita' della coda (8 slot) e non c'e' un payload che puo' essere
+/// perso. Il pull azzera la cache del server quando `offset == 0`.
+/// Il chiamante e' attestato (pid); il dato sta nel bucket `sys:identis`,
+/// protetto: i nomi li da' il servizio, mai il bucket (ADR-0096).
+pub const IDENTIS_LIST: u64 = 0x72;
 /// `w1` = pid (0 = il chiamante; un altro pid solo `System`) -> `w0` = codice,
 /// `w1` = maschera dei ruoli correnti dell'utente (ADR-0080, fase 5). I ruoli
-/// si leggono **live** da `identis:config`: cambiarli ha effetto senza rifare
+/// si leggono **live** da `sys:identis`: cambiarli ha effetto senza rifare
 /// il login.
 pub const IDENTIS_WHOAMI: u64 = 0x73;
 
@@ -1463,9 +1470,11 @@ pub enum Service {
     /// nel bucket `log` nativo (+ coda RAM senza volume), lettura, seal via
     /// snapshot, contatori. Supervisionato da init dopo `Time`.
     Vestigia = 10,
-    /// Servizio identita'/autenticazione utenti (ADR-0055): detiene il bucket
-    /// `identis:config` (nome -> hash BLAKE2s-256 della password), verifica
-    /// login e crea nuovi utenti. Supervisionato da init.
+    /// Servizio identita'/autenticazione utenti (ADR-0055): detiene il dato
+    /// `sys:identis` (nome -> hash BLAKE2s-256 della password, ADR-0096),
+    /// verifica login e crea nuovi utenti. **Unico** a leggere e scrivere le
+    /// credenziali; gli altri passano da `LIST`/`WHOAMI`. Supervisionato da
+    /// init.
     Identis = 11,
     /// Console server (D3, ADR-0060): serve `/dev/console` (testo) e
     /// possiede i pixel del display (surface framebuffer o VGA testuale).

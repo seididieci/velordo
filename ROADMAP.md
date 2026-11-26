@@ -14,7 +14,7 @@ nulla da solo.
 ## Stato (completate 1-57 + E0 + E1 + E2 + N8 + D8a + D8b + D8c1 + D8c2 + D8d + D8e + D8f + S3.3c + S3.3d + S3.4)
 
 Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` +
-`[posixtests] PASS 4/4` + `[identistest] PASS 11/11` + `[usertests] PASS 72/72` +
+`[posixtests] PASS 4/4` + `[identistest] PASS 12/12` + `[usertests] PASS 72/72` +
 `[threadtest] PASS 12/12` + `[shell-native] PASS 33/33` (la shell nativa gira
 nella stessa QEMU: login via `sendkey`, `--attach-pid`), zero FAIL/PANIC/FAULT;
 `./run-tests.sh` stampa `[gate] PASS/FAIL` ed esce `!= 0`. La suite FAT32 e'
@@ -553,7 +553,10 @@ Voci con scope e vittoria dichiarati (non date).
 - [x] **S3.3 — Hardening utenti** (debiti dichiarati in ADR-0058): (a)
       **proteggere il bucket `identis:config`** in cardo (path protetto ->
       solo il canale del servizio Identis: i channel id sono simmetrici,
-      basta `service_lookup(Service::Identis)` + confronto `m.channel`);
+      basta `service_lookup(Service::Identis)` + confronto `m.channel`) —
+      **fatta** (ADR-0096): il dato e' `sys:identis`, writer unico Identis,
+      **lettura** guardata (`policy::read_allowed`) e l'elenco lo serve
+      `IDENTIS_LIST` (`nome:ruoli`, pull a 4 byte) invece del bucket;
       (b) ACL per utente sul bucket home `usr:<nome>` (grant runtime
       Identis -> cardo: "il canale Y e' la sessione di alice"); (c) token
       bearer -> **attestazione per pid/sessione** (ADR-0094, **fatta**):
@@ -1416,6 +1419,40 @@ Voci con scope e vittoria dichiarati (non date).
       API di trasporto; VT-d/IOMMU.
       Config `sys:net` con policy di subtree in cardo (`sys:identis` rinomina
       `identis:config`, chiude il debito ADR-0058).
+
+## Desiderata (idee dichiarate, da raffinare)
+
+Direzione scelta, non ancora pianificata riga per riga. Le voci qui sotto
+hanno un ordine concordato ma **non** una data: si prendono in quest'ordine.
+
+1. **Sessione a schermo intero** — un programma prende la sessione (alt-screen,
+   cursore posizionabile, `ESC[nD`, ED/EL, resize notificato) e all'uscita lo
+   scrollback torna com'era. Base per un editor stile neovim e per il monitor.
+   `littera` ha gia' il parser CSI tokenizzato (i parametri vanno onorati), il
+   resto e' API in `civis::sess` + una demo.
+2. **Canvas di testo** — libreria **pura** (client) che *genera celle*:
+   box/hline, alberi, barre, sparkline, braille. Separata dal **disegno** a
+   schermo, che resta della console (responsabilita' diverse: chi produce le
+   celle non conosce pixel ne' danno).
+3. **Monitor di sistema** (btop-like) — prima app vera, usa 1+2. I dati ci sono
+   gia' tutti: `ps_info` porta i **tick CPU per processo** (`ticks_used`),
+   `SYS_MEMINFO`, `CBS_GET_INFO`, stats di block/gpu/net. **Zero kernel.**
+4. **Base grafica (analisi prima)** — cursore, widget, componenti, rendering.
+   Architettura dichiarata:
+   - **una tile grafica e' una superficie di pixel confinata al rect della
+     tile**: niente griglia, niente scroll — il testo e la grafica sono due
+     modalita' della stessa tile, e lo spazio e' quello del rect (musivum ha
+     gia' `Backing::Direct` e il clip per tile);
+   - il **mouse non esiste**: serve un driver PS/2 aux (IRQ12) prima di
+     qualsiasi widget; il puntatore lo compone chi disegna (console/musivum),
+     il bersaglio lo decide il DE;
+   - **le immagini inline invece scorrono**: sono pixel *dentro* la griglia
+     (celle, scrollback, T4), quindi restano un caso a parte — non vanno
+     confuse con le finestre grafiche.
+5. **Config di sistema** (tool) — TUI sopra 2 (poi GUI sopra 4). Un namespace
+   `sys:*` con **un writer per bucket** (si parte da `sys:identis`, ADR-0096) e
+   lo schema del dato; il tool parla con il servizio proprietario, non scrive
+   `sys:*` direttamente.
 
 ## Parcheggiate
 
