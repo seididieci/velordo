@@ -65,6 +65,9 @@ build_one testland/floorprobe testland/floorprobe/src/floorprobe.ld floorprobe.b
 # al resize ed esce lasciando il testo di prima. Fuori dal gate
 # (`scripts/run-tui-tests.sh`: prende il terminale).
 build_one testland/fullscreen testland/fullscreen/src/fullscreen.ld fullscreen.bin fullscreen
+# La prima **Graphic TUI** (ADR-0099): testo + toppe di pixel nelle celle (log
+# con i rami disegnati, barra, sparkline). Fuori dal gate: la si guarda.
+build_one testland/gtui testland/gtui/src/gtui.ld gtui.bin gtui
 # Helper per il tetto ops ereditato (S3.4b): legge (ok) e scrive (negato).
 build_one testland/rightshelper testland/rightshelper/src/rightshelper.ld rightshelper.bin rightshelper
 # Helper per l'eredita' del subtree (S3.4): padre restringe + figlio prova i path.

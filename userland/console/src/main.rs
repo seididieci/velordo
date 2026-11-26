@@ -1545,6 +1545,9 @@ impl Term {
                         continue;
                     }
                     let is_cursor = cursor_here && (col, row) == (cc, cr);
+                    if !is_cursor && self.blank_over_patch(sid, col, row) {
+                        continue; // la toppa resta visibile
+                    }
                     self.draw_cell_at(t, col, row, is_cursor, l0_data, true);
                     self.stat_cells += 1; // T0 (ADR-0066)
                 }
@@ -1561,6 +1564,9 @@ impl Term {
                         continue;
                     }
                     let is_cursor = cursor_here && (col, row) == (cc, cr);
+                    if !is_cursor && self.blank_over_patch(sid, col, row) {
+                        continue; // la toppa resta visibile
+                    }
                     self.draw_cell_at(t, col, row, is_cursor, l0_data, false);
                     self.stat_cells += 1; // T0 (ADR-0066)
                 }
@@ -1604,6 +1610,23 @@ impl Term {
         for (x, y, w, h) in patches {
             self.comp.add_damage(musivum::Rect::new(x, y, w, h));
         }
+    }
+
+    /// Una **cella vuota** che sta sopra una toppa non si ridipinge: il fondo
+    /// della cella coprirebbe i pixel della toppa (ADR-0099: la toppa e' sotto
+    /// i glifi, ma sopra il fondo). Una cella con testo si disegna normale —
+    /// glifo e suo fondo coprono la toppa, che e' il comportamento voluto.
+    fn blank_over_patch(&self, sid: usize, col: usize, row: usize) -> bool {
+        let Some(s) = self.sessions.get(sid) else {
+            return false;
+        };
+        if !s.grid.cell(col, row).is_blank() {
+            return false;
+        }
+        s.grid
+            .segments_at(row)
+            .iter()
+            .any(|g| col >= g.col && col < g.col + g.cells)
     }
 
     /// Il cursore del terminale della tile in focus: si ridisegna solo se si e'

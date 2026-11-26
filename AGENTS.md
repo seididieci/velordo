@@ -683,13 +683,20 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   la base per un'app (alt screen, `at`, `clear`, `cursor`, `poll_resize`); il
   frame va **solo schermo** (`write_screen`), il mirror resta il transcript.
   Demo `usr/bin/fullscreen` + `scripts/run-tui-tests.sh` (fuori dal gate: prova
-  alt screen, tasti, modeset→riadattamento 127x36→102x34, ritorno al prompt).
+  alt screen, tasti, toppa, modeset→riadattamento 127x36→102x34, ritorno al
+  prompt) + **GTUI** `usr/bin/gtui` (log con i rami disegnati in pixel, barra,
+  sparkline: le toppe restano nella cronologia e muoiono con le loro righe).
   Modello grafico (ADR-0097): la tile e' una **superficie di pixel**, il testo
   e' una vista a celle (`Geom::for_rect`), una cella contiene glifo **o**
   toppa; la libreria di disegno produce bitmap (una sola, `text` a due teste:
-  cella vs font proporzionale); niente toolkit unificato; toppe con budget,
-  **fuori dallo scrollback** e con alt-text; il "terminale come app" resta una
-  migrazione possibile perche' `littera` e' indipendente dal display.
+  cella vs font proporzionale); niente toolkit unificato.
+  **Toppe (ADR-0099)**: `Segment` per riga che **vive quanto il suo testo**
+  (nessuna eviction; tetto `PATCH_MAX_BYTES` 8 MiB **solo-rifiuto**
+  all'ingresso), alt-text nel dump, `SESS_STATS.w1` le misura; render
+  fondo → toppe → glifi con `blank_over_patch` (una cella vuota **non**
+  ridipinge il fondo sopra la toppa); resize = toppe scartate (il reflow
+  sposta le celle). Il "terminale come app" resta una migrazione possibile
+  perche' `littera` e' indipendente dal display.
 - **Niente identita' in ambiente (S3.3d, ADR-0095)**: `USER` non esiste piu'.
   `identis-login` spawma il DE e `impluvium` spawma le shell **senza env**;
   il prompt chiede il nome a ogni riga (`civis::sess::auth()` →

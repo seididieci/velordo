@@ -136,6 +136,33 @@ START_POS="$(grep -aF '[fullscreen] start' "$LOG" | tail -1 | grep -ao 'star=([0
 END_POS="$(grep -aF '[fullscreen] exit' "$LOG" | tail -1 | grep -ao 'star=([0-9]*,[0-9]*)' || true)"
 echo "[tui] stella: $START_POS -> $END_POS"
 
+# 5. La **Graphic TUI** (ADR-0099): testo + toppe di pixel, e le toppe vivono
+#    quanto il loro testo. L'app verifica da sola e scrive i marker sul seriale.
+sleep 1
+send_text $'gtui\n'
+if ! wait_for '[gtui] log' 60; then
+    echo "[tui] FAIL: gtui non e' partito" >&2
+    exit 1
+fi
+GTUI_LOG="$(grep -aF '[gtui] log' "$LOG" | tail -1 || true)"
+# Scroll dentro la cronologia: le toppe restano.
+if ! wait_for '[gtui] dopo 40 righe' 60; then
+    echo "[tui] FAIL: gtui non ha finito lo scroll breve" >&2
+    exit 1
+fi
+GTUI_KEEP="$(grep -aF '[gtui] dopo 40 righe' "$LOG" | tail -1 | sed 's/.*patches=//' || true)"
+# Scroll oltre la cronologia (1100 righe su 1000): le righe escono, i pixel con loro.
+if ! wait_for '[gtui] oltre la cronologia' 120; then
+    echo "[tui] FAIL: gtui non ha finito lo scroll lungo" >&2
+    exit 1
+fi
+GTUI_GONE="$(grep -aF '[gtui] oltre la cronologia' "$LOG" | tail -1 | sed 's/.*patches=//' || true)"
+GTUI_K0="$(printf '%s' "$GTUI_LOG" | sed 's/.*patches=//; s/ .*//')"
+GTUI_CRC="$(printf '%s' "$GTUI_LOG" | sed 's/.*crc=//')"
+echo "[tui] gtui: patches k0=${GTUI_K0:-?} dopo40=${GTUI_KEEP:-?} oltre=${GTUI_GONE:-?} crc=${GTUI_CRC:-?}"
+send_mon 'sendkey q'
+wait_for '[gtui] exit' 20 || true
+
 kill "$QEMU_PID" 2>/dev/null || true
 wait "$QEMU_PID" 2>/dev/null || true
 trap - EXIT
@@ -162,6 +189,16 @@ if [ -n "$A" ] && [ -n "$B" ] && [ "$A" != "$B" ]; then ok=1; else ok=0; fi
 check "la toppa cambia i pixel della riga (crc $PATCH_CRC)" "$ok"
 if [ -n "$RESIZED" ] && [ "$RESIZED" != "$BEFORE_RESIZE" ]; then ok=1; else ok=0; fi
 check "riadattamento dopo il modeset ($BEFORE_RESIZE -> $RESIZED)" "$ok"
+# GTUI: le toppe sono state disegnate, restano nella cronologia e poi se ne
+# vanno **con le loro righe** (nessuna eviction separata, ADR-0099).
+if [ -n "$GTUI_K0" ] && [ "$GTUI_K0" -gt 0 ] 2>/dev/null; then ok=1; else ok=0; fi
+check "gtui: toppe disegnate ($GTUI_K0 byte)" "$ok"
+if [ "$GTUI_CRC" != "0" ] && [ -n "$GTUI_CRC" ]; then ok=1; else ok=0; fi
+check "gtui: i pixel arrivano al framebuffer (crc $GTUI_CRC)" "$ok"
+if [ -n "$GTUI_KEEP" ] && [ "$GTUI_KEEP" -gt 0 ] 2>/dev/null; then ok=1; else ok=0; fi
+check "gtui: le toppe restano nella cronologia ($GTUI_KEEP byte)" "$ok"
+if [ "$GTUI_GONE" = "0" ]; then ok=1; else ok=0; fi
+check "gtui: le toppe muoiono con le loro righe ($GTUI_GONE byte)" "$ok"
 if grep -aqF '[fullscreen] exit' "$LOG"; then ok=1; else ok=0; fi
 check "uscita dalla tela" "$ok"
 # Dopo l'uscita la shell torna a scrivere: la principale era messa da parte,
@@ -178,7 +215,7 @@ if grep -aqE 'FAIL|PANIC|#.* FAULT' "$LOG"; then
 fi
 
 if [ "$fail" -eq 0 ]; then
-    echo "[tui] PASS (schermo intero: alt screen, posizionamento, tasti, ritorno)"
+    echo "[tui] PASS (schermo intero: alt screen, tasti, resize; toppe: pixel, cronologia, morte con la riga)"
 else
     echo "[tui] FAIL (log $LOG)" >&2
 fi

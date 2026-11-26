@@ -5067,3 +5067,42 @@ un'app.
 gate) PASS: alt screen 127x36, tasti, **modeset chiesto dall'app** →
 riadattamento a 102x34 da solo, `q` → la shell ridisegna il prompt. Gate
 invariato.
+
+## Passo 2 — Toppe di pixel: la prima GTUI (ADR-0099)
+
+**2a (modello e ABI)**: `Segment` per riga in `term::grid` (accanto alle celle
+`Copy`, che restano intatte) e `scrollback` fatto di `Row { cells, segments }`:
+la toppa **vive quanto il suo testo** — scorre con la riga e muore quando la
+cronologia la scarta. Nessuna eviction, nessuna politica per posizione o
+dimensione (la richiesta esplicita): l'unico tetto e' `PATCH_MAX_BYTES` (8 MiB
+per sessione) controllato **all'ingresso** e **solo-rifiuto** — una toppa
+rifiutata e' un errore per il client, non una perdita per il log. ABI:
+`SESS_METRICS` (la cella in pixel la sa solo il font), `SESS_PATCH_BEGIN` /
+`SESS_PATCH_DATA` (blocchi nella mailbox, niente shm; commit implicito a misura
+esatta), `SESS_STATS.w1` = focus | byte delle toppe (misura, non decide).
+`libs/pictura`: disegno in bitmap puro (fill/rect/line/bar/sparkline), 6 test
+host.
+
+**2b (la GTUI)**: `usr/bin/gtui` — log con i **rami disegnati in pixel** (non
+con `|`/`├`), barra di carico, sparkline; testo normale accanto alle toppe. Il
+programma verifica da solo la regola dell'ADR e lo scrive sul seriale:
+144 KB di toppe con CRC di riga non nullo, **stessi byte dopo 40 righe di
+scroll** (sono nella cronologia), **0 byte oltre le 1000 righe** (sono uscite
+con le loro righe).
+
+**Trappole pagate**:
+- **la cella vuota ridipingeva il fondo sopra la toppa**: il render fa fondo →
+  toppe → celle, e una cella vuota ripassava il suo fondo cancellando la
+  toppa (il grafo si vedeva solo dove c'era testo). Fix `blank_over_patch`:
+  una cella vuota sopra una toppa si salta (il cursore no). Trovato dallo
+  **screendump**, non dal CRC (che cambiava: i pixel c'erano, ma coperti);
+- **`ESC[2J` non muove il cursore** (corretto: e' un terminale vero, ADR-0098):
+  chi ridisegna da capo deve mandare anche `ESC[H`, o disegna dal fondo;
+- **il commit non disegna da solo** (2a): senza `render+flush` nel handler i
+  pixel stanno nella griglia e mai sullo schermo.
+
+**Test**: unit host **200** (`term` +3, `littera` +3, `pictura` +6);
+`run-tui-tests.sh` (fuori dal gate) con 4 check nuovi (toppe disegnate, pixel al
+framebuffer via CRC, toppe nella cronologia, toppe che muoiono con le righe);
+gate invariato. Verifica visiva one-off con screendump: blu (barra/gauge),
+verde (sparkline/nodo), giallo e viola (nodi) tutti presenti nei pixel.

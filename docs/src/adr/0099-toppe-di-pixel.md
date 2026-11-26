@@ -2,10 +2,10 @@
 
 ## Status
 
-**Accepted** (2026-11-26). Implementata la **2a** (griglia con segmenti, ABI,
-libreria `pictura`, unit test). La **2b** (demo dedicata, script esteso, docs
-di fase) segue. Gate invariato; `run-tui-tests.sh` PASS con un check nuovo
-(CRC della riga prima/dopo la toppa).
+**Accepted** (2026-11-26). Implementata **2a** (griglia con segmenti, ABI,
+libreria `pictura`, unit test) e **2b** (la prima GTUI: `usr/bin/gtui`, log con
+i rami disegnati + barra + sparkline, e la prova che le toppe vivono quanto il
+loro testo). Gate invariato; `run-tui-tests.sh` PASS con quattro check nuovi.
 
 Dipende da ADR-0097 (modello grafico), ADR-0098 (schermo intero e notifica di
 resize), ADR-0089/0090 (sessioni, scrollback).
@@ -111,6 +111,19 @@ del server si basa su quel numero (il tetto si controlla all'ingresso).
 - `resize` e toppe non convivono: dopo un reflow le toppe spariscono (e l'app
   lo sa). È l'unico posto in cui "perdere" è la risposta giusta.
 - `Cell` resta `Copy`: la toppa è un vicino di riga, non un campo della cella.
+
+## Trappole pagate (2b)
+
+- **La cella vuota ridipingeva il fondo sopra la toppa.** Il render disegna il
+  fondo (banda), poi le toppe, poi le celle: una cella *vuota* ripassava il suo
+  fondo e cancellava la toppa. Il grafo del log si vedeva solo dove c'era
+  testo. Fix: `blank_over_patch` — una cella vuota sopra una toppa si salta
+  (il cursore no: deve restare visibile). L'ha trovato lo **screendump**: il
+  CRC delle righe cambiava (i pixel c'erano) ma i colori attesi non si
+  vedevano.
+- **`ESC[2J` non muove il cursore** (giusto: e' un terminale vero, ADR-0098).
+  Chi ridisegna da capo deve mandare anche `ESC[H`, o disegna dal fondo e la
+  prima riga scorre via.
 
 ## Trappole pagate
 

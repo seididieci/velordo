@@ -1431,10 +1431,12 @@ hanno un ordine concordato ma **non** una data: si prendono in quest'ordine.
    `usr/bin/fullscreen` provato da `scripts/run-tui-tests.sh` (modeset chiesto
    dall'app → 127x36 → 102x34, riadattamento da solo). Base per editor e
    monitor.
-2. **Canvas di testo** — libreria **pura** (client) che *genera celle*:
-   box/hline, alberi, barre, sparkline, braille. Separata dal **disegno** a
-   schermo, che resta della console (responsabilita' diverse: chi produce le
-   celle non conosce pixel ne' danno).
+2. **Canvas di testo / toppe** — **fatta** (ADR-0099: `SESS_METRICS`,
+   `SESS_PATCH_BEGIN/DATA`, `littera` con staging + tetto solo-rifiuto,
+   `term::grid` con i segmenti che scorrono nella cronologia, libreria
+   `pictura`, prima **GTUI** `usr/bin/gtui`: log con i rami disegnati in pixel
+   + barra + sparkline). La libreria produce **bitmap** (il testo resta
+   `sess::out`); il disegno a schermo resta della console.
 3. **Monitor di sistema** (btop-like) — prima app vera, usa 1+2. I dati ci sono
    gia' tutti: `ps_info` porta i **tick CPU per processo** (`ticks_used`),
    `SYS_MEMINFO`, `CBS_GET_INFO`, stats di block/gpu/net. **Zero kernel.**

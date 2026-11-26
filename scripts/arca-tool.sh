@@ -231,6 +231,7 @@ seed_bin testland/build/tileprobe.bin test/tileprobe.bin tst test/tileprobe.bin
 seed_bin testland/build/tileprobe.bin usr/bin/tileprobe.bin usr tileprobe
 seed_bin testland/build/floorprobe.bin usr/bin/floorprobe.bin usr floorprobe
 seed_bin testland/build/fullscreen.bin usr/bin/fullscreen.bin usr fullscreen
+seed_bin testland/build/gtui.bin usr/bin/gtui.bin usr gtui
 seed_bin testland/build/rightshelper.bin test/rightshelper.bin tst test/rightshelper.bin
 seed_bin testland/build/subtreehelper.bin test/subtreehelper.bin tst test/subtreehelper.bin
 seed_bin testland/build/subtreechild.bin test/subtreechild.bin tst test/subtreechild.bin
