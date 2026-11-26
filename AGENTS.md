@@ -682,6 +682,14 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   modeset, `TILE_COMMIT` e `SESS_RESIZE`). `civis::sess::Screen` e'
   la base per un'app (alt screen, `at`, `clear`, `cursor`, `poll_resize`); il
   frame va **solo schermo** (`write_screen`), il mirror resta il transcript.
+  **Il frame e' l'unita' di disegno (addendum ADR-0098)**: `at`/`write`/`clear`
+  **accodano**, `present()` manda una `SESS_WRITE` (chunk 2048 B) = una feed, un
+  render, un flush; `libs/tabula` (`Canvas` a celle con copia ombra) manda il
+  **differenziale** (`diff()` = `CUP` per fetta + caratteri). REGOLA: mai un IPC
+  per cella — un bordo disegnato cella per cella erano ~660 render+flush per
+  tasto e il frame si vedeva arrivare a pezzi (il "lampeggio" di `fullscreen`;
+  ora 1 IPC / ~33 B). Una cella = un carattere: la larghezza di un glifo la sa
+  solo il font, non una tabella nel canvas.
   Demo `usr/bin/fullscreen` + `scripts/run-tui-tests.sh` (fuori dal gate: prova
   alt screen, tasti, toppa, modeset→riadattamento 127x36→102x34, ritorno al
   prompt) + **GTUI** `usr/bin/gtui` (log con i rami disegnati in pixel, barra,
@@ -989,7 +997,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
 ./scripts/run-desktop-tests.sh   # tileprobe + keybinding del DE via monitor
 
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, syscall-numbers, impluvium-tree, blake2s, sig, tls: 188 test
+./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), pictura + tabula (toppe e canvas a celle), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, syscall-numbers, impluvium-tree, blake2s, sig, tls: 213 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh

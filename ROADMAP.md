@@ -1430,7 +1430,10 @@ hanno un ordine concordato ma **non** una data: si prendono in quest'ordine.
    bit 2 = "geometria cambiata" e hint `w1 = 1`; `civis::sess::Screen` e
    `usr/bin/fullscreen` provato da `scripts/run-tui-tests.sh` (modeset chiesto
    dall'app → 127x36 → 102x34, riadattamento da solo). Base per editor e
-   monitor.
+   monitor. **Addendum**: il **frame è l'unità di disegno** — `Screen` accoda e
+   `present()` manda una feed, `libs/tabula` (canvas a celle con copia ombra)
+   manda il differenziale: un tasto = 1 IPC / ~34 byte (prima ~660, il
+   lampeggio).
 2. **Canvas di testo / toppe** — **fatta** (ADR-0099: `SESS_METRICS`,
    `SESS_PATCH_BEGIN/DATA`, `littera` con staging + tetto solo-rifiuto,
    `term::grid` con i segmenti che scorrono nella cronologia, libreria

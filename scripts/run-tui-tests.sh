@@ -101,6 +101,17 @@ send_mon 'sendkey l'
 send_mon 'sendkey l'
 send_mon 'sendkey j'
 sleep 1
+# 2a. Il **costo di un tasto** (ADR-0098, addendum "il frame e' l'unita' di
+#     disegno"): un frame piccolo in **una** feed. Prima l'app faceva un IPC per
+#     cella, cioe' un render+flush per cella (~660 per un tasto): il frame si
+#     vedeva arrivare a pezzi, partendo dallo schermo vuoto. Era il lampeggio.
+FRAMES="$(grep -aF '[fullscreen] frame bytes=' "$LOG" || true)"
+FIRST_FRAME="$(printf '%s\n' "$FRAMES" | head -1)"
+LAST_FRAME="$(printf '%s\n' "$FRAMES" | tail -1)"
+FIRST_BYTES="$(printf '%s' "$FIRST_FRAME" | sed 's/.*bytes=//; s/ .*//')"
+FRAME_BYTES="$(printf '%s' "$LAST_FRAME" | sed 's/.*bytes=//; s/ .*//')"
+FRAME_CHUNKS="$(printf '%s' "$LAST_FRAME" | sed 's/.*chunks=//')"
+echo "[tui] frame: intero=${FIRST_BYTES:-?} byte, dopo i tasti=${FRAME_BYTES:-?} byte in ${FRAME_CHUNKS:-?} chunk"
 
 # 2b. Toppa di pixel (ADR-0099): barra+linea disegnate **sotto** le celle.
 send_mon 'sendkey p'
@@ -234,6 +245,10 @@ check() {
 # `if`, non `cmd; check $?`: con `set -e` un grep che non trova abortisce.
 if [ -n "$END_POS" ] && [ "$START_POS" != "$END_POS" ]; then ok=1; else ok=0; fi
 check "i tasti muovono la stella ($START_POS -> $END_POS)" "$ok"
+if [ -n "$FRAME_BYTES" ] && [ "$FRAME_BYTES" -lt 200 ] 2>/dev/null && [ "$FRAME_CHUNKS" = "1" ]; then ok=1; else ok=0; fi
+check "un tasto = un frame piccolo in una feed ($FRAME_BYTES byte, $FRAME_CHUNKS chunk)" "$ok"
+if [ -n "$FIRST_BYTES" ] && [ -n "$FRAME_BYTES" ] && [ "$FIRST_BYTES" -gt "$FRAME_BYTES" ] 2>/dev/null; then ok=1; else ok=0; fi
+check "il primo frame e' intero, i successivi differenziali ($FIRST_BYTES -> $FRAME_BYTES byte)" "$ok"
 if [ -n "$PATCH_BYTES" ] && [ "$PATCH_BYTES" -gt 0 ] 2>/dev/null; then ok=1; else ok=0; fi
 check "toppa di pixel disegnata ($PATCH_BYTES byte)" "$ok"
 # Il CRC della riga prima/dopo: i pixel sono arrivati al framebuffer e sono

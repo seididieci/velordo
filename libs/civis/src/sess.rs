@@ -17,6 +17,7 @@
 //! ([`whoami`]): il kernel dice chi sta chiamando, il server risolve; nessun
 //! handle passa dallo spawn, nessuna variabile d'ambiente.
 
+use alloc::vec::Vec;
 use core::ptr;
 
 use crate::sys::{munmap, shm_map};
@@ -349,22 +350,39 @@ impl Session {
 /// Non e' un secondo modello: sono le sequenze ANSI che un terminale vero
 /// capisce (`ESC[?1049h`, `ESC[2J`, `ESC[H`…) scritte sulla **sessione del
 /// processo** ([`current`]). La sessione ha gia' tutto (scrollback, danno,
-/// mirror seriale); l'app prende il controllo finche' non chiama [`Screen::close`],
-/// e allora il testo di prima torna com'era.
+/// mirror seriale); l'app prende il controllo finche' non chiama
+/// [`Screen::close`], e allora il testo di prima torna com'era.
+///
+/// **Il frame e' l'unita' di disegno** (ADR-0098, addendum). `at`/`write`/
+/// `clear`/`cursor` **accodano** i byte in memoria; [`Screen::present`] li manda
+/// con una `SESS_WRITE` (spezzata solo se supera la mailbox). Un IPC per cella
+/// significa un `render`+`flush` per cella: il frame si vede arrivare a pezzi,
+/// partendo dallo schermo vuoto — cosi' un'app "lampeggia" (~660 render per un
+/// tasto, misurati su `fullscreen` prima di questa API).
 pub struct Screen {
     cols: u16,
     rows: u16,
+    /// Il frame in composizione: niente IPC finche' non si presenta.
+    buf: Vec<u8>,
+    /// `close` fatto: il `Drop` non deve presentare niente.
+    closed: bool,
 }
 
 impl Screen {
     /// Entra nella tela alternativa: lettore dichiarato, eco spento, cursore
-    /// nascosto, schermo pulito. Da qui in poi l'app disegna con [`Screen::at`].
+    /// nascosto, schermo pulito. Da qui in poi l'app disegna con
+    /// [`Screen::at`] e manda con [`Screen::present`].
     pub fn open() -> Result<Screen, SessError> {
         let s = current().ok_or(SessError::NotAttached)?;
         let _ = s.echo(false);
         s.write_screen(b"\x1b[?1049h\x1b[?25l\x1b[2J").map(|_| ())?;
         let info = s.info()?;
-        Ok(Screen { cols: info.cols, rows: info.rows })
+        Ok(Screen {
+            cols: info.cols,
+            rows: info.rows,
+            buf: Vec::new(),
+            closed: false,
+        })
     }
 
     /// La misura della tela (celle).
@@ -390,33 +408,71 @@ impl Screen {
     }
 
     /// Porta il cursore in `(col, row)` (1-based, come il CUP): il prossimo
-    /// byte si scrive li'.
-    pub fn at(&self, col: u16, row: u16) -> Result<(), SessError> {
+    /// byte si scrive li'. Accoda al frame.
+    pub fn at(&mut self, col: u16, row: u16) -> Result<(), SessError> {
         let mut buf = [0u8; 24];
         let n = format_cup(&mut buf, col, row);
         self.write(&buf[..n])
     }
 
-    /// Cancella lo schermo (il cursore non si muove).
-    pub fn clear(&self) -> Result<(), SessError> {
+    /// Cancella lo schermo (il cursore non si muove). Accoda al frame.
+    pub fn clear(&mut self) -> Result<(), SessError> {
         self.write(b"\x1b[2J")
     }
 
-    /// Mostra/nasconde il cursore.
-    pub fn cursor(&self, visible: bool) -> Result<(), SessError> {
+    /// Mostra/nasconde il cursore. Accoda al frame.
+    pub fn cursor(&mut self, visible: bool) -> Result<(), SessError> {
         self.write(if visible { b"\x1b[?25h" } else { b"\x1b[?25l" })
     }
 
-    /// Scrive byte nella tela (testo o sequenze).
-    pub fn write(&self, bytes: &[u8]) -> Result<(), SessError> {
-        let s = current().ok_or(SessError::NotAttached)?;
-        s.write_screen(bytes).map(|_| ())
+    /// Accoda byte al frame (testo o sequenze): nessuna IPC, nessun render.
+    /// Gli errori (sessione morta) arrivano con [`Screen::present`].
+    pub fn write(&mut self, bytes: &[u8]) -> Result<(), SessError> {
+        self.buf.extend_from_slice(bytes);
+        Ok(())
     }
 
-    /// Lascia la tela: cursore e schermata principale tornano come prima.
-    pub fn close(self) -> Result<(), SessError> {
+    /// Byte in attesa di essere mandati.
+    pub fn pending(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// Quante `SESS_WRITE` costera' il frame (la mailbox ne porta `MAX_CHUNK`).
+    pub fn chunks(&self) -> usize {
+        self.buf.len().div_ceil(MAX_CHUNK)
+    }
+
+    /// Manda il frame: **una** feed -> un parse -> un render -> un flush, quindi
+    /// nessuno stato intermedio finisce sullo schermo. Il buffer si svuota solo
+    /// se la scrittura riesce (un frame rifiutato si puo' rimandare).
+    pub fn present(&mut self) -> Result<usize, SessError> {
+        if self.buf.is_empty() {
+            return Ok(0);
+        }
         let s = current().ok_or(SessError::NotAttached)?;
-        s.write_screen(b"\x1b[?25h\x1b[?1049l").map(|_| ())
+        let n = s.write_screen(&self.buf)?;
+        self.buf.clear();
+        Ok(n)
+    }
+
+    /// Lascia la tela: il frame pendente va prima, poi cursore e schermata
+    /// principale tornano come prima.
+    pub fn close(mut self) -> Result<(), SessError> {
+        self.closed = true;
+        let pending = self.present();
+        let s = current().ok_or(SessError::NotAttached)?;
+        s.write_screen(b"\x1b[?25h\x1b[?1049l").map(|_| ())?;
+        pending.map(|_| ())
+    }
+}
+
+impl Drop for Screen {
+    /// Un frame composto e mai presentato non deve sparire in silenzio: chi
+    /// disegna e dimentica `present` lo trova a video lo stesso.
+    fn drop(&mut self) {
+        if !self.closed && !self.buf.is_empty() {
+            let _ = self.present();
+        }
     }
 }
 

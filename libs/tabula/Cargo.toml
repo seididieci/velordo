@@ -1,0 +1,17 @@
+[package]
+name = "tabula"
+version = "0.1.0"
+edition = "2021"
+
+# Crate fuori dal workspace del kernel: unit test host dalla directory neutra
+# di `scripts/run-unit-tests.sh` (come `term`, `pictura`, `musivum`).
+[workspace]
+
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"

@@ -92,3 +92,66 @@ stato di un'app di test vanno sul seriale con `print_string`.
   dall'app** la ridimensiona a 102x34 e lei si riadatta da sola (il resize non
   lo ha chiesto lei), `q` esce e la shell **ridisegna il prompt** — la tela
   principale era messa da parte, non distrutta.
+
+## Addendum (2026-11-27): il frame è l'unità di disegno
+
+**Status**: Accepted, implementato.
+
+### Il problema, misurato
+
+`Screen::at`/`write` erano **una `SESS_WRITE` ciascuno**, e il server fa
+`parse → render → flush` **a ogni** feed. Il `draw()` di `fullscreen` (bordo
+disegnato cella per cella) costava **~660 IPC per un tasto**, cioè ~660 render e
+660 flush sul display: il frame si vedeva arrivare a pezzi, **partendo dallo
+schermo vuoto** (`ESC[2J` una cella alla volta). Il lampeggio visto a schermo
+non era un problema grafico, era la granularità dell'API.
+
+### La decisione
+
+Due strati, entrambi necessari:
+
+1. **Il meccanismo bufferizza** (`libs/civis/src/sess.rs`): `at`/`write`/`clear`/
+   `cursor` **accodano** i byte in un `Vec`, `present()` li manda con una (o
+   poche, `MAX_CHUNK` = 2048 B) `SESS_WRITE`. **Una feed → un render → un
+   flush**: gli stati intermedi non esistono. `close()` presenta il pendente
+   prima dell'epilogo e `Drop` presenta un frame rimasto appeso (dimenticare
+   `present` non lascia lo schermo muto in silenzio).
+2. **L'app differenzia** (`libs/tabula`): un canvas a celle con **copia ombra**;
+   `diff()` ritorna solo le celle cambiate (`CUP` per fetta + caratteri). L'app
+   scrive il suo frame nel canvas (memoria, nessuna IPC) e manda il
+   differenziale. `fullscreen`: da **~660 IPC / 3551 B** a **1 IPC / 33-34 B**
+   per un tasto, primo frame intero 1564 B.
+
+`civis` **non** dipende da `tabula`: il canvas produce byte, `Screen` li
+bufferizza. Meccanismo e aiuto restano separati (il server non cambia, e la
+reply di `SESS_WRITE` continua a significare "è sullo schermo" — i test ci
+contano).
+
+### Limiti dichiarati
+
+- **Una cella = un carattere** (larghezza 1). La larghezza di un glifo la sa solo
+  il **font** (`glyph_width_cells`, lato console): indovinarla con una tabella
+  nel canvas disallineerebbe il modello dallo schermo — ed è la classe di bug
+  appena pagata (coordinate). Chi deve disegnare un glifo largo scrive con
+  `Screen::write` e conta le celle da sé.
+- Il canvas **non** è un toolkit (ADR-0097): niente widget, niente layout,
+  niente stile. Solo una superficie di caratteri con la copia ombra.
+- Il **resize** azzera le due copie del canvas: dopo un resize si ridisegna
+  (l'app lo sa, il resize è notificato).
+- Il server **non** raggruppa le write in una finestra: la garanzia "quando
+  `SESS_WRITE` ritorna, il frame è a video" resta com'è. Il raggruppamento è
+  compito del client (ed è ciò che rende il frame atomico).
+- `gtui` (testo + toppe) **non** passa dal canvas: scrive righe di testo e
+  toppe, quindi il suo ridisegno (al resize) resta una trentina di feed. È
+  un'app di testo, non una tela; se il repaint desse fastidio si bufferizza
+  anche lì (debito dichiarato, non un difetto del meccanismo).
+
+### Test
+
+- `libs/tabula` (host, 12): primo frame intero, nessun cambio → zero byte, fette
+  consecutive in un solo `CUP`, celle non adiacenti (il cursore che si sposta),
+  riga che si accorcia, `clear`, fuori tela, testo che si ferma al bordo, UTF-8
+  (bordo e frecce), `resize` che riparte da zero, `fill`, misure minime.
+- `scripts/run-tui-tests.sh`: due check nuovi — "un tasto = un frame piccolo in
+  una feed" (`< 200` byte, `1` chunk) e "il primo frame è intero, i successivi
+  differenziali" (misurati dai marker `[fullscreen] frame bytes=N chunks=M`).

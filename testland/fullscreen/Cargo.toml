@@ -8,6 +8,7 @@ edition = "2024"
 [dependencies]
 civis = { path = "../../libs/civis" }
 pictura = { path = "../../libs/pictura" }
+tabula = { path = "../../libs/tabula" }
 
 [profile.dev]
 panic = "abort"

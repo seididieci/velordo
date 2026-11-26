@@ -5159,3 +5159,36 @@ con la grafica nella seconda e zero avvisi di toppa fuori dalla vista). Unit
 host **201**. Gate invariato (5/5, 64/64, 4/4, 12/12, 72/72, 12/12, shell
 33/33). Verifica visiva con screendump dopo lo split: la metà sinistra mostra
 la grafica ridisegnata alla misura nuova.
+
+**Quarto giro (il lampeggio di `fullscreen`)**: a ogni tasto lo schermo
+lampeggiava. Non era grafica: era la **granularità dell'API**. `Screen::at` /
+`Screen::write` erano una `SESS_WRITE` ciascuno e il server fa
+`parse → render → flush` a ogni feed; il `draw()` di `fullscreen` disegnava il
+bordo cella per cella, quindi **~660 IPC = ~660 render+flush per un tasto**, con
+il frame che arrivava a pezzi partendo dallo schermo vuoto (`ESC[2J`).
+
+Due strati, entrambi necessari (addendum ADR-0098):
+
+1. **Meccanismo — il frame è l'unità di disegno**: `Screen` accoda i byte in un
+   `Vec`, `present()` manda una `SESS_WRITE` (chunk 2048 B). Un frame = una
+   feed = un render = un flush. `close()` presenta il pendente, `Drop` presenta
+   un frame rimasto appeso (dimenticare `present` non lascia lo schermo muto).
+   Misura: **660 → 2** feed per il frame intero.
+2. **App — differenziale**: `libs/tabula` (nuovo, puro, 12 unit test host) è un
+   canvas a celle con **copia ombra**: `diff()` ritorna un `CUP` per fetta di
+   celle cambiate + i caratteri. `fullscreen` compone il frame in memoria e
+   manda il delta: **1564 byte il primo frame, 33-34 byte per un tasto, 1 IPC**.
+   Il frame finale è identico (il CRC dello script non cambia): si toglie il
+   lampeggio **senza cambiare un pixel**.
+
+Decisioni dichiarate: `civis` **non** dipende da `tabula` (il canvas produce
+byte, `Screen` li bufferizza: meccanismo e aiuto separati); il canvas **non**
+indovina la larghezza dei glifi (la sa solo il font: una tabella nel canvas
+disallineerebbe il modello dallo schermo — la classe di bug appena pagata); il
+server non raggruppa le write (la garanzia "`SESS_WRITE` ritorna = il frame è a
+video" resta, i test ci contano).
+
+**Test**: `libs/tabula` 12 unit host; `run-tui-tests.sh` **17 check** (due
+nuovi: "un tasto = un frame piccolo in una feed", 34 byte / 1 chunk, e "il primo
+frame è intero, i successivi differenziali", 1564 → 34); unit host **213**; gate
+invariato.

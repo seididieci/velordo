@@ -10,6 +10,12 @@
 //! riadattamento: il resize non lo chiede l'app), `p` disegna una **toppa**
 //! (ADR-0099: barra + linea in pixel, sotto i glifi), `q` esce.
 //!
+//! Il disegno passa dal **canvas a celle** (`libs/tabula`): il frame si compone
+//! in memoria, `Screen::present` lo manda in una feed e il canvas manda solo il
+//! **differenziale** (ADR-0098 addendum). Un tasto costa ~34 byte e una IPC:
+//! disegnare cella per cella erano ~660 render+flush per tasto, e il frame si
+//! vedeva arrivare a pezzi (il "lampeggio").
+//!
 //! Seedato in `usr/bin/fullscreen.bin` (uso manuale dalla shell) e provato da
 //! `scripts/run-tui-tests.sh`, fuori dal gate: prende il terminale, quindi non
 //! puo' girare nella suite.
@@ -25,6 +31,7 @@ use alloc::string::String;
 use civis;
 use civis::sess::Screen;
 use pictura::{rgb, Canvas};
+use tabula::Canvas as Cells;
 
 civis::entry!(real_main);
 
@@ -129,44 +136,60 @@ fn set_mode((w, h): (u16, u16)) -> bool {
     }
 }
 
-fn draw(scr: &Screen, star: (u16, u16), keys: u32) {
-    let (w, h) = scr.size();
-    let _ = scr.clear();
-    // Bordo: quattro lati disegnati con le posizioni assolute.
+/// Compone il frame **nel canvas** (celle, nessuna IPC) e manda il
+/// differenziale: un tasto tocca due celle (la stella vecchia e la nuova) piu'
+/// la riga di stato, non 660.
+fn draw(canvas: &mut Cells, scr: &mut Screen, star: (u16, u16), keys: u32) {
+    let (w, h) = canvas.size();
+    let (w, h) = (w as u16, h as u16);
+    canvas.clear();
+    // Bordo: quattro lati, in celle (1-based nelle sequenze, 0-based qui).
     let right = w.saturating_sub(1);
     let bottom = h.saturating_sub(1);
     for col in 1..=right {
-        let _ = scr.at(col, 1);
-        let _ = scr.write("─".as_bytes());
-        let _ = scr.at(col, bottom);
-        let _ = scr.write("─".as_bytes());
+        canvas.set(col as usize - 1, 0, '─');
+        canvas.set(col as usize - 1, bottom as usize - 1, '─');
     }
     for row in 1..=bottom {
-        let _ = scr.at(1, row);
-        let _ = scr.write("│".as_bytes());
-        let _ = scr.at(right, row);
-        let _ = scr.write("│".as_bytes());
+        canvas.set(0, row as usize - 1, '│');
+        canvas.set(right as usize - 1, row as usize - 1, '│');
     }
-    for (c, r, s) in [
-        (1u16, 1u16, "┌"),
-        (right, 1, "┐"),
-        (1, bottom, "└"),
-        (right, bottom, "┘"),
+    for (c, r, g) in [
+        (1u16, 1u16, '┌'),
+        (right, 1, '┐'),
+        (1, bottom, '└'),
+        (right, bottom, '┘'),
     ] {
-        let _ = scr.at(c, r);
-        let _ = scr.write(s.as_bytes());
+        canvas.set(c as usize - 1, r as usize - 1, g);
     }
-    // Intestazione e stato al centro.
+    // Intestazione e stato: solo le celle che cambiano finiscono sul filo (il
+    // canvas confronta con la copia ombra).
     let title = format!(" fullscreen {}x{} ", w, h);
-    let _ = scr.at(3, 2);
-    let _ = scr.write(title.as_bytes());
+    canvas.text(2, 1, &title);
     let info: String = format!("tasti={}  stella=({},{})  q=esci", keys, star.0, star.1);
-    let _ = scr.at(3, 3);
-    let _ = scr.write(info.as_bytes());
+    canvas.text(2, 2, &info);
     // La stella: si scrive **dove** dice la posizione, non dove capita.
-    let _ = scr.at(star.0.clamp(2, right.saturating_sub(1)), star.1.clamp(4, bottom.saturating_sub(1)));
-    let _ = scr.write("*".as_bytes());
-    let _ = civis::flush();
+    let sx = star.0.clamp(2, right.saturating_sub(1));
+    let sy = star.1.clamp(4, bottom.saturating_sub(1));
+    canvas.set(sx.saturating_sub(1) as usize, sy.saturating_sub(1) as usize, '*');
+    // **Un frame, una feed** (ADR-0098 addendum): il costo si dichiara, cosi'
+    // il lampeggio e' una misura e non un'impressione.
+    let bytes = canvas.diff();
+    let n = bytes.len();
+    if scr.write(bytes).is_err() {
+        mark("frame ERRORE: scrittura rifiutata");
+        return;
+    }
+    frame_mark(scr, n);
+}
+
+/// Manda il frame e riporta il costo sul seriale (`bytes` = il differenziale).
+fn frame_mark(scr: &mut Screen, bytes: usize) {
+    let chunks = scr.chunks();
+    match scr.present() {
+        Ok(_) => mark(&format!("frame bytes={} chunks={}", bytes, chunks)),
+        Err(_) => mark("frame ERRORE: non presentato"),
+    }
 }
 
 fn real_main(_sp: u64) -> ! {
@@ -183,13 +206,14 @@ fn real_main(_sp: u64) -> ! {
         }
     };
     let (w, h) = scr.size();
+    let mut canvas = Cells::new(w as usize, h as usize);
     let mut star = (w / 2, h / 2);
     // Il frame va **solo sullo schermo** (`write_screen`): il mirror seriale
     // resta il transcript dell'output, non dei ridisegni (D8c2). Per questo i
     // marker di stato viaggiano sul seriale (`print_string`), non dal frame.
     mark(&format!("start {}x{} star=({},{})", w, h, star.0, star.1));
     let mut keys = 0u32;
-    draw(&scr, star, keys);
+    draw(&mut canvas, &mut scr, star, keys);
 
     loop {
         let mut buf = [0u8; 16];
@@ -205,7 +229,9 @@ fn real_main(_sp: u64) -> ! {
                 let (w, h) = scr.size();
                 mark(&format!("resized {}x{}", w, h));
                 star = (w / 2, h / 2);
-                draw(&scr, star, keys);
+                // Il canvas scarta le due copie: dopo un resize si ridisegna.
+                canvas.resize(w as usize, h as usize);
+                draw(&mut canvas, &mut scr, star, keys);
             }
             continue;
         }
@@ -232,7 +258,7 @@ fn real_main(_sp: u64) -> ! {
         if quit {
             break;
         }
-        draw(&scr, star, keys);
+        draw(&mut canvas, &mut scr, star, keys);
     }
 
     let _ = scr.close();
