@@ -5,7 +5,8 @@
 **Accepted** (2026-11-26). Implementata **2a** (griglia con segmenti, ABI,
 libreria `pictura`, unit test) e **2b** (la prima GTUI: `usr/bin/gtui`, log con
 i rami disegnati + barra + sparkline, e la prova che le toppe vivono quanto il
-loro testo). Gate invariato; `run-tui-tests.sh` PASS con quattro check nuovi.
+loro testo). Gate invariato; `run-tui-tests.sh` PASS con 15 check (compreso
+**split mentre l'app gira**: la grafica viene ridisegnata alla misura nuova).
 
 Dipende da ADR-0097 (modello grafico), ADR-0098 (schermo intero e notifica di
 resize), ADR-0089/0090 (sessioni, scrollback).
@@ -53,11 +54,22 @@ console), che le valida e deriva dal numero di celle. Così `term` resta senza
 dipendenze dal font e i suoi unit test sono pixel-free.
 
 Le operazioni che spostano righe (`scroll_cells`, `scroll_model_n`,
-`scroll_up*`) portano i segmenti con sé (una `rotate_left`). **Il resize
-(`Grid::resize`) li scarta tutti**: il reflow sposta le celle di colonna e di
-riga, quindi un'ancora a celle non ha più senso — meglio perderli che disegnarli
-dove non c'entrano. Il resize è **notificato** (ADR-0098), quindi l'app
-ridisegna. `clear` (`ESC[2J`) libera tutto.
+`scroll_up*`) portano i segmenti con sé (una `rotate_left`).
+
+Il resize (`Grid::resize`) distingue **due casi**, e la differenza è la
+larghezza:
+
+- **larghezza invariata** (`new_cols == cols`): le righe non si spezzano, quindi
+  le toppe delle righe che sopravvivono **restano** (si spostano di `start` come
+  le celle; quelle delle righe che escono vanno via con loro). È il caso del
+  resize in verticale (più righe, stesse colonne) e di molti cambi di finestra.
+- **larghezza diversa**: il re-wrap può **spezzare una riga in due**, e una
+  toppa non si spezza: si scartano tutte. Meglio perderle che disegnarle dove
+  non c'entrano.
+
+In entrambi i casi il resize è **notificato** (ADR-0098): l'app sa e ridisegna.
+Lo scrollback invece si ricompone sempre nel reflow — le sue righe (e le loro
+toppe) non tornano. `clear` (`ESC[2J`) libera tutto.
 
 ### 3. Sotto i glifi
 
@@ -98,9 +110,15 @@ contenuto, non un diritto nuovo.
 
 ### 6. `SESS_STATS` misura, non decide
 
-`w1` = focus nei bit 0..8, **byte delle toppe** nei bit 8.. . Serve ai test
-("quando la riga esce, i byte scendono") e agli strumenti; nessuna decisione
-del server si basa su quel numero (il tetto si controlla all'ingresso).
+`w1` = focus nei bit 0..8, **byte delle toppe della sessione attaccata** nei bit
+8.. . Serve ai test ("quando la riga esce, i byte scendono") e agli strumenti;
+nessuna decisione del server si basa su quel numero (il tetto si controlla
+all'ingresso).
+
+I byte sono quelli della sessione **attaccata**, non di quella in focus: un'app
+misura se stessa, e dopo uno split il focus è su un'altra tile. Leggerli dal
+focus è la trappola che ha fatto dire `patches=0` a un'app che le toppe le aveva
+appena disegnate (e quindi fallire un test che era giusto).
 
 ## Conseguenze
 
@@ -108,8 +126,9 @@ del server si basa su quel numero (il tetto si controlla all'ingresso).
   stesse primitive, e la grafica scorre nella cronologia come il testo.
 - Il costo in memoria è **quello che l'app chiede**, per il tempo in cui il
   testo vive; nessun `Vec` di pixel sopravvive alla sua riga.
-- `resize` e toppe non convivono: dopo un reflow le toppe spariscono (e l'app
-  lo sa). È l'unico posto in cui "perdere" è la risposta giusta.
+- `resize` e toppe convivono solo a **larghezza invariata**: se il reflow
+  cambia le colonne le toppe spariscono (e l'app, notificata, ridisegna). È
+  l'unico posto in cui "perdere" è la risposta giusta.
 - `Cell` resta `Copy`: la toppa è un vicino di riga, non un campo della cella.
 
 ## Trappole pagate (2b, secondo giro)
@@ -138,6 +157,26 @@ del server si basa su quel numero (il tetto si controlla all'ingresso).
   Chi ridisegna da capo deve mandare anche `ESC[H`, o disegna dal fondo e la
   prima riga scorre via.
 
+## Trappole pagate (resize mentre l'app gira)
+
+- **"Ho splittato e la grafica è sparita".** Due cause che si sommano, e sono
+  due doveri distinti: (a) il modello scarta le toppe quando la larghezza
+  cambia — legittimo, il re-wrap può spezzare una riga; (b) l'**app** deve
+  ridisegnare quando il resize le viene notificato (ADR-0098: flag `resized` in
+  `SESS_INFO` + hint `SESS_INPUT_EVENT` con `w1 = 1`). `fullscreen` lo faceva,
+  `gtui` no: restava il testo perché il reflow le celle le conserva. La regola
+  per un'app a schermo intero è **una sola**: svegliarsi, leggere la misura,
+  ridisegnare la propria schermata. `gtui` ora lo fa e lo dichiara sul seriale
+  (`[gtui] resize WxH patches=N`) — con `N = 0` il ridisegno non è avvenuto.
+- **Il focus dopo lo split cambia** (va alla tile nuova): chi vuole mandare
+  tasti all'app della tile di prima deve riportarcelo (`Super+h`). Un test che
+  "preme q" dopo uno split senza ricentrare parla con la shell sbagliata.
+- **`SESS_STATS` misurava la sessione in focus, non la propria.** L'app sul
+  lato sinistro dello split, appena ridisegnata, leggeva `patches=0`: i byte
+  erano quelli della tile in focus (la shell nuova, vuota). La misura deve
+  riguardare la sessione **attaccata** — è una diagnosi, e una diagnosi che
+  guarda qualcun altro mente proprio quando serve.
+
 ## Trappole pagate
 
 - **Il commit non disegna da solo.** `SESS_PATCH_DATA` che completa la toppa
@@ -154,7 +193,9 @@ del server si basa su quel numero (il tetto si controlla all'ingresso).
 
 - `libs/term` (host): la toppa **scorre** con la riga e **muore** quando la
   cronologia la scarta (limite 2 righe); riga fuori griglia / toppa più larga
-  rifiutate; il reflow la scarta; più toppe sulla stessa riga (l'ultima vince).
+  rifiutate; il resize la scarta a **larghezza diversa** e la **conserva** (con
+  la sua riga) a larghezza invariata; più toppe sulla stessa riga (l'ultima
+  vince).
 - `libs/littera` (host): staging (uno per volta, offset sbagliato, commit solo
   a misura esatta), **tetto solo-rifiuto** (la toppa nuova oltre il tetto è
   rifiutata, quella presente resta), alt-text nel dump, `ESC[2J` che libera.

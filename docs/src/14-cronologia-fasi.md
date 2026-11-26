@@ -5128,3 +5128,34 @@ verde (sparkline/nodo), giallo e viola (nodi) tutti presenti nei pixel.
 seconda): grafica disegnata (119 KB) e **zero** avvisi di toppa fuori dalla
 vista. Verifica visiva con screendump della metà destra: blu/verde/giallo/viola
 tutti presenti.
+
+**Terzo giro (split mentre l'app gira)**: l'utente ha splittato **dopo** aver
+avviato `gtui` e la grafica è sparita (restava il testo). Due doveri distinti,
+che si sommavano:
+
+1. **Il modello** scartava *tutte* le toppe a ogni resize. La ragione dello
+   scarto è il re-wrap orizzontale (una riga può spezzarsi in due, una toppa non
+   si spezza), quindi ora `Grid::resize` **conserva** i segmenti se la
+   **larghezza non cambia** (le righe sopravvissute se li portano, spostati di
+   `start`; quelli fuori griglia si scartano) e li scarta se cambia. Unit test
+   nuovo `toppa_conservata_se_la_larghezza_non_cambia`.
+2. **L'app** non reagiva alla notifica: `fullscreen` sì, `gtui` no. Il flag
+   `resized` e l'hint `SESS_INPUT_EVENT(w1=1)` c'erano già (ADR-0098): `gtui`
+   ora, a ogni risveglio senza tasti, legge la misura e **ridisegna** la
+   schermata, dichiarandolo sul seriale (`[gtui] resize WxH patches=N`).
+
+**Terza trappola, la più insidiosa**: `SESS_STATS` riportava i byte delle toppe
+della sessione **in focus**, non di quella attaccata. Dopo lo split il focus è
+sulla tile nuova (la shell), quindi `gtui` — che aveva appena ridisegnato —
+leggeva `patches=0` e il test falliva mentre il fix funzionava: una **diagnosi**
+che guarda qualcun altro mente proprio quando serve. Ora la misura è della
+sessione attaccata (un'app misura se stessa); `focus` resta nei bit 0..8.
+Corollario per i test: dopo uno split il focus si sposta, quindi "premere `q`"
+per chiudere l'app della tile di prima richiede `Super+h` prima.
+
+**Test**: `run-tui-tests.sh` **15 check** (nuovo: split mentre `gtui` gira →
+`62x34` con **142560** byte di toppe, cioè ridisegnata; più il giro a due tile
+con la grafica nella seconda e zero avvisi di toppa fuori dalla vista). Unit
+host **201**. Gate invariato (5/5, 64/64, 4/4, 12/12, 72/72, 12/12, shell
+33/33). Verifica visiva con screendump dopo lo split: la metà sinistra mostra
+la grafica ridisegnata alla misura nuova.

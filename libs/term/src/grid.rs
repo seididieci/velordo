@@ -658,6 +658,11 @@ impl Grid {
         if new_cols == self.cols && new_rows == self.rows {
             return;
         }
+        // Se la **larghezza** non cambia le righe non si spezzano: le toppe
+        // delle righe che sopravvivono restano valide (ADR-0099). Se cambia,
+        // il re-wrap puo' spezzare una riga in due e una toppa non si spezza:
+        // si scartano tutte.
+        let keep_segments = new_cols == self.cols;
 
         // Il cursore, nel flusso delle righe (scrollback + griglia): la riga
         // che occupa e la colonna (la colonna puo' essere oltre la fine del
@@ -666,22 +671,33 @@ impl Grid {
         let cursor_col = self.cursor.0;
         let cursor_src = self.scrollback.len() + cursor_row;
 
-        // 1) Le righe, dalla piu' vecchia: scrollback + griglia corrente.
-        let mut lines: Vec<Vec<Cell>> = Vec::with_capacity(self.scrollback.len() + self.rows);
-        for row in self.scrollback.iter() {
-            lines.push(trim_row(&row.cells));
+        // 1) Le righe, dalla piu' vecchia: scrollback + griglia corrente. Le
+        //    toppe viaggiano con la loro riga (mosse, non copiate).
+        let mut lines: Vec<(Vec<Cell>, Vec<Segment>)> =
+            Vec::with_capacity(self.scrollback.len() + self.rows);
+        let mut sb = core::mem::take(&mut self.scrollback);
+        for row in sb.drain(..) {
+            lines.push((trim_row(&row.cells), row.segments));
         }
+        let mut old_segments = core::mem::take(&mut self.segments);
         for r in 0..self.rows {
-            lines.push(trim_row(&self.cells[r * self.cols..(r + 1) * self.cols]));
+            let cells = trim_row(&self.cells[r * self.cols..(r + 1) * self.cols]);
+            let segs = if r < old_segments.len() {
+                core::mem::take(&mut old_segments[r])
+            } else {
+                Vec::new()
+            };
+            lines.push((cells, segs));
         }
         // 2) Via le righe vuote in coda (il testo finisce dove finiva), MA
         //    **non oltre la riga del cursore**: il cursore sta spesso su
         //    una riga vuota (dopo l'ultimo testo) e deve restare li' —
         //    senza questo la sua riga sparirebbe dal flusso e il cursore
-        //    finirebbe in fondo (il comportamento di prima).
+        //    finirebbe in fondo (il comportamento di prima). Una riga con
+        //    una toppa non e' vuota: la toppa e' contenuto.
         while lines.len() > cursor_src + 1 {
             match lines.last() {
-                Some(last) if last.is_empty() => {
+                Some((last, segs)) if last.is_empty() && segs.is_empty() => {
                     lines.pop();
                 }
                 _ => break,
@@ -692,12 +708,19 @@ impl Grid {
         let cursor_live = cursor_src < lines.len();
 
         // 3) Spezza le righe troppo lunghe alla nuova larghezza, tenendo il
-        //    posto del cursore (indice piatto della riga + colonna).
+        //    posto del cursore (indice piatto della riga + colonna). Le toppe
+        //    passano solo se la riga resta intera (larghezza invariata).
         let mut flat: Vec<Vec<Cell>> = Vec::new();
+        let mut flat_segs: Vec<Vec<Segment>> = Vec::new();
         let mut cursor_flat: Option<(usize, usize)> = None;
-        for (src_idx, line) in lines.iter().enumerate() {
+        for (src_idx, (line, segs)) in lines.iter_mut().enumerate() {
             if line.is_empty() {
                 flat.push(Vec::new());
+                flat_segs.push(if keep_segments {
+                    core::mem::take(segs)
+                } else {
+                    Vec::new()
+                });
                 // Riga **vuota**: puo' essere quella del cursore (il
                 // cursore sta spesso sotto l'ultimo testo). La colonna non
                 // si taglia (non c'e' testo): il cursore resta dov'e'.
@@ -716,6 +739,13 @@ impl Grid {
                     end -= 1;
                 }
                 flat.push(line[i..end].to_vec());
+                // La toppa si porta solo se questa e' l'unica fetta della riga.
+                let whole = i == 0 && end == line.len();
+                flat_segs.push(if keep_segments && whole {
+                    core::mem::take(segs)
+                } else {
+                    Vec::new()
+                });
                 if cursor_live && src_idx == cursor_src {
                     // Il cursore puo' essere oltre la fine del testo della
                     // riga: in quel caso resta in coda all'ultimo pezzo.
@@ -746,7 +776,12 @@ impl Grid {
             .max(min_start)
             .min(max_start);
         let mut cells = alloc::vec![Cell::default(); new_cols * new_rows];
+        let mut segments: Vec<Vec<Segment>> = alloc::vec![Vec::new(); new_rows];
+        let mut kept_bytes = 0usize;
         for (dst_row, src) in flat[start..].iter().enumerate() {
+            if dst_row >= new_rows {
+                break;
+            }
             let base = dst_row * new_cols;
             let mut c = 0;
             while c < src.len() && c < new_cols {
@@ -772,20 +807,26 @@ impl Grid {
                 }
                 c += span;
             }
+            // Le toppe della riga (solo se la riga e' sopravvissuta intera e
+            // sta nella nuova griglia).
+            if let Some(segs) = flat_segs.get_mut(start + dst_row) {
+                for seg in segs.drain(..) {
+                    if seg.col + seg.cells <= new_cols {
+                        kept_bytes += seg.bytes();
+                        segments[dst_row].push(seg);
+                    }
+                }
+            }
         }
 
         self.cols = new_cols;
         self.rows = new_rows;
         self.cells = cells;
+        self.segments = segments;
+        self.patch_bytes = kept_bytes;
         // Il contenuto ora e' nella griglia: lo scrollback si svuota (le righe
-        // piu' vecchie che non ci stanno sono perse). Con lui se ne vanno le
-        // **toppe** (ADR-0099): il reflow sposta le celle di colonna e di
-        // riga, quindi un'ancora a celle non ha piu' senso — meglio perderle
-        // che disegnarle dove non c'entrano. Chi le ha fatte ridisegna (il
-        // resize e' notificato, ADR-0098).
+        // piu' vecchie che non ci stanno sono perse, **con le loro toppe**).
         self.scrollback.clear();
-        self.segments.clear();
-        self.patch_bytes = 0;
         // Il cursore: stessa riga (dove il testo lo lascia), colonna seguita
         // nel reflow.
         self.cursor = (
@@ -1181,6 +1222,24 @@ mod tests {
         assert!(g.put_segment(0, seg(0, 2, 8)));
         g.clear();
         assert_eq!(g.patch_bytes(), 0);
+    }
+
+    #[test]
+    fn toppa_conservata_se_la_larghezza_non_cambia() {
+        let mut g = Grid::new(8, 4);
+        assert!(g.put_segment(0, seg(0, 2, 16)));
+        assert!(g.put_segment(3, seg(4, 2, 16)));
+        assert_eq!(g.patch_bytes(), 32);
+        // Stessa larghezza, meno righe: la toppa della riga 0 resta (le righe
+        // non si spezzano), quella della riga 3 esce con la sua riga.
+        g.resize(8, 2);
+        assert_eq!(g.patch_bytes(), 16);
+        assert_eq!(g.segments_at(0).len(), 1);
+        assert_eq!(g.segments_at(0)[0].col, 0);
+        // Larghezza diversa: il re-wrap puo' spezzare le righe, si scartano.
+        g.resize(12, 2);
+        assert_eq!(g.patch_bytes(), 0);
+        assert!(g.segments_at(0).is_empty());
     }
 
     #[test]

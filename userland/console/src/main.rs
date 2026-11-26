@@ -3091,12 +3091,15 @@ fn real_main(_sp: u64) -> ! {
                     SESS_STATS => {
                         // `w1` = focus (bit 0..8) | byte delle toppe (bit 8..):
                         // la **misura** che rende verificabile il tetto, senza
-                        // una tag in piu' (ADR-0099).
-                        let bytes = term
-                            .sessions
-                            .focus_session()
-                            .map(|s| s.patch_bytes())
-                            .unwrap_or(0);
+                        // una tag in piu' (ADR-0099). I byte sono quelli della
+                        // sessione **attaccata**, non di quella in focus: un'app
+                        // misura **se stessa**, e dopo uno split il focus e' su
+                        // un'altra tile (leggerlo dal focus dava `0` a un'app
+                        // che le toppe le aveva appena disegnate).
+                        let bytes = match term.sessions.attached(msg.channel) {
+                            Some(sid) => term.sessions.get(sid).map(|s| s.patch_bytes()).unwrap_or(0),
+                            None => 0,
+                        };
                         let w1 = (term.sessions.focus as u64 & 0xFF) | ((bytes as u64) << 8);
                         let _ = civis::reply(SESS_STATS, term.sessions.count() as u64, w1);
                     }

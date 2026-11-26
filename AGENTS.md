@@ -694,8 +694,11 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   (nessuna eviction; tetto `PATCH_MAX_BYTES` 8 MiB **solo-rifiuto**
   all'ingresso), alt-text nel dump, `SESS_STATS.w1` le misura; render
   fondo → toppe → glifi con `blank_over_patch` (una cella vuota **non**
-  ridipinge il fondo sopra la toppa); resize = toppe scartate (il reflow
-  sposta le celle). **Coordinate**: il disegno passa dalla **vista** della tile
+  ridipinge il fondo sopra la toppa); `Grid::resize` **conserva** le toppe se
+  la **larghezza** non cambia (le righe non si spezzano) e le **scarta** se
+  cambia (il re-wrap puo' spezzare una riga); l'app notificata **ridisegna**
+  (`gtui`: `[gtui] resize WxH patches=N`, `N = 0` = non ridisegnato).
+  **Coordinate**: il disegno passa dalla **vista** della tile
   (`Pixel::view` + `geom_local`, locali), il **danno** usa `geom` (schermo) —
   come `draw_cell_at`; sbagliarlo funziona solo nella tile in (0,0) e la
   guardia `[console] toppa fuori dalla tile` (una volta) lo dice. Il "terminale come app" resta una migrazione possibile

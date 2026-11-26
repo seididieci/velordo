@@ -160,19 +160,37 @@ GTUI_GONE="$(grep -aF '[gtui] oltre la cronologia' "$LOG" | tail -1 | sed 's/.*p
 GTUI_K0="$(printf '%s' "$GTUI_LOG" | sed 's/.*patches=//; s/ .*//')"
 GTUI_CRC="$(printf '%s' "$GTUI_LOG" | sed 's/.*crc=//')"
 echo "[tui] gtui: patches k0=${GTUI_K0:-?} dopo40=${GTUI_KEEP:-?} oltre=${GTUI_GONE:-?} crc=${GTUI_CRC:-?}"
-send_mon 'sendkey q'
-wait_for '[gtui] exit' 20 || true
 
-# 6. **Seconda tile** (Super+% = split): la grafica deve uscire anche li'. Il
-#    bug del primo giro era esattamente qui: coordinate schermo su una vista
-#    locale -> la toppa cadeva fuori e il clip la buttava via in silenzio.
+# 5b. **Split mentre gtui gira** (lo scenario vero): la tile si stringe, la
+#     larghezza cambia -> il modello scarta le toppe (il re-wrap puo'
+#     spezzare una riga) -> l'app viene **svegliata** dall'hint e ridisegna
+#     alla misura nuova (ADR-0098/0099). Se non lo facesse resterebbe un log
+#     senza grafica: e' il difetto visto a schermo.
 send_mon 'sendkey meta_l-shift-5'
 if ! wait_for '[impluvium] split' 40; then
     echo "[tui] FAIL: split non avvenuto" >&2
     exit 1
 fi
-GTUI_BEFORE="$(grep -acF '[gtui] log' "$LOG" || true)"
+if ! wait_for '[gtui] resize' 40; then
+    echo "[tui] FAIL: gtui non si e' riadattato allo split" >&2
+    exit 1
+fi
+GTUI_RESIZE_LINE="$(grep -aF '[gtui] resize' "$LOG" | tail -1 || true)"
+GTUI_RESIZE_SIZE="$(printf '%s' "$GTUI_RESIZE_LINE" | sed 's/.*resize //; s/ .*//')"
+GTUI_RESIZE="$(printf '%s' "$GTUI_RESIZE_LINE" | sed 's/.*patches=//; s/ .*//')"
+echo "[tui] gtui dopo lo split: $GTUI_RESIZE_SIZE (patches=${GTUI_RESIZE:-?})"
+# Torna sulla tile di gtui (dopo lo split il focus e' sulla nuova) e chiudi.
+send_mon 'sendkey meta_l-h'
 sleep 1
+send_mon 'sendkey q'
+wait_for '[gtui] exit' 20 || true
+
+# 6. **Seconda tile**: la grafica deve uscire anche li'. Il bug del primo giro
+#    era esattamente qui: coordinate schermo su una vista locale -> la toppa
+#    cadeva fuori e il clip la buttava via in silenzio.
+send_mon 'sendkey meta_l-l'
+sleep 1
+GTUI_BEFORE="$(grep -acF '[gtui] log' "$LOG" || true)"
 send_text $'gtui\n'
 # Il secondo giro: la tile ha un'altra sessione, quindi altri marker.
 START2=$SECONDS
@@ -237,6 +255,8 @@ if [ "$GTUI_GONE" = "0" ]; then ok=1; else ok=0; fi
 check "gtui: le toppe muoiono con le loro righe ($GTUI_GONE byte)" "$ok"
 # Seconda tile: la grafica si vede anche li' (stessi byte) e **nessuna** toppa
 # e' mai caduta fuori dalla vista (la guardia del traduttore di coordinate).
+if [ -n "$GTUI_RESIZE" ] && [ "$GTUI_RESIZE" -gt 0 ] 2>/dev/null; then ok=1; else ok=0; fi
+check "dopo lo split gtui ridisegna la grafica ($GTUI_RESIZE_SIZE, ${GTUI_RESIZE:-?} byte)" "$ok"
 GTUI2_K="$(printf '%s' "${GTUI2:-}" | sed 's/.*patches=//; s/ .*//')"
 if [ -n "$GTUI2_K" ] && [ "$GTUI2_K" -gt 0 ] 2>/dev/null; then ok=1; else ok=0; fi
 check "gtui nella seconda tile: grafica disegnata ($GTUI2_K byte)" "$ok"

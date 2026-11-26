@@ -802,7 +802,9 @@ pub const SESS_STATE: u64 = 0xA6;
 /// `SESS_DUMP {sess, max}` → `w0` = n, `w1` = totale: copia la coda del testo
 /// visibile nella meta' IN (le sessioni non in focus si leggono cosi').
 pub const SESS_DUMP: u64 = 0xA7;
-/// `SESS_STATS` → `w0` = sessioni vive, `w1` = focus.
+/// `SESS_STATS` → `w0` = sessioni vive, `w1` = focus (bit 0..8) | byte delle
+/// toppe della sessione **attaccata** (bit 8.., ADR-0099): un'app misura se
+/// stessa, non chi ha il focus.
 pub const SESS_STATS: u64 = 0xA8;
 /// `SESS_TEST_INPUT {len}` → 0 / `!0` — **solo test**: inietta `len` byte di
 /// input nella sessione attaccata (come farebbe la tastiera), provando `read`

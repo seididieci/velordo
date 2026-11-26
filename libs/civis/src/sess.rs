@@ -533,8 +533,9 @@ pub fn stats() -> Result<(usize, usize), SessError> {
     Ok((r.w0 as usize, (r.w1 & 0xFF) as usize))
 }
 
-/// Byte di **toppe** della sessione in focus (ADR-0099): la misura che rende
-/// verificabile che la cronologia le libera.
+/// Byte di **toppe** della sessione **attaccata** (ADR-0099): la misura che
+/// rende verificabile che la cronologia le libera. Non e' quella in focus:
+/// un'app misura se stessa (dopo uno split il focus e' un'altra tile).
 pub fn patch_bytes() -> Result<usize, SessError> {
     let r = send(service_chan()?, SESS_STATS, 0, 0).map_err(|_| SessError::Ipc)?;
     Ok((r.w1 >> 8) as usize)

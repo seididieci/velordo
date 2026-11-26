@@ -1436,7 +1436,10 @@ hanno un ordine concordato ma **non** una data: si prendono in quest'ordine.
    `term::grid` con i segmenti che scorrono nella cronologia, libreria
    `pictura`, prima **GTUI** `usr/bin/gtui`: log con i rami disegnati in pixel
    + barra + sparkline). La libreria produce **bitmap** (il testo resta
-   `sess::out`); il disegno a schermo resta della console.
+   `sess::out`); il disegno a schermo resta della console. `resize`: le toppe
+   si conservano a larghezza invariata e si scartano se cambia (l'app,
+   notificata, ridisegna — `gtui` lo fa; provato con **split mentre l'app
+   gira**).
 3. **Monitor di sistema** (btop-like) — prima app vera, usa 1+2. I dati ci sono
    gia' tutti: `ps_info` porta i **tick CPU per processo** (`ticks_used`),
    `SYS_MEMINFO`, `CBS_GET_INFO`, stats di block/gpu/net. **Zero kernel.**

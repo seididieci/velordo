@@ -446,7 +446,7 @@ stdout: sessione attestata → default → seriale).
 | 0xA5 | `SESS_INFO` | `w0` = sess → `w0` = `cols<<16\|rows`, `w1` = eco \| focus<<1 \| **resized<<2** (la geometria è cambiata dall'ultima domanda: il flag si consuma qui — ADR-0098) |
 | 0xA6 | `SESS_STATE` | `w0` = sess, `w1` = limite → `(celle non vuote, CRC del testo)` |
 | 0xA7 | `SESS_DUMP` | `w0` = sess, `w1` = max → coda del testo visibile nella meta' IN |
-| 0xA8 | `SESS_STATS` | → `w0` = sessioni vive, `w1` = focus (bit 0..8) \| **byte delle toppe** (bit 8.., ADR-0099) |
+| 0xA8 | `SESS_STATS` | → `w0` = sessioni vive, `w1` = focus (bit 0..8) \| **byte delle toppe della sessione attaccata** (bit 8.., ADR-0099) |
 | 0xAB | `SESS_ATTACH` | `w0` = sessione → `w1` = shm: mailbox su una sessione **nominata** (≥ `ThirdParty`, D8e). Non dichiara il lettore: serve a un **iniettore** (il DE) |
 | 0xAC | `SESS_INPUT` | `w0` = len (byte in OUT) → accoda nel **buffer di input** della sessione attaccata (tasti, ≠ `SESS_WRITE` che è testo) e manda l'hint al lettore |
 | 0xA9 | `SESS_TEST_INPUT` | `w0` = len (byte in OUT) — **solo test**: inietta input come la tastiera (stesso percorso + hint) |

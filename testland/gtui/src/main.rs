@@ -266,13 +266,34 @@ fn real_main(_sp: u64) -> ! {
     write_str("[gtui] le toppe sono vive finche' il loro testo e' in cronologia\n");
     write_str("[gtui] premi q per uscire\n");
 
-    // Resta a video: `q` esce.
+    // Resta a video: `q` esce. Ogni risveglio senza tasti e' un **cambio di
+    // geometria** (un resize non lo chiede l'app: lo decide il display o il
+    // DE, ADR-0098): si legge la misura nuova e si **ridisegna**.
+    // NB: niente `Screen::open()` qui — entrerebbe nella tela alternativa,
+    // mentre gtui disegna sullo schermo normale (il log deve scorrere).
+    let mut cur = (cols, rows);
     loop {
         let mut buf = [0u8; 16];
         let n = civis::input::read(&mut buf);
         if n == 0 {
             if !civis::input::wait() {
                 break;
+            }
+            let grown = civis::sess::current()
+                .and_then(|s| s.info().ok())
+                .filter(|i| i.resized || (i.cols as usize, i.rows as usize) != cur)
+                .map(|i| (i.cols as usize, i.rows as usize));
+            if let Some((c, r)) = grown {
+                cur = (c, r);
+                write(b"\x1b[2J\x1b[H");
+                let (n, crc, p) = draw_pretty(cw, ch, c, r);
+                // Il modello, se la **larghezza** e' cambiata, ha scartato le
+                // toppe (il re-wrap puo' spezzare una riga, ADR-0099): il
+                // ridisegno le rimette. Se restassero `patches=0` sarebbe un
+                // guasto (o il ridisegno non e' avvenuto).
+                mark(&format!("resize {}x{} patches={} crc={:x}", c, r, p, crc));
+                let _ = n;
+                write_str("\n[gtui] ridisegnato dopo il resize (premi q)\n");
             }
             continue;
         }
