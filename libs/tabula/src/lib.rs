@@ -249,10 +249,21 @@ impl Canvas {
     /// bassa frequenza (il monitor a 1 Hz) che non vogliono dipendere dal
     /// differenziale per convergere.
     pub fn invalidate(&mut self) {
-        self.shown.fill(Cell {
-            ch: '\u{0}',
-            st: Style::DEFAULT,
-        });
+        self.invalidate_rows(self.rows);
+    }
+
+    /// Come [`Canvas::invalidate`], ma solo le prime `rows` righe. Un'app a
+    /// schermo intero **non** deve invalidare l'ultima riga: scrivere l'ultima
+    /// cella dell'ultima riga fa **scorrere** la griglia (`NeedScroll`), e un
+    /// repaint pieno la farebbe scorrere a ogni frame (le toppe "salgono").
+    pub fn invalidate_rows(&mut self, rows: usize) {
+        let n = rows.min(self.rows) * self.cols;
+        for cell in self.shown.iter_mut().take(n) {
+            *cell = Cell {
+                ch: '\u{0}',
+                st: Style::DEFAULT,
+            };
+        }
     }
 
     /// I byte del **differenziale** rispetto all'ultima chiamata: un `CUP` per
@@ -548,6 +559,20 @@ mod tests {
         c.invalidate();
         assert_eq!(s(c.diff()), "\x1b[1;1Habc", "invalidate: repaint pieno");
         assert_eq!(c.diff().len(), 0);
+    }
+
+    #[test]
+    fn invalidate_rows_non_tocca_l_ultima() {
+        // Repaint pieno **tranne l'ultima riga**: scriverne l'ultima cella fa
+        // scorrere la griglia (con il repaint a ogni frame le toppe salirebbero).
+        let mut c = Canvas::new(4, 3);
+        c.text(0, 2, "z"); // ultima riga
+        let _ = c.diff();
+        c.invalidate_rows(2); // righe 0,1 (non la 2)
+        c.text(0, 0, "a");
+        let out = s(c.diff());
+        assert!(out.contains('a'), "la riga 0 si rimanda: {:?}", out);
+        assert!(!out.contains('z'), "l'ultima riga NON si rimanda: {:?}", out);
     }
 
     #[test]

@@ -254,17 +254,14 @@ fn draw(model: &mut Model, frame: &mut Frame) {
 
     frame.begin();
 
-    // Sfondo **unico traslucido** di tutto il monitor: ogni cella ha il bg
-    // della card (blu scuro, ~84% di opacita'). Il compositor lo fonde sul
-    // wallpaper (la banda del fondo e' gia' li'), quindi il monitor e' un
-    // overlay: il wallpaper traspare attenuato, non un pannello opaco.
-    // Le card sono toppe **trasparenti** con lo stesso colore; le loro celle
-    // vuote vengono saltate (`blank_over_patch`) e mostrano la toppa.
+    // Sfondo **unico traslucido** di tutto il monitor. NON si tocca l'ultima
+    // riga: scrivere l'ultima cella farebbe scorrere la griglia (e col repaint
+    // pieno le toppe salirebbero a ogni frame).
     frame.cells().fill_styled(
         0,
         0,
         cols as usize,
-        rows as usize,
+        rows.saturating_sub(1) as usize,
         ' ',
         TH.pen_on(TH.text, TH.card),
     );
@@ -571,10 +568,13 @@ fn main_loop() -> ! {
         }
 
         if dirty {
-            // Repaint **pieno** ogni frame: il monitor e' a 1 Hz, il costo e'
+            // Repaint **pieno** ogni frame (tranne l'ultima riga, che farebbe
+            // scorrere la griglia): il monitor e' a 1 Hz, il costo e'
             // trascurabile, e cosi' non dipendiamo dal differenziale (che con
-            // la tabella che si riordina a ogni tick lasciava righe "fantasma").
-            frame.cells().invalidate();
+            // la tabella che si riordina a ogni tick lasciava celle "fantasma").
+            frame
+                .cells()
+                .invalidate_rows((rows as usize).saturating_sub(1));
             draw(&mut model, &mut frame);
 
             // Manda prima le toppe (pixel) **solo se cambiate**, poi il

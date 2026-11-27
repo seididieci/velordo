@@ -203,13 +203,28 @@ for y in range(y0, y1):
             moved += 1
             if y >= 100:
                 core += 1
-print(drawn, moved, core)
+
+def green_bar_Y(px, w, h):
+    # Y della barra MEM (verde) nella meta' destra: deve restare **fissa** fra
+    # due frame (se la griglia scrolla, la toppa "sale" e questo cambia).
+    for y in range(0, min(h, 400)):
+        for x in range(640, min(w, 1280)):
+            o = (y * w + x) * 3
+            r, g, bl = px[o], px[o + 1], px[o + 2]
+            if g > 140 and r < 160 and bl < 200 and g > r + 40:
+                return y
+    return -1
+
+print(drawn, moved, core, green_bar_Y(pa, w, h), green_bar_Y(pb, w, h))
 PY
 )"
 CARD_DRAWN="$(printf '%s' "$PIXELS" | cut -d' ' -f1)"
 CHART_MOVED="$(printf '%s' "$PIXELS" | cut -d' ' -f2)"
 CHART_CORE="$(printf '%s' "$PIXELS" | cut -d' ' -f3)"
+MEM_BAR_Y1="$(printf '%s' "$PIXELS" | cut -d' ' -f4)"
+MEM_BAR_Y2="$(printf '%s' "$PIXELS" | cut -d' ' -f5)"
 echo "[mon] pixel: card dipinta=$CARD_DRAWN, grafico mosso=$CHART_MOVED (corpo=$CHART_CORE) in 3 s"
+echo "[mon] barra MEM: y=$MEM_BAR_Y1 -> $MEM_BAR_Y2 (deve restare fissa)"
 
 # 6. `q` esce e il prompt torna.
 send_mon 'sendkey q'
@@ -258,6 +273,8 @@ if [ "${CARD_DRAWN:-0}" -gt 1000 ] 2>/dev/null; then ok=1; else ok=0; fi
 check "la card CPU e' dipinta a pixel ($CARD_DRAWN px non-wallpaper)" "$ok"
 if [ "${CHART_MOVED:-0}" -gt 50 ] 2>/dev/null; then ok=1; else ok=0; fi
 check "il grafico si muove da solo ($CHART_MOVED px cambiati in 3 s, corpo $CHART_CORE)" "$ok"
+if [ -n "${MEM_BAR_Y1:-}" ] && [ "${MEM_BAR_Y1}" = "${MEM_BAR_Y2:-x}" ] && [ "${MEM_BAR_Y1}" != "-1" ]; then ok=1; else ok=0; fi
+check "la barra MEM resta ferma (y=$MEM_BAR_Y1 = $MEM_BAR_Y2; la griglia non scorre)" "$ok"
 if [ "${PROMPT_NOW:-0}" -ge 1 ] 2>/dev/null; then ok=1; else ok=0; fi
 check "uscita e ritorno al prompt" "$ok"
 if [ "${EXIT_OK:-0}" = "1" ]; then ok=1; else ok=0; fi

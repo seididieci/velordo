@@ -628,7 +628,12 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   ogni frame**: `tabula::Canvas::invalidate()` (copia ombra a `'\0'`) — il
   differenziale, sotto il riordino continuo della tabella, lasciava celle
   "fantasma" (righe basse con nomi troncati/pid errati); a 1 Hz il repaint
-  pieno costa poco e garantisce la convergenza.
+  pieno costa poco e garantisce la convergenza. **Ma il repaint pieno non deve
+  toccare l'ultima riga**: scrivere l'ultima cella fa **scorrere** la griglia
+  (`NeedScroll`) e le toppe (segmenti per riga) salgono a ogni frame (titolo
+  coperto dalla card, barra RAM che sale). Il monitor riempie e invalida
+  `rows-1` righe (`invalidate_rows`), l'ultima resta `(' ', BLACK)` in `cur` e
+  `shown` → mai emessa.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
@@ -1070,7 +1075,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
 ./scripts/run-monitor-tests.sh   # 1 Hz senza tasti, pausa, sort, selezione, pixel, uscita
 
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), pictura + tabula (toppe e canvas a celle), formae (componenti: chart/barra/history/fmt, ADR-0100), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, syscall-numbers, impluvium-tree, blake2s, sig, tls: 242 test
+./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), pictura + tabula (toppe e canvas a celle), formae (componenti: chart/barra/history/fmt, ADR-0100), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, syscall-numbers, impluvium-tree, blake2s, sig, tls: 243 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh

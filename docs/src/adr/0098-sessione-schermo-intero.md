@@ -133,6 +133,12 @@ convergere sempre può chiamare `tabula::Canvas::invalidate()` — la copia ombr
 va a `'\0'` e il prossimo `diff` è un **repaint pieno**. A 1 Hz costa poco ed
 elimina le celle "fantasma" quando il diff non tiene il passo.
 
+**Attenzione all'ultima riga**: un repaint pieno che emette anche l'ultima cella
+dell'ultima riga fa **scorrere** la griglia (`littera::put` → `NeedScroll`) e,
+ripetuto a ogni frame, fa "salire" le toppe (i segmenti sono per riga). Un'app a
+schermo intero riempie e invalida `rows-1` righe (`invalidate_rows`), lasciando
+l'ultima riga `(' ', BLACK)` in `cur` e `shown`: mai emessa, nessuno scroll.
+
 ### Limiti dichiarati
 
 - **Una cella = un carattere** (larghezza 1). La larghezza di un glifo la sa solo

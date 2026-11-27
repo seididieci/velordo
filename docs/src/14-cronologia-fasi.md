@@ -5326,7 +5326,7 @@ gate): 10 check — avvio, **tick senza tasti** (2→7 in 5 s), pausa (9=9),
 sort (`cpu`→`time`), selezione (0→2), **card dipinta a pixel** (104k px
 non-wallpaper), **grafico mosso da solo** (486 px in 3 s), uscita
 (`[monitor] exit`) e ritorno al prompt, zero `[console] toppa fuori dalla
-tile`. Unit host **242** (formae 14, term 50, tabula 18); gate invariato (5/5, 64/64, 4/4, 12/12,
+tile`. Unit host **243** (formae 14, term 50, tabula 19); gate invariato (5/5, 64/64, 4/4, 12/12,
 72/72, 12/12, shell 33/33).
 
 Scelta di look: la tabella resta **testo** ma sopra una **card a celle** (fondo
@@ -5452,3 +5452,26 @@ Resa: card **traslucide** (blu scuro `#0E1222`, `PANEL_ALPHA = 0xD6` ≈84%) con
 il wallpaper che traspare **continuo** (angoli arrotondati, niente logo
 ripetuto); tabella pulita e leggibile sopra il pannello. Verifica: split
 (Super+%) + monitor nella tile di destra, screendump.
+
+**Il titolo coperto e la barra RAM che "sale" (la griglia scorreva).** Dopo il
+repaint pieno, il monitor su una tile mostrava il titolo coperto dalla card CPU
+e la barra RAM che **saliva** di una cella a ogni refresh. Misura controllata
+(5 screendump 1 s apart): la Y della barra MEM faceva `54 → 54 → 32 → 10 →
+via`, cioè **−22 px = 1 cella/refresh**. La barra sta **dentro la toppa** della
+card MEM, che è **statica** (non rispedita): se si muove, si muove con la
+**griglia** → era la griglia che **scrollava**.
+
+Causa: il **repaint pieno** (`invalidate`) emette anche l'**ultima cella
+dell'ultima riga**; scriverla fa scorrere la griglia (`littera::put` →
+`NeedScroll`). Ogni frame → uno scroll → le toppe (segmenti per riga) salivano:
+la MEM (statica) se ne andava, la CPU (rispedita ogni tick) lasciava copie e
+copriva il titolo.
+
+Fix: un repaint pieno **non tocca l'ultima riga**. `tabula::Canvas::
+invalidate_rows(rows)` invalida solo le prime `rows` righe; il monitor riempie
+`rows-1` righe e invalida `rows-1`. L'ultima riga resta `(' ', BLACK)` sia in
+`cur` sia in `shown` → mai emessa → nessuno scroll. Unit test
+`invalidate_rows_non_tocca_l_ultima`. Guardia nel test QEMU: la Y della barra
+MEM deve restare **uguale** fra due screendump (`run-monitor-tests.sh`, 13
+check). Verifica: dopo il fix la barra resta a `y=76` in tutti i 5 frame e il
+titolo ha 700+ px bianchi in riga 0 (prima 0).
