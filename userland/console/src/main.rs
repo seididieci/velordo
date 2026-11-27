@@ -1533,6 +1533,18 @@ impl Term {
                 bc0 = bc0.min(s0);
                 let (s1, l1) = self.grid_span_at(sid, c1, row);
                 bc1 = bc1.max((s1 + l1).saturating_sub(1));
+                // Le **toppe** della riga si blittano per intero (vedi
+                // `blit_row_segments`), quindi il bbox delle celle deve
+                // coprirle: altrimenti un render parziale (una cella cambiata)
+                // ribalta la toppa intera e ridisegna solo il bbox, lasciando
+                // coperto il testo della card fuori dal bbox (bug: " CPU"/
+                // "MEM" sparivano a ogni tick).
+                if let Some(s) = self.sessions.get(sid) {
+                    for seg in s.grid.segments_at(row) {
+                        bc0 = bc0.min(seg.col);
+                        bc1 = bc1.max(seg.col + seg.cells - 1);
+                    }
+                }
             }
             let bg = unsafe { core::slice::from_raw_parts(bg_ptr, bg_len) };
             for row in r0..=r1 {

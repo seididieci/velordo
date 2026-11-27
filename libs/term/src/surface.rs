@@ -456,6 +456,11 @@ impl Pixel {
     /// non una banda della stessa superficie (per quello c'e' `copy_from`, che
     /// legge alle stesse coordinate). Clippa alla vista (il rect della tile),
     /// quindi una toppa non puo' scrivere fuori dalla sua tile.
+    ///
+    /// Una riga **tutta opaca** si copia come sempre (percorso veloce: i byte
+    /// arrivano identici); una riga con alpha < 255 si **compone** sopra il
+    /// gia' disegnato (`blend_bgra_span`), cosi' un angolo arrotondato o
+    /// un'ombra lasciano vedere il wallpaper sotto (addendum ADR-0099).
     pub fn blit(&mut self, src: &[u8], src_stride: u32, x: u32, y: u32, w: u32, h: u32) {
         if x >= self.width || y >= self.height || w == 0 || h == 0 {
             return;
@@ -471,9 +476,15 @@ impl Pixel {
             if src_off + bytes > src.len() {
                 break;
             }
+            let row = &src[src_off..src_off + bytes];
+            let opaque = row.chunks_exact(4).all(|p| p[3] == 0xFF);
+            if !opaque {
+                self.blend_bgra_span(x, y + rr as u32, w, row);
+                continue;
+            }
             let dst_off = (y as usize + rr) * dst_stride + x as usize * 4;
             unsafe {
-                core::ptr::copy_nonoverlapping(src.as_ptr().add(src_off), ptr.add(dst_off), bytes);
+                core::ptr::copy_nonoverlapping(row.as_ptr(), ptr.add(dst_off), bytes);
             }
         }
     }
@@ -1169,7 +1180,44 @@ mod tests {
         }
     }
 
-    // ── T3: bg layer precomposta + composizione a banda ─────────────────
+    /// `blit` di una toppa: la riga opaca si copia identica, quella con
+    /// alpha < 255 si compone sopra lo sfondo, alpha 0 non tocca niente.
+    #[test]
+    fn blit_con_alpha_si_compone() {
+        let mut fb = alloc::vec![0u32; 40 * 44];
+        let blue = rgba_to_bgra(color::BLUE);
+        fb.fill(blue);
+        let mut s = surface_40x44(&mut fb);
+        let p = pixel_mut(&mut s);
+        let red = rgba_to_bgra(color::RED);
+        let half = blend(blue, red, 128);
+        // Toppa 2x3: riga 0 opaca, riga 1 al 50%, riga 2 trasparente.
+        let mut src = alloc::vec![0u8; 2 * 3 * 4];
+        for row in 0..3 {
+            for col in 0..2 {
+                let off = (row * 2 + col) * 4;
+                let b = red.to_le_bytes();
+                src[off] = b[0];
+                src[off + 1] = b[1];
+                src[off + 2] = b[2];
+                src[off + 3] = if row == 0 {
+                    0xFF
+                } else if row == 1 {
+                    128
+                } else {
+                    0
+                };
+            }
+        }
+        p.blit(&src, 8, 0, 0, 2, 3);
+        assert_eq!(fb[0], red, "riga opaca: byte copiati");
+        assert_eq!(fb[40], half, "riga al 50%: composta col fondo");
+        assert_eq!(fb[80], blue, "riga trasparente: il fondo resta");
+        // Il blit continua a clippare alla vista.
+        p.blit(&src, 8, 39, 0, 2, 3);
+        assert_eq!(fb[39], red);
+    }
+
 
     /// Source 40x44 con un valore unico per pixel (`riga<<8 | colonna`).
     fn sorgente_40x44() -> alloc::vec::Vec<u8> {

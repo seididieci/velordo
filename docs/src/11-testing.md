@@ -309,6 +309,7 @@ read-write si corromperebbero):
 |------|------|-------|
 | `test-shell-base.py` | 9.4/18/19/20 (ls/cat/mkdir, backspace, builtin, cd/pwd, ls -l, kill, ps, rm/cp/mv, FAT scrivibile, clear) + guardia CPU al prompt (ADR-0067) | 29 |
 | `run-tui-tests.sh` | **fuori dal gate** (ADR-0098/0099): `usr/bin/fullscreen` prende la tela (alt screen, 127x36) e il **primo frame è a video senza premere tasti** (screendump: i pixel del bordo ci sono; il feed di una tela non è "bulk"), i tasti muovono la stella e **un tasto costa un frame piccolo in una feed** (34 byte, 1 chunk: il lampeggio era un IPC per cella, ~660 render+flush; il primo frame è intero, 1564 byte), una **toppa** 12x1 (10560 byte) cambia il **CRC della riga**, un **modeset chiesto dall'app** la ridimensiona (102x34) e lei si riadatta da sola, `q` esce e la shell **ridisegna il prompt**; poi la **GTUI** `usr/bin/gtui` (log con i rami in pixel + barra + sparkline): 144 KB di toppe con il CRC della riga non nullo, **restano nella cronologia** dopo 40 righe (stessi byte) e **muoiono con le loro righe** oltre le 1000 (0 byte); poi **split mentre gtui gira** (Super+%): la tile si stringe (62x34), l'app viene svegliata dalla notifica e **ridisegna la grafica** (`[gtui] resize … patches=N`, N > 0); infine `gtui` nella **seconda tile**: la grafica esce anche lì e nessuna toppa cade fuori dalla vista; chiude il giro `fullscreen` in una tile **spostata** (origine > 0): un passo = una cella, la stella si ferma al bordo senza "memorizzare" righe, e il frame raggiunto **per differenziale** è identico a quello di un **repaint da zero** (`r` → `CONSOLE_REPAINT`), cioè il fondo ridisegnato viene dal wallpaper |
+| `run-monitor-tests.sh` | **fuori dal gate** (M4, ADR-0100): `usr/bin/monitor` parte (127x36), i **valori si aggiornano da soli** senza tasti (più di un `[monitor] tick` in 5 s = 1 Hz), `p` **ferma i tick** (e `p` li riprende), `s` cicla l'ordinamento (`sort=` cambia), `j`/`k` muovono la selezione (`sel=` cambia), due **screendump** a 3 s provano che la card CPU è **dipinta a pixel** e che il **grafico si muove** (px cambiati nella regione della card), `q` esce (`[monitor] exit`) e il prompt torna; zero `[console] toppa fuori dalla tile` | 8 |
 | `test-shell-native.py` | S3.2b-4/ADR-0064 + ADR-0065 (shell nativa: `BIN_LIST` → oggetto piatto `usr` → EXECUTE → spawn con argv → exit, ring sincronizzato, comando ignoto; interprete: variabili, aritmetica, if/while/for, commenti, `dump`/`type`; prompt una volta per riga, hint inline, Up) + nessun diniego/errore di permesso su `usr` (la shell spawnata dal login è verificata: ADR-0080 fase 6) + guardia CPU al prompt principale e a quello di `create-user` (E0/ADR-0082: eventi, non polling; entrambe &lt; 5%) + orologio del prompt che **avanza in-place** mentre la shell dorme (E1/ADR-0083: `ESC[D`×13 + `HH:MM:SS` + `ESC[C`×5, saldo zero delle celle, nessun prompt ridisegnato) + il prompt mostra il nome **letto dalla sessione** (`SESS_AUTH`, S3.3d/ADR-0095: niente `USER` in ambiente) | 33 |
 | `test-shell-run.py` | 37.2 (run fg/bg, argv, exit-code, jobs/wait) | 8 |
 | `test-shell-redirect.py` | 40.4 (`> >> < 2> 2>&1` + run redirectato) | 20 |
@@ -381,10 +382,14 @@ log seriale.
   set/clear, UTF-8 e lunghezza fail-loud, purga per `auth_by`; S3.3c) e
   `libs/sess-proto` (layout della mailbox: OUT/IN, `MAX_CHUNK`, `fits`),
   `libs/pictura` (primitive bitmap delle toppe: fill/clip, barra, sparkline,
-  linea con spessore) e `libs/tabula` (canvas a celle con **copia ombra**:
-  primo frame intero, nessun cambio = zero byte, fette consecutive in un solo
-  `CUP`, celle non adiacenti, riga che si accorcia, resize che riparte da zero)
-  (**214 test** in tutto;
+  linea con spessore, **alpha/gradiente/arrotondati/polilinea**), `libs/tabula`
+  (canvas a celle con **copia ombra**: primo frame intero, nessun cambio = zero
+  byte, fette consecutive in un solo `CUP`, celle non adiacenti, riga che si
+  accorcia, resize che riparte da zero, **colore per cella** con `SGR` al cambio
+  e reset finale, riga fuori tela che non panica) e `libs/formae` (componenti
+  ADR-0100: geometria celle↔pixel, `Bar`/`Chart` dentro il rect e proporzionali
+  a due metriche, `History` ad anello, `fmt`).
+  (**238 test** in tutto;
   `libs/net` ne ha 54, 23 dei quali sulla macchina a stati TCP e sul wiring, 2
   sul framing RFC 7858). Girano da una
   **directory neutra**: il `.cargo/config.toml` del repo impone

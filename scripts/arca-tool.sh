@@ -153,6 +153,9 @@ seed_bin userland/build/users.bin usr/bin/users.bin usr users
 seed_bin userland/build/logout.bin usr/bin/logout.bin usr logout
 # dns-resolve (ADR-0075): client DNS nativo (richiede `net=1` per il servizio).
 seed_bin userland/build/dns-resolve.bin usr/bin/dns-resolve.bin usr dns-resolve
+# monitor (M3, ADR-0097/0099): dashboard a 1 Hz, finestra grafica a schermo
+# intero sulla sessione. Non e' un servizio.
+seed_bin userland/build/monitor.bin usr/bin/monitor.bin usr monitor
 # create-user (ADR-0055): programma utente (l'interprete nativo lo invoca come
 # comando, Fase 3.2).
 seed_bin userland/build/create-user.bin usr/bin/cuuser.bin usr cuuser

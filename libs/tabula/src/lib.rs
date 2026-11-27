@@ -19,6 +19,12 @@
 //! monospazio il glifo che il font non ha e' largo **1**. Chi deve disegnare un
 //! glifo largo scrive con `Screen::write` e conta le celle da se'.
 //!
+//! **Colore per cella** (M1 di `formae`): ogni cella porta `(char, fg, bg)`;
+//! `diff` emette un `SGR` solo quando lo stile **cambia** e chiude con
+//! `ESC[0m`, cosi' il colore non cola nel prompt dopo un'app a schermo intero.
+//! Un'app monocroma (tutte le celle di default) produce **esattamente** i byte
+//! di prima: nessun `SGR`, nessun reset.
+//!
 //! Nessuna dipendenza dal sistema: si prova sull'host.
 
 #![no_std]
@@ -28,14 +34,72 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
+/// Colore RGBA impacchettato come `term::grid::color` (`0xRRGGBBAA`).
+pub type Color = u32;
+
+/// Foreground di default: lo stesso bianco morbido della griglia del terminale.
+pub const DEFAULT_FG: Color = 0xE8EB_F2FF;
+/// Background di default: lo stesso blu-notte della griglia del terminale.
+pub const DEFAULT_BG: Color = 0x0B0D_14FF;
+
+/// Lo stile di una cella: colore del glifo e del fondo.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Style {
+    pub fg: Color,
+    pub bg: Color,
+}
+
+impl Style {
+    /// Bianco su blu-notte: lo stile con cui il terminale parte.
+    pub const DEFAULT: Style = Style {
+        fg: DEFAULT_FG,
+        bg: DEFAULT_BG,
+    };
+
+    pub const fn new(fg: Color, bg: Color) -> Style {
+        Style { fg, bg }
+    }
+
+    /// Solo il colore del glifo (fondo di default: sopra una toppa il fondo
+    /// non si dipinge, vedi ADR-0099).
+    pub const fn fg(fg: Color) -> Style {
+        Style {
+            fg,
+            bg: DEFAULT_BG,
+        }
+    }
+
+    pub const fn is_default(&self) -> bool {
+        self.fg == DEFAULT_FG && self.bg == DEFAULT_BG
+    }
+}
+
+/// Una cella: il carattere e il suo stile.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Cell {
+    ch: char,
+    st: Style,
+}
+
+impl Cell {
+    const BLANK: Cell = Cell {
+        ch: ' ',
+        st: Style::DEFAULT,
+    };
+}
+
 /// Una tela a celle con la **copia ombra** di quello che e' gia' sullo schermo.
 pub struct Canvas {
     cols: usize,
     rows: usize,
     /// Il frame in composizione.
-    cur: Vec<char>,
+    cur: Vec<Cell>,
     /// Quello che il server ha gia' sullo schermo (l'ultimo `diff`/`present`).
-    shown: Vec<char>,
+    shown: Vec<Cell>,
+    /// Lo stile della "penna": lo usano `set`/`text`/`fill`/`clear`.
+    pen: Style,
+    /// Lo stile SGR che resta attivo sullo schermo dopo l'ultimo `diff`.
+    live: Style,
     /// I byte dell'ultimo `diff` (riusato: nessuna allocazione per frame).
     out: Vec<u8>,
 }
@@ -47,8 +111,10 @@ impl Canvas {
         Canvas {
             cols,
             rows,
-            cur: vec![' '; cols * rows],
-            shown: vec![' '; cols * rows],
+            cur: vec![Cell::BLANK; cols * rows],
+            shown: vec![Cell::BLANK; cols * rows],
+            pen: Style::DEFAULT,
+            live: Style::DEFAULT,
             out: Vec::new(),
         }
     }
@@ -66,46 +132,101 @@ impl Canvas {
         (self.cols, self.rows)
     }
 
+    /// Lo stile corrente della penna.
+    pub fn style(&self) -> Style {
+        self.pen
+    }
+
+    /// Cambia lo stile della penna: `set`/`text`/`fill`/`clear` da qui in poi.
+    pub fn set_style(&mut self, st: Style) {
+        self.pen = st;
+    }
+
     /// Il carattere nel frame corrente (`' '` fuori dalla tela).
     pub fn cell(&self, col: usize, row: usize) -> char {
         if col >= self.cols || row >= self.rows {
             return ' ';
         }
-        self.cur[row * self.cols + col]
+        self.cur[row * self.cols + col].ch
     }
 
-    /// Svuota la tela (**nel frame**, non sullo schermo): chi ridisegna da capo
-    /// azzera e riscrive, e il `diff` manda solo cio' che cambia davvero.
+    /// Lo stile della cella nel frame corrente (`None` fuori).
+    pub fn style_at(&self, col: usize, row: usize) -> Option<Style> {
+        if col >= self.cols || row >= self.rows {
+            return None;
+        }
+        Some(self.cur[row * self.cols + col].st)
+    }
+
+    /// Svuota la tela (**nel frame**, non sullo schermo) con lo stile della
+    /// penna: chi ridisegna da capo azzera e riscrive, e il `diff` manda solo
+    /// cio' che cambia davvero.
     pub fn clear(&mut self) {
-        self.cur.fill(' ');
+        self.cur.fill(Cell {
+            ch: ' ',
+            st: self.pen,
+        });
     }
 
-    /// Scrive un carattere in `(col, row)`. Fuori tela non fa niente.
+    /// Scrive un carattere in `(col, row)` con lo stile della penna. Fuori
+    /// tela non fa niente.
     pub fn set(&mut self, col: usize, row: usize, ch: char) {
+        self.set_styled(col, row, ch, self.pen);
+    }
+
+    /// Scrive un carattere con uno stile **esplicito** (non tocca la penna).
+    pub fn set_styled(&mut self, col: usize, row: usize, ch: char, st: Style) {
         if col >= self.cols || row >= self.rows {
             return;
         }
-        self.cur[row * self.cols + col] = ch;
+        self.cur[row * self.cols + col] = Cell { ch, st };
     }
 
     /// Scrive una stringa da `(col, row)` e ritorna le colonne occupate.
     pub fn text(&mut self, col: usize, row: usize, s: &str) -> usize {
+        self.text_styled(col, row, s, self.pen)
+    }
+
+    /// Come [`Canvas::text`], con uno stile esplicito.
+    pub fn text_styled(&mut self, col: usize, row: usize, s: &str, st: Style) -> usize {
+        if row >= self.rows {
+            return 0;
+        }
         let mut c = col;
         for ch in s.chars() {
             if c >= self.cols {
                 break;
             }
-            self.set(c, row, ch);
+            self.cur[row * self.cols + c] = Cell { ch, st };
             c += 1;
         }
-        c - col
+        c.saturating_sub(col)
     }
 
-    /// Riempie un rettangolo di `ch` (clippato alla tela).
+    /// Riempie un rettangolo di `ch` con lo stile della penna (clippato).
     pub fn fill(&mut self, col: usize, row: usize, w: usize, h: usize, ch: char) {
+        let cell = Cell { ch, st: self.pen };
         for r in row..row.saturating_add(h).min(self.rows) {
             for c in col..col.saturating_add(w).min(self.cols) {
-                self.cur[r * self.cols + c] = ch;
+                self.cur[r * self.cols + c] = cell;
+            }
+        }
+    }
+
+    /// Riempie un rettangolo con uno stile esplicito (clippato).
+    pub fn fill_styled(
+        &mut self,
+        col: usize,
+        row: usize,
+        w: usize,
+        h: usize,
+        ch: char,
+        st: Style,
+    ) {
+        let cell = Cell { ch, st };
+        for r in row..row.saturating_add(h).min(self.rows) {
+            for c in col..col.saturating_add(w).min(self.cols) {
+                self.cur[r * self.cols + c] = cell;
             }
         }
     }
@@ -119,15 +240,20 @@ impl Canvas {
         }
         self.cols = cols;
         self.rows = rows;
-        self.cur = vec![' '; cols * rows];
-        self.shown = vec![' '; cols * rows];
+        self.cur = vec![Cell::BLANK; cols * rows];
+        self.shown = vec![Cell::BLANK; cols * rows];
     }
 
     /// I byte del **differenziale** rispetto all'ultima chiamata: un `CUP` per
     /// fetta di celle cambiate, poi i caratteri. Vuoto se niente e' cambiato.
     /// Aggiorna la copia ombra (il prossimo `diff` riparte da qui).
+    ///
+    /// Le fette si spezzano anche al cambio di **stile**: il `SGR` si manda
+    /// solo quando serve, e lo stato che lasciamo allo schermo e' sempre
+    /// quello di default (l'app non puo' "colorare" il prompt che segue).
     pub fn diff(&mut self) -> &[u8] {
         self.out.clear();
+        let mut live = self.live;
         for r in 0..self.rows {
             let base = r * self.cols;
             let mut c = 0;
@@ -137,12 +263,20 @@ impl Canvas {
                     continue;
                 }
                 let start = c;
-                while c < self.cols && self.cur[base + c] != self.shown[base + c] {
+                let st = self.cur[base + c].st;
+                while c < self.cols
+                    && self.cur[base + c] != self.shown[base + c]
+                    && self.cur[base + c].st == st
+                {
                     c += 1;
                 }
                 self.push_cup(r + 1, start + 1);
+                if st != live {
+                    self.push_sgr(st);
+                    live = st;
+                }
                 for k in start..c {
-                    let ch = self.cur[base + k];
+                    let ch = self.cur[base + k].ch;
                     self.push_char(ch);
                 }
                 for k in start..c {
@@ -150,6 +284,11 @@ impl Canvas {
                 }
             }
         }
+        if !live.is_default() {
+            self.out.extend_from_slice(b"\x1b[0m");
+            live = Style::DEFAULT;
+        }
+        self.live = live;
         &self.out
     }
 
@@ -160,6 +299,31 @@ impl Canvas {
         self.out.push(b';');
         push_usize(&mut self.out, col);
         self.out.push(b'H');
+    }
+
+    /// `ESC[0;38;2;R;G;B;48;2;R;G;Bm`: autosufficiente (parte dal reset),
+    /// quindi non dipende dallo stato lasciato dal frame precedente.
+    fn push_sgr(&mut self, st: Style) {
+        self.out.extend_from_slice(b"\x1b[0;38;2;");
+        for ch in [(st.fg >> 24) as u8, (st.fg >> 16) as u8, (st.fg >> 8) as u8] {
+            push_usize(&mut self.out, ch as usize);
+            self.out.push(b';');
+        }
+        self.out.extend_from_slice(b"48;2;");
+        for (i, ch) in [
+            (st.bg >> 24) as u8,
+            (st.bg >> 16) as u8,
+            (st.bg >> 8) as u8,
+        ]
+        .iter()
+        .enumerate()
+        {
+            push_usize(&mut self.out, *ch as usize);
+            if i < 2 {
+                self.out.push(b';');
+            }
+        }
+        self.out.push(b'm');
     }
 
     fn push_char(&mut self, ch: char) {
@@ -302,5 +466,77 @@ mod tests {
     fn dimensioni_minime() {
         let c = Canvas::new(0, 0);
         assert_eq!(c.size(), (1, 1));
+    }
+
+    const RED: Color = 0xFF5C_70FF;
+    const BLUE_BG: Color = 0x1A20_30FF;
+
+    #[test]
+    fn il_colore_si_manda_solo_al_cambio_e_si_chiude() {
+        let mut c = Canvas::new(4, 2);
+        let red = Style::new(RED, DEFAULT_BG);
+        c.set_styled(0, 0, 'a', red);
+        c.set_styled(2, 0, 'b', red);
+        // Due fette dello **stesso** stile: il secondo SGR non si rimanda.
+        // `0;` rende la sequenza autosufficiente; il reset finale non lascia
+        // il colore acceso sul prompt che segue (SGR sopravvive alle feed).
+        assert_eq!(
+            s(c.diff()),
+            "\x1b[1;1H\x1b[0;38;2;255;92;112;48;2;11;13;20ma\x1b[1;3Hb\x1b[0m"
+        );
+        // Cella di default dopo il reset: nessun SGR da mandare.
+        c.set(1, 1, 'c');
+        assert_eq!(s(c.diff()), "\x1b[2;2Hc");
+    }
+
+    #[test]
+    fn stili_diversi_spezzano_la_fetta() {
+        let mut c = Canvas::new(4, 1);
+        c.set_styled(0, 0, 'a', Style::fg(RED));
+        c.set_styled(1, 0, 'b', Style::new(DEFAULT_FG, BLUE_BG));
+        let out = s(c.diff());
+        assert_eq!(
+            out,
+            "\x1b[1;1H\x1b[0;38;2;255;92;112;48;2;11;13;20ma\
+             \x1b[1;2H\x1b[0;38;2;232;235;242;48;2;26;32;48mb\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn app_monocroma_nessun_byte_di_colore() {
+        let mut c = Canvas::new(4, 2);
+        c.text(0, 0, "ciao");
+        c.fill(0, 1, 4, 1, '-');
+        let out = s(c.diff());
+        assert!(!out.contains('\x1b') || out.matches('\x1b').count() == 2);
+        // Solo i due CUP: nessun SGR.
+        assert_eq!(out, "\x1b[1;1Hciao\x1b[2;1H----");
+        assert_eq!(c.style(), Style::DEFAULT);
+        assert_eq!(c.style_at(0, 1), Some(Style::DEFAULT));
+        assert_eq!(c.style_at(9, 9), None);
+    }
+
+    #[test]
+    fn clear_usa_lo_stile_della_penna() {
+        let mut c = Canvas::new(2, 1);
+        c.set_style(Style::new(RED, BLUE_BG));
+        c.clear();
+        let out = s(c.diff());
+        assert!(out.contains("\x1b[0;38;2;255;92;112;48;2;26;32;48m"));
+        assert!(out.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn riga_fuori_tela_non_panica() {
+        // Una cella fuori tela e' un no-op (il monitor sbagliava la riga e
+        // faceva index-out-of-bounds: la guardia e' qui, non nell'app).
+        let mut c = Canvas::new(4, 2);
+        assert_eq!(c.text_styled(0, 99, "abc", Style::DEFAULT), 0);
+        assert_eq!(c.set_styled(0, 99, 'x', Style::DEFAULT), ());
+        c.fill_styled(0, 99, 4, 1, 'x', Style::DEFAULT);
+        assert_eq!(c.diff().len(), 0);
+        // Colonna fuori: tronca, non panica.
+        assert_eq!(c.text_styled(3, 0, "abc", Style::DEFAULT), 1);
+        assert_eq!(s(c.diff()), "\x1b[1;4Ha");
     }
 }

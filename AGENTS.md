@@ -113,6 +113,10 @@ velordo/
 │   ├── littera/        # sessione di terminale (D8c1, ADR-0089): modello +
 │   │                   #   ANSI + input, senza display
 │   ├── sess-proto/     # layout della mailbox di sessione (D8c1, ADR-0089)
+│   ├── pictura/        # primitive bitmap delle toppe (D8, ADR-0099)
+│   ├── tabula/         # canvas a celle + differenziale (ADR-0098 addendum)
+│   ├── formae/         # componenti di disegno TUI/GUI (ADR-0100): geometria,
+│   │                   #   Theme, Target/Frame, Chart, Bar, History, fmt
 │   ├── net/            # core rete puro (Ethernet/IPv6/NDP/TCP/SIIT/DNS)
 │   ├── net-ep/         # formato degli slot dei ring endpoint (N7.0, ADR-0074)
 │   ├── custos-proto/   # protocollo IPC di Custos (ADR-0080 fase 5)
@@ -144,7 +148,8 @@ velordo/
 │   │                   #   porta (servizio tastiera, D8d: niente device),
 │   │                   #   vestigia, time, uptime, console (console server
 │   │                   #   D3 + sessioni), custos (policy per identita',
-│   │                   #   ADR-0080);
+│   │                   #   ADR-0080), monitor (dashboard TUI a 1 Hz sopra
+│   │                   #   `formae`, ADR-0100);
 │   │                   #   tools/arca (nativo, linka `libr` solo per
 │   │                   #   l'entry/redirect)
 │   └── build/          # output .bin dei servizi nativi
@@ -572,6 +577,23 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   girano **attraverso il DE**) + `./scripts/run-desktop-tests.sh` (login via
   monitor, poi keybinding, `t76` che confronta i CRC delle due tile per il bordo).
   Unit host **183** (`impluvium-tree` 7).
+- **Componenti e monitor (M1–M4, ADR-0100)**: la base grafica ha il suo livello
+  riusabile. `libs/formae` (puro, niente `civis`) = geometria celle↔pixel,
+  `Theme`, `Target`/`Frame` (testo **misurato** con `measure`/`snap_x`),
+  `Chart` (area con gradiente), `Bar`, `History`, `fmt`. Primo consumatore
+  `usr/bin/monitor`: CPU (grafico), RAM (barra), tabella processi, **1 Hz** su
+  un `input::wait_until`, tasti `q/p/j/k/s/r`, responsive 47↔128. Prove:
+  `scripts/run-monitor-tests.sh` (10 check, anche **pixel**: card dipinta +
+  grafico che si muove). **Trappole**: il lettore si dichiara alla `SESS_READ`
+  (dentro `input::read`), non con `attach` → il loop **drena prima** di
+  attendere (come `fullscreen`); `PatchTarget::text` deve togliere l'origine in
+  pixel o il testo di una card non in (0,0) finisce spostato del doppio;
+  `tabula::text_styled` ha la guardia sulla riga (una riga in pixel invece di
+  celle = index-out-of-bounds). Toppe alpha: `Pixel::blit` compone solo le righe
+  con alpha < 255. La tabella e' testo su una **card a celle** (bg per cella),
+  non una toppa. **Console**: in `render` il bbox delle celle si **espande alle
+  toppe della riga**, o un render parziale (una cella cambiata) ribalta l'intera
+  toppa e ridisegna solo il bbox, coprendo il testo delle card fuori dal bbox.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
@@ -1009,8 +1031,11 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
 # Tile e DE (D8e, FUORI dal gate: il layout lo dispone solo >= ThirdParty)
 ./scripts/run-desktop-tests.sh   # tileprobe + keybinding del DE via monitor
 
+# Monitor di sistema (M4, ADR-0100, FUORI dal gate: prende la tela della sessione)
+./scripts/run-monitor-tests.sh   # 1 Hz senza tasti, pausa, sort, selezione, pixel, uscita
+
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), pictura + tabula (toppe e canvas a celle), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, syscall-numbers, impluvium-tree, blake2s, sig, tls: 214 test
+./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), pictura + tabula (toppe e canvas a celle), formae (componenti: chart/barra/history/fmt, ADR-0100), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, syscall-numbers, impluvium-tree, blake2s, sig, tls: 238 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh

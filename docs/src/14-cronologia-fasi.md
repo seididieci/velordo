@@ -5259,3 +5259,76 @@ dopo `ESC[?1049l` il primo byte **continua** la riga di prima (`due` → `due!`)
 Verifica visiva con screendump nella tile: il transcript torna nell'ordine
 giusto (banner → prompt → `fullscreen` → messaggi → uscita → prompt **sotto**).
 Unit host **214**; gate invariato.
+
+## M1–M4 — `formae` (componenti condivisi) e il monitor di sistema (ADR-0100)
+
+La sessione precedente aveva reso solida la **base** grafica (alt screen, il
+frame come unita' di disegno, le toppe di pixel). Questa costruisce **sopra**
+la base: la prima app che reagisce al **tempo** e non solo ai tasti, e la
+libreria di componenti che la GUI riusera'.
+
+**M1 — il vocabolario che mancava.** Tre pezzi, ognuno con la sua regressione:
+
+- `pictura`: alpha (source-over non premoltiplicato), `vgradient`, `round_rect`
+  con antialias (4×4 sub-campioni, distanze in ottavi di pixel: niente
+  `sqrt`), `round_bar` a capsula, `polyline`. I test provano che il blend
+  funziona (rosso al 50% su nero = 128), che l'angolo arrotondato e'
+  **trasparente** su una tela vuota (il wallpaper si vede) e opaco su un fondo.
+- `tabula` a **colori**: ogni cella e' `(char, fg, bg)`; `diff` emette lo `SGR`
+  **solo al cambio** e chiude con `ESC[0m`. Un'app monocroma produce gli
+  **stessi byte** di prima (i check di `run-tui-tests.sh` lo provano: 1564 B il
+  primo frame, 33 B un tasto).
+- console: `Pixel::blit` **alpha-aware** — riga tutta opaca = copia come sempre
+  (percorso veloce), riga con alpha = `blend_bgra_span`. E' cosi' che una card
+  arrotondata lascia vedere il wallpaper sotto.
+
+**M2 — `libs/formae`.** Puro (`no_std`, niente `civis`, unit test host): il
+confine e' il trait `Target` (geometria in `PxRect`, testo **misurato** con
+`measure`/`snap_x`, primitive fill/border/vgradient/round/bar/line).
+`Frame`/`PatchTarget` implementano il target della TUI: i pixel vanno in una
+toppa `pictura`, il testo nella tela `tabula`. Sopra ci sono `Chart` (area con
+gradiente + linea + alone), `Bar`, `History<N>`, `fmt` (orologio, percentuale
+troncata, memoria binaria). Test: `Bar`/`Chart` disegnano dentro il rect e sono
+proporzionali a **due metriche** diverse (47 e 128 colonne).
+
+**M3 — il monitor.** `usr/bin/monitor`: card CPU (grafico), card RAM (barra),
+tabella processi; **1 Hz** su un solo `input::wait_until(deadline)`; tasti
+`q`/`p`/`j`/`k`/`s`/`r`; layout responsive (una colonna sotto 100, due sopra).
+Dati veri, zero kernel: delta `ticks_used`/parete (idle escluso), `meminfo`,
+`ps_info`, `get_ticks`. Costo dichiarato e misurato: 2 toppe per frame
+(~894 KB a 1 Hz), il testo va per differenziale.
+
+Due **trappole** emerse e pagate:
+
+1. **Il lettore si dichiara alla `SESS_READ`, non con `attach`.** Il primo
+   giro del monitor **panicava** subito: `tabula::text_styled` (aggiunto in
+   M2) non controllava `row`, e il monitor passava una riga in **pixel** invece
+   che in celle → index out of bounds. Fix: la guardia sta in `tabula` (riga
+   fuori tela = no-op), non nell'app. Il secondo giro **non prendeva i tasti**:
+   `input::attach` spegne solo l'eco; e' `input::read` che fa `SESS_READ` e
+   dichiara il lettore. Il loop drena **prima** di attendere (come
+   `fullscreen`), poi `wait_until`.
+2. **Testo in una toppa non in (0,0).** `PatchTarget::text` aggiungeva
+   `origin.col` senza togliere l'origine in pixel: la card MEM (colonna 63)
+   finiva a colonna 126 e "MEM" non si vedeva. Fix: `x - origin_px.x`, con unit
+   test dedicato.
+3. **Il render parziale ribalta la toppa e non ridisegna il testo fuori dal
+   bbox.** Con la card CPU che si ridisegna a ogni tick, il valore ("15%")
+   cambia → il render della riga ha un bbox **stretto** (le celle del numero),
+   ma `blit_row_segments` ribalta **l'intera** toppa della riga: il testo della
+   card fuori dal bbox (" CPU") veniva coperto e non ridisegnato → spariva a
+   ogni tick. Fix in `userland/console`: il bbox delle celle si **espande alle
+   toppe della riga** (banda, blit e celle coprono la stessa area). E' il
+   difetto che rendeva il monitor "senza etichette" a tratti.
+
+**M4 — la prova.** `scripts/run-monitor-tests.sh` (boot dedicato, fuori dal
+gate): 10 check — avvio, **tick senza tasti** (2→7 in 5 s), pausa (9=9),
+sort (`cpu`→`time`), selezione (0→2), **card dipinta a pixel** (104k px
+non-wallpaper), **grafico mosso da solo** (486 px in 3 s), uscita
+(`[monitor] exit`) e ritorno al prompt, zero `[console] toppa fuori dalla
+tile`. Unit host **238** (formae 13); gate invariato (5/5, 64/64, 4/4, 12/12,
+72/72, 12/12, shell 33/33).
+
+Scelta di look: la tabella resta **testo** ma sopra una **card a celle** (fondo
+`TH.card` per cella), cosi' il wallpaper (il logo) non trapela dietro i numeri
+— la reference e' una linea guida, non una specifica, e il monospace resta.

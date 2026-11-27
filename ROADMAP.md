@@ -1443,9 +1443,18 @@ hanno un ordine concordato ma **non** una data: si prendono in quest'ordine.
    si conservano a larghezza invariata e si scartano se cambia (l'app,
    notificata, ridisegna — `gtui` lo fa; provato con **split mentre l'app
    gira**).
-3. **Monitor di sistema** (btop-like) — prima app vera, usa 1+2. I dati ci sono
-   gia' tutti: `ps_info` porta i **tick CPU per processo** (`ticks_used`),
-   `SYS_MEMINFO`, `CBS_GET_INFO`, stats di block/gpu/net. **Zero kernel.**
+3. **Monitor di sistema** (btop-like) — **fatta (M1–M4, ADR-0100)**: la
+   libreria di componenti `libs/formae` (puri: geometria celle↔pixel, `Theme`,
+   `Target`/`Frame`, `Chart` ad area con gradiente, `Bar`, `History` ad anello,
+   `fmt`) e il primo consumatore `usr/bin/monitor` (card CPU con grafico, card
+   RAM con barra, tabella processi, **1 Hz** su `input::wait_until`, tasti
+   `q`/`p`/`j`/`k`/`s`/`r`, layout responsive 47↔128 colonne). Dati veri:
+   delta `ticks_used`/parete (idle escluso), `meminfo`, `ps_info`,
+   `get_ticks`. **Zero kernel.** Prova `scripts/run-monitor-tests.sh` (tick
+   senza tasti, pausa, sort, selezione, pixel della card, uscita). La card
+   **Network** e' condizionale: oggi non esiste un contatore di traffico
+   system-wide (`NET_EP_STATS` e' per endpoint, serve `net=1`) — follow-up
+   dichiarato, niente numeri finti.
 4. **Base grafica (analisi prima)** — cursore, widget, componenti, rendering.
    Architettura dichiarata in **ADR-0097** (superficie a pixel, cella =
    glifo|toppa, compositing annidato, niente toolkit unificato, la porta per il

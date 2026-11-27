@@ -1,0 +1,21 @@
+[package]
+name = "monitor"
+version = "0.1.0"
+edition = "2024"
+
+# Crate fuori dal workspace del kernel: build freestanding separata
+# (come `uptime`, `interpres`).
+[workspace]
+
+[dependencies]
+civis = { path = "../../libs/civis" }
+pictura = { path = "../../libs/pictura" }
+tabula = { path = "../../libs/tabula" }
+formae = { path = "../../libs/formae" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"

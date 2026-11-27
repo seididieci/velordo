@@ -29,7 +29,7 @@ export CARGO_TARGET_DIR="$ROOT/target/unit-tests"
 # Crate con `#[cfg(test)] mod tests` (il primo e' quello nato dalla
 # regressione della copertura: il rasterizer perdeva l'ultimo pixel di ogni
 # span e il testo risultava assottigliato).
-CRATES=(libs/term libs/musivum libs/littera libs/sess-proto libs/pictura libs/tabula syscall-numbers libs/net libs/net-ep libs/broker-proto libs/valloc libs/impluvium-tree blake2s libs/sig libs/tls)
+CRATES=(libs/term libs/musivum libs/littera libs/sess-proto libs/pictura libs/tabula libs/formae syscall-numbers libs/net libs/net-ep libs/broker-proto libs/valloc libs/impluvium-tree blake2s libs/sig libs/tls)
 
 FAIL=0
 TOT_PASS=0

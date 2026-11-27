@@ -127,3 +127,4 @@
 - [ADR-0097: Superficie, celle e toppe — il modello grafico del terminale](./adr/0097-modello-grafico-terminale.md)
 - [ADR-0098: Sessione a schermo intero — alt screen, CSI con parametri, resize notificato](./adr/0098-sessione-schermo-intero.md)
 - [ADR-0099: Toppe di pixel nelle celle — `SESS_PATCH`, vita = testo](./adr/0099-toppe-di-pixel.md)
+- [ADR-0100: `formae` — componenti di disegno condivisi fra TUI e GUI](./adr/0100-componenti-formae.md)

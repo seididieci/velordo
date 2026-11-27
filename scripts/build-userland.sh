@@ -76,6 +76,9 @@ build_one userland/users userland/users/src/users.ld users.bin users
 build_one userland/logout userland/logout/src/logout.ld logout.bin logout
 # dns-resolve (ADR-0075): client DNS nativo, lanciabile dalla shell (NET=1).
 build_one userland/dns-resolve userland/dns-resolve/src/dns-resolve.ld dns-resolve.bin dns-resolve
+# monitor di sistema (M3, ADR-0097/0099): app grafica a 1 Hz sopra `formae`
+# (chart/barra) + `tabula`/`pictura`. Non e' un servizio: solo `usr/bin`.
+build_one userland/monitor userland/monitor/src/monitor.ld monitor.bin monitor
 # Shell nativa (Fase 3.2, S3.2a): REPL minima post-login, comandi help/users/create-user/logout/exit.
 build_one userland/interpres userland/interpres/src/interpres.ld shell.bin interpres
 # Fornitore di data/ora (Fase 50, P1 orologio): prima di gen-service-hashes

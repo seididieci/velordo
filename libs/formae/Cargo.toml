@@ -1,0 +1,21 @@
+[package]
+name = "formae"
+version = "0.1.0"
+edition = "2021"
+
+# Crate fuori dal workspace del kernel: unit test host dalla directory neutra
+# di `scripts/run-unit-tests.sh` (come `pictura`, `tabula`, `term`).
+# Dipendenze **pure** (niente `civis`, niente sistema): i componenti sono
+# disegnabili sia nella TUI (`tabula` + `pictura`) sia, domani, in una GUI.
+[workspace]
+
+[dependencies]
+pictura = { path = "../pictura" }
+tabula = { path = "../tabula" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
