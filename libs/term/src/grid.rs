@@ -509,9 +509,14 @@ impl Grid {
         core::mem::take(&mut self.segments[row])
     }
 
-    /// Mette una toppa nella riga `row` (in coda: l'ultima disegnata vince
-    /// dove si sovrappone) e marca la riga sporca. `false` = riga fuori
-    /// griglia o toppa piu' larga della griglia.
+    /// Mette una toppa nella riga `row`. Se c'e' gia' una toppa con la
+    /// **stessa** `(col, cells)` la **sostituisce**: un'app che ridisegna la
+    /// stessa toppa a ogni tick (il monitor a 1 Hz, una GUI animata) non deve
+    /// accumulare segmenti fino al tetto di `PATCH_MAX_BYTES` — e' il difetto
+    /// per cui il grafico si fermava dopo ~19 tick (443.520 B × 19 > 8 MiB).
+    /// Una toppa in una posizione **diversa** si aggiunge in coda (l'ultima
+    /// disegnata vince dove si sovrappone). Marca la riga sporca.
+    /// `false` = riga fuori griglia o toppa piu' larga della griglia.
     pub fn put_segment(&mut self, row: usize, seg: Segment) -> bool {
         if row >= self.rows || seg.col + seg.cells > self.cols || seg.cells == 0 {
             return false;
@@ -519,8 +524,22 @@ impl Grid {
         if self.segments.len() < self.rows {
             self.segments.resize_with(self.rows, Vec::new);
         }
-        self.patch_bytes += seg.bytes();
-        self.segments[row].push(seg);
+        match self.segments[row]
+            .iter_mut()
+            .find(|s| s.col == seg.col && s.cells == seg.cells)
+        {
+            Some(slot) => {
+                self.patch_bytes = self
+                    .patch_bytes
+                    .saturating_sub(slot.bytes())
+                    .saturating_add(seg.bytes());
+                *slot = seg;
+            }
+            None => {
+                self.patch_bytes += seg.bytes();
+                self.segments[row].push(seg);
+            }
+        }
         self.dirty.mark(0, row);
         self.dirty.mark(self.cols.saturating_sub(1), row);
         true
@@ -1252,5 +1271,29 @@ mod tests {
         // L'ultima disegnata vince dove si sovrappone: la cerco dal fondo.
         let segs = g.segments_at(1);
         assert_eq!(segs.iter().rev().find(|s| 4 >= s.col && 4 < s.col + s.cells).map(|s| s.col), Some(4));
+    }
+
+    #[test]
+    fn toppa_ridisegnata_sostituisce_non_accumula() {
+        // Un'app che ridisegna la stessa toppa a ogni tick (il monitor a 1 Hz)
+        // non deve accumulare segmenti: altrimenti `patch_bytes` cresce fino
+        // al tetto e le toppe vengono rifiutate (~19 tick: 443.520 B × 19 > 8 MiB).
+        let mut g = Grid::new(8, 2);
+        assert!(g.put_segment(0, seg(0, 4, 32)));
+        assert_eq!((g.segments_at(0).len(), g.patch_bytes()), (1, 32));
+        // Ristessa toppa (stessa col/cells), byte diversi: sostituisce.
+        assert!(g.put_segment(0, seg(0, 4, 32)));
+        assert!(g.put_segment(0, seg(0, 4, 32)));
+        assert_eq!(
+            (g.segments_at(0).len(), g.patch_bytes()),
+            (1, 32),
+            "sostituisce, non accumula"
+        );
+        // Una toppa in un'altra posizione resta un secondo segmento.
+        assert!(g.put_segment(0, seg(5, 2, 8)));
+        assert_eq!((g.segments_at(0).len(), g.patch_bytes()), (2, 40));
+        // Ripetere quella a destra non tocca quella a sinistra.
+        assert!(g.put_segment(0, seg(5, 2, 8)));
+        assert_eq!((g.segments_at(0).len(), g.patch_bytes()), (2, 40));
     }
 }

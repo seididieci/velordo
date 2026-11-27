@@ -56,6 +56,14 @@ dipendenze dal font e i suoi unit test sono pixel-free.
 Le operazioni che spostano righe (`scroll_cells`, `scroll_model_n`,
 `scroll_up*`) portano i segmenti con sé (una `rotate_left`).
 
+`put_segment` **sostituisce** un segmento con la stessa `(col, cells)` nella
+riga e **accoda** solo quelli in posizioni diverse ("l'ultima disegnata vince
+dove si sovrappone"). Non è un dettaglio: un'app che **ridisegna la stessa
+toppa** a ogni tick (il monitor a 1 Hz, una GUI animata) accumulerebbe un
+segmento — e 443.520 byte (una card 630×176) — per tick, superando
+`PATCH_MAX_BYTES` dopo ~19 tick e facendosi **rifiutare** le toppe successive
+(il grafico "si ferma"). Con la sostituzione `patch_bytes` resta costante.
+
 Il resize (`Grid::resize`) distingue **due casi**, e la differenza è la
 larghezza:
 

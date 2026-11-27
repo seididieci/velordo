@@ -5326,7 +5326,7 @@ gate): 10 check — avvio, **tick senza tasti** (2→7 in 5 s), pausa (9=9),
 sort (`cpu`→`time`), selezione (0→2), **card dipinta a pixel** (104k px
 non-wallpaper), **grafico mosso da solo** (486 px in 3 s), uscita
 (`[monitor] exit`) e ritorno al prompt, zero `[console] toppa fuori dalla
-tile`. Unit host **238** (formae 13); gate invariato (5/5, 64/64, 4/4, 12/12,
+tile`. Unit host **239** (formae 13); gate invariato (5/5, 64/64, 4/4, 12/12,
 72/72, 12/12, shell 33/33).
 
 Scelta di look: la tabella resta **testo** ma sopra una **card a celle** (fondo
@@ -5360,3 +5360,22 @@ la card MEM e' statica finche' la RAM non cambia, quindi il traffico scende da
 non finisce piu' nel grafico del monitor stesso. Il `[monitor] tick` porta
 anche `maxproc=` (il massimo per processo) come guardia di regressione:
 `run-monitor-tests.sh` verifica che non sia sempre 0.
+
+**Il terzo difetto (e il vero motivo per cui il grafico si fermava).** Anche
+dopo il fix del campionamento, il grafico si bloccava **dopo ~20 tick**, e un
+resize lo faceva ripartire per altri ~20. Non era il campionamento: era la
+console. Ogni tick il monitor rispedisce la card CPU come toppa
+(`630×176×4 = 443.520 B`) e `term::grid::put_segment` la **accodava** invece di
+sostituirla: `patch_bytes` cresceva di 443.520 B/tick e al ~19° superava
+`PATCH_MAX_BYTES` (8 MiB) → `patch_begin` **rifiutava** → il grafico restava
+fermo. Un resize che cambia la larghezza scarta i segmenti (`Grid::resize`),
+azzera il conteggio e il ciclo riparte: esattamente il sintomo osservato
+(`8.388.608 / 443.520 ≈ 18,9`).
+
+Fix: `put_segment` **sostituisce** un segmento con la **stessa `(col, cells)`**
+(aggiustando `patch_bytes`) e accoda solo quelli in posizioni diverse. È la
+semantica naturale ("ho ridisegnato la mia toppa") e vale per ogni app che
+ridisegna una toppa sul posto (il monitor, e domani una GUI animata). Unit test
+`toppa_ridisegnata_sostituisce_non_accumula`. Verifica: dopo ~65 s il corpo del
+grafico cambia ancora ~18.000 px fra secondi consecutivi (prima si fermava al
+tick ~19).
