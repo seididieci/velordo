@@ -606,6 +606,11 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   (8 MiB) → `patch_begin` rifiutava. Ora `put_segment` **sostituisce** un
   segmento con la stessa `(col, cells)` (e accoda solo posizioni diverse): ogni
   app che ridisegna una toppa sul posto non accumula.
+  **Due ritocchi d'uso**: `Frame::begin()` **azzera la tela a celle**
+  (`cells.clear()`), o un testo che si accorcia ("name"→"cpu", un valore
+  `100%`→`9%`) lascia la coda vecchia; e la CPU per processo va con **un
+  decimale** (con il totale = **somma dei permille per-processo**, così lista e
+  totale coincidono — `sumproc=` nel marker).
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
@@ -1047,7 +1052,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
 ./scripts/run-monitor-tests.sh   # 1 Hz senza tasti, pausa, sort, selezione, pixel, uscita
 
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), pictura + tabula (toppe e canvas a celle), formae (componenti: chart/barra/history/fmt, ADR-0100), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, syscall-numbers, impluvium-tree, blake2s, sig, tls: 239 test
+./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), pictura + tabula (toppe e canvas a celle), formae (componenti: chart/barra/history/fmt, ADR-0100), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, syscall-numbers, impluvium-tree, blake2s, sig, tls: 240 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh

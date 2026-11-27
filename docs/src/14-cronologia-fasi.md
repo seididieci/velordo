@@ -5326,7 +5326,7 @@ gate): 10 check — avvio, **tick senza tasti** (2→7 in 5 s), pausa (9=9),
 sort (`cpu`→`time`), selezione (0→2), **card dipinta a pixel** (104k px
 non-wallpaper), **grafico mosso da solo** (486 px in 3 s), uscita
 (`[monitor] exit`) e ritorno al prompt, zero `[console] toppa fuori dalla
-tile`. Unit host **239** (formae 13); gate invariato (5/5, 64/64, 4/4, 12/12,
+tile`. Unit host **240** (formae 14); gate invariato (5/5, 64/64, 4/4, 12/12,
 72/72, 12/12, shell 33/33).
 
 Scelta di look: la tabella resta **testo** ma sopra una **card a celle** (fondo
@@ -5379,3 +5379,20 @@ ridisegna una toppa sul posto (il monitor, e domani una GUI animata). Unit test
 `toppa_ridisegnata_sostituisce_non_accumula`. Verifica: dopo ~65 s il corpo del
 grafico cambia ancora ~18.000 px fra secondi consecutivi (prima si fermava al
 tick ~19).
+
+**Due difetti d'uso (M5, ritocco).** Provando il monitor a mano:
+
+1. **Il titolo non si accorciava** ("name" → "cpue"): `draw` scriveva il titolo
+   con `text_styled` senza pulire la riga, e la tela a celle sopravvive fra i
+   frame (serve al differenziale) → le celle in fondo non venivano né riscritte
+   né svuotate. Valeva anche per i **valori delle card** che si accorciano. Fix:
+   `Frame::begin()` **azzera la tela** (`cells.clear()`); il `diff` manda poi la
+   differenza, comprese le celle diventate vuote (lo spazio che cancella la
+   coda). Unit test `testo_che_si_accorcia_pulisce_la_coda`.
+2. **Il totale CPU non tornava con la lista.** Ogni processo era mostrato
+   troncato all'1% (`percent(permille, 0)` = `permille/10`), quindi un `1.4%`
+   si vedeva `1%` e con 24 processi la somma perdeva diversi punti. Fix: la
+   colonna `CPU%` (e il valore della card) con **un decimale** (`1.4%`,
+   `0.5%`), e il totale calcolato come **somma dei permille per-processo** —
+   così lista e totale coincidono per costruzione. Il marker porta `sumproc=`
+   e `run-monitor-tests.sh` verifica `sumproc == cpu`.

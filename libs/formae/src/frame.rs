@@ -58,9 +58,14 @@ impl Frame {
         self.patches.clear();
     }
 
-    /// Inizio frame: le toppe del frame precedente sono gia' state mandate.
+    /// Inizio frame: la tela a celle e le toppe del frame precedente sono
+    /// gia' state mandate. Si riparte **vuoti** — la tela va azzerata, o un
+    /// testo che si **accorcia** ("name" → "cpu") lascia la coda vecchia
+    /// (il differenziale non sa che quelle celle sono diventate vuote). Il
+    /// `diff` poi manda solo la differenza (comprese le celle svuotate).
     pub fn begin(&mut self) {
         self.patches.clear();
+        self.cells.clear();
     }
 
     /// Disegna una card/toppa nel rettangolo di celle `rect`. La superficie
@@ -353,5 +358,27 @@ mod tests {
         assert_eq!(cells.cell(63, 4), '4');
         // Niente finisce nella colonna 126 (il doppio offset di prima).
         assert_eq!(cells.cell(126, 2), ' ');
+    }
+
+    #[test]
+    fn testo_che_si_accorcia_pulisce_la_coda() {
+        // "name" -> "cpu": la cella della 'e' deve diventare spazio, o resta
+        // la coda vecchia ("cpue"). E' il motivo per cui `begin()` azzera la
+        // tela: il differenziale non sa che una cella e' diventata vuota.
+        let m = Metrics::new(20, 2, 10, 22);
+        let mut frame = Frame::new(m);
+        frame.begin();
+        frame.cells().text_styled(0, 0, "name", Style::DEFAULT);
+        let d1 = frame.diff().to_vec();
+        assert!(d1.windows(4).any(|w| w == b"name"), "d1 = {:?}", d1);
+        frame.begin();
+        frame.cells().text_styled(0, 0, "cpu", Style::DEFAULT);
+        let d2 = frame.diff().to_vec();
+        assert!(
+            d2.windows(4).any(|w| w == b"cpu "),
+            "il diff deve cancellare la 'e': {:?}",
+            d2
+        );
+        assert_eq!(frame.cells_ref().cell(3, 0), ' ');
     }
 }

@@ -128,7 +128,8 @@ echo "[mon] tick: $T0 -> $T1 in 5 s; ultimo: $TICK_LINE"
 #     globale invece dei tick per pid.
 MAXPROC="$(printf '%s' "$TICK_LINE" | sed 's/.*maxproc=//; s/ .*//' || true)"
 GLOBALCPU="$(printf '%s' "$TICK_LINE" | sed 's/.*tick cpu=//; s/ .*//' || true)"
-echo "[mon] cpu globale=${GLOBALCPU:-?} massimo per processo=${MAXPROC:-?}"
+SUMPROC="$(printf '%s' "$TICK_LINE" | sed 's/.*sumproc=//; s/ .*//' || true)"
+echo "[mon] cpu globale=${GLOBALCPU:-?} somma per-processo=${SUMPROC:-?} massimo=${MAXPROC:-?}"
 
 # 3. Pausa: nessun nuovo tick in 3 s.
 send_mon 'sendkey p'
@@ -245,6 +246,8 @@ if [ "${T1:-0}" -gt "${T0:-0}" ] 2>/dev/null; then ok=1; else ok=0; fi
 check "i valori si aggiornano da soli senza tasti ($T0 -> $T1 tick)" "$ok"
 if [ "${MAXPROC:-0}" -gt 0 ] 2>/dev/null; then ok=1; else ok=0; fi
 check "la CPU per processo non e' sempre 0 (massimo ${MAXPROC:-0} permille)" "$ok"
+if [ -n "${SUMPROC:-}" ] && [ "${SUMPROC}" = "${GLOBALCPU}" ]; then ok=1; else ok=0; fi
+check "il totale CPU = somma della lista ($GLOBALCPU = $SUMPROC)" "$ok"
 if [ "${P1:-0}" = "${P0:-0}" ] 2>/dev/null; then ok=1; else ok=0; fi
 check "la pausa ferma i tick ($P0 = $P1)" "$ok"
 if [ -n "${SORT_AFTER:-}" ] && [ "$SORT_BEFORE" != "$SORT_AFTER" ]; then ok=1; else ok=0; fi

@@ -56,6 +56,15 @@ fn pct(permille: u32) -> String {
     core::str::from_utf8(&b[..n]).unwrap_or("0%").to_string()
 }
 
+/// `12.3%` da permille (1 decimale): la CPU per processo ha bisogno del
+/// decimale, o i valori sotto il 1% spariscono e la somma della lista non
+/// torna col totale.
+fn pct1(permille: u32) -> String {
+    let mut b = [0u8; 8];
+    let n = fmt::percent(permille, 1, &mut b);
+    core::str::from_utf8(&b[..n]).unwrap_or("0.0%").to_string()
+}
+
 /// `800 MiB` / `1.4 GiB` da frame di 4 KiB.
 fn mem_str(frames: u64) -> String {
     let (whole, tenths, unit) = fmt::mem(frames);
@@ -149,10 +158,10 @@ impl Model {
         let wall = sys::get_ticks() as u64;
         let dt = wall.saturating_sub(self.last_wall).max(1);
         let mut nprocs: usize = 0;
-        // Somma dei delta **per processo**: la CPU globale e' la parte di tempo
-        // non-idle, e un processo che muore non falsa il totale (a differenza di
-        // `somma - somma_precedente`).
-        let mut sum_delta: u64 = 0;
+        // Somma dei permille **per processo**: la CPU globale e' esattamente la
+        // somma di cio' che la lista mostra (un fit per costruzione, invece di
+        // `delta_totali * 1000 / dt` che troncava il decimale di ognuno).
+        let mut sum_permille: u32 = 0;
         let mut present = [false; PS_SLOTS];
         let mut rows: Vec<Proc> = Vec::new();
 
@@ -167,8 +176,8 @@ impl Model {
                     0 // baseline o pid nuovo: nessun delta
                 };
                 self.prev_ticks[idx] = e.ticks;
-                sum_delta = sum_delta.saturating_add(delta);
                 let cpu_permille = ((delta.saturating_mul(1000)) / dt).min(1000) as u32;
+                sum_permille = sum_permille.saturating_add(cpu_permille);
                 let state = match e.state {
                     0 => 'R',
                     1 => 'S',
@@ -191,8 +200,9 @@ impl Model {
         self.seen[1..].copy_from_slice(&present[1..]);
         self.primed = true;
 
-        // CPU% globale = somma dei delta per-processo / delta parete (1 core).
-        let cpu_permille = ((sum_delta.saturating_mul(1000)) / dt).min(1000) as u32;
+        // CPU% globale = **somma dei permille per-processo** (1 core): il
+        // totale e la somma della lista coincidono per costruzione.
+        let cpu_permille = sum_permille.min(1000);
 
         // RAM: used / total.
         let (_free, total, used) = sys::meminfo();
@@ -289,7 +299,7 @@ fn draw_cpu_card(model: &Model, frame: &mut Frame, rect: CellRect) {
         t.round(px, m.cell_h / 4, TH.card);
         t.border(px, 1, TH.accent);
         t.text(px.x + 4, px.y + 2, " CPU", TH.pen(TH.text));
-        let val = pct(last as u32);
+        let val = pct1(last as u32);
         let vx = px.right() - 6 - (val.len() as u32) * m.cell_w;
         t.text(vx.max(px.x + 4), px.y + 2, &val, TH.pen(TH.dim));
         // Grafico: dalla seconda riga alla penultima.
@@ -372,7 +382,7 @@ fn draw_proc_card(model: &Model, frame: &mut Frame, rect: CellRect) {
         c += 7;
         frame.cells().text_styled(c, row, &p.name, st);
         c += 17;
-        frame.cells().text_styled(c, row, &pct(p.cpu_permille), st);
+        frame.cells().text_styled(c, row, &pct1(p.cpu_permille), st);
         c += 7;
         let secs = p.ticks / TICKS_HZ;
         frame
@@ -500,10 +510,14 @@ fn main_loop() -> ! {
 
             // Marker seriale per i test.
             let maxproc = model.procs.iter().map(|p| p.cpu_permille).max().unwrap_or(0);
+            // Somma dei permille per-processo: deve coincidere col globale
+            // (la lista e il totale sono la stessa cosa per costruzione).
+            let sumproc: u64 = model.procs.iter().map(|p| p.cpu_permille as u64).sum();
             let _ = civis::print_string(
                 format!(
-                    "[monitor] tick cpu={} maxproc={} mem={} procs={} sel={} sort={} patches={} bytes={}\n",
+                    "[monitor] tick cpu={} sumproc={} maxproc={} mem={} procs={} sel={} sort={} patches={} bytes={}\n",
                     model.cpu_hist.last().unwrap_or(0),
+                    sumproc,
                     maxproc,
                     model.mem_hist.last().unwrap_or(0),
                     model.procs.len(),
