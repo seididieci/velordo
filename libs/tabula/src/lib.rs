@@ -244,6 +244,17 @@ impl Canvas {
         self.shown = vec![Cell::BLANK; cols * rows];
     }
 
+    /// Forza il prossimo `diff` a emettere **tutte** le celle (repaint pieno):
+    /// la copia ombra va a un carattere che nessuna cella usa. Serve alle app a
+    /// bassa frequenza (il monitor a 1 Hz) che non vogliono dipendere dal
+    /// differenziale per convergere.
+    pub fn invalidate(&mut self) {
+        self.shown.fill(Cell {
+            ch: '\u{0}',
+            st: Style::DEFAULT,
+        });
+    }
+
     /// I byte del **differenziale** rispetto all'ultima chiamata: un `CUP` per
     /// fetta di celle cambiate, poi i caratteri. Vuoto se niente e' cambiato.
     /// Aggiorna la copia ombra (il prossimo `diff` riparte da qui).
@@ -524,6 +535,19 @@ mod tests {
         let out = s(c.diff());
         assert!(out.contains("\x1b[0;38;2;255;92;112;48;2;26;32;48m"));
         assert!(out.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn invalidate_forza_repaint_pieno() {
+        // Le app a bassa frequenza (il monitor) invalidano la copia ombra per
+        // convergere sempre: il prossimo `diff` rimanda **tutte** le celle.
+        let mut c = Canvas::new(3, 1);
+        c.text(0, 0, "abc");
+        assert_eq!(s(c.diff()), "\x1b[1;1Habc");
+        assert_eq!(c.diff().len(), 0, "nessun cambio: zero byte");
+        c.invalidate();
+        assert_eq!(s(c.diff()), "\x1b[1;1Habc", "invalidate: repaint pieno");
+        assert_eq!(c.diff().len(), 0);
     }
 
     #[test]

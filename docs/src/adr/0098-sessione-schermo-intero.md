@@ -127,6 +127,12 @@ bufferizza. Meccanismo e aiuto restano separati (il server non cambia, e la
 reply di `SESS_WRITE` continua a significare "è sullo schermo" — i test ci
 contano).
 
+Il differenziale è un'**ottimizzazione**, non una garanzia: un'app che cambia
+molte celle a ogni frame (la tabella del monitor, che si riordina) e vuole
+convergere sempre può chiamare `tabula::Canvas::invalidate()` — la copia ombra
+va a `'\0'` e il prossimo `diff` è un **repaint pieno**. A 1 Hz costa poco ed
+elimina le celle "fantasma" quando il diff non tiene il passo.
+
 ### Limiti dichiarati
 
 - **Una cella = un carattere** (larghezza 1). La larghezza di un glifo la sa solo
@@ -162,7 +168,7 @@ differimento è una politica per il testo che scorre, mai per il disegno.**
 
 ### Test
 
-- `libs/tabula` (host, 12): primo frame intero, nessun cambio → zero byte, fette
+- `libs/tabula` (host, 18): primo frame intero, nessun cambio → zero byte, fette
   consecutive in un solo `CUP`, celle non adiacenti (il cursore che si sposta),
   riga che si accorcia, `clear`, fuori tela, testo che si ferma al bordo, UTF-8
   (bordo e frecce), `resize` che riparte da zero, `fill`, misure minime.

@@ -5326,7 +5326,7 @@ gate): 10 check — avvio, **tick senza tasti** (2→7 in 5 s), pausa (9=9),
 sort (`cpu`→`time`), selezione (0→2), **card dipinta a pixel** (104k px
 non-wallpaper), **grafico mosso da solo** (486 px in 3 s), uscita
 (`[monitor] exit`) e ritorno al prompt, zero `[console] toppa fuori dalla
-tile`. Unit host **241** (formae 14, term 50); gate invariato (5/5, 64/64, 4/4, 12/12,
+tile`. Unit host **242** (formae 14, term 50, tabula 18); gate invariato (5/5, 64/64, 4/4, 12/12,
 72/72, 12/12, shell 33/33).
 
 Scelta di look: la tabella resta **testo** ma sopra una **card a celle** (fondo
@@ -5425,3 +5425,30 @@ Costo dichiarato: a 84% il logo chiaro traspare nelle celle vuote (rumore di
 fondo sui nomi); alzare `PANEL_ALPHA` (es. `0xE8`) lo attenua — è una costante.
 Verifica: split (Super+%) + monitor nella tile di destra, screendump: il "V"
 attraversa i due tile senza ripetersi.
+
+**Tabella stile btop (e il "ghost" del differenziale).** La tabella dei
+processi ha ora:
+
+- **bordo box-drawing** (`┌─┐│└┘`, colore dim) — i confini si vedono;
+- **selezione a tutta riga** (`fill_styled` della riga, non solo le celle di
+  testo) — la fascia accent e' continua;
+- **scrollbar a celle** (1 colonna sul bordo destro interno): track `TH.track`,
+  thumb `TH.accent` proporzionale a `offset/(n-visible)`; niente toppa (leggera);
+- **scroll con `j`/`k`**: `sel` si muove, `offset` (prima riga visibile) la
+  insegue per tenerla sempre a schermo — si vedono **tutti** i processi;
+- via il `›` (basta la fascia).
+
+Durante la prova e' emerso un **"ghost"**: righe basse con nomi troncati/
+duplicati ("cardole", "usertimeme", pid "80"/"-1") anche a pannello **opaco**.
+Il canvas (`tabula`) era **pulito** (dump di una riga: `4 cardo`), quindi il
+difetto era nel **console/differenziale**: alcune celle cambiate non venivano
+ri-renderizzate (il diff non convergeva sotto il riordino continuo della
+tabella). Poiche' il monitor e' a **1 Hz**, la cura e' a costo trascurabile:
+`draw` chiama `frame.cells().invalidate()` (nuovo metodo di `tabula`: la copia
+ombra va a `'\0'`) → **repaint pieno a ogni frame**, nessuna dipendenza dal
+differenziale. Unit test `invalidate_forza_repaint_pieno`.
+
+Resa: card **traslucide** (blu scuro `#0E1222`, `PANEL_ALPHA = 0xD6` ≈84%) con
+il wallpaper che traspare **continuo** (angoli arrotondati, niente logo
+ripetuto); tabella pulita e leggibile sopra il pannello. Verifica: split
+(Super+%) + monitor nella tile di destra, screendump.

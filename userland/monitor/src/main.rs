@@ -119,6 +119,9 @@ struct Model {
     procs: Vec<Proc>,
     sort: Sort,
     sel: usize,
+    /// Prima riga visibile della tabella (finestra scorrevole): `j`/`k` muovono
+    /// `sel` e `draw` aggiusta `offset` per tenerla visibile.
+    offset: usize,
     paused: bool,
     /// Tick precedenti **per pid**: il delta di CPU di un processo è
     /// `e.ticks - prev_ticks[pid]`. (Prima si usava il totale globale, quindi
@@ -145,6 +148,7 @@ impl Model {
             procs: Vec::new(),
             sort: Sort::Cpu,
             sel: 0,
+            offset: 0,
             paused: false,
             prev_ticks: [0; PS_SLOTS],
             seen: [false; PS_SLOTS],
@@ -241,7 +245,7 @@ impl Model {
 }
 
 /// Disegna il frame nel `formae::Frame`.
-fn draw(model: &Model, frame: &mut Frame) {
+fn draw(model: &mut Model, frame: &mut Frame) {
     let m = frame.metrics();
     let (cols, rows) = (m.cols, m.rows);
     if cols < 20 || rows < 10 {
@@ -361,58 +365,138 @@ fn draw_mem_card(frame: &mut Frame, rect: CellRect) {
     });
 }
 
-fn draw_proc_card(model: &Model, frame: &mut Frame, rect: CellRect) {
-    // Coordinate in **celle**: la tabella e' testo sopra il **pannello
-    // traslucido unico** (gia' riempito da `draw`)); qui si scrivono solo le
-    // righe e la fascia di selezione.
+fn draw_proc_card(model: &mut Model, frame: &mut Frame, rect: CellRect) {
+    // Tabella **stile btop**: bordo box-drawing, selezione a **tutta riga**,
+    // scrollbar a celle sul bordo destro, scroll con `j`/`k`. Tutto testo
+    // sopra il pannello traslucido unico (gia' riempito da `draw`).
+    if rect.cols < 10 || rect.rows < 4 {
+        return;
+    }
     let col0 = rect.col as usize;
     let row0 = rect.row as usize;
-    let row_h = (rect.rows as usize).saturating_sub(1);
+    let w = rect.cols as usize;
+    let h = rect.rows as usize;
     let card = TH.pen_on(TH.text, TH.card);
+    let dim = TH.pen_on(TH.dim, TH.card);
 
-    // Intestazioni (riga 0 della card).
-    let headers: [u16; 5] = [6, 16, 6, 8, 6];
-    let names: [&str; 5] = ["PID", "NAME", "CPU%", "TIME", "STATE"];
+    // ── Bordo (box-drawing) ──
+    let right = col0 + w - 1;
+    let bottom = row0 + h - 1;
+    frame.cells().set_styled(col0, row0, '┌', dim);
+    frame.cells().set_styled(right, row0, '┐', dim);
+    frame.cells().set_styled(col0, bottom, '└', dim);
+    frame.cells().set_styled(right, bottom, '┘', dim);
     let mut c = col0 + 1;
-    for (w, h) in headers.iter().zip(names.iter()) {
-        frame
-            .cells()
-            .text_styled(c, row0, h, TH.pen_on(TH.dim, TH.card));
-        c += (*w as usize) + 1;
+    while c < right {
+        frame.cells().set_styled(c, row0, '─', dim);
+        frame.cells().set_styled(c, bottom, '─', dim);
+        c += 1;
+    }
+    let mut r = row0 + 1;
+    while r < bottom {
+        frame.cells().set_styled(col0, r, '│', dim);
+        frame.cells().set_styled(right, r, '│', dim);
+        r += 1;
     }
 
-    let sel = model.sel.min(model.procs.len().saturating_sub(1));
-    for (i, p) in model.procs.iter().enumerate().take(row_h.saturating_sub(1)) {
-        let row = row0 + 1 + i;
-        let st = if i == sel {
+    // ── Area contenuto (dentro il bordo) ──
+    let cc0 = col0 + 1;
+    let cr0 = row0 + 1;
+    let cw = w - 2;
+    let chh = h - 2;
+    if cw < 8 || chh < 2 {
+        return;
+    }
+    let sb_col = cc0 + cw - 1; // scrollbar: ultima colonna del contenuto
+    let data_w = cw - 1; // larghezza del testo (la scrollbar ha la sua)
+    let visible = chh - 1; // righe dati (l'header ne occupa una)
+
+    // Finestra scorrevole: `sel` sempre visibile, `offset` entro i limiti.
+    let n = model.procs.len();
+    if n == 0 {
+        model.sel = 0;
+        model.offset = 0;
+    } else {
+        model.sel = model.sel.min(n - 1);
+        if model.sel < model.offset {
+            model.offset = model.sel;
+        }
+        if model.sel >= model.offset + visible {
+            model.offset = model.sel + 1 - visible;
+        }
+        model.offset = model.offset.min(n.saturating_sub(visible));
+    }
+
+    // Colonne: PID fisso, NAME **elastica**, poi CPU%/TIME/STATE.
+    let name_w = data_w.saturating_sub(29).max(4);
+    let hdr: [(&str, usize); 5] = [
+        ("PID", 6),
+        ("NAME", name_w),
+        ("CPU%", 6),
+        ("TIME", 7),
+        ("STATE", 6),
+    ];
+    let mut c = cc0;
+    for (name, wd) in hdr {
+        put_field(frame, c, cr0, name, wd, dim);
+        c += wd + 1;
+    }
+
+    // ── Righe dati ──
+    for i in 0..visible {
+        let idx = model.offset + i;
+        if idx >= n {
+            break;
+        }
+        let row = cr0 + 1 + i;
+        let p = &model.procs[idx];
+        let st = if idx == model.sel {
             TH.pen_on(TH.text, TH.accent)
         } else {
             card
         };
-        let mut c = col0 + 1;
-        frame
-            .cells()
-            .text_styled(c, row, &format!("{}", p.pid), st);
+        // Fascia piena su tutta la riga: la selezione evidenzia **tutta** la
+        // riga, non solo le celle con testo.
+        frame.cells().fill_styled(cc0, row, data_w, 1, ' ', st);
+        let mut c = cc0;
+        put_field(frame, c, row, &format!("{}", p.pid), 6, st);
         c += 7;
-        frame.cells().text_styled(c, row, &p.name, st);
-        c += 17;
-        frame.cells().text_styled(c, row, &pct1(p.cpu_permille), st);
+        put_field(frame, c, row, &p.name, name_w, st);
+        c += name_w + 1;
+        put_field(frame, c, row, &pct1(p.cpu_permille), 6, st);
         c += 7;
         let secs = p.ticks / TICKS_HZ;
-        frame
-            .cells()
-            .text_styled(c, row, &format!("{}:{:02}", secs / 60, secs % 60), st);
-        c += 9;
-        frame.cells().text_styled(c, row, &p.state.to_string(), st);
+        put_field(frame, c, row, &format!("{}:{:02}", secs / 60, secs % 60), 7, st);
+        c += 8;
+        put_field(frame, c, row, &p.state.to_string(), 6, st);
     }
-    // Indicatore di selezione (sulla card, non sul wallpaper).
-    if !model.procs.is_empty() {
-        frame.cells().text_styled(
-            col0,
-            row0 + 1 + sel,
-            "›",
-            TH.pen_on(TH.accent, TH.card),
-        );
+
+    // ── Scrollbar (celle, 1 colonna): track + thumb proporzionale ──
+    let track_top = cr0 + 1;
+    let track_h = visible;
+    if n > visible && track_h > 0 {
+        let thumb_h = (track_h * visible / n).max(1).min(track_h);
+        let max_off = n - visible;
+        let thumb_top = model.offset * (track_h - thumb_h) / max_off.max(1);
+        for i in 0..track_h {
+            let on = i >= thumb_top && i < thumb_top + thumb_h;
+            let st = if on {
+                TH.pen_on(TH.accent, TH.accent)
+            } else {
+                TH.pen_on(TH.track, TH.track)
+            };
+            frame.cells().set_styled(sb_col, track_top + i, ' ', st);
+        }
+    }
+}
+
+/// Scrive `s` a partire da `col`, troncandolo a `width` caratteri (monospace:
+/// 1 carattere = 1 cella). Non tocca cio' che sta oltre il campo.
+fn put_field(frame: &mut Frame, col: usize, row: usize, s: &str, width: usize, st: Style) {
+    let mut c = col;
+    for ch in s.chars().take(width) {
+        frame.cells().set_styled(c, row, ch, st);
+        c += 1;
     }
 }
 
@@ -427,7 +511,7 @@ fn on_key(b: u8, model: &mut Model) -> bool {
         b'p' => model.paused = !model.paused,
         b's' => model.sort = model.sort.next(),
         b'j' => {
-            if model.sel < model.procs.len() {
+            if model.sel + 1 < model.procs.len() {
                 model.sel += 1;
             }
         }
@@ -487,7 +571,11 @@ fn main_loop() -> ! {
         }
 
         if dirty {
-            draw(&model, &mut frame);
+            // Repaint **pieno** ogni frame: il monitor e' a 1 Hz, il costo e'
+            // trascurabile, e cosi' non dipendiamo dal differenziale (che con
+            // la tabella che si riordina a ogni tick lasciava righe "fantasma").
+            frame.cells().invalidate();
+            draw(&mut model, &mut frame);
 
             // Manda prima le toppe (pixel) **solo se cambiate**, poi il
             // differenziale delle celle.

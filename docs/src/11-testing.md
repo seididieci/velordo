@@ -389,7 +389,7 @@ log seriale.
   e reset finale, riga fuori tela che non panica) e `libs/formae` (componenti
   ADR-0100: geometria celle↔pixel, `Bar`/`Chart` dentro il rect e proporzionali
   a due metriche, `History` ad anello, `fmt`).
-  (**241 test** in tutto;
+  (**242 test** in tutto;
   `libs/net` ne ha 54, 23 dei quali sulla macchina a stati TCP e sul wiring, 2
   sul framing RFC 7858). Girano da una
   **directory neutra**: il `.cargo/config.toml` del repo impone

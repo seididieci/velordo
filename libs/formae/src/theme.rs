@@ -43,9 +43,9 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// L'opacita' di un pannello (card): ~84%. Traslucido, cosi' il wallpaper
-    /// del compositor traspare attenuato sotto il monitor (non un fondo opaco
-    /// tutto suo).
+    /// L'opacita' di un pannello (card): ~93%. Traslucido quel tanto che basta
+    /// a far intravedere il wallpaper attenuato; a 84% il logo chiaro
+    /// "trapelava" nelle celle vuote e la tabella diventava illeggibile.
     pub const PANEL_ALPHA: u8 = 0xD6;
 
     /// Il tema scuro della dashboard.
