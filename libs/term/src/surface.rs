@@ -664,6 +664,12 @@ impl Surface {
     /// layer 0 BMP: i pixel sovrapposti vengono composti sopra lo sfondo
     /// (rispettandone l'alpha) prima di disegnare il glifo, cosi' il testo
     /// resta sopra l'immagine.
+    ///
+    /// `bg_ready` = il fondo (la **banda** dal wallpaper) e' gia' nella
+    /// superficie per questa cella. In quel caso si applica **solo** il bg
+    /// della cella (un pannello opaco copre il fondo, uno traslucido lo
+    /// tinge) e **non** si ricompone pagina+immagine: ricomporla dava il
+    /// doppio wallpaper, sfasato sulle tile non in origine.
     pub fn put_char(
         &mut self,
         col: usize,
@@ -675,6 +681,7 @@ impl Surface {
         cursor: bool,
         font: Option<&mut Font>,
         l0: Option<(&[u8], u32, u32, u32, u32)>,
+        bg_ready: bool,
     ) {
         match self {
             Surface::Pixel(p) => {
@@ -688,53 +695,72 @@ impl Surface {
                 let bg_color = rgba_to_bgra(bg);
                 let fg_color = rgba_to_bgra(fg);
                 let bg_a = alpha(bg);
-                // Background: opaco -> fill diretto; altrimenti la cella
-                // riparte dal **fondo di pagina** e ci si fonde sopra il bg
-                // richiesto (il terminale non ha altri layer sotto: partire
-                // dal pixel precedente lascerebbe il carattere vecchio).
-                if bg_a == 0xFF {
-                    p.fill_rect(x, y, w, ch, bg_color);
-                } else {
-                    p.fill_rect(x, y, w, ch, rgba_to_bgra(crate::grid::color::BLACK));
-                    p.fill_rect_blend(x, y, w, ch, bg_color, bg_a);
-                }
-                // Copia i pixel del layer 0 sopra lo sfondo dove lo span
-                // sovrappone il BMP: cosi' l'immagine resta visibile dietro
-                // al testo (e il testo non cancella il BMP). L'alpha
-                // dell'immagine viene rispettato: lo sfondo trasparente del
-                // BMP lascia vedere lo sfondo della cella.
-                if let Some((l0_data, l0_w, l0_h, l0_ox, l0_oy)) = l0 {
-                    let img_left = l0_ox;
-                    let img_right = l0_ox + l0_w;
-                    let img_top = l0_oy;
-                    let img_bottom = l0_oy + l0_h;
-                    let overlap_x_start = x.max(img_left);
-                    let overlap_x_end = (x + w).min(img_right);
-                    let overlap_y_start = y.max(img_top);
-                    let overlap_y_end = (y + ch).min(img_bottom);
-                    if overlap_x_start < overlap_x_end && overlap_y_start < overlap_y_end {
-                        let n = overlap_x_end - overlap_x_start;
-                        for sy in overlap_y_start..overlap_y_end {
-                            if sy >= p.height {
-                                break;
-                            }
-                            let sy0 = (sy - l0_oy) as usize;
-                            if sy0 >= l0_h as usize {
-                                break;
-                            }
-                            let src_off = sy0 * l0_w as usize * 4
-                                + ((overlap_x_start - l0_ox) as usize) * 4;
-                            let bytes = n as usize * 4;
-                            if src_off + bytes > l0_data.len() {
-                                break;
-                            }
-                            p.blend_bgra_span(
-                                overlap_x_start,
-                                sy,
-                                n,
-                                &l0_data[src_off..src_off + bytes],
-                            );
+                let is_page = bg == crate::grid::color::BLACK;
+                if bg_ready {
+                    // Il fondo (la **banda** dal wallpaper) e' gia' nella
+                    // superficie: si applica solo il bg della cella. Un bg
+                    // opaco colorato lo **copre**, uno traslucido lo **tinge**,
+                    // il fondo di pagina lo lascia com'e'. MAI ricomporre
+                    // pagina+immagine qui: era il doppio wallpaper sfasato
+                    // (l'immagine ripartiva dall'angolo della tile).
+                    if bg_a == 0xFF {
+                        if !is_page {
+                            p.fill_rect(x, y, w, ch, bg_color);
                         }
+                    } else if bg_a > 0 {
+                        p.fill_rect_blend(x, y, w, ch, bg_color, bg_a);
+                    }
+                } else {
+                    // Compone dal nulla (nessun fondo gia' nella superficie):
+                    // pagina, immagine (solo se la cella mostra il wallpaper),
+                    // poi il bg sopra.
+                    p.fill_rect(x, y, w, ch, rgba_to_bgra(crate::grid::color::BLACK));
+                    if is_page || bg_a < 0xFF {
+                        // Copia i pixel del layer 0 sopra la pagina dove lo
+                        // span sovrappone il BMP, rispettandone l'alpha.
+                        if let Some((l0_data, l0_w, l0_h, l0_ox, l0_oy)) = l0 {
+                            let img_left = l0_ox;
+                            let img_right = l0_ox + l0_w;
+                            let img_top = l0_oy;
+                            let img_bottom = l0_oy + l0_h;
+                            let overlap_x_start = x.max(img_left);
+                            let overlap_x_end = (x + w).min(img_right);
+                            let overlap_y_start = y.max(img_top);
+                            let overlap_y_end = (y + ch).min(img_bottom);
+                            if overlap_x_start < overlap_x_end
+                                && overlap_y_start < overlap_y_end
+                            {
+                                let n = overlap_x_end - overlap_x_start;
+                                for sy in overlap_y_start..overlap_y_end {
+                                    if sy >= p.height {
+                                        break;
+                                    }
+                                    let sy0 = (sy - l0_oy) as usize;
+                                    if sy0 >= l0_h as usize {
+                                        break;
+                                    }
+                                    let src_off = sy0 * l0_w as usize * 4
+                                        + ((overlap_x_start - l0_ox) as usize) * 4;
+                                    let bytes = n as usize * 4;
+                                    if src_off + bytes > l0_data.len() {
+                                        break;
+                                    }
+                                    p.blend_bgra_span(
+                                        overlap_x_start,
+                                        sy,
+                                        n,
+                                        &l0_data[src_off..src_off + bytes],
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if bg_a == 0xFF {
+                        if !is_page {
+                            p.fill_rect(x, y, w, ch, bg_color);
+                        }
+                    } else if bg_a > 0 {
+                        p.fill_rect_blend(x, y, w, ch, bg_color, bg_a);
                     }
                 }
                 glyph_pixels(p, x, y, w, cp, fg_color, font);
@@ -852,7 +878,7 @@ mod tests {
             let mut fb = alloc::vec![0u32; 32 * 16];
             let mut s = surface(&mut fb);
             // Cella (1,1) = pixel (8,8): l'immagine (8x8) la ricopre esatta.
-            s.put_char(1, 1, 1, 0, color::WHITE, bg, false, None, Some((&img, 8, 8, 8, 8)));
+            s.put_char(1, 1, 1, 0, color::WHITE, bg, false, None, Some((&img, 8, 8, 8, 8)), false);
             for y in 0..8usize {
                 for x in 0..8usize {
                     let got = fb[(8 + y) * 32 + (8 + x)];
@@ -882,7 +908,7 @@ mod tests {
         }
         let mut fb = alloc::vec![0u32; 32 * 16];
         let mut s = surface(&mut fb);
-        s.put_char(1, 1, 1, 0, color::WHITE, color::BLACK, false, None, Some((&img, 8, 8, 8, 8)));
+        s.put_char(1, 1, 1, 0, color::WHITE, color::BLACK, false, None, Some((&img, 8, 8, 8, 8)), false);
 
         let bg = rgba_to_bgra(color::BLACK);
         let white = 0xFFFF_FFFF;
@@ -894,6 +920,44 @@ mod tests {
                 a => assert_eq!(got, blend(bg, white, a as u32), "alpha {}", a),
             }
         }
+    }
+
+    /// Un bg **opaco colorato** e' un pannello: copre il fondo e **non**
+    /// ricompone l'immagine sopra (era il doppio wallpaper sfasato sulle tile
+    /// spostate). Un bg **traslucido** invece tinge il fondo gia' presente.
+    #[test]
+    fn pannello_opaco_copre_traslucido_tinge() {
+        let img = immagine();
+        let wall = rgba(0x40, 0x80, 0xC0, 0xFF); // "wallpaper" gia' nella superficie
+        let panel = rgba(0x20, 0x10, 0x30, 0xFF); // pannello opaco
+        let panel_t = rgba(0x20, 0x10, 0x30, 0x80); // pannello traslucido
+        let cell = ' ' as u32;
+
+        // (a) compone dal nulla, bg opaco custom + immagine: il pannello copre.
+        let mut fb = alloc::vec![0u32; 32 * 16];
+        let mut s = surface(&mut fb);
+        s.put_char(0, 0, 1, cell, color::WHITE, panel, false, None, Some((&img, 8, 8, 0, 0)), false);
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(fb[y * 32 + x], rgba_to_bgra(panel), "opaco copre ({},{})", x, y);
+            }
+        }
+
+        // (b) banda gia' presente (bg_ready), bg opaco: copre il fondo.
+        let mut fb2 = alloc::vec![rgba_to_bgra(wall); 32 * 16];
+        let mut s2 = surface(&mut fb2);
+        s2.put_char(0, 0, 1, cell, color::WHITE, panel, false, None, None, true);
+        assert_eq!(fb2[0], rgba_to_bgra(panel), "opaco copre la banda");
+
+        // (c) banda gia' presente, bg traslucido: tinge il fondo (non lo lascia,
+        // non lo copre). Fondamentale per i pannelli trasparenti del monitor.
+        let mut fb3 = alloc::vec![rgba_to_bgra(wall); 32 * 16];
+        let mut s3 = surface(&mut fb3);
+        s3.put_char(0, 0, 1, cell, color::WHITE, panel_t, false, None, None, true);
+        let got = fb3[0];
+        assert_ne!(got, rgba_to_bgra(wall), "traslucido: non lascia il fondo");
+        assert_ne!(got, rgba_to_bgra(panel), "traslucido: non e' il pieno");
+        assert_eq!(got, blend(rgba_to_bgra(wall), rgba_to_bgra(panel), 0x80), "blend col fondo");
     }
 
     /// I colori sono `0xRRGGBBAA`: l'alpha e' il byte **basso**, il rosso
@@ -975,7 +1039,7 @@ mod tests {
         let mut fb = fb_di_pagina(40, 44);
         let mut s = surface_16px(&mut fb);
         let bg = rgba_to_bgra(color::BLACK);
-        s.put_char(0, 0, 2, 0xF520, color::WHITE, color::BLACK, false, Some(&mut font), None);
+        s.put_char(0, 0, 2, 0xF520, color::WHITE, color::BLACK, false, Some(&mut font), None, false);
         let mut ink = 0;
         for y in 0..22 {
             for x in 10..20 {
@@ -1006,7 +1070,7 @@ mod tests {
         let mut fb = fb_di_pagina(40, 44);
         let mut s = surface_16px(&mut fb);
         let bg = rgba_to_bgra(color::BLACK);
-        s.put_char(0, 0, 1, 0xF520, color::WHITE, color::BLACK, false, Some(&mut font), None);
+        s.put_char(0, 0, 1, 0xF520, color::WHITE, color::BLACK, false, Some(&mut font), None, false);
         // La prima cella e' dipinta (il glifo c'e'), la seconda e' intatta.
         let mut ink0 = 0;
         for y in 0..22 {
@@ -1031,7 +1095,7 @@ mod tests {
         let mut fb = alloc::vec![0u32; 40 * 44];
         let mut s = surface_16px(&mut fb);
         let red = rgba_to_bgra(color::RED);
-        s.put_char(1, 0, 2, 0, color::WHITE, color::RED, false, None, None);
+        s.put_char(1, 0, 2, 0, color::WHITE, color::RED, false, None, None, false);
         for y in 0..22 {
             for x in 10..30 {
                 assert_eq!(fb[y * 40 + x], red, "pixel ({},{}) del background", x, y);

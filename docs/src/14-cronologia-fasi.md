@@ -5326,7 +5326,7 @@ gate): 10 check — avvio, **tick senza tasti** (2→7 in 5 s), pausa (9=9),
 sort (`cpu`→`time`), selezione (0→2), **card dipinta a pixel** (104k px
 non-wallpaper), **grafico mosso da solo** (486 px in 3 s), uscita
 (`[monitor] exit`) e ritorno al prompt, zero `[console] toppa fuori dalla
-tile`. Unit host **240** (formae 14); gate invariato (5/5, 64/64, 4/4, 12/12,
+tile`. Unit host **241** (formae 14, term 50); gate invariato (5/5, 64/64, 4/4, 12/12,
 72/72, 12/12, shell 33/33).
 
 Scelta di look: la tabella resta **testo** ma sopra una **card a celle** (fondo
@@ -5396,3 +5396,32 @@ tick ~19).
    `0.5%`), e il totale calcolato come **somma dei permille per-processo** —
    così lista e totale coincidono per costruzione. Il marker porta `sumproc=`
    e `run-monitor-tests.sh` verifica `sumproc == cpu`.
+
+**Il wallpaper sfasato nella tile (e il monitor traslucido).** Aprendo il
+monitor su una tile a **destra** il logo del wallpaper si ripeteva sfasato
+dentro l'area della tabella. Non era la "tile che legge la sua fetta" (quello
+lo fa il compositor, a coordinate schermo, ed è corretto): era `put_char` che,
+per una cella con `bg` **colorato opaco** (la tabella, `TH.card`), dopo aver
+riempito il pannello **ricomponeva l'immagine del layer 0 sopra** il pannello —
+e con l'offset `saturating_sub(origine_tile)`, quindi l'immagine ripartiva
+dall'angolo della tile.
+
+Fix in `libs/term::surface::put_char`: la composizione della cella dipende da
+`bg_ready` (il fondo, la banda dal wallpaper, è già nella superficie).
+Con la banda presente si applica **solo** il `bg` della cella — un pannello
+opaco **copre**, uno traslucido **tinge**, il fondo di pagina lascia il
+wallpaper — e **mai** si ricompone pagina+immagine. Senza banda si compone dal
+nulla come prima. Unit test `pannello_opaco_copre_traslucido_tinge` (opaco
+copre l'immagine; traslucido tinge il fondo, `blend(bg, panel, 0x80)`).
+
+Sopra questa base, il **monitor traslucido**: `TH.card` è un blu scuro "in
+tema" (`#0E1222`) all'**84%** (`PANEL_ALPHA = 0xD6`); `draw` riempie **tutta**
+la tela con quel bg (pannello unico) e il contenuto ci sta sopra. Le card sono
+toppe **trasparenti** con lo stesso colore (le celle vuote sulla toppa vengono
+saltate, `blank_over_patch`); la tabella è testo sopra il pannello; la
+selezione resta una fascia accent opaca. Risultato: il monitor è un **overlay**
+sul wallpaper (il fondo si vede attenuato e **continuo**, niente logo ripetuto).
+Costo dichiarato: a 84% il logo chiaro traspare nelle celle vuote (rumore di
+fondo sui nomi); alzare `PANEL_ALPHA` (es. `0xE8`) lo attenua — è una costante.
+Verifica: split (Super+%) + monitor nella tile di destra, screendump: il "V"
+attraversa i due tile senza ripetersi.

@@ -64,6 +64,22 @@ segmento — e 443.520 byte (una card 630×176) — per tick, superando
 `PATCH_MAX_BYTES` dopo ~19 tick e facendosi **rifiutare** le toppe successive
 (il grafico "si ferma"). Con la sostituzione `patch_bytes` resta costante.
 
+### 2b. Il fondo di una cella sopra il wallpaper (compositore, non doppia copia)
+
+Il compositor è **uno**: la banda dal wallpaper è la base della zona sporca, e
+sopra si disegna il contenuto della tile. Per una cella, `put_char` rispetta
+questo ordine (`bg_ready` = la banda è già nella superficie):
+
+- **bg di pagina** (`BLACK`) → il wallpaper si vede dietro al testo;
+- **bg opaco colorato** → il pannello **copre** (nessuna immagine ridisegnata
+  sopra: era il "wallpaper sfasato" sulle tile non in origine);
+- **bg traslucido** (`alpha < 255`) → il pannello **tinge** il fondo già
+  presente (il wallpaper traspare attenuato, continuo).
+
+Con la banda presente non si ricompone **mai** pagina+immagine (era il doppio
+wallpaper, sfasato dall'`saturating_sub` dell'origine tile). È la base dei
+pannelli traslucidi delle app (il monitor).
+
 Il resize (`Grid::resize`) distingue **due casi**, e la differenza è la
 larghezza:
 

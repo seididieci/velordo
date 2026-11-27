@@ -611,6 +611,17 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   `100%`→`9%`) lascia la coda vecchia; e la CPU per processo va con **un
   decimale** (con il totale = **somma dei permille per-processo**, così lista e
   totale coincidono — `sumproc=` nel marker).
+  **Wallpaper sfasato nella tile**: `put_char` ricomponeva pagina+immagine anche
+  sopra un `bg` **opaco colorato** (la tabella), con offset
+  `saturating_sub(origine tile)` → il logo ripartiva dall'angolo della tile.
+  Ora `put_char` prende `bg_ready`: con la banda del wallpaper già presente
+  applica **solo** il bg (opaco copre, traslucido tinge, pagina lascia il
+  wallpaper) e **mai** ricompone l'immagine. Sopra: il monitor ha **un solo
+  pannello traslucido** (`TH.card` blu scuro `#0E1222` a `0xD6` ≈84%,
+  `PANEL_ALPHA`); `draw` riempie tutta la tela con quel bg, le card sono toppe
+  trasparenti con lo stesso colore, la tabella è testo sopra → overlay sul
+  wallpaper (continuo, attenuato). A 84% il logo traspare nelle celle vuote:
+  alzare `PANEL_ALPHA` lo attenua.
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
@@ -1052,7 +1063,7 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
 ./scripts/run-monitor-tests.sh   # 1 Hz senza tasti, pausa, sort, selezione, pixel, uscita
 
 # Unit test host dei crate condivisi (FUORI dal gate: millisecondi, no boot)
-./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), pictura + tabula (toppe e canvas a celle), formae (componenti: chart/barra/history/fmt, ADR-0100), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, syscall-numbers, impluvium-tree, blake2s, sig, tls: 240 test
+./scripts/run-unit-tests.sh   # term, musivum (D8a), littera + sess-proto (D8c1), pictura + tabula (toppe e canvas a celle), formae (componenti: chart/barra/history/fmt, ADR-0100), net (IPv6/NDP/TCP/SIIT/DNS + framing RFC 7858), net-ep, broker-proto, valloc, syscall-numbers, impluvium-tree, blake2s, sig, tls: 241 test
 
 # Test in QEMU (output seriale, esce con Ctrl-C)
 ./run.sh

@@ -250,6 +250,21 @@ fn draw(model: &Model, frame: &mut Frame) {
 
     frame.begin();
 
+    // Sfondo **unico traslucido** di tutto il monitor: ogni cella ha il bg
+    // della card (blu scuro, ~84% di opacita'). Il compositor lo fonde sul
+    // wallpaper (la banda del fondo e' gia' li'), quindi il monitor e' un
+    // overlay: il wallpaper traspare attenuato, non un pannello opaco.
+    // Le card sono toppe **trasparenti** con lo stesso colore; le loro celle
+    // vuote vengono saltate (`blank_over_patch`) e mostrano la toppa.
+    frame.cells().fill_styled(
+        0,
+        0,
+        cols as usize,
+        rows as usize,
+        ' ',
+        TH.pen_on(TH.text, TH.card),
+    );
+
     // ── Titolo ──
     let title = format!(
         " monitor  uptime {}  procs {}  sort:{}",
@@ -257,7 +272,9 @@ fn draw(model: &Model, frame: &mut Frame) {
         model.procs.len(),
         model.sort.label()
     );
-    frame.cells().text_styled(0, 0, &title, TH.pen(TH.text));
+    // Scritto **sopra** il fondo traslucido (bg della card, non di pagina):
+    // cosi' anche il titolo e' sopra il pannello, non sul wallpaper pieno.
+    frame.cells().text_styled(0, 0, &title, TH.pen_on(TH.text, TH.card));
 
     // ── Layout delle card ──
     // Due colonne a >= 100 colonne (CPU a sinistra, MEM a destra), una
@@ -345,16 +362,13 @@ fn draw_mem_card(frame: &mut Frame, rect: CellRect) {
 }
 
 fn draw_proc_card(model: &Model, frame: &mut Frame, rect: CellRect) {
-    // Coordinate in **celle**: la tabella e' testo puro, ma sopra una **card a
-    // celle** (fondo `TH.card` per cella) — cosi' il wallpaper (il logo) non
-    // trapela dietro i numeri. Niente toppa: una tabella resta testo.
+    // Coordinate in **celle**: la tabella e' testo sopra il **pannello
+    // traslucido unico** (gia' riempito da `draw`)); qui si scrivono solo le
+    // righe e la fascia di selezione.
     let col0 = rect.col as usize;
     let row0 = rect.row as usize;
     let row_h = (rect.rows as usize).saturating_sub(1);
     let card = TH.pen_on(TH.text, TH.card);
-    frame
-        .cells()
-        .fill_styled(col0, row0, rect.cols as usize, rect.rows as usize, ' ', card);
 
     // Intestazioni (riga 0 della card).
     let headers: [u16; 5] = [6, 16, 6, 8, 6];

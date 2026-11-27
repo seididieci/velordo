@@ -2,7 +2,7 @@
 //! card, testo, accento, track, soglie). Una decisione, non un caso
 //! sparso nei widget.
 
-use pictura::{rgb, Color};
+use pictura::{rgb, with_alpha, Color};
 
 use crate::geom::faded;
 use crate::Style;
@@ -43,10 +43,17 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// L'opacita' di un pannello (card): ~84%. Traslucido, cosi' il wallpaper
+    /// del compositor traspare attenuato sotto il monitor (non un fondo opaco
+    /// tutto suo).
+    pub const PANEL_ALPHA: u8 = 0xD6;
+
     /// Il tema scuro della dashboard.
     pub const NIGHT: Theme = Theme {
         page: rgb(0x07, 0x07, 0x0C),
-        card: rgb(0x0D, 0x10, 0x18),
+        // Blu scuro "in tema", traslucido: il monitor e' un overlay sul
+        // wallpaper, non un pannello opaco.
+        card: with_alpha(rgb(0x0E, 0x12, 0x22), Theme::PANEL_ALPHA),
         text: rgb(0xE8, 0xEA, 0xF0),
         dim: rgb(0x8A, 0x93, 0xA6),
         accent: rgb(0xA7, 0x8B, 0xFA),

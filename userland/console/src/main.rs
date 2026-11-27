@@ -1730,6 +1730,7 @@ impl Term {
         fg: u32,
         bg: u32,
         cursor: bool,
+        bg_ready: bool,
     ) {
         // Passa il layer 0 a put_char: i pixel BMP sovrapposti vengono
         // copiati sopra lo sfondo prima del glifo, cosi' il testo resta
@@ -1762,12 +1763,12 @@ impl Term {
                     (d, w, h, ox.saturating_sub(rx), oy.saturating_sub(ry))
                 });
                 let mut surf = Surface::Pixel(view);
-                surf.put_char(col, row, span, cp, fg, bg, cursor, font, l0);
+                surf.put_char(col, row, span, cp, fg, bg, cursor, font, l0, bg_ready);
             }
             // Fallback VGA: una sola griglia testuale, nessuna tile pixel.
             None => self
                 .surface
-                .put_char(col, row, span, cp, fg, bg, cursor, font, l0),
+                .put_char(col, row, span, cp, fg, bg, cursor, font, l0, bg_ready),
         }
     }
 
@@ -1855,7 +1856,7 @@ impl Term {
         }
         // Celle con carattere: put_char gestisce layer 0 (BMP come sfondo) +
         // glifo in un colpo solo.
-        self.draw_cell(t, start, row, span, cell.cp, cell.fg, cell.bg, cursor);
+        self.draw_cell(t, start, row, span, cell.cp, cell.fg, cell.bg, cursor, bg_ready);
     }
 
     /// Ridisegna il fondo dell'intero framebuffer: il **colore di pagina**
