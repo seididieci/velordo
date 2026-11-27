@@ -122,6 +122,14 @@ T1="$(count_lines '[monitor] tick')"
 TICK_LINE="$(grep -aF '[monitor] tick' "$LOG" | tail -1 || true)"
 echo "[mon] tick: $T0 -> $T1 in 5 s; ultimo: $TICK_LINE"
 
+# 2b. La CPU **per processo** funziona: il massimo tra i processi e' > 0
+#     (console/monitor lavorano) e la somma non e' tutta a zero mentre il
+#     globale e' > 0. Prima era sempre 0 perche' il delta usava il totale
+#     globale invece dei tick per pid.
+MAXPROC="$(printf '%s' "$TICK_LINE" | sed 's/.*maxproc=//; s/ .*//' || true)"
+GLOBALCPU="$(printf '%s' "$TICK_LINE" | sed 's/.*tick cpu=//; s/ .*//' || true)"
+echo "[mon] cpu globale=${GLOBALCPU:-?} massimo per processo=${MAXPROC:-?}"
+
 # 3. Pausa: nessun nuovo tick in 3 s.
 send_mon 'sendkey p'
 sleep 0.5
@@ -181,6 +189,8 @@ x0, x1 = 4, min(w, 626)
 y0, y1 = 48, min(h, 216)
 drawn = 0     # pixel non-wallpaper (la card e' disegnata)
 moved = 0     # pixel cambiati fra i due frame (il grafico si anima)
+core = 0      # pixel cambiati nel **corpo** del grafico (sotto l'etichetta):
+              # prova che la linea avanza, non solo che cambia il valore "13%"
 for y in range(y0, y1):
     base = y * w * 3
     for x in range(x0, x1):
@@ -190,12 +200,15 @@ for y in range(y0, y1):
             drawn += 1
         if pa[o:o + 3] != pb[o:o + 3]:
             moved += 1
-print(drawn, moved)
+            if y >= 100:
+                core += 1
+print(drawn, moved, core)
 PY
 )"
 CARD_DRAWN="$(printf '%s' "$PIXELS" | cut -d' ' -f1)"
 CHART_MOVED="$(printf '%s' "$PIXELS" | cut -d' ' -f2)"
-echo "[mon] pixel: card dipinta=$CARD_DRAWN, grafico mosso=$CHART_MOVED in 3 s"
+CHART_CORE="$(printf '%s' "$PIXELS" | cut -d' ' -f3)"
+echo "[mon] pixel: card dipinta=$CARD_DRAWN, grafico mosso=$CHART_MOVED (corpo=$CHART_CORE) in 3 s"
 
 # 6. `q` esce e il prompt torna.
 send_mon 'sendkey q'
@@ -230,6 +243,8 @@ if [ -n "${START_LINE:-}" ]; then ok=1; else ok=0; fi
 check "il monitor parte ($START_LINE)" "$ok"
 if [ "${T1:-0}" -gt "${T0:-0}" ] 2>/dev/null; then ok=1; else ok=0; fi
 check "i valori si aggiornano da soli senza tasti ($T0 -> $T1 tick)" "$ok"
+if [ "${MAXPROC:-0}" -gt 0 ] 2>/dev/null; then ok=1; else ok=0; fi
+check "la CPU per processo non e' sempre 0 (massimo ${MAXPROC:-0} permille)" "$ok"
 if [ "${P1:-0}" = "${P0:-0}" ] 2>/dev/null; then ok=1; else ok=0; fi
 check "la pausa ferma i tick ($P0 = $P1)" "$ok"
 if [ -n "${SORT_AFTER:-}" ] && [ "$SORT_BEFORE" != "$SORT_AFTER" ]; then ok=1; else ok=0; fi
@@ -239,7 +254,7 @@ check "la selezione si muove ($SEL_BEFORE -> $SEL_AFTER)" "$ok"
 if [ "${CARD_DRAWN:-0}" -gt 1000 ] 2>/dev/null; then ok=1; else ok=0; fi
 check "la card CPU e' dipinta a pixel ($CARD_DRAWN px non-wallpaper)" "$ok"
 if [ "${CHART_MOVED:-0}" -gt 50 ] 2>/dev/null; then ok=1; else ok=0; fi
-check "il grafico si muove da solo ($CHART_MOVED px cambiati in 3 s)" "$ok"
+check "il grafico si muove da solo ($CHART_MOVED px cambiati in 3 s, corpo $CHART_CORE)" "$ok"
 if [ "${PROMPT_NOW:-0}" -ge 1 ] 2>/dev/null; then ok=1; else ok=0; fi
 check "uscita e ritorno al prompt" "$ok"
 if [ "${EXIT_OK:-0}" = "1" ]; then ok=1; else ok=0; fi

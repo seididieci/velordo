@@ -43,6 +43,8 @@ const SAMPLE_TICKS: u64 = 100; // 1 Hz
 const HISTORY: usize = 60; // 60 secondi di storia
 
 const PS_MAX: u32 = civis::syscall_numbers::PS_SCAN_MAX;
+/// Slot della tabella `ps` (indice = pid).
+const PS_SLOTS: usize = PS_MAX as usize;
 
 /// Il tema della dashboard (una decisione sola).
 const TH: Theme = Theme::NIGHT;
@@ -109,7 +111,15 @@ struct Model {
     sort: Sort,
     sel: usize,
     paused: bool,
-    last_ticks: Option<u64>,
+    /// Tick precedenti **per pid**: il delta di CPU di un processo è
+    /// `e.ticks - prev_ticks[pid]`. (Prima si usava il totale globale, quindi
+    /// ogni processo risultava sempre 0%.)
+    prev_ticks: [u64; PS_SLOTS],
+    /// Il pid era presente al campione precedente: un pid riusato non eredita
+    /// i tick del processo morto.
+    seen: [bool; PS_SLOTS],
+    /// Almeno un campione fatto (il primo è la baseline: niente delta).
+    primed: bool,
     last_wall: u64,
 }
 
@@ -127,7 +137,9 @@ impl Model {
             sort: Sort::Cpu,
             sel: 0,
             paused: false,
-            last_ticks: None,
+            prev_ticks: [0; PS_SLOTS],
+            seen: [false; PS_SLOTS],
+            primed: false,
             last_wall: now,
         }
     }
@@ -136,14 +148,27 @@ impl Model {
     fn sample(&mut self) -> (u32, u32, usize) {
         let wall = sys::get_ticks() as u64;
         let dt = wall.saturating_sub(self.last_wall).max(1);
-        let mut total_ticks: u64 = 0;
         let mut nprocs: usize = 0;
+        // Somma dei delta **per processo**: la CPU globale e' la parte di tempo
+        // non-idle, e un processo che muore non falsa il totale (a differenza di
+        // `somma - somma_precedente`).
+        let mut sum_delta: u64 = 0;
+        let mut present = [false; PS_SLOTS];
         let mut rows: Vec<Proc> = Vec::new();
 
         for pid in 1..PS_MAX {
             // pid 0 = idle: escluso (la CPU dell'idle non conta).
             if let Some(e) = sys::ps_info(pid) {
-                let name = e.name_str().to_string();
+                let idx = pid as usize;
+                present[idx] = true;
+                let delta = if self.primed && self.seen[idx] {
+                    e.ticks.saturating_sub(self.prev_ticks[idx])
+                } else {
+                    0 // baseline o pid nuovo: nessun delta
+                };
+                self.prev_ticks[idx] = e.ticks;
+                sum_delta = sum_delta.saturating_add(delta);
+                let cpu_permille = ((delta.saturating_mul(1000)) / dt).min(1000) as u32;
                 let state = match e.state {
                     0 => 'R',
                     1 => 'S',
@@ -151,32 +176,23 @@ impl Model {
                     3 => 'Z',
                     _ => '?',
                 };
-                let cpu_permille = self
-                    .last_ticks
-                    .map(|lt| {
-                        let d = e.ticks.saturating_sub(lt);
-                        ((d.saturating_mul(1000)) / dt).min(1000) as u32
-                    })
-                    .unwrap_or(0);
                 rows.push(Proc {
                     pid: e.pid,
-                    name,
+                    name: e.name_str().to_string(),
                     cpu_permille,
                     ticks: e.ticks,
                     state,
                 });
-                total_ticks = total_ticks.saturating_add(e.ticks);
                 nprocs += 1;
             }
         }
+        // I pid spariti non devono lasciare `seen` acceso: se il pid viene
+        // riusato da un processo nuovo, riparte da zero.
+        self.seen[1..].copy_from_slice(&present[1..]);
+        self.primed = true;
 
-        // CPU% globale = delta ticks di processo / delta parete, singolo core.
-        let cpu_permille = if let Some(lt) = self.last_ticks {
-            let dp = total_ticks.saturating_sub(lt);
-            ((dp.saturating_mul(1000)) / dt).min(1000) as u32
-        } else {
-            0 // primo campione: baseline
-        };
+        // CPU% globale = somma dei delta per-processo / delta parete (1 core).
+        let cpu_permille = ((sum_delta.saturating_mul(1000)) / dt).min(1000) as u32;
 
         // RAM: used / total.
         let (_free, total, used) = sys::meminfo();
@@ -201,7 +217,6 @@ impl Model {
             self.sel = rows.len().saturating_sub(1);
         }
         self.procs = rows;
-        self.last_ticks = Some(total_ticks);
         self.last_wall = wall;
         (cpu_permille, mem_permille, nprocs)
     }
@@ -281,6 +296,9 @@ fn draw_cpu_card(model: &Model, frame: &mut Frame, rect: CellRect) {
         let top = px.y + m.cell_h;
         let bottom = px.bottom() - m.cell_h;
         let chart_r = PxRect::new(px.x + 2, top, px.w.saturating_sub(4), bottom.saturating_sub(top));
+        // Auto-scala alla finestra: con la storia **piena** (campionamento a
+        // 1 Hz regolare) la linea e l'area riempiono il grafico anche a CPU
+        // bassa; una scala fissa 0..100 schiaccerebbe tutto sul fondo.
         Chart::new(&samples[..nn.min(samples.len())], TH.accent).draw(t, chart_r);
         let bar_r = PxRect::new(px.x + 2, px.bottom() - m.cell_h + 4, px.w.saturating_sub(4), 2);
         let mut bar = Bar::new(TH.track, TH.level(last as u32));
@@ -421,68 +439,97 @@ fn main_loop() -> ! {
     let (mut cols, mut rows) = screen.size();
     let mut frame = Frame::new(Metrics::new(cols, rows, cw, ch));
 
-    let mut deadline = input_ticks_now() + SAMPLE_TICKS;
+    let mut next_sample = input_ticks_now() + SAMPLE_TICKS;
+    // Ultimo invio di ogni toppa (stesso indice del frame): una toppa identica
+    // non si rispedisce (la card MEM cambia raramente, la CPU ogni tick).
+    let mut sent: Vec<Vec<u8>> = Vec::new();
+    let mut dirty = true; // primo frame da disegnare
 
     let _ = civis::print_string(format!("[monitor] start {}x{}\n", cols, rows).as_bytes());
 
     loop {
-        // Riadattamento: il frame **riusa** la tela (il differenziale non
-        // rimanda tutto); un resize la scarta e si ridisegna da zero.
+        // Riadattamento: il frame **riusa** la tela (differenziale), un resize
+        // la scarta e si ridisegna da zero.
         if screen.poll_resize() {
             let (c, r) = screen.size();
             cols = c;
             rows = r;
             frame.resize(cols, rows);
+            sent.clear();
+            dirty = true;
             let _ = civis::print_string(
                 format!("[monitor] resize {}x{}\n", cols, rows).as_bytes(),
             );
         }
 
-        draw(&model, &mut frame);
+        if dirty {
+            draw(&model, &mut frame);
 
-        // Manda prima le toppe (pixel), poi il differenziale delle celle.
-        let patches = frame.patches().len();
-        let mut patch_bytes: usize = 0;
-        let sess = civis::sess::current();
-        for p in frame.patches() {
-            let rect = p.rect;
-            patch_bytes += p.canvas.bytes().len();
-            if let Some(s) = sess {
-                let _ = s.patch(
-                    rect.col,
-                    rect.row,
-                    rect.cols,
-                    rect.rows,
-                    p.canvas.bytes(),
-                    b"monitor",
-                );
+            // Manda prima le toppe (pixel) **solo se cambiate**, poi il
+            // differenziale delle celle.
+            let patches = frame.patches().len();
+            if sent.len() != patches {
+                sent = (0..patches).map(|_| Vec::new()).collect();
             }
+            let mut sent_bytes: usize = 0;
+            let sess = civis::sess::current();
+            for (i, p) in frame.patches().iter().enumerate() {
+                let rect = p.rect;
+                let bytes = p.canvas.bytes();
+                if let Some(s) = sess {
+                    if sent[i].as_slice() != bytes {
+                        let _ = s.patch(
+                            rect.col,
+                            rect.row,
+                            rect.cols,
+                            rect.rows,
+                            bytes,
+                            b"monitor",
+                        );
+                        sent[i].clear();
+                        sent[i].extend_from_slice(bytes);
+                        sent_bytes += bytes.len();
+                    }
+                }
+            }
+            let diff = frame.diff();
+            if !diff.is_empty() {
+                let _ = screen.write(diff);
+            }
+            let _ = screen.present();
+
+            // Marker seriale per i test.
+            let maxproc = model.procs.iter().map(|p| p.cpu_permille).max().unwrap_or(0);
+            let _ = civis::print_string(
+                format!(
+                    "[monitor] tick cpu={} maxproc={} mem={} procs={} sel={} sort={} patches={} bytes={}\n",
+                    model.cpu_hist.last().unwrap_or(0),
+                    maxproc,
+                    model.mem_hist.last().unwrap_or(0),
+                    model.procs.len(),
+                    model.sel,
+                    model.sort.label(),
+                    patches,
+                    sent_bytes,
+                )
+                .as_bytes(),
+            );
+            dirty = false;
         }
-        let diff = frame.diff();
-        if !diff.is_empty() {
-            let _ = screen.write(diff);
-        }        let _ = screen.present();
 
-        // Marker seriale per i test.
-        let _ = civis::print_string(
-            format!(
-                "[monitor] tick cpu={} mem={} procs={} sel={} sort={} patches={} bytes={}\n",
-                model.cpu_hist.last().unwrap_or(0),
-                model.mem_hist.last().unwrap_or(0),
-                model.procs.len(),
-                model.sel,
-                model.sort.label(),
-                patches,
-                patch_bytes,
-            )
-            .as_bytes(),
-        );
+        // Attesa: tasto o **prossima scadenza fissa** (0 = mai, in pausa). Non
+        // si sposta la scadenza su un `Event`: un messaggio spurio non rimanda
+        // il campione (prima la storia si riempiva a singhiozzo e il grafico
+        // sembrava fermo).
+        match input::wait_until(if model.paused { 0 } else { next_sample }) {
+            Wait::Event | Wait::Timeout => {}
+            Wait::Dead => break,
+        }
 
-        // **Drena prima di attendere**: e' `input::read` che dichiara il
-        // lettore (`SESS_READ`) e consuma i tasti gia' arrivati. Senza questo
-        // giro l'app non e' il lettore e non riceverebbe mai un hint (ci
-        // arriverebbe solo per caso, con la coda piena).
+        // **Drena** i tasti: e' `input::read` che dichiara il lettore
+        // (`SESS_READ`) e consuma quelli gia' arrivati.
         let mut quit = false;
+        let mut keyed = false;
         loop {
             let mut buf = [0u8; 16];
             let n = input::read(&mut buf);
@@ -493,28 +540,27 @@ fn main_loop() -> ! {
                 if on_key(b, &mut model) {
                     quit = true;
                 }
+                keyed = true;
             }
         }
         if quit {
             break;
         }
 
-        // Attesa evento-o-tick (E1): scadenza o tasto.
-        match input::wait_until(deadline) {
-            Wait::Event => {} // tasto (o messaggio): si ridisegna al giro dopo
-            Wait::Timeout => {
-                if !model.paused {
-                    model.sample();
-                }
-            }
-            Wait::Dead => break,
+        // Campiona **sull'orologio**, a prescindere dall'esito dell'attesa: una
+        // volta per secondo, con la scadenza riallineata a `now` (niente burst,
+        // niente deriva).
+        let now = input_ticks_now();
+        let mut sampled = false;
+        if !model.paused && now >= next_sample {
+            model.sample();
+            next_sample = now + SAMPLE_TICKS;
+            sampled = true;
         }
 
-        deadline = if model.paused {
-            0 // nessun tick: solo tasti
-        } else {
-            input_ticks_now() + SAMPLE_TICKS
-        };
+        if keyed || sampled {
+            dirty = true;
+        }
     }
 
     let _ = screen.close();

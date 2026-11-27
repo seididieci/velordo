@@ -5332,3 +5332,31 @@ tile`. Unit host **238** (formae 13); gate invariato (5/5, 64/64, 4/4, 12/12,
 Scelta di look: la tabella resta **testo** ma sopra una **card a celle** (fondo
 `TH.card` per cella), cosi' il wallpaper (il logo) non trapela dietro i numeri
 — la reference e' una linea guida, non una specifica, e il monospace resta.
+
+**M3/M4 — due difetti trovati col primo uso vero.** Provando il monitor a
+mano sono emersi due bug che l'automazione non vedeva (i marker c'erano, i
+valori no):
+
+1. **Processi tutti a 0%.** `sample()` calcolava il delta di CPU di ogni
+   processo come `e.ticks - self.last_ticks`, dove `last_ticks` era il
+   **totale globale** del campione prima: essendo `e.ticks` sempre minore del
+   totale, `saturating_sub` dava 0 per tutti. Fix: i tick precedenti vivi
+   **per pid** (`prev_ticks: [u64; PS_SLOTS]` + `seen` per non ereditare i
+   tick di un pid riusato), e la CPU globale e' la **somma dei delta
+   per-processo** (un processo che muore non falsa piu' il totale). Ora la
+   console mostra ~7% e il monitor ~2% mentre i servizi fermi restano a 0%
+   (corretto: sono `Blocked` in `recv`).
+2. **Il grafico non avanzava.** Il campione scattava solo su `Wait::Timeout`,
+   ma il loop **spostava `deadline = now + 100` a ogni giro, anche su
+   `Event`**: un messaggio spurio rimandava la scadenza e la storia si
+   riempiva a singhiozzo (un picco vecchio restava a destra, il resto a 0).
+   Fix: si campiona **sull'orologio** (`now >= next_sample`, una volta per
+   secondo, `next_sample = now + 100`), non sull'esito dell'attesa; si
+   ridisegna solo quando si campiona o cambia un tasto.
+
+In piu': una toppa **identica non si rispedisce** (`sent` confronta i byte) —
+la card MEM e' statica finche' la RAM non cambia, quindi il traffico scende da
+~894 a ~443 KB/s e il 13% che prima era la console che ridisegnava il monitor
+non finisce piu' nel grafico del monitor stesso. Il `[monitor] tick` porta
+anche `maxproc=` (il massimo per processo) come guardia di regressione:
+`run-monitor-tests.sh` verifica che non sia sempre 0.

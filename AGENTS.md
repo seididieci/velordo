@@ -594,6 +594,12 @@ Gate (un solo boot, ADR-0081): `[testfs] PASS 5/5` + `[testsarca] PASS 64/64` + 
   non una toppa. **Console**: in `render` il bbox delle celle si **espande alle
   toppe della riga**, o un render parziale (una cella cambiata) ribalta l'intera
   toppa e ridisegna solo il bbox, coprendo il testo delle card fuori dal bbox.
+  **Difetti dal primo uso vero**: il delta di CPU per-processo usava il
+  **totale globale** (`e.ticks - last_ticks` = negativo → 0 per tutti): ora
+  `prev_ticks[pid]`; il campione scattava solo su `Timeout` ma la scadenza si
+  spostava **anche su `Event`** (storia a singhiozzo, grafico fermo): ora si
+  campiona **sull'orologio** (`now >= next_sample`) e si ridisegna solo se
+  serve; una toppa **identica non si rispedisce** (`sent` confronta i byte).
 - **Stato e futuro**: `ROADMAP.md` (sorgente unica: tabella completate 1-57, Pianificate, Parcheggiate).
 - **Storia dettagliata**: `docs/src/14-cronologia-fasi.md` (log per fase: decisioni, bug trovati, lezioni, validazioni).
 - **Personalità POSIX separata (Fase 58, ADR-0041, chiusa)**: meccanismo
